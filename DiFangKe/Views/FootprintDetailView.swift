@@ -192,7 +192,8 @@ struct FootprintModalView: View {
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedItems, matching: .images)
             .sheet(item: Binding(get: { selectedPhotoID.map { IdentifiableString(value: $0) } }, set: { selectedPhotoID = $0?.value })) { item in
-                PhotoFullscreenView(assetID: item.value)
+                let index = footprint.photoAssetIDs.firstIndex(of: item.value) ?? 0
+                PhotoFullscreenView(assetIDs: footprint.photoAssetIDs, currentIndex: index)
             }
             .sheet(isPresented: $showAddPlaceModal) {
                 AddToFavoriteModal(footprint: footprint)
@@ -1037,25 +1038,58 @@ struct IdentifiableString: Identifiable {
 }
 
 struct PhotoFullscreenView: View {
-    let assetID: String
+    let assetIDs: [String]
+    @State var currentIndex: Int
     @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.ignoresSafeArea()
+            
+            TabView(selection: $currentIndex) {
+                ForEach(0..<assetIDs.count, id: \.self) { index in
+                    FullscreenImageItem(assetID: assetIDs[index])
+                        .tag(index)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .always))
+            .ignoresSafeArea()
+            
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(10)
+                    .background(.ultraThinMaterial)
+                    .clipShape(Circle())
+            }
+            .padding(16)
+        }
+    }
+}
+
+struct FullscreenImageItem: View {
+    let assetID: String
     @State private var image: UIImage?
     
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
             if let image = image {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
-                    .ignoresSafeArea()
+                    .onTapGesture {
+                        // Optional: single tap to hide/show UI, but here we just dismiss if tapped?
+                        // Usually TabView prevents tap events from propagating easily if not careful.
+                    }
             } else {
                 ProgressView().tint(.white)
             }
         }
-        .onTapGesture { dismiss() }
         .onAppear {
-            PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 1200, height: 1200)) { img, _, _ in
+            PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 2000, height: 2000)) { img, _, _ in
                 self.image = img
             }
         }

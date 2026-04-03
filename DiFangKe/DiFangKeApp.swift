@@ -212,14 +212,14 @@ struct OnboardingView: View {
 struct SplashScreenView: View {
     var body: some View {
         ZStack {
-            Color.dfkAccent.ignoresSafeArea()
+            Color.dfkBackground.ignoresSafeArea()
             VStack(spacing: 20) {
-                Image(systemName: "mappin.and.ellipse.circle.fill")
+                Image(systemName: "map.fill")
                     .font(.system(size: 80))
-                    .foregroundColor(.white)
+                    .foregroundColor(.dfkAccent)
                 Text("地方客")
                     .font(.system(size: 34, weight: .bold, design: .rounded))
-                    .foregroundColor(.white)
+                    .foregroundColor(.dfkAccent)
             }
         }
     }

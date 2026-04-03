@@ -253,16 +253,18 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         // On app open, force a fresh high-accuracy location fix
         locationManager.requestLocation() // This will trigger a one-time precise update
         
-        // 主线程延迟执行，避免卡启动画面
-        // 注意：ModelContext 非线程安全，必须在主线程操作
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            if let ctx = self?.modelContext {
-                self?.consolidateFootprints(in: ctx)
-                
-                // If it's evening, trigger notification summary refresh
+        // 后台异步执行维护任务，避免卡启动画面
+        let container = modelContext?.container
+        Task.detached(priority: .background) { [weak self] in
+            guard let self = self, let container = container else { return }
+            let context = ModelContext(container)
+            await self.consolidateFootprints(in: context)
+            
+            // If it's evening, trigger notification summary refresh
+            Task { @MainActor in
                 let hour = Calendar.current.component(.hour, from: Date())
                 if hour >= 18 {
-                    self?.triggerNotificationSummaryRefresh()
+                    self.triggerNotificationSummaryRefresh()
                 }
             }
         }
@@ -283,13 +285,15 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     /// 合并数据库中已有的碎片足迹（必须在主线程执行）
     /// 第一步：删除时长 < 5分钟的噪点记录
     /// 第二步：合并间隔 < 30分钟 且 距离 < 200m 的相邻记录
-    public func consolidateFootprints(in context: ModelContext) {
+    public func consolidateFootprints(in context: ModelContext) async {
         let mergeTime: TimeInterval = 30 * 60
         let mergeDist: CLLocationDistance = 200.0  // 统一阈值为 200m
         let minKeepDuration: TimeInterval = 5 * 60  // 小于5分钟视为噪点
 
+        // 为了性能，自动维护只针对最近 7 天的数据，避免每次全量扫库导致卡顿
+        let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? .distantPast
         let descriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate { $0.statusValue != "ignored" },
+            predicate: #Predicate { $0.statusValue != "ignored" && $0.startTime > sevenDaysAgo },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]
         )
         guard let all = try? context.fetch(descriptor) else { return }
@@ -459,7 +463,11 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                             address: nil
                         )
                         context.insert(newFp)
-                        self.analyzeFootprint(newFp)
+                        // 将 ID 传回主线程进行分析，避免跨线程访问 Model
+                        let fid = newFp.persistentModelID
+                        Task { @MainActor in
+                            self.analyzeFootprintByID(fid)
+                        }
                     }
                 }
                 try? context.save()
@@ -653,17 +661,32 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         try? context.save()
     }
 
+    func analyzeFootprintByID(_ id: PersistentIdentifier) {
+        guard let context = modelContext,
+              let footprint = context.model(for: id) as? Footprint else { return }
+        analyzeFootprint(footprint)
+    }
+
     private func analyzeFootprint(_ footprint: Footprint) {
         if footprint.status == .ignored { return }
         let locations = footprint.footprintLocations.map { ($0.latitude, $0.longitude) }
         
+        // 提前获取必要信息，避免在闭包中直接访问 Model 可能导致的问题（虽然当前闭包是在主线程）
+        let fpLat = footprint.latitude
+        let fpLon = footprint.longitude
+        let fpDuration = footprint.duration
+        let fpStart = footprint.startTime
+        let fpEnd = footprint.endTime
+        let fpTags = footprint.tags
+        let fpAddress = footprint.address
+
         // 匹配已知地点，给 AI 提供背景信息 (应用「最近优先」原则)
         let mPlace = allPlaces.filter { place in
             let pLoc = CLLocation(latitude: place.latitude, longitude: place.longitude)
-            let fLoc = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
+            let fLoc = CLLocation(latitude: fpLat, longitude: fpLon)
             return fLoc.distance(from: pLoc) <= Double(place.radius) + 100.0
         }.min { p1, p2 in
-            let fLoc = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
+            let fLoc = CLLocation(latitude: fpLat, longitude: fpLon)
             let d1 = fLoc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude))
             let d2 = fLoc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
             return d1 < d2
@@ -671,12 +694,12 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         
         openAIService.analyzeFootprint(
             locations: locations,
-            duration: footprint.duration,
-            startTime: footprint.startTime,
-            endTime: footprint.endTime,
+            duration: fpDuration,
+            startTime: fpStart,
+            endTime: fpEnd,
             placeName: mPlace?.name,
-            placeTags: footprint.tags,
-            address: footprint.address
+            placeTags: fpTags,
+            address: fpAddress
         ) { title, reason, score in
             DispatchQueue.main.async {
                 footprint.title = title

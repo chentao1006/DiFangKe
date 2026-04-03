@@ -78,6 +78,30 @@ class OpenAIService {
         return digest.map { String(format: "%02hhx", $0) }.joined()
     }
     
+    
+    // 便捷方法：直接分析 Footprint 对象
+    func analyzeFootprint(_ footprint: Footprint, completion: @escaping (Footprint) -> Void) {
+        let locations = footprint.footprintLocations.map { ($0.latitude, $0.longitude) }
+        
+        analyzeFootprint(
+            locations: locations,
+            duration: footprint.duration,
+            startTime: footprint.startTime,
+            endTime: footprint.endTime,
+            placeName: footprint.title == "那时的足迹" ? nil : footprint.title,
+            address: nil, // 可以后续扩展读取地址
+            isOngoing: false
+        ) { title, reason, score in
+            DispatchQueue.main.async {
+                footprint.title = title
+                footprint.reason = reason
+                footprint.aiScore = score
+                footprint.isHighlight = score >= 0.7
+                completion(footprint)
+            }
+        }
+    }
+    
     func analyzeFootprint(locations: [(Double, Double)], 
                           duration: TimeInterval, 
                           startTime: Date, 

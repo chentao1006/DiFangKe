@@ -83,12 +83,12 @@ struct DayTimelineView: View {
         .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     NavigationLink(destination: HistoryListView()) {
-                        Image(systemName: "calendar").foregroundColor(Color.dfkAccent)
+                        Image(systemName: "calendar")
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink(destination: SettingsView()) {
-                        Image(systemName: "gearshape").foregroundColor(Color.dfkAccent)
+                        Image(systemName: "gearshape")
                     }
                 }
             }
@@ -804,22 +804,35 @@ struct FootprintCardView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 
                 if let firstID = footprint.photoAssetIDs.first {
-                    AssetThumbnailView(assetID: firstID, onAssetMissing: {
-                        withAnimation {
-                            var ids = footprint.photoAssetIDs
-                            ids.removeAll { $0 == firstID }
-                            footprint.photoAssetIDs = ids
-                            try? modelContext.save()
+                    ZStack(alignment: .topTrailing) {
+                        AssetThumbnailView(assetID: firstID, onAssetMissing: {
+                            withAnimation {
+                                var ids = footprint.photoAssetIDs
+                                ids.removeAll { $0 == firstID }
+                                footprint.photoAssetIDs = ids
+                                try? modelContext.save()
+                            }
+                        })
+                            .id(firstID)
+                            .frame(width: 48, height: 48)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        
+                        if footprint.photoAssetIDs.count > 1 {
+                            Text("\(footprint.photoAssetIDs.count)")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(Color.black.opacity(0.6))
+                                .clipShape(Capsule())
+                                .offset(x: -4, y: 4)
                         }
-                    })
-                        .id(firstID)
-                        .frame(width: 44, height: 44)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .padding(.bottom, 14)
-                        .padding(.trailing, 12)
-                        .padding(.leading, 8)
-                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: footprint.photoAssetIDs)
+                    }
+                    .padding(.bottom, 14)
+                    .padding(.trailing, 12)
+                    .padding(.leading, 8)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                    .animation(.spring(response: 0.35, dampingFraction: 0.7), value: footprint.photoAssetIDs)
                 }
             }
         }
