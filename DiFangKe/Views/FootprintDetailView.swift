@@ -10,6 +10,7 @@ import PhotosUI
 struct FootprintModalView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(LocationManager.self) private var locationManager
     @ObservedObject var photoService = PhotoService.shared
     @Bindable var footprint: Footprint
     var allPlaces: [Place] = []
@@ -39,30 +40,30 @@ struct FootprintModalView: View {
     
     @State private var showingPhotoDeleteAlert = false
     @State private var photoToDelete: String? = nil
+    @State private var showingSearchSheet = false
     
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @State private var isGeneratingAI = false
     @State private var showingAINotEnabledAlert = false
+    @State private var showingAIErrorAlert = false
+    @State private var aiErrorMessage = ""
     
     var body: some View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
-                    titleSection.padding(.horizontal, 24).padding(.top, 16)
-                    timeSection.padding(.horizontal, 24).padding(.top, 12)
-                    tagsSection.padding(.horizontal, 24).padding(.top, 12)
+                    headerContent
                     
                     if showMap {
-                        mapSection.padding(.horizontal, 24).padding(.top, 16).transition(.opacity.combined(with: .scale(scale: 0.97)))
+                        mapContent
                     } else {
-                        mapSkeleton.padding(.horizontal, 24).padding(.top, 16)
+                        mapSkeleton
+                            .padding(.horizontal, 24)
+                            .padding(.top, 16)
                     }
                     
-                    addToPlacesSection.padding(.horizontal, 24).padding(.top, 12)
+                    footerContent
                     
-                    aiSection.padding(.horizontal, 24).padding(.top, 20).transition(.opacity.combined(with: .move(edge: .bottom)))
-                    
-                    photoSection.padding(.horizontal, 24).padding(.top, 16)
                     Spacer().frame(height: 30)
                 }
                 .contentShape(Rectangle())
@@ -195,6 +196,12 @@ struct FootprintModalView: View {
                 }
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedItems, matching: .images)
+            .sheet(isPresented: $showingSearchSheet) {
+                LocationSearchSheet(locationManager: locationManager, 
+                                    coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), 
+                                    forOngoing: false, 
+                                    footprint: footprint)
+            }
             .sheet(item: Binding(get: { selectedPhotoID.map { IdentifiableString(value: $0) } }, set: { selectedPhotoID = $0?.value })) { item in
                 let index = footprint.photoAssetIDs.firstIndex(of: item.value) ?? 0
                 PhotoFullscreenView(assetIDs: footprint.photoAssetIDs, currentIndex: index)
@@ -219,14 +226,14 @@ struct FootprintModalView: View {
                 Text("这张照片将从该足迹中移除。")
             }
             .alert("AI 助手未开启", isPresented: $showingAINotEnabledAlert) {
-                Button("去开启") { 
-                    // This is a simple app, we can just dismiss and assume they find settings or add a deep link if possible
-                    // Or just let them know they need to turn it on in settings.
-                    // For now, just OK is fine as per usual SwiftUI patterns unless navigation is planned.
-                }
-                Button("取消", role: .cancel) { }
+                Button("确定", role: .cancel) { }
             } message: {
                 Text("请在设置中开启 AI 智能分析功能，以解锁自动生成标题和感悟的功能。")
+            }
+            .alert("AI 分析失败", isPresented: $showingAIErrorAlert) {
+                Button("确定", role: .cancel) { }
+            } message: {
+                Text(aiErrorMessage)
             }
         }
     }
@@ -243,7 +250,7 @@ struct FootprintModalView: View {
     }
     
     private func checkAndGenerateAIContent() {
-        let isTitleEmpty = footprint.title.trimmingCharacters(in: .whitespaces).isEmpty || footprint.title == "新足迹"
+        let isTitleEmpty = footprint.title.trimmingCharacters(in: .whitespaces).isEmpty || footprint.title == "时光里的停留"
         let isReasonEmpty = (footprint.reason ?? "").trimmingCharacters(in: .whitespaces).isEmpty
         
         if isTitleEmpty || isReasonEmpty {
@@ -277,15 +284,39 @@ struct FootprintModalView: View {
             placeTags: footprint.tags,
             address: footprint.address,
             isOngoing: false
-        ) { title, reason, score in
+        ) { title, reason, tags, score, success in
             DispatchQueue.main.async {
-                withAnimation {
-                    footprint.title = title
-                    footprint.reason = reason
-                    footprint.aiScore = score
+                if success {
+                    withAnimation {
+                        footprint.title = title
+                        footprint.reason = reason
+                        footprint.aiScore = score
+                        
+                        // 合并新生成的标签
+                        var currentTags = footprint.tags
+                        for tag in tags {
+                            let trimmed = tag.trimmingCharacters(in: .whitespaces)
+                            if !trimmed.isEmpty && !currentTags.contains(trimmed) {
+                                currentTags.append(trimmed)
+                                
+                                // 如果是全局未有的新标签，创建它
+                                let descriptor = FetchDescriptor<PlaceTag>(predicate: #Predicate { $0.name == trimmed })
+                                if (try? modelContext.fetch(descriptor).first) == nil {
+                                    modelContext.insert(PlaceTag(name: trimmed))
+                                }
+                            }
+                        }
+                        footprint.tags = currentTags
+                        footprint.aiAnalyzed = true
+                    }
+                } else if forcePrompt {
+                    self.aiErrorMessage = reason
+                    self.showingAIErrorAlert = true
                 }
                 isGeneratingAI = false
-                try? modelContext.save()
+                if success {
+                    try? modelContext.save()
+                }
             }
         }
     }
@@ -295,13 +326,14 @@ struct FootprintModalView: View {
             HStack(alignment: .center, spacing: 8) {
                 HStack(alignment: .top, spacing: 6) {
                     VStack(alignment: .leading, spacing: 6) {
-                        TextField("你在哪里做什么？", text: $footprint.title)
+                        TextField("有什么值得记住的", text: $footprint.title)
                             .font(.system(.title3, design: .rounded).bold())
                             .foregroundColor(Color.dfkMainText)
                             .submitLabel(.done)
                             .focused($titleFocused)
                             .lineLimit(1)
-                            .onSubmit { titleFocused = false; try? modelContext.save() }
+                            .onSubmit { titleFocused = false; footprint.aiAnalyzed = true; try? modelContext.save() }
+                            .onChange(of: footprint.title) { _, _ in footprint.aiAnalyzed = true }
                     }
                     
                     if !titleFocused {
@@ -347,8 +379,10 @@ struct FootprintModalView: View {
     
     private var timeSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button {
-                refreshAddress()
+            Menu {
+                SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint) {
+                    showingSearchSheet = true
+                }
             } label: {
                 HStack(alignment: .center, spacing: 6) { 
                     Image(systemName: isUpdatingAddress ? "arrow.triangle.2.circlepath" : "mappin.and.ellipse")
@@ -361,10 +395,16 @@ struct FootprintModalView: View {
                             .font(.subheadline)
                             .foregroundColor(Color.dfkMainText.opacity(0.5))
                     } else {
-                        Text(footprint.address ?? (matchedPlace?.address ?? "未记录位置"))
-                            .font(.subheadline)
-                            .foregroundColor(Color.dfkMainText.opacity(0.8))
-                            .lineLimit(2)
+                        HStack(spacing: 4) {
+                            Text(footprint.address ?? (matchedPlace?.address ?? "未记录位置"))
+                                .font(.subheadline)
+                                .foregroundColor(Color.dfkMainText.opacity(0.8))
+                                .lineLimit(2)
+                            
+                            Image(systemName: "pencil")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color.dfkSecondaryText.opacity(0.6))
+                        }
                     }
                     
                     if let place = matchedPlace {
@@ -465,7 +505,7 @@ struct FootprintModalView: View {
     }
     
     private var matchedPlace: Place? {
-        savedPlaces.first(where: { $0.placeID == footprint.placeID })
+        savedPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })
     }
     
     private func toggleTag(_ name: String) {
@@ -566,6 +606,29 @@ struct FootprintModalView: View {
         }
     }
     
+    private var headerContent: some View {
+        Group {
+            titleSection.padding(.horizontal, 24).padding(.top, 16)
+            timeSection.padding(.horizontal, 24).padding(.top, 12)
+            tagsSection.padding(.horizontal, 24).padding(.top, 12)
+        }
+    }
+    
+    private var footerContent: some View {
+        Group {
+            addToPlacesSection.padding(.horizontal, 24).padding(.top, 12)
+            aiContent
+            photoSection.padding(.horizontal, 24).padding(.top, 16)
+        }
+    }
+    
+    private var mapContent: some View {
+        mapSection
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .transition(.opacity.combined(with: .scale(scale: 0.97)))
+    }
+    
     private var mapSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("位置轨迹").font(.system(size: 13, weight: .semibold)).foregroundColor(.secondary).padding(.leading, 8)
@@ -581,6 +644,13 @@ struct FootprintModalView: View {
         }
     }
     
+    private var aiContent: some View {
+        aiSection
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+    }
+    
     private var mapSkeleton: some View { RoundedRectangle(cornerRadius: 16).fill(Color(uiColor: .tertiarySystemGroupedBackground)).frame(height: 220).overlay(ProgressView().scaleEffect(1.2)) }
     
     private var aiSection: some View {
@@ -590,7 +660,7 @@ struct FootprintModalView: View {
             HStack(alignment: .top, spacing: 6) {
                 TextField("输入感悟...", text: Binding(
                     get: { footprint.reason ?? "" },
-                    set: { footprint.reason = $0 }
+                    set: { footprint.reason = $0; footprint.aiAnalyzed = true }
                 ), axis: Axis.vertical)
                 .font(.body)
                 .foregroundColor(Color.dfkMainText.opacity(0.85))
@@ -1163,13 +1233,6 @@ struct FootprintDetailMapView: View {
         Map(position: $cameraPosition, interactionModes: isInteractive ? .all : []) {
             MapPolyline(coordinates: footprint.coordinates)
                 .stroke(Color.dfkAccent, lineWidth: 5)
-            
-            if let first = footprint.coordinates.first {
-                Marker("", coordinate: first).tint(Color.dfkAccent)
-            }
-            if let last = footprint.coordinates.last {
-                Marker("", coordinate: last).tint(Color.dfkAccent)
-            }
         }
         .mapStyle(.standard)
         .onAppear {
@@ -1249,3 +1312,4 @@ struct FlowLayout: Layout {
         }
     }
 }
+

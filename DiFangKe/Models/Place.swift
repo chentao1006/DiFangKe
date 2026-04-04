@@ -12,6 +12,7 @@ final class Place {
     var address: String?
     var isIgnored: Bool = false
     var isUserDefined: Bool = true
+    var isPriority: Bool = false
     
     var coordinate: CLLocationCoordinate2D {
         get { CLLocationCoordinate2D(latitude: latitude, longitude: longitude) }

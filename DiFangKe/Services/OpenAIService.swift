@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import SwiftData
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -23,8 +24,66 @@ class OpenAIService {
         config?["SERVICE_SECRET"] ?? ""
     }
     
-    private var baseUrl: String {
-        config?["PUBLIC_SERVICE_URL"] ?? "https://openai.ct106.com/v1"
+    // MARK: - New Dynamic Settings
+    
+    private var aiServiceType: String {
+        UserDefaults.standard.string(forKey: "aiServiceType") ?? "public"
+    }
+    
+    private var customAiUrl: String {
+        UserDefaults.standard.string(forKey: "customAiUrl") ?? "https://api.openai.com/v1"
+    }
+    
+    private var customAiKey: String {
+        UserDefaults.standard.string(forKey: "customAiKey") ?? ""
+    }
+    
+    private var customAiModel: String {
+        UserDefaults.standard.string(forKey: "customAiModel") ?? "gpt-4o-mini"
+    }
+    
+    private var currentBaseUrl: String {
+        if aiServiceType == "custom" {
+            var url = customAiUrl
+            if url.hasSuffix("/") { url.removeLast() }
+            return url
+        }
+        return config?["PUBLIC_SERVICE_URL"] ?? "https://openai.ct106.com/v1"
+    }
+    
+    private var currentModel: String {
+        if aiServiceType == "custom" {
+            return customAiModel
+        }
+        return "gpt-4o-mini"
+    }
+    
+    private func prepareRequest(endpoint: String, body: [String: Any]) -> URLRequest? {
+        guard let url = URL(string: "\(currentBaseUrl)\(endpoint)") else { return nil }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        if aiServiceType == "custom" {
+            let key = customAiKey
+            if !key.isEmpty {
+                request.addValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            }
+        } else {
+            let deviceId = getDeviceId()
+            let token = generateToken(deviceId: deviceId)
+            request.addValue(deviceId, forHTTPHeaderField: "X-Device-Id")
+            request.addValue(token, forHTTPHeaderField: "X-Token")
+        }
+        
+        // Inject model
+        var updatedBody = body
+        updatedBody["model"] = currentModel
+        
+        request.httpBody = try? JSONSerialization.data(withJSONObject: updatedBody)
+        return request
     }
     
     private let tomorrowQuoteKey = "cachedTomorrowQuote"
@@ -92,14 +151,39 @@ class OpenAIService {
             startTime: footprint.startTime,
             endTime: footprint.endTime,
             placeName: footprint.title == "时光里的足迹" ? nil : footprint.title,
-            address: nil, // 可以后续扩展读取地址
+            address: footprint.address,
             isOngoing: false
-        ) { title, reason, score in
+        ) { title, reason, tags, score, success in
             DispatchQueue.main.async {
-                footprint.title = title
-                footprint.reason = reason
-                footprint.aiScore = score
-                // 此时不再由 AI 决定是否收藏，保持纯用户行为
+                if success {
+                    footprint.title = title
+                    footprint.reason = reason
+                    footprint.aiScore = score
+                    footprint.aiAnalyzed = true
+                    
+                    // 为 Footprint 添加标签，并排除重复
+                    var current = footprint.tags
+                    for tag in tags {
+                        if !current.contains(tag) {
+                            current.append(tag)
+                        }
+                    }
+                    footprint.tags = current
+                    
+                    // 尝试在 modelContext 中同步新增标签（如果有的话）
+                    if let context = footprint.modelContext {
+                        for tag in tags {
+                            let trimmed = tag.trimmingCharacters(in: .whitespaces)
+                            if !trimmed.isEmpty {
+                                let tagName = trimmed
+                                let descriptor = FetchDescriptor<PlaceTag>(predicate: #Predicate<PlaceTag> { $0.name == tagName })
+                                if (try? context.fetch(descriptor).first) == nil {
+                                    context.insert(PlaceTag(name: tagName))
+                                }
+                            }
+                        }
+                    }
+                }
                 completion(footprint)
             }
         }
@@ -128,6 +212,29 @@ class OpenAIService {
         }
     }
     
+    private func dateContextString(for date: Date) -> String {
+        let calendar = Calendar.current
+        let weekday = calendar.component(.weekday, from: date)
+        let weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+        let weekdayStr = weekdays[weekday - 1]
+        
+        let isWeekend = (weekday == 1 || weekday == 7)
+        
+        let lunarCalendar = Calendar(identifier: .chinese)
+        let month = lunarCalendar.component(.month, from: date)
+        let day = lunarCalendar.component(.day, from: date)
+        
+        let lunarMonths = ["", "正月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "冬月", "腊月"]
+        let lunarDays = ["", "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十", 
+                         "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
+                         "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十"]
+        
+        let lunarStr = "农历\(lunarMonths[month])\(lunarDays[day])"
+        let fullDate = date.formatted(.dateTime.year().month().day())
+        
+        return "公历\(fullDate)，\(weekdayStr)\(isWeekend ? "（周末）" : "")，\(lunarStr)"
+    }
+
     func analyzeFootprint(locations: [(Double, Double)], 
                           duration: TimeInterval, 
                           startTime: Date, 
@@ -136,23 +243,12 @@ class OpenAIService {
                           placeTags: [String] = [],
                           address: String? = nil,
                           isOngoing: Bool = false, 
-                          completion: @escaping (String, String, Float) -> Void) {
-        guard let url = URL(string: "\(baseUrl)/chat/completions") else { return }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        
-        let deviceId = getDeviceId()
-        let token = generateToken(deviceId: deviceId)
-        
-        request.addValue(deviceId, forHTTPHeaderField: "X-Device-Id")
-        request.addValue(token, forHTTPHeaderField: "X-Token")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        
+                          completion: @escaping (String, String, [String], Float, Bool) -> Void) {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "HH:mm"
         let startStr = dateFormatter.string(from: startTime)
         let endStr = dateFormatter.string(from: endTime)
+        let dateContext = dateContextString(for: startTime)
         
         var promptSnippet = ""
         if let name = placeName {
@@ -172,58 +268,96 @@ class OpenAIService {
         
         let prompt = """
         用户在某地点停留\(statusText)：
+        日期环境：\(dateContext)
         时间：\(startStr) - \(endStr)
         时长：\(Int(duration / 60))分钟
         地点信息：\(promptSnippet)
 
         请输出：
         1. 简短标题（10字以内，反映活动或地点特点。**绝对禁止使用“定位中停留”、“位置记录”、“非预设地点”、“具有标签”等死板或技术性词汇**，也不要直接复述地点信息。尽量具体且有生活气息，如“在咖啡馆小憩”或“办公中”）
-        2. 精彩程度（0.0 ~ 1.0评分，1.0代表非常有意义或新奇）
-        3. 简短原因（20字以内，禁止使用“记录停留”、“位置分析”等描述，应基于地点特点给出一个温馨或有见地的理由）
+        2. 标签：根据地点和活动，给出 0-2 个关键词标签。**要求：极其吻合情景才加标签；如果该地点之前已经有标记或类似活动（见地点信息），优先沿用；如果不确定或情景不明显，请返回空数组 []**。
+        3. 精彩程度（0.0 ~ 1.0评分，1.0代表非常有意义或新奇。如果是节假日或有纪念意义的活动，评分可以适当高一点）
+        4. 简短原因（20字以内，基于地点特点、日期环境给出一个温馨或有见地的理由）
 
         返回格式（严格JSON）：
         {
           "title": "标题内容",
+          "tags": ["标签1", "标签2"],
           "score": 0.85,
           "reason": "推荐理由"
         }
         """
         
         let body: [String: Any] = [
-            "model": "gpt-4o-mini",
             "messages": [
-                ["role": "system", "content": "You are a professional life style and travel analyst. You provide concise, warm, and insightful snippets for a personal location diary app. Always respond in raw JSON without any markdown formatting."],
+                ["role": "system", "content": "You are a professional life style and travel analyst. You provide concise, warm, and insightful snippets for a personal location diary app. Always respond in direct JSON format without any markdown code blocks."],
                 ["role": "user", "content": prompt]
             ],
-            "temperature": 0.8
+            "temperature": 0.8,
+            "response_format": ["type": "json_object"]
         ]
         
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
+            DispatchQueue.main.async { completion("时光里的停留", "分析中...", [], 0.0, false) }
+            return
+        }
         
         URLSession.shared.dataTask(with: request) { data, response, error in
-            guard let data = data, error == nil else {
-                print("OpenAI Error: \(error?.localizedDescription ?? "Unknown")")
+            if let error = error {
+                print("OpenAI Error: \(error.localizedDescription)")
+                DispatchQueue.main.async { completion("新足迹", "网络连接异常 (\(error.localizedDescription))", [], 0.0, false) }
+                return
+            }
+            
+            if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+                print("OpenAI Error: HTTP \(httpResponse.statusCode)")
+                let msg = httpResponse.statusCode == 401 ? "认证失败，请检查服务配置" : "服务器繁忙 (错误码 \(httpResponse.statusCode))"
+                DispatchQueue.main.async { completion("新足迹", msg, [], 0.0, false) }
+                return
+            }
+            
+            guard let data = data else {
+                print("OpenAI Error: No data received")
+                DispatchQueue.main.async { completion("新足迹", "未收到有效的分析结果", [], 0.0, false) }
                 return
             }
             
             do {
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let choices = json["choices"] as? [[String: Any]],
-                   let firstChoice = choices.first,
-                   let message = firstChoice["message"] as? [String: Any],
-                   let content = message["content"] as? String {
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if let errorJson = json["error"] as? [String: Any], let errorMsg = errorJson["message"] as? String {
+                         print("OpenAI API Error: \(errorMsg)")
+                         DispatchQueue.main.async { completion("新足迹", "分析服务返回错误：\(errorMsg)", [], 0.0, false) }
+                         return
+                    }
                     
-                    // Decode the raw JSON from content string
-                    if let contentData = content.data(using: .utf8),
-                       let parsedConfig = try JSONSerialization.jsonObject(with: contentData) as? [String: Any] {
-                        let title = parsedConfig["title"] as? String ?? (parsedConfig["title"] as? String ?? "新足迹")
-                        let reason = parsedConfig["reason"] as? String ?? "未提供详情"
-                        let score = (parsedConfig["score"] as? NSNumber)?.floatValue ?? (parsedConfig["aiScore"] as? NSNumber)?.floatValue ?? 0.0
-                        completion(title, reason, score)
+                    if let choices = json["choices"] as? [[String: Any]],
+                       let firstChoice = choices.first,
+                       let message = firstChoice["message"] as? [String: Any],
+                       let content = message["content"] as? String {
+                        
+                        // Clean content string of markdown codes if AI adds them (common issue)
+                        let cleanContent = content.replacingOccurrences(of: "```json", with: "")
+                            .replacingOccurrences(of: "```", with: "")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        // Decode the potentially cleaned JSON from content string
+                        if let contentData = cleanContent.data(using: .utf8),
+                           let parsedConfig = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any] {
+                            let title = parsedConfig["title"] as? String ?? "新足迹"
+                            let reason = parsedConfig["reason"] as? String ?? "在这个熟悉或陌生的地方留下了一段回忆。"
+                            let tags = parsedConfig["tags"] as? [String] ?? []
+                            let score = (parsedConfig["score"] as? NSNumber)?.floatValue ?? (parsedConfig["aiScore"] as? NSNumber)?.floatValue ?? 0.0
+                            DispatchQueue.main.async { completion(title, reason, tags, score, true) }
+                            return
+                        }
                     }
                 }
+                
+                print("OpenAI Error: Failed to parse valid content from response")
+                DispatchQueue.main.async { completion("新足迹", "解析结果失败", [], 0.0, false) }
             } catch {
                 print("Decode error: \(error)")
+                DispatchQueue.main.async { completion("新足迹", "解析结果异常", [], 0.0, false) }
             }
         }.resume()
     }
@@ -233,18 +367,6 @@ class OpenAIService {
             DispatchQueue.main.async { completion(cache.0, cache.1) }
             return
         }
-        
-        guard let url = URL(string: "\(baseUrl)/chat/completions") else { return }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        
-        let deviceId = getDeviceId()
-        let token = generateToken(deviceId: deviceId)
-        
-        request.addValue(deviceId, forHTTPHeaderField: "X-Device-Id")
-        request.addValue(token, forHTTPHeaderField: "X-Token")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         
         let prompt = """
         请为个人位置足迹轨迹应用“地方客”的“明天”预告页写一段温馨、治愈或富有哲理的文案。
@@ -263,7 +385,6 @@ class OpenAIService {
         """
         
         let body: [String: Any] = [
-            "model": "gpt-4o-mini",
             "messages": [
                 ["role": "system", "content": "You are a poetic writer and life coach. You provide short, warm Chinese copy for a personal diary and travel app. Always respond in direct JSON."],
                 ["role": "user", "content": prompt]
@@ -271,9 +392,18 @@ class OpenAIService {
             "temperature": 0.9
         ]
         
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
+            DispatchQueue.main.async { completion("明天是个未拆的礼物", "愿明天的你，能在平凡中发现惊喜。") }
+            return
+        }
         
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            if let error = error {
+                print("Quote Error: \(error.localizedDescription)")
+                DispatchQueue.main.async { completion("明天是个未拆的礼物", "愿明天的你，能在平凡中发现惊喜。") }
+                return
+            }
+            
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let choices = json["choices"] as? [[String: Any]],
@@ -304,18 +434,6 @@ class OpenAIService {
             return
         }
         
-        guard let url = URL(string: "\(baseUrl)/chat/completions") else { return }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        
-        let deviceId = getDeviceId()
-        let token = generateToken(deviceId: deviceId)
-        
-        request.addValue(deviceId, forHTTPHeaderField: "X-Device-Id")
-        request.addValue(token, forHTTPHeaderField: "X-Token")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        
         let prompt = """
         请为个人位置足迹轨迹应用“地方客”的“远古边界”页（即第一条数据之前的空白页）写一段文案。
         
@@ -335,7 +453,6 @@ class OpenAIService {
         """
         
         let body: [String: Any] = [
-            "model": "gpt-4o-mini",
             "messages": [
                 ["role": "system", "content": "You are a nostalgic and warm writer. You provide short, sentimental Chinese copy for a personal diary app. Always respond in direct JSON."],
                 ["role": "user", "content": prompt]
@@ -343,9 +460,18 @@ class OpenAIService {
             "temperature": 0.9
         ]
         
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
+            DispatchQueue.main.async { completion("真希望能早点遇到你", "要是早点遇见，就能记录更多精彩了。") }
+            return
+        }
         
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            if let error = error {
+                print("Quote Error: \(error.localizedDescription)")
+                DispatchQueue.main.async { completion("真希望能早点遇到你", "要是早点遇见，就能记录更多精彩了。") }
+                return
+            }
+            
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let choices = json["choices"] as? [[String: Any]],
@@ -375,18 +501,6 @@ class OpenAIService {
             return
         }
         
-        guard let url = URL(string: "\(baseUrl)/chat/completions") else { return }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        
-        let deviceId = getDeviceId()
-        let token = generateToken(deviceId: deviceId)
-        
-        request.addValue(deviceId, forHTTPHeaderField: "X-Device-Id")
-        request.addValue(token, forHTTPHeaderField: "X-Token")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        
         let footprintList = footprintDescriptions.enumerated().map { "\($0 + 1). \($1)" }.joined(separator: "\n")
         let prompt = """
         请根据以下用户今天的足迹列表，写一段极简的晚间回顾文案（20字以内）。
@@ -403,7 +517,6 @@ class OpenAIService {
         """
         
         let body: [String: Any] = [
-            "model": "gpt-4o-mini",
             "messages": [
                 ["role": "system", "content": "You are a warm, poetic life companion. You summarize a person's day in a very short, touching sentence. Always respond in plain text Chinese."],
                 ["role": "user", "content": prompt]
@@ -411,14 +524,23 @@ class OpenAIService {
             "temperature": 0.8
         ]
         
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
+            completion("那些路过的街头巷尾，都藏着今天的独家记忆。")
+            return
+        }
         
-        URLSession.shared.dataTask(with: request) { data, _, _ in
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                print("Summary Error: \(error.localizedDescription)")
+                DispatchQueue.main.async { completion("那些路过的街头巷尾，都藏着今天的独家记忆。") }
+                return
+            }
+            
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let choices = json["choices"] as? [[String: Any]],
                   let content = (choices.first?["message"] as? [String: Any])?["content"] as? String else {
-                completion("那些路过的街头巷尾，都藏着今天的独家记忆。")
+                DispatchQueue.main.async { completion("那些路过的街头巷尾，都藏着今天的独家记忆。") }
                 return
             }
             

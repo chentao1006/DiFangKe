@@ -246,10 +246,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             let prioritizedClusters = Array(sortedClusters.prefix(20))
             let otherClusters = sortedClusters.count > 20 ? Array(sortedClusters.suffix(from: 20)) : []
             
-            let candidateTitles = [
-                "时光里的足迹", "拾起的旧时光", "重逢的轨迹", "岁月里的痕迹",
-                "被唤醒的记忆", "那一刻的流连", "走过的老地方", "往昔的剪影", "时间的注脚"
-            ]
+            let candidateTitles = Footprint.candidateTitles
             
             // 处理重要足迹（带解析）
             for cluster in prioritizedClusters {

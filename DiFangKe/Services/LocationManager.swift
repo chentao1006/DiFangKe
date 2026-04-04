@@ -3,6 +3,268 @@ import CoreLocation
 import SwiftData
 import Combine
 import SwiftUI
+import MapKit
+import CloudKit
+
+// MARK: - 位置建议结构体
+struct LocationSuggestion: Identifiable {
+    let id: UUID
+    let name: String
+    let address: String
+    let coordinate: CLLocationCoordinate2D
+    var isExistingPlace: Bool
+    var placeID: UUID?
+}
+
+// MARK: - 原始坐标持久化存储（按天存储至 CSV 文件）
+final class RawLocationStore {
+    static let shared = RawLocationStore()
+    
+    private let fileManager = FileManager.default
+    private let directoryName = "RawLocations"
+    
+    private init() {
+        createDirectoryIfNeeded()
+    }
+    
+    private var documentsDirectory: URL {
+        fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+    
+    private var baseDirectory: URL {
+        documentsDirectory.appendingPathComponent(directoryName)
+    }
+    
+    private func createDirectoryIfNeeded() {
+        if !fileManager.fileExists(atPath: baseDirectory.path) {
+            try? fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        }
+    }
+    
+    private var deviceID: String {
+        if let id = UserDefaults.standard.string(forKey: "raw_location_device_id") {
+            return id
+        }
+        let id = UIDevice.current.identifierForVendor?.uuidString ?? UUID().uuidString
+        UserDefaults.standard.set(id, forKey: "raw_location_device_id")
+        return id
+    }
+
+    private func getFileURL(for date: Date, device: String? = nil) -> URL {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let baseName = formatter.string(from: date)
+        let fileName = device == nil ? "\(baseName).csv" : "\(baseName)-\(device!).csv"
+        return baseDirectory.appendingPathComponent(fileName)
+    }
+    
+    /// 保存单个位置点到当日文件
+    func saveLocation(_ location: CLLocation) {
+        let url = getFileURL(for: location.timestamp)
+        let line = "\(location.timestamp.timeIntervalSince1970),\(location.coordinate.latitude),\(location.coordinate.longitude),\(location.horizontalAccuracy),\(location.speed)\n"
+        
+        if let data = line.data(using: .utf8) {
+            if fileManager.fileExists(atPath: url.path) {
+                if let fileHandle = try? FileHandle(forWritingTo: url) {
+                    fileHandle.seekToEndOfFile()
+                    fileHandle.write(data)
+                    fileHandle.closeFile()
+                }
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+    
+    /// 读取指定日期的所有坐标点
+    func loadLocations(for date: Date) -> [CLLocation] {
+        let url = getFileURL(for: date)
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        
+        var locations: [CLLocation] = []
+        let lines = content.components(separatedBy: .newlines)
+        
+        for line in lines where !line.isEmpty {
+            let parts = line.components(separatedBy: ",")
+            if parts.count >= 3,
+               let ts = Double(parts[0]),
+               let lat = Double(parts[1]),
+               let lon = Double(parts[2]) {
+                
+                let accuracy = parts.count > 3 ? (Double(parts[3]) ?? 0) : 0
+                let speed = parts.count > 4 ? (Double(parts[4]) ?? 0) : 0
+                
+                let loc = CLLocation(
+                    coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                    altitude: 0,
+                    horizontalAccuracy: accuracy,
+                    verticalAccuracy: 0,
+                    course: 0,
+                    speed: speed,
+                    timestamp: Date(timeIntervalSince1970: ts)
+                )
+                locations.append(loc)
+            }
+        }
+        return locations
+    }
+    
+    /// 获取最近一段（默认 2 小时内）的点
+    func loadRecentLocations(lookbackHours: Double = 2.0) -> [CLLocation] {
+        let now = Date()
+        let threshold = now.addingTimeInterval(-lookbackHours * 3600)
+        
+        let today = loadLocations(for: now)
+        var recent = today.filter { $0.timestamp > threshold }
+        
+        if threshold < Calendar.current.startOfDay(for: now) {
+            let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: now)!
+            let yesterdayLocations = loadLocations(for: yesterday)
+            let yesterdayRecent = yesterdayLocations.filter { $0.timestamp > threshold }
+            recent = yesterdayRecent + recent
+        }
+        
+        return recent
+    }
+
+    /// 读取指定日期的所有坐标点（包含本设备和其他同步过来的设备）
+    func loadAllDevicesLocations(for date: Date) -> [CLLocation] {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let datePrefix = formatter.string(from: date)
+        
+        guard let files = try? fileManager.contentsOfDirectory(at: baseDirectory, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        
+        var allPoints: [CLLocation] = []
+        let relevantFiles = files.filter { $0.lastPathComponent.hasPrefix(datePrefix) && $0.pathExtension == "csv" }
+        
+        for fileURL in relevantFiles {
+            if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
+                let lines = content.components(separatedBy: .newlines)
+                for line in lines where !line.isEmpty {
+                    let parts = line.components(separatedBy: ",")
+                    if parts.count >= 3,
+                       let ts = Double(parts[0]),
+                       let lat = Double(parts[1]),
+                       let lon = Double(parts[2]) {
+                        
+                        let accuracy = parts.count > 3 ? (Double(parts[3]) ?? 0) : 0
+                        let speed = parts.count > 4 ? (Double(parts[4]) ?? 0) : 0
+                        
+                        let loc = CLLocation(
+                            coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                            altitude: 0,
+                            horizontalAccuracy: accuracy,
+                            verticalAccuracy: 0,
+                            course: 0,
+                            speed: speed,
+                            timestamp: Date(timeIntervalSince1970: ts)
+                        )
+                        allPoints.append(loc)
+                    }
+                }
+            }
+        }
+        
+        return allPoints.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    // --- CloudKit 手动同步相关 ---
+
+    private let cloudDatabase = CKContainer(identifier: "iCloud.com.ct106.difangke").privateCloudDatabase
+
+    func syncToiCloud() async throws -> Int {
+        let localFiles = try fileManager.contentsOfDirectory(at: baseDirectory, includingPropertiesForKeys: nil)
+        var totalCount = 0
+
+        // 1. 上传本地文件 (带上当前设备 ID)
+        for localURL in localFiles {
+            let fileName = localURL.lastPathComponent
+            // 只要文件名长度正好是 14 位 (例如 2026-04-04.csv)，就视为本地待上传文件
+            guard fileName.hasSuffix(".csv") && fileName.count == 14 else { continue }
+            
+            let dateStr = fileName.replacingOccurrences(of: ".csv", with: "")
+            let recordID = CKRecord.ID(recordName: "\(dateStr)-\(deviceID)")
+            
+            let record = CKRecord(recordType: "RawTrajectory", recordID: recordID)
+            record["date"] = dateStr
+            record["deviceID"] = deviceID
+            record["file"] = CKAsset(fileURL: localURL)
+            
+            // 使用 CKModifyRecordsOperation 进行覆盖保存
+            let modifyOp = CKModifyRecordsOperation(recordsToSave: [record], recordIDsToDelete: nil)
+            modifyOp.savePolicy = .allKeys
+            
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                modifyOp.modifyRecordsResultBlock = { result in
+                    switch result {
+                    case .success: continuation.resume()
+                    case .failure(let error): continuation.resume(throwing: error)
+                    }
+                }
+                cloudDatabase.add(modifyOp)
+            }
+            totalCount += 1
+        }
+
+        // 2. 下载最近 7 天其他设备的文件
+        do {
+            let calendar = Calendar.current
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            
+            // 计算最近 7 天的所有日期字符串
+            var dateStrings: [String] = []
+            for i in 0..<7 {
+                if let date = calendar.date(byAdding: .day, value: -i, to: Date()) {
+                    dateStrings.append(formatter.string(from: date))
+                }
+            }
+            
+            // 使用 IN 查询，规避 String 不支持范围查询的问题
+            let predicate = NSPredicate(format: "date IN %@", dateStrings)
+            let query = CKQuery(recordType: "RawTrajectory", predicate: predicate)
+            
+            let (results, _) = try await cloudDatabase.records(matching: query)
+            
+            for (_, result) in results {
+                if let record = try? result.get() {
+                    let remoteDeviceID = record["deviceID"] as? String ?? ""
+                    let remoteDate = record["date"] as? String ?? ""
+                    
+                    // 只有其他设备的数据才下载
+                    if remoteDeviceID != deviceID && !remoteDate.isEmpty {
+                        if let asset = record["file"] as? CKAsset, let assetURL = asset.fileURL {
+                            let localFileName = "\(remoteDate)-\(remoteDeviceID).csv"
+                            let localURL = baseDirectory.appendingPathComponent(localFileName)
+                            
+                            if fileManager.fileExists(atPath: localURL.path) {
+                                try? fileManager.removeItem(at: localURL)
+                            }
+                            try? fileManager.copyItem(at: assetURL, to: localURL)
+                            totalCount += 1
+                        }
+                    }
+                }
+            }
+        } catch let error as CKError where error.code == .unknownItem {
+            // 云端还没有 RawTrajectory 表，说明是首次同步，跳过下载即可
+        } catch {
+            // 其他错误正常抛出
+            throw error
+        }
+        
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "raw_locations_last_sync")
+        return totalCount
+    }
+
+    var lastSyncDate: Date? {
+        let ts = UserDefaults.standard.double(forKey: "raw_locations_last_sync")
+        return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
+    }
+}
 
 // MARK: - 候选足迹结构体（停留点识别输出）
 struct CandidateFootprint {
@@ -134,11 +396,12 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     var lastLocation: CLLocation?
     var accuracy: CLLocationAccuracy?
     var currentAddress: String = "正在解析位置..."
-    var trackingPoints: [CLLocation] = []
-    var allTodayPoints: [CLLocation] = [] // 本次运行流水，非持久化
-    var todayTotalPointsCount: Int = 0    // 全天流水总计，持久化
+    var trackingPoints: [CLLocation] = [] // 用于足迹识别的内存滑动窗口
+    var allTodayPoints: [CLLocation] = [] // 本日流水缓存，从 RawLocationStore 加载
+    var todayTotalPointsCount: Int = 0    // 全天流水点数，基于本地文件统计
     var ongoingTitle: String?
     private var lastAIAnalysisTime: Date?
+    private var isAnalyzingOngoing = false
     /// 标记上一个分类足迹的截止时间，避免重复识别 (同时满足 3 天全量数据保留)
     private var lastProcessedTimestamp: Date?
     
@@ -171,6 +434,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         updateAuthStatus()
         loadPotentialStop()
         loadTodayTotalPoints()
+        loadPointsFromStore() // 从本地文件恢复内存队列，防止因杀死进程导致的记录丢失
     }
     
     private func updateAuthStatus() {
@@ -203,7 +467,6 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     }
 
     var matchedPlace: Place? {
-        // 使用纠偏后的坐标进行匹配计算
         guard let currentGcj = lastLocation ?? potentialStopStartLocation else { return nil }
         
         // 1. 找出所有在范围内的地点
@@ -211,6 +474,11 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             let placeLocation = CLLocation(latitude: place.latitude, longitude: place.longitude)
             let distance = currentGcj.distance(from: placeLocation)
             return distance <= Double(place.radius) + 100.0
+        }
+        
+        // 优先返回用户标记为“优先识别”的地点
+        if let priorityMatch = validMatches.first(where: { $0.isPriority }) {
+            return priorityMatch
         }
         
         // 2. 从符合条件的地点中，选出距离圆心最近的那一个
@@ -508,7 +776,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             }
         }
         
-        // 1. 同时存入流转缓存
+        // 1. 永久保存原始点，并存入内存缓存
+        RawLocationStore.shared.saveLocation(location)
         updateTodayTotalPoints()
         allTodayPoints.append(location)
         trackingPoints.append(location)
@@ -538,7 +807,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             let duration = Date().timeIntervalSince(start)
             if duration >= 5 * 60 {
                 let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
-                if isAiEnabled && (ongoingTitle == nil || (lastAIAnalysisTime != nil && Date().timeIntervalSince(lastAIAnalysisTime!) > 30 * 60)) {
+                if isAiEnabled && !isAnalyzingOngoing && (ongoingTitle == nil || (lastAIAnalysisTime != nil && Date().timeIntervalSince(lastAIAnalysisTime!) > 30 * 60)) {
                     // 只在有坐标时分析
                     analyzeOngoingStay(at: location)
                 }
@@ -563,6 +832,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         lastAIAnalysisTime = now
         
         let place = matchedPlace
+        isAnalyzingOngoing = true
         openAIService.analyzeFootprint(
             locations: [(location.coordinate.latitude, location.coordinate.longitude)],
             duration: duration,
@@ -572,9 +842,12 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             placeTags: [], // Place no longer has tags
             address: currentAddress,
             isOngoing: true
-        ) { [weak self] title, _, _ in
+        ) { [weak self] title, _, _, _, success in
             DispatchQueue.main.async {
-                self?.ongoingTitle = title
+                self?.isAnalyzingOngoing = false
+                if success {
+                    self?.ongoingTitle = title
+                }
             }
         }
     }
@@ -671,12 +944,15 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     private func analyzeFootprint(_ footprint: Footprint) {
         if footprint.status == .ignored { return }
         
+        // 核心检查：使用显式标识判断是否已分析
+        if footprint.aiAnalyzed {
+            return
+        }
+
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
         if !isAiEnabled {
             // 如果 AI 关闭，设置一个默认标题而不进入分析队列
-            if footprint.title == "正在分析足迹..." || footprint.title == "那时的足迹" {
-                footprint.title = matchedPlace?.name ?? footprint.address ?? "未知位置"
-            }
+            footprint.title = matchedPlace?.name ?? footprint.address ?? "记录于此"
             return
         }
         
@@ -711,19 +987,42 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             placeName: mPlace?.name,
             placeTags: fpTags,
             address: fpAddress
-        ) { title, reason, score in
+        ) { title, reason, tags, score, success in
             DispatchQueue.main.async {
-                footprint.title = title
-                footprint.reason = reason
-                footprint.aiScore = score
-                try? footprint.modelContext?.save()
-                
-                // 如果判定为“精彩”足迹（0.7 分以上），仅发送通知，不再自动收藏
-                if score >= 0.7 {
-                    NotificationManager.shared.sendHighlightNotification(
-                        title: title,
-                        body: reason
-                    )
+                if success {
+                    footprint.title = title
+                    footprint.reason = reason
+                    footprint.aiScore = score
+                    footprint.aiAnalyzed = true
+                    
+                    // 合并新生成的标签
+                    var currentTags = footprint.tags
+                    for tag in tags {
+                        let trimmed = tag.trimmingCharacters(in: .whitespaces)
+                        if !trimmed.isEmpty && !currentTags.contains(trimmed) {
+                            currentTags.append(trimmed)
+                            
+                            // 如果是全局未有的新标签，尝试同步到 modelContext
+                            if let context = footprint.modelContext {
+                                let tagName = trimmed
+                                let descriptor = FetchDescriptor<PlaceTag>(predicate: #Predicate<PlaceTag> { $0.name == tagName })
+                                if (try? context.fetch(descriptor).first) == nil {
+                                    context.insert(PlaceTag(name: tagName))
+                                }
+                            }
+                        }
+                    }
+                    footprint.tags = currentTags
+                    
+                    try? footprint.modelContext?.save()
+                    
+                    // 如果判定为“精彩”足迹（0.7 分以上），仅发送通知，不再自动收藏
+                    if score >= 0.7 {
+                        NotificationManager.shared.sendHighlightNotification(
+                            title: title,
+                            body: reason
+                        )
+                    }
                 }
                 
                 // If it's evening, refresh the daily summary push notification content
@@ -836,6 +1135,26 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         UserDefaults.standard.set(todayTotalPointsCount, forKey: "points_total_count")
     }
 
+    private func loadPointsFromStore() {
+        // 从本地存储恢复今日点，用于 UI 流水显示
+        let todayPoints = RawLocationStore.shared.loadLocations(for: Date())
+        self.allTodayPoints = todayPoints
+        self.todayTotalPointsCount = todayPoints.count
+        
+        // 从本地存储恢复滑动窗口，用于足迹识别。限制在最近 2 小时
+        let recent = RawLocationStore.shared.loadRecentLocations(lookbackHours: 2.0)
+        self.trackingPoints = recent
+        
+        // 如果我们恢复了轨道点，并且存在潜在停留状态，我们将窗口同步给识别器，防止由于 app 重启导致的历史点丢失
+        if let last = recent.last {
+            self.lastUpdateTime = last.timestamp
+            self.lastLocation = last
+        }
+
+        // 重要：重新设置 lastProcessedTimestamp 为最近的一个足迹截止时间
+        // 这将防止重新加载的旧数据被二次识别生成重复足迹 (此处仅为补丁逻辑)
+    }
+
     // MARK: - Ignore Location Logic
     
     func ignoreLocation(for footprint: Footprint) {
@@ -886,6 +1205,154 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         }
         
         try? context.save()
+    }
+    
+    // --- 附近地点建议逻辑 ---
+    
+    /// 获取当前坐标附近的建议地点（包含已保存地点和 POI）
+    func fetchNearbySuggestions(at coordinate: CLLocationCoordinate2D) async -> [LocationSuggestion] {
+        let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        var allFound: [LocationSuggestion] = []
+        
+        // 1. 获取已保存的附近地点 (1.5km内)
+        let saved = allPlaces.compactMap { place -> (LocationSuggestion, Double)? in
+            let loc = CLLocation(latitude: place.latitude, longitude: place.longitude)
+            let dist = center.distance(from: loc)
+            guard dist < 1500 else { return nil }
+            return (LocationSuggestion(
+                id: UUID(),
+                name: place.name,
+                address: place.address ?? "",
+                coordinate: place.coordinate,
+                isExistingPlace: true,
+                placeID: place.placeID
+            ), dist)
+        }
+        allFound.append(contentsOf: saved.map { $0.0 })
+        
+        // 2. 并行执行多项搜索以提高效率并增加多样性
+        async let poisFromRequest = performPOIRequest(at: coordinate, radius: 1000)
+        async let poisFromNatureSearch = performNaturalLanguageSearch(at: coordinate, query: "公园 景点 博物馆 校园 车站", radius: 2500)
+        async let poisFromBuildingSearch = performNaturalLanguageSearch(at: coordinate, query: "大厦 写字楼 商场 办公 住宅", radius: 1500)
+        async let poisFromGeneralSearch = performNaturalLanguageSearch(at: coordinate, query: "地点", radius: 1000)
+        
+        allFound.append(contentsOf: await poisFromRequest)
+        allFound.append(contentsOf: await poisFromNatureSearch)
+        allFound.append(contentsOf: await poisFromBuildingSearch)
+        allFound.append(contentsOf: await poisFromGeneralSearch)
+        
+        // 3. 反向地理编码补充 (提供纯粹的“路号”地址，作为兜底)
+        let geocoder = CLGeocoder()
+        if let placemarks = try? await geocoder.reverseGeocodeLocation(center), let first = placemarks.first {
+            let name = first.name ?? ""
+            if !name.isEmpty {
+                allFound.append(LocationSuggestion(
+                    id: UUID(),
+                    name: name,
+                    address: first.thoroughfare ?? "",
+                    coordinate: coordinate,
+                    isExistingPlace: false,
+                    placeID: nil
+                ))
+            }
+        }
+        
+        // 4. 排序与去重 (保留 10-15 个)
+        var seenNames = Set<String>()
+        var unique: [LocationSuggestion] = []
+        
+        // 按距离排序 (计算到中心的距离)
+        let sortedAll = allFound.sorted { s1, s2 in
+            let d1 = center.distance(from: CLLocation(latitude: s1.coordinate.latitude, longitude: s1.coordinate.longitude))
+            let d2 = center.distance(from: CLLocation(latitude: s2.coordinate.latitude, longitude: s2.coordinate.longitude))
+            return d1 < d2
+        }
+        
+        for s in sortedAll {
+            if !seenNames.contains(s.name) {
+                seenNames.insert(s.name)
+                unique.append(s)
+            }
+            if unique.count >= 15 { break } // 适当增加一些名额，方便用户选择
+        }
+        
+        return unique
+    }
+    
+    private func performPOIRequest(at coordinate: CLLocationCoordinate2D, radius: Double) async -> [LocationSuggestion] {
+        let req = MKLocalPointsOfInterestRequest(center: coordinate, radius: radius)
+        let search = MKLocalSearch(request: req)
+        guard let response = try? await search.start() else { return [] }
+        return response.mapItems.map { item in
+            LocationSuggestion(id: UUID(), name: item.name ?? "未知地点", address: item.placemark.title ?? "", coordinate: item.placemark.coordinate, isExistingPlace: false, placeID: nil)
+        }
+    }
+    
+    private func performNaturalLanguageSearch(at coordinate: CLLocationCoordinate2D, query: String, radius: Double) async -> [LocationSuggestion] {
+        let req = MKLocalSearch.Request()
+        req.naturalLanguageQuery = query
+        req.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: radius, longitudinalMeters: radius)
+        let search = MKLocalSearch(request: req)
+        guard let response = try? await search.start() else { return [] }
+        return response.mapItems.map { item in
+            LocationSuggestion(id: UUID(), name: item.name ?? "未知地点", address: item.placemark.title ?? "", coordinate: item.placemark.coordinate, isExistingPlace: false, placeID: nil)
+        }
+    }
+    
+    /// 用户选择建议地点后的处理
+    func selectSuggestion(_ suggestion: LocationSuggestion, forOngoing: Bool, footprint: Footprint? = nil) {
+        let targetPlace = updateOrCreatePlaceAsPriority(suggestion)
+        
+        // 如果是“重要地点”（用户定义），展示地址而非名称（因为名称会在标签/标题里展示）
+        // 如果是普通的 POI点位，则依然展示名称
+        let displayValue = (targetPlace.isUserDefined && !(targetPlace.address ?? "").isEmpty) ? (targetPlace.address ?? suggestion.name) : suggestion.name
+        
+        if forOngoing {
+            self.currentAddress = displayValue
+            // 强制重新进行分析以更新 UI
+            ongoingTitle = nil
+            if let loc = lastLocation ?? potentialStopStartLocation {
+                analyzeOngoingStay(at: loc)
+            }
+        } else if let fp = footprint {
+            fp.address = displayValue
+            fp.placeID = targetPlace.placeID
+            // 重新分析足迹内容
+            analyzeFootprint(fp)
+        }
+        
+        try? modelContext?.save()
+    }
+    
+    @discardableResult
+    private func updateOrCreatePlaceAsPriority(_ suggestion: LocationSuggestion) -> Place {
+        // 先重置该区域其他地点的优先状态
+        let center = CLLocation(latitude: suggestion.coordinate.latitude, longitude: suggestion.coordinate.longitude)
+        for p in allPlaces {
+            let pLoc = CLLocation(latitude: p.latitude, longitude: p.longitude)
+            if pLoc.distance(from: center) < 200 {
+                p.isPriority = false
+            }
+        }
+        
+        if let pid = suggestion.placeID, let existing = allPlaces.first(where: { $0.placeID == pid }) {
+            existing.isPriority = true
+            return existing
+        } else if let existing = allPlaces.first(where: { $0.name == suggestion.name }) {
+            existing.isPriority = true
+            return existing
+        } else {
+            let newPlace = Place(
+                name: suggestion.name,
+                coordinate: suggestion.coordinate,
+                radius: 100,
+                address: suggestion.address,
+                isUserDefined: false // 修正行为不应自动创建“重要地点”，以免干扰管理列表
+            )
+            newPlace.isPriority = true
+            modelContext?.insert(newPlace)
+            return newPlace
+        }
     }
 }
 

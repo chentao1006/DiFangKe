@@ -24,7 +24,7 @@ struct DataManagerView: View {
                 Button {
                     prepareExport()
                 } label: {
-                    Label("导出备份 (JSON)", systemImage: "square.and.arrow.up")
+                    Label("导出备份", systemImage: "square.and.arrow.up")
                 }
                 
                 Button {
@@ -34,6 +34,20 @@ struct DataManagerView: View {
                 }
             }
             
+            Section(header: Text("数据轨迹 (Raw)"), footer: Text("所有经过脱敏处理的原始 GPS 坐标流，永久保存在本地。")) {
+                let count = locationManager.allTodayPoints.count
+                HStack {
+                    Label("今日记录点数", systemImage: "location.circle")
+                    Spacer()
+                    Text("\(count) 个")
+                        .foregroundColor(.secondary)
+                }
+                
+                NavigationLink(destination: RawLogsManagerView()) {
+                    Label("查看/导出轨迹原始日志", systemImage: "doc.text.magnifyingglass")
+                }
+            }
+
             Section(header: Text("回收站")) {
                 NavigationLink(destination: RecycleBinView()) {
                     Label("足迹回收站", systemImage: "trash.circle")

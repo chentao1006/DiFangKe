@@ -33,6 +33,18 @@ final class Footprint {
     
     var isHighlight: Bool?
     var isPlaceSuggestionIgnored: Bool = false
+    var aiAnalyzed: Bool = false
+    
+    static let candidateTitles = [
+        "时光里的足迹", "拾起的旧时光", "重逢的轨迹", "岁月里的痕迹",
+        "被唤醒的记忆", "那一刻的流连", "走过的老地方", "往昔的剪影", "时间的注脚"
+    ]
+    
+    var placeholderTitle: String {
+        let titles = Footprint.candidateTitles
+        let hash = abs(footprintID.uuidString.hashValue)
+        return titles[hash % titles.count]
+    }
     
     var status: FootprintStatus {
         get { FootprintStatus(rawValue: statusValue) ?? .candidate }
@@ -89,7 +101,7 @@ final class Footprint {
          footprintLocations: [CLLocationCoordinate2D],
          locationHash: String,
          duration: TimeInterval,
-         title: String = "未命名足迹",
+         title: String? = nil,
          reason: String? = nil,
          status: FootprintStatus = .candidate,
          aiScore: Float = 0.0,
@@ -98,7 +110,8 @@ final class Footprint {
          photoAssetIDs: [String] = [],
          tags: [String] = [],
          address: String? = nil,
-         isPlaceSuggestionIgnored: Bool = false) {
+         isPlaceSuggestionIgnored: Bool = false,
+         aiAnalyzed: Bool = false) {
         
         self.footprintID = footprintID
         self.date = date
@@ -106,7 +119,11 @@ final class Footprint {
         self.endTime = endTime
         self.locationHash = locationHash
         self.duration = duration
-        self.title = title
+        if let title = title, !title.isEmpty {
+            self.title = title
+        } else {
+            self.title = Footprint.candidateTitles.randomElement()!
+        }
         self.reason = reason
         self.statusValue = status.rawValue
         self.aiScore = aiScore
@@ -114,6 +131,7 @@ final class Footprint {
         self.placeID = placeID
         self.address = address
         self.isPlaceSuggestionIgnored = isPlaceSuggestionIgnored
+        self.aiAnalyzed = aiAnalyzed
         
         // Use setters for computed properties
         self.latitudeArray = footprintLocations.map { $0.latitude }

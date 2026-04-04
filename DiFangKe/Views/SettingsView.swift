@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage("isDailyNotificationEnabled") private var isDailyNotificationEnabled = true
     @AppStorage("isHighlightNotificationEnabled") private var isHighlightNotificationEnabled = true
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
+    @AppStorage("aiServiceType") private var aiServiceType = "public"
     
     private var notificationTime: Binding<Date> {
         Binding(
@@ -40,7 +41,7 @@ struct SettingsView: View {
                     }
                 
                 Toggle("开启 iCloud 同步", isOn: $isICloudSyncEnabled)
-                Toggle("自动关联足迹照片", isOn: $isAutoPhotoLinkEnabled)
+                Toggle("自动关联照片到足迹", isOn: $isAutoPhotoLinkEnabled)
             }
             
             Section(header: Text("地点与标签管理")) {
@@ -113,6 +114,17 @@ struct SettingsView: View {
             
             Section(header: Text("系统配置"), footer: Text("智能分析服务将根据您的地点历史自动建议标题。")) {
                 Toggle("AI 智能辅助", isOn: $isAiAssistantEnabled)
+                if isAiAssistantEnabled {
+                    NavigationLink(destination: AiSettingsView()) {
+                        HStack {
+                            Text("AI 服务配置")
+                            Spacer()
+                            Text(aiServiceType == "custom" ? "自定义" : "公共服务")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
             }
             
             Section {

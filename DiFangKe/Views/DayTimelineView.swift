@@ -26,7 +26,9 @@ struct DayTimelineView: View {
         case footprintsOnly = "仅有足迹日期"
         var id: String { self.rawValue }
     }
-    @State private var cachedFilteredOffsets: [Int] = []
+    @State private var cachedDates: [Date] = []
+    @State private var pastLimitOffset: Int = -1
+    @State private var groupedFootprints: [Date: [Footprint]] = [:]
 
     init(selectedDate: Date = Calendar.current.startOfDay(for: Date())) {
         self._selectedDate = State(initialValue: selectedDate)
@@ -41,12 +43,12 @@ struct DayTimelineView: View {
                 ZStack(alignment: .top) {
                     ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 0) {
-                        ForEach(cachedFilteredOffsets, id: \.self) { offset in
-                            if let date = Calendar.current.date(byAdding: .day, value: offset, to: Date()) {
-                                TimelinePageView(date: date, footprints: footprints, offset: offset, locationManager: locationManager, pastLimitOffset: pastLimitOffset)
-                                    .frame(width: UIScreen.main.bounds.width)
-                                    .id(Calendar.current.startOfDay(for: date))
-                            }
+                        ForEach(cachedDates, id: \.self) { date in
+                            let offset = latestOffsetIn(date: date)
+                            let dayFootprints = groupedFootprints[date] ?? []
+                            TimelinePageView(date: date, footprints: dayFootprints, allPlaces: allPlaces, offset: offset, locationManager: locationManager, pastLimitOffset: pastLimitOffset)
+                                .frame(width: UIScreen.main.bounds.width)
+                                .id(date)
                         }
                     }
                     .scrollTargetLayout()
@@ -114,18 +116,18 @@ struct DayTimelineView: View {
                 if UserDefaults.standard.bool(forKey: "isTrackingEnabled") && !locationManager.isTracking {
                     locationManager.startTracking()
                 }
-                updateFilteredOffsets()
+                updateData()
             }
             .onDisappear {
                 stopRepeatTimer()
             }
             .onChange(of: footprints) { _, _ in
-                updateFilteredOffsets()
+                updateData()
             }
             .onChange(of: timelineFilter) { _, _ in
-                updateFilteredOffsets()
+                updateData()
                 // 当切换过滤模式时，如果当前选中的日期被过滤了，跳回今天
-                if !cachedFilteredOffsets.contains(latestOffsetIn(date: selectedDate)) {
+                if !cachedDates.contains(selectedDate) {
                     jumpToToday()
                 }
             }
@@ -150,26 +152,42 @@ struct DayTimelineView: View {
         }
     }
     
-    private func updateFilteredOffsets() {
+    private func updateData() {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
-        let all = Array(pastLimitOffset...1)
         
+        // 1. Calculate pastLimitOffset and Group footprints
+        let validFootprints = footprints.filter { $0.status != .ignored }
+        self.groupedFootprints = Dictionary(grouping: validFootprints) { calendar.startOfDay(for: $0.date) }
+        
+        var limitOffset = -1
+        if let earliestFootprint = validFootprints.last {
+            let earliestDataDate = calendar.startOfDay(for: earliestFootprint.date)
+            if let limitDate = calendar.date(byAdding: .day, value: -1, to: earliestDataDate) {
+                let diff = calendar.dateComponents([.day], from: today, to: limitDate).day ?? 0
+                limitOffset = min(-1, diff)
+            }
+        }
+        self.pastLimitOffset = limitOffset
+        
+        // 2. Generate dates
+        let allOffsets = Array(limitOffset...1)
         if timelineFilter == .all {
-            self.cachedFilteredOffsets = all
+            self.cachedDates = allOffsets.compactMap { calendar.date(byAdding: .day, value: $0, to: today) }
             return
         }
         
-        let validDatesWithData = Set(footprints.compactMap { $0.status != .ignored ? calendar.startOfDay(for: $0.date) : nil })
+        let validDatesWithData = Set(self.groupedFootprints.keys)
         
-        self.cachedFilteredOffsets = all.filter { offset in
-            // 明天 (1), 今天 (0), 和 最早一天 (pastLimitOffset) 始终显示
-            if offset == 1 || offset == 0 || offset == pastLimitOffset { return true }
+        self.cachedDates = allOffsets.compactMap { offset in
+            if offset == 1 || offset == 0 || offset == limitOffset {
+                return calendar.date(byAdding: .day, value: offset, to: today)
+            }
             
             if let date = calendar.date(byAdding: .day, value: offset, to: today) {
-                return validDatesWithData.contains(date)
+                return validDatesWithData.contains(date) ? date : nil
             }
-            return false
+            return nil
         }
     }
 
@@ -232,44 +250,6 @@ struct DayTimelineView: View {
         isFarFromToday ? "arrow.right.to.line" : "arrow.right"
     }
     
-    private var dateHeader: String {
-        let calendar = Calendar.current
-        if calendar.isDateInToday(selectedDate) { return "今天" }
-        if calendar.isDateInYesterday(selectedDate) { return "昨天" }
-        if calendar.isDateInTomorrow(selectedDate) { return "明天" }
-        
-        if let dby = calendar.date(byAdding: .day, value: -2, to: calendar.startOfDay(for: Date())),
-           calendar.isDate(selectedDate, inSameDayAs: dby) {
-            return "前天"
-        }
-        
-        let isCurrentYear = calendar.component(.year, from: selectedDate) == calendar.component(.year, from: Date())
-        return isCurrentYear ? selectedDate.formatted(.dateTime.month().day()) : selectedDate.formatted(.dateTime.year().month().day())
-    }
-    
-    private var secondaryHeader: String {
-        let calendar = Calendar.current
-        let isRelative = calendar.isDateInToday(selectedDate) || 
-                         calendar.isDateInYesterday(selectedDate) || 
-                         calendar.isDateInTomorrow(selectedDate) ||
-                         calendar.isDate(selectedDate, inSameDayAs: calendar.date(byAdding: .day, value: -2, to: calendar.startOfDay(for: Date()))!)
-        
-        if isRelative {
-            let isCurrentYear = calendar.component(.year, from: selectedDate) == calendar.component(.year, from: Date())
-            let dateStr = isCurrentYear ? selectedDate.formatted(.dateTime.month().day()) : selectedDate.formatted(.dateTime.year().month().day())
-            return "\(dateStr) \(selectedDate.formatted(.dateTime.weekday(.wide)))"
-        } else {
-            return selectedDate.formatted(.dateTime.weekday(.wide))
-        }
-    }
-    
-    private var isAtEnd: Bool {
-        if !cachedFilteredOffsets.isEmpty {
-            return (cachedFilteredOffsets.firstIndex(of: latestOffsetIn(date: selectedDate)) ?? 0) >= (cachedFilteredOffsets.count - 1)
-        }
-        return true
-    }
-    
     private func latestOffsetIn(date: Date) -> Int {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
@@ -277,36 +257,16 @@ struct DayTimelineView: View {
         return diff
     }
     
-    private var pastLimitOffset: Int {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        
-        // 过滤掉已忽略的足迹，只看可见数据
-        let validFootprints = footprints.filter { $0.status != .ignored }
-        
-        // 由于 footprints 按 startTime reverse 排序，最后一项就是最早的
-        if let earliestFootprint = validFootprints.last {
-            let earliestDataDate = calendar.startOfDay(for: earliestFootprint.date)
-            // 在最早数据的基础上多让滚一天（空白日期）
-            if let limitDate = calendar.date(byAdding: .day, value: -1, to: earliestDataDate) {
-                let diff = calendar.dateComponents([.day], from: today, to: limitDate).day ?? 0
-                return min(-1, diff) // 确保至少能看到昨天（offset -1）
-            }
+    private var isAtEnd: Bool {
+        if !cachedDates.isEmpty {
+            return (cachedDates.firstIndex(of: selectedDate) ?? 0) >= (cachedDates.count - 1)
         }
-        
-        // 默认如果没有数据，允许看到昨天
-        return -1
-    }
-    
-    private var limitDate: Date {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        return calendar.date(byAdding: .day, value: pastLimitOffset, to: today) ?? today
+        return true
     }
     
     private var isAtStart: Bool {
-        if !cachedFilteredOffsets.isEmpty {
-             return (cachedFilteredOffsets.firstIndex(of: latestOffsetIn(date: selectedDate)) ?? 0) <= 0
+        if !cachedDates.isEmpty {
+             return (cachedDates.firstIndex(of: selectedDate) ?? 0) <= 0
         }
         return true
     }
@@ -351,6 +311,40 @@ struct DayTimelineView: View {
         repeatTimer = nil
     }
     
+    private var dateHeader: String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(selectedDate) { return "今天" }
+        if calendar.isDateInYesterday(selectedDate) { return "昨天" }
+        if calendar.isDateInTomorrow(selectedDate) { return "明天" }
+        
+        let today = calendar.startOfDay(for: Date())
+        if let dby = calendar.date(byAdding: .day, value: -2, to: today),
+           calendar.isDate(selectedDate, inSameDayAs: dby) {
+            return "前天"
+        }
+        
+        let isCurrentYear = calendar.component(.year, from: selectedDate) == calendar.component(.year, from: today)
+        return isCurrentYear ? selectedDate.formatted(.dateTime.month().day()) : selectedDate.formatted(.dateTime.year().month().day())
+    }
+    
+    private var secondaryHeader: String {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let dby = calendar.date(byAdding: .day, value: -2, to: today)!
+        let isRelative = calendar.isDateInToday(selectedDate) || 
+                         calendar.isDateInYesterday(selectedDate) || 
+                         calendar.isDateInTomorrow(selectedDate) ||
+                         calendar.isDate(selectedDate, inSameDayAs: dby)
+        
+        if isRelative {
+            let isCurrentYear = calendar.component(.year, from: selectedDate) == calendar.component(.year, from: today)
+            let dateStr = isCurrentYear ? selectedDate.formatted(.dateTime.month().day()) : selectedDate.formatted(.dateTime.year().month().day())
+            return "\(dateStr) \(selectedDate.formatted(.dateTime.weekday(.wide)))"
+        } else {
+            return selectedDate.formatted(.dateTime.weekday(.wide))
+        }
+    }
+    
     private func step(direction: Int) {
         let isDisabled = (direction == -1) ? isAtStart : isAtEnd
         if !isDisabled {
@@ -369,22 +363,18 @@ struct DayTimelineView: View {
     }
     
     private func changeDate(by direction: Int) {
-        let currentOffset = latestOffsetIn(date: selectedDate)
-        guard let currentIndex = cachedFilteredOffsets.firstIndex(of: currentOffset) else {
+        guard let currentIndex = cachedDates.firstIndex(of: selectedDate) else {
             // 如果当前日期不在过滤列表中（切换过滤模式时可能发生），尝试找最近的
             jumpToToday()
             return
         }
         
         let nextIndex = currentIndex + direction
-        if nextIndex >= 0 && nextIndex < cachedFilteredOffsets.count {
-            let nextOffset = cachedFilteredOffsets[nextIndex]
-            if let nextDate = Calendar.current.date(byAdding: .day, value: nextOffset, to: Date()) {
-                let targetDate = Calendar.current.startOfDay(for: nextDate)
-                withAnimation(.spring()) {
-                    selectedDate = targetDate
-                    scrollID = targetDate
-                }
+        if nextIndex >= 0 && nextIndex < cachedDates.count {
+            let targetDate = cachedDates[nextIndex]
+            withAnimation(.spring()) {
+                selectedDate = targetDate
+                scrollID = targetDate
             }
         }
     }
@@ -394,11 +384,10 @@ struct TimelinePageView: View {
     @Environment(\.modelContext) private var modelContext
     let date: Date
     let footprints: [Footprint]
+    let allPlaces: [Place]
     let offset: Int
     let locationManager: LocationManager
     let pastLimitOffset: Int
-    
-    @Query(sort: \Place.name) private var allPlaces: [Place]
     
     @State private var selectedFootprint: Footprint?
     @State private var autoFocusOnOpen = false
@@ -415,14 +404,8 @@ struct TimelinePageView: View {
     @State private var animateHint = false
     @State private var notificationAuthStatus: UNAuthorizationStatus = .notDetermined
     
-    var dailyFootprints: [Footprint] {
-        footprints.filter { 
-            Calendar.current.isDate($0.date, inSameDayAs: date) &&
-            $0.status != .ignored
-        }
-    }
-    
     var body: some View {
+        let currentDayFootprints = self.footprints
         ScrollView {
             VStack(spacing: 0) {
                 let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
@@ -435,7 +418,7 @@ struct TimelinePageView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         // 1. Unified Status & Ongoing Card
                         if isToday {
-                            RecordingStatusCard(locationManager: locationManager, footprintCount: dailyFootprints.count)
+                            RecordingStatusCard(locationManager: locationManager, footprintCount: currentDayFootprints.count)
                                 .padding(.horizontal, 16)
                             
                             // Important Place Guide
@@ -447,7 +430,7 @@ struct TimelinePageView: View {
                         }
                         
                          // 2. Historical Footprints
-                         if dailyFootprints.isEmpty && (!isToday || locationManager.potentialStopStartLocation == nil) {
+                         if currentDayFootprints.isEmpty && (!isToday || locationManager.potentialStopStartLocation == nil) {
                              if allPlaces.isEmpty && isToday && !isGuideDismissed {
                                  EmptyView()
                              } else {
@@ -461,8 +444,8 @@ struct TimelinePageView: View {
                                      .padding(.bottom, 16)
                              }
                              
-                             let count = dailyFootprints.count
-                             ForEach(Array(dailyFootprints.enumerated()), id: \.element.id) { index, footprint in
+                             let count = currentDayFootprints.count
+                             ForEach(Array(currentDayFootprints.enumerated()), id: \.element.id) { index, footprint in
                                  FootprintCardView(
                                      footprint: footprint, 
                                      allPlaces: allPlaces,
@@ -835,13 +818,13 @@ struct FootprintCardView: View {
                     }
                     
                     HStack(spacing: 6) {
-                        Text(footprint.title)
+                        Text(footprint.title.isEmpty ? footprint.placeholderTitle : footprint.title)
                             .font(.system(.headline, design: .rounded))
                             .foregroundColor(Color.dfkMainText)
                             .lineLimit(1)
                         
                         if let placeID = footprint.placeID,
-                           let place = allPlaces.first(where: { $0.placeID == placeID }) {
+                           let place = allPlaces.first(where: { $0.placeID == placeID && $0.isUserDefined }) {
                             Spacer(minLength: 4)
                             Text(place.name)
                                 .font(.system(size: 12, weight: .bold, design: .rounded))
@@ -897,7 +880,7 @@ struct FootprintCardView: View {
                 .padding(.vertical, 14)
                 .padding(.leading, showTimeline ? 0 : 16)
                 .padding(.trailing, 16)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
                 
                 if let firstID = footprint.photoAssetIDs.first {
                     ZStack(alignment: .topTrailing) {
@@ -1105,6 +1088,7 @@ struct TrackingStatusModalView: View {
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var showFullscreenMap = false
     @State private var showingAddPlaceSheet = false
+    @State private var showingSearchSheet = false
     @State private var isSuggestionIgnored = false
 
     var body: some View {
@@ -1119,19 +1103,12 @@ struct TrackingStatusModalView: View {
                             Map(position: $cameraPosition) {
                                 UserAnnotation()
                                 
-                                // 改为显示全天流水（物理不删，连贯大连线）
-                                let totalPoints = locationManager.allTodayPoints.map { $0.coordinate }
+                                // 从本地文件读取包含所有设备的轨迹流水
+                                let totalPoints = RawLocationStore.shared.loadAllDevicesLocations(for: Date()).map { $0.coordinate }
                                 
                                 if !totalPoints.isEmpty {
                                     MapPolyline(coordinates: totalPoints)
                                         .stroke(Color.dfkAccent, lineWidth: 3)
-                                    
-                                    if let first = totalPoints.first {
-                                        Marker("", coordinate: first).tint(Color.dfkAccent)
-                                    }
-                                    if let last = totalPoints.last {
-                                        Marker("", coordinate: last).tint(Color.dfkAccent)
-                                    }
                                 }
 
                                 ForEach(locationManager.allPlaces) { place in
@@ -1160,10 +1137,35 @@ struct TrackingStatusModalView: View {
                     // Info Cards
                     VStack(spacing: 12) {
                         statusRow(title: "追踪状态", value: locationManager.isTracking ? "正在运行" : "已停止", color: locationManager.isTracking ? .green : .red)
-                        statusRow(title: "今日记录", value: "\(footprintCount) 个足迹", color: .dfkAccent)
+                        statusRow(title: "今日足迹", value: "\(footprintCount) 个记录", color: .dfkAccent)
+                        
+                        let totalRawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: Date()).count
+                        statusRow(title: "今日轨迹", value: "\(totalRawPoints) 条数据", color: .secondary)
                         
                         VStack(alignment: .leading, spacing: 8) {
-                            statusRow(title: "当前位置", value: locationManager.currentAddress)
+                            HStack {
+                                Text("当前位置").foregroundColor(.secondary)
+                                Spacer()
+                                if locationManager.isTracking && !locationManager.currentAddress.isEmpty && locationManager.currentAddress != "正在解析位置..." {
+                                    Menu {
+                                        SuggestionsMenuContent(locationManager: locationManager, coordinate: locationManager.lastLocation?.coordinate ?? locationManager.potentialStopStartLocation?.coordinate, forOngoing: true) {
+                                            showingSearchSheet = true
+                                        }
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Text(locationManager.currentAddress)
+                                                .fontWeight(.semibold)
+                                                .foregroundColor(.primary)
+                                                .lineLimit(1)
+                                            Image(systemName: "pencil")
+                                                .font(.system(size: 11))
+                                                .foregroundColor(.secondary.opacity(0.6))
+                                        }
+                                    }
+                                } else {
+                                    Text(locationManager.currentAddress).fontWeight(.semibold).foregroundColor(.primary)
+                                }
+                            }
                             
                             // 参考足迹详情的添加样式
                             if locationManager.matchedPlace == nil && !isSuggestionIgnored {
@@ -1238,60 +1240,12 @@ struct TrackingStatusModalView: View {
                         .background(RoundedRectangle(cornerRadius: 16).fill(Color.orange.opacity(0.05)))
                     }
                     
+                    
                     Text("足迹将根据您在重要地点及其周边的停留情况自动记录。如果发现位置偏差或记录不准，请确保已授予“始终允许”定位权限。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .lineSpacing(4)
                         .padding(.horizontal, 8)
-                    
-                    // --- 数据自检控制台 ---
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("📡 全天流水监视器").font(.caption.bold()).foregroundColor(.secondary)
-                        
-                        VStack(spacing: 0) {
-                            debugRow(title: "今日数据总计", value: "\(locationManager.todayTotalPointsCount) points", color: .dfkAccent)
-                            Divider()
-                            debugRow(title: "本次运行流水", value: "\(locationManager.allTodayPoints.count) points", color: .green)
-                            Divider()
-                            debugRow(title: "实时分析缓存", value: "\(locationManager.trackingPoints.count) points", color: .secondary)
-                            Divider()
-                            debugRow(title: "今日生成足迹", value: "\(dailyFootprints.count) records", color: .dfkAccent)
-                            
-                            if !locationManager.allTodayPoints.isEmpty {
-                                Divider()
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("流水最新 5 个坐标 (GCJ-02):").font(.system(size: 10)).foregroundColor(.secondary)
-                                    ForEach(Array(locationManager.allTodayPoints.suffix(5).enumerated()), id: \.offset) { _, loc in
-                                        Text("\(String(format: "%.6f", loc.coordinate.latitude)), \(String(format: "%.6f", loc.coordinate.longitude))")
-                                            .font(.system(.caption2, design: .monospaced))
-                                    }
-                                }
-                                .padding(10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                        .background(Color.secondary.opacity(0.08))
-                        .cornerRadius(10)
-                        
-                        if !dailyFootprints.isEmpty {
-                            Text("已存足迹详情:").font(.caption.bold()).foregroundColor(.secondary).padding(.top, 4)
-                            ForEach(dailyFootprints) { fp in
-                                HStack {
-                                    VStack(alignment: .leading) {
-                                        Text(fp.title).font(.caption.bold())
-                                        Text("\(fp.startTime.formatted(.dateTime.hour().minute())) - \(fp.endTime.formatted(.dateTime.hour().minute()))").font(.system(size: 10))
-                                    }
-                                    Spacer()
-                                    Text("\(fp.footprintLocations.count) 点").font(.system(size: 10)).foregroundColor(.secondary)
-                                }
-                                .padding(8)
-                                .background(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
-                            }
-                        }
-                    }
-                    .padding(16)
-                    .background(RoundedRectangle(cornerRadius: 16).fill(Color.secondary.opacity(0.05)))
-                    .padding(.top, 20)
                 }
                 .padding(20)
             }
@@ -1319,6 +1273,11 @@ struct TrackingStatusModalView: View {
                     modelContext.insert(newPlace)
                     try? modelContext.save()
                 }
+            }
+            .sheet(isPresented: $showingSearchSheet) {
+                LocationSearchSheet(locationManager: locationManager, 
+                                    coordinate: locationManager.lastLocation?.coordinate ?? locationManager.potentialStopStartLocation?.coordinate, 
+                                    forOngoing: true)
             }
         }
     }
@@ -1354,13 +1313,6 @@ struct FullFrameTrackingMapView: View {
                 if !points.isEmpty {
                     MapPolyline(coordinates: points)
                         .stroke(Color.dfkAccent, lineWidth: 4)
-                    
-                    if let first = points.first {
-                        Marker("", coordinate: first).tint(Color.dfkAccent)
-                    }
-                    if let last = points.last {
-                        Marker("", coordinate: last).tint(Color.dfkAccent)
-                    }
                 }
                 ForEach(locationManager.allPlaces) { place in
                     MapCircle(center: place.coordinate, radius: Double(place.radius))
@@ -1384,3 +1336,285 @@ struct FullFrameTrackingMapView: View {
         }
     }
 }
+
+struct SuggestionsMenuContent: View {
+    let locationManager: LocationManager
+    let coordinate: CLLocationCoordinate2D?
+    let forOngoing: Bool
+    var footprint: Footprint? = nil
+    var onSearchRequested: () -> Void
+    
+    @State private var suggestions: [LocationSuggestion] = []
+    @State private var isLoading = false
+    
+    var body: some View {
+        Group {
+            Button {
+                onSearchRequested()
+            } label: {
+                Label("搜索其他地点...", systemImage: "magnifyingglass")
+            }
+            
+            Divider()
+            
+            if isLoading {
+                Text("正在寻找附近地点...")
+            } else if suggestions.isEmpty {
+                Text("未发现附近建议")
+            } else {
+                ForEach(suggestions) { suggestion in
+                    Button {
+                        locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint)
+                    } label: {
+                        HStack {
+                            Text(suggestion.name)
+                            if suggestion.isExistingPlace {
+                                Image(systemName: "mappin.circle.fill")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear {
+            if let coord = coordinate {
+                isLoading = true
+                Task {
+                    let results = await locationManager.fetchNearbySuggestions(at: coord)
+                    await MainActor.run {
+                        self.suggestions = results
+                        self.isLoading = false
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 位置搜索弹窗
+struct LocationSearchSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let locationManager: LocationManager
+    let coordinate: CLLocationCoordinate2D?
+    let forOngoing: Bool
+    var footprint: Footprint? = nil
+
+    @State private var searchText = ""
+    @State private var searchResults: [LocationSuggestion] = []
+    @State private var isSearching = false
+    @FocusState private var isFocused: Bool
+    
+    // Completer Logic
+    @StateObject private var completerDelegate = SearchCompleterDelegate()
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // 搜索框
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("搜索地点/地址", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .autocorrectionDisabled()
+                        .focused($isFocused)
+                        .onChange(of: searchText) { oldValue, newValue in
+                            completerDelegate.updateQueryFragment(newValue)
+                        }
+                        .onSubmit {
+                            performFullSearch(query: searchText)
+                        }
+                    
+                    if !searchText.isEmpty {
+                        Button {
+                            searchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(Color(uiColor: .secondarySystemBackground))
+                .cornerRadius(10)
+                .padding()
+
+                // 结果列表
+                List {
+                    if !completerDelegate.results.isEmpty {
+                        Section("猜你想找") {
+                            ForEach(completerDelegate.results, id: \.self) { completion in
+                                Button {
+                                    performSearch(for: completion)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(completion.title)
+                                            .font(.body)
+                                            .foregroundColor(.primary)
+                                        Text(completion.subtitle)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if !searchResults.isEmpty {
+                        Section("搜索结果") {
+                            ForEach(searchResults) { suggestion in
+                                Button {
+                                    selectSuggestion(suggestion)
+                                } label: {
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(suggestion.name)
+                                                .font(.body)
+                                                .foregroundColor(.primary)
+                                            Text(suggestion.address)
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                        Text(distanceLabel(for: suggestion))
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+            }
+            .navigationTitle("手动修正地址")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                }
+            }
+            .overlay {
+                if isSearching {
+                    ProgressView()
+                        .padding()
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(10)
+                }
+            }
+            .onAppear {
+                if let coord = coordinate {
+                    completerDelegate.setupRegion(center: coord)
+                }
+                // Autofocus on sheet appear
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    isFocused = true
+                }
+            }
+        }
+    }
+
+    private func performFullSearch(query: String) {
+        guard !query.isEmpty else { return }
+        isSearching = true
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = query
+        if let center = coordinate {
+            request.region = MKCoordinateRegion(center: center, latitudinalMeters: 5000, longitudinalMeters: 5000)
+        }
+        let search = MKLocalSearch(request: request)
+        search.start { response, error in
+            isSearching = false
+            guard let items = response?.mapItems else { return }
+            
+            var suggestions = items.map { item in
+                LocationSuggestion(
+                    id: UUID(),
+                    name: item.name ?? "未知地点",
+                    address: item.placemark.title ?? "",
+                    coordinate: item.placemark.coordinate,
+                    isExistingPlace: false,
+                    placeID: nil
+                )
+            }
+            
+            // 按距离排序
+            if let center = coordinate {
+                let centerLoc = CLLocation(latitude: center.latitude, longitude: center.longitude)
+                suggestions.sort { s1, s2 in
+                    let l1 = CLLocation(latitude: s1.coordinate.latitude, longitude: s1.coordinate.longitude)
+                    let l2 = CLLocation(latitude: s2.coordinate.latitude, longitude: s2.coordinate.longitude)
+                    return centerLoc.distance(from: l1) < centerLoc.distance(from: l2)
+                }
+            }
+            
+            self.searchResults = suggestions
+        }
+    }
+
+    private func performSearch(for completion: MKLocalSearchCompletion) {
+        isSearching = true
+        let request = MKLocalSearch.Request(completion: completion)
+        let search = MKLocalSearch(request: request)
+        search.start { response, error in
+            isSearching = false
+            guard let item = response?.mapItems.first else { return }
+            
+            let suggestion = LocationSuggestion(
+                id: UUID(),
+                name: item.name ?? completion.title,
+                address: item.placemark.title ?? completion.subtitle,
+                coordinate: item.placemark.coordinate,
+                isExistingPlace: false,
+                placeID: nil
+            )
+            selectSuggestion(suggestion)
+        }
+    }
+    
+    private func selectSuggestion(_ suggestion: LocationSuggestion) {
+        locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint)
+        dismiss()
+    }
+
+    private func distanceLabel(for suggestion: LocationSuggestion) -> String {
+        guard let center = coordinate else { return "" }
+        let l1 = CLLocation(latitude: center.latitude, longitude: center.longitude)
+        let l2 = CLLocation(latitude: suggestion.coordinate.latitude, longitude: suggestion.coordinate.longitude)
+        let dist = l1.distance(from: l2)
+        if dist < 1000 {
+            return String(format: "%.0f米", dist)
+        } else {
+            return String(format: "%.1f公里", dist / 1000.0)
+        }
+    }
+}
+
+// MARK: - Search Completer Delegate Wrapper
+class SearchCompleterDelegate: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
+    @Published var results: [MKLocalSearchCompletion] = []
+    private var completer = MKLocalSearchCompleter()
+    
+    override init() {
+        super.init()
+        completer.delegate = self
+        completer.resultTypes = .pointOfInterest
+    }
+    
+    func setupRegion(center: CLLocationCoordinate2D) {
+        completer.region = MKCoordinateRegion(center: center, latitudinalMeters: 5000, longitudinalMeters: 5000)
+    }
+    
+    func updateQueryFragment(_ fragment: String) {
+        completer.queryFragment = fragment
+    }
+    
+    func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
+        self.results = completer.results
+    }
+    
+    func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
+        // Silent fail
+    }
+}
+
