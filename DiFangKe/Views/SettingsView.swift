@@ -7,7 +7,7 @@ struct SettingsView: View {
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: \PlaceTag.name) private var allTags: [PlaceTag]
     @AppStorage("isICloudSyncEnabled") private var isICloudSyncEnabled = true
-    @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = true
+    @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @AppStorage("dailyNotificationHour") private var notificationHour: Int = 21
     @AppStorage("dailyNotificationMinute") private var notificationMinute: Int = 0
     @AppStorage("isDailyNotificationEnabled") private var isDailyNotificationEnabled = true
@@ -41,30 +41,6 @@ struct SettingsView: View {
                 
                 Toggle("开启 iCloud 同步", isOn: $isICloudSyncEnabled)
                 Toggle("自动关联足迹照片", isOn: $isAutoPhotoLinkEnabled)
-            }
-            
-            Section(header: Text("推送通知")) {
-                Toggle("每日动态汇总", isOn: $isDailyNotificationEnabled)
-                    .onChange(of: isDailyNotificationEnabled) { _, newValue in
-                        if newValue {
-                            NotificationManager.shared.requestAuthorization { granted in
-                                if !granted {
-                                    isDailyNotificationEnabled = false
-                                } else {
-                                    updateNotifications()
-                                }
-                            }
-                        } else {
-                            updateNotifications()
-                        }
-                    }
-                if isDailyNotificationEnabled {
-                    DatePicker("通知时间", selection: notificationTime, displayedComponents: .hourAndMinute)
-                        .onChange(of: notificationHour) { _, _ in updateNotifications() }
-                        .onChange(of: notificationMinute) { _, _ in updateNotifications() }
-                }
-                
-                Toggle("精彩足迹提醒", isOn: $isHighlightNotificationEnabled)
             }
             
             Section(header: Text("地点与标签管理")) {
@@ -109,6 +85,30 @@ struct SettingsView: View {
                             .foregroundColor(.secondary)
                     }
                 }
+            }
+
+            Section(header: Text("推送通知")) {
+                Toggle("每日动态汇总", isOn: $isDailyNotificationEnabled)
+                    .onChange(of: isDailyNotificationEnabled) { _, newValue in
+                        if newValue {
+                            NotificationManager.shared.requestAuthorization { granted in
+                                if !granted {
+                                    isDailyNotificationEnabled = false
+                                } else {
+                                    updateNotifications()
+                                }
+                            }
+                        } else {
+                            updateNotifications()
+                        }
+                    }
+                if isDailyNotificationEnabled {
+                    DatePicker("通知时间", selection: notificationTime, displayedComponents: .hourAndMinute)
+                        .onChange(of: notificationHour) { _, _ in updateNotifications() }
+                        .onChange(of: notificationMinute) { _, _ in updateNotifications() }
+                }
+                
+                Toggle("精彩足迹提醒", isOn: $isHighlightNotificationEnabled)
             }
             
             Section(header: Text("系统配置"), footer: Text("智能分析服务将根据您的地点历史自动建议标题。")) {

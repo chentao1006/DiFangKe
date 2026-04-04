@@ -81,18 +81,17 @@ struct AddPlaceSheet: View {
                 }
                 .listRowBackground(Color.clear)
 
-                Section(header: Text("地点名称")) {
-                    TextField("给这个地点起个名字", text: $placeName)
-                        .font(.body)
-                }
-
-                Section(header: presetHeader) {
-                    FlowLayout(spacing: 8) {
+                Section(header: Text("地点名称"), footer: 
+                    HStack(spacing: 8) {
                         ForEach(importantTypes, id: \.self) { type in
                             presetBadge(type)
                         }
                     }
-                    .padding(.vertical, 4)
+                    .padding(.top, 4)
+                    .padding(.bottom, 12)
+                ) {
+                    TextField("给这个地点起个名字", text: $placeName)
+                        .font(.body)
                 }
 
                 Section(header: Text("感知半径"), footer: Text("进入该范围内时自动识别为此地点")) {
@@ -114,7 +113,7 @@ struct AddPlaceSheet: View {
                 }
 
                 Section(header: Text("记录设置"), footer: Text("开启后，系统将不再记录发生在此地点的足迹。")) {
-                    Toggle("在此地点停止记录", isOn: $isIgnored)
+                    Toggle("忽略此地点的足迹", isOn: $isIgnored)
                         .tint(.orange)
                 }
             }
@@ -163,11 +162,11 @@ struct AddPlaceSheet: View {
             placeName = name
         } label: {
             Text(name)
-                .font(.system(size: 14, weight: .bold, design: .rounded))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(isSelected ? Color.orange : Color.orange.opacity(0.1))
-                .foregroundColor(isSelected ? .white : .orange)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(isSelected ? Color.secondary.opacity(0.2) : Color.secondary.opacity(0.1))
+                .foregroundColor(isSelected ? .primary : .secondary)
                 .clipShape(Capsule())
         }
         .buttonStyle(.plain)

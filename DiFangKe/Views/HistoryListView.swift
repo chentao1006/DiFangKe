@@ -85,6 +85,7 @@ struct HistoryListView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
     
+    let initialDate: Date
     @State private var viewMode: ViewMode = .week
     @State private var cachedSummaries: [Date: DaySummary] = [:]
     @State private var showingDate: IdentifiableDate? = nil
@@ -96,6 +97,8 @@ struct HistoryListView: View {
     @State private var showingNoResultsAlert = false
     @State private var showingImportSuccessAlert = false
     @State private var successCount = 0
+    @State private var showingPermissionAlert = false
+    @ObservedObject private var photoService = PhotoService.shared
     
     @Query(sort: \Place.name) private var allPlacesForScan: [Place]
     
@@ -107,6 +110,15 @@ struct HistoryListView: View {
     enum ViewMode: String, CaseIterable {
         case week = "周"
         case month = "月"
+        case favorites = "收藏"
+        case tags = "标签"
+    }
+
+    @State private var hasScrolledWeek = false
+    @State private var hasScrolledMonth = false
+    
+    init(initialDate: Date = Date()) {
+        self.initialDate = Calendar.current.startOfDay(for: initialDate)
     }
     
     var body: some View {
@@ -124,6 +136,7 @@ struct HistoryListView: View {
         .onChange(of: allFootprints) { updateSummaries() }
         .sheet(item: $showingDate) { item in
             SimpleDayTimelineView(date: item.date)
+                .onDisappear { updateSummaries() }
         }
         .modifier(ImportSheetsModifier(
             showingPhotoImportRange: $showingPhotoImportRange,
@@ -135,11 +148,7 @@ struct HistoryListView: View {
                     modelContext.insert(fp)
                 }
                 try? modelContext.save()
-                for fp in selectedFootprints {
-                    OpenAIService.shared.analyzeFootprint(fp) { _ in
-                        try? self.modelContext.save()
-                    }
-                }
+                OpenAIService.shared.enqueueFootprintsForAnalysis(selectedFootprints)
                 isShowingResults = false
                 scannedResults = []
                 updateSummaries()
@@ -151,44 +160,63 @@ struct HistoryListView: View {
             isScanning: isScanning,
             showingNoResultsAlert: $showingNoResultsAlert,
             showingImportSuccessAlert: $showingImportSuccessAlert,
+            showingPermissionAlert: $showingPermissionAlert,
             successCount: successCount
         ))
-        .modifier(ImportToolbarModifier(showingPhotoImportRange: $showingPhotoImportRange))
+        .modifier(ImportToolbarModifier(onTapAction: checkPhotoPermission))
     }
     
     private var pickerSection: some View {
-        Picker("视图", selection: $viewMode) {
-            ForEach(ViewMode.allCases, id: \.self) { mode in
-                Text(mode.rawValue).tag(mode)
+        HStack {
+            Picker("视图", selection: $viewMode) {
+                ForEach(ViewMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
             }
+            .pickerStyle(.segmented)
         }
-        .pickerStyle(.segmented)
-        .padding()
+        .padding(.horizontal)
+        .padding(.top, 10)
+        .padding(.bottom, 12)
+        .background(Color.dfkBackground)
     }
     
     private var contentArea: some View {
-        ZStack {
-            if viewMode == .week {
-                HistoryWeekView(summaries: cachedSummaries) { date in
-                    showingDate = IdentifiableDate(date: date)
-                }
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .scale(scale: 0.98)),
-                    removal: .opacity.combined(with: .scale(scale: 1.02))
-                ))
-            } else {
-                HistoryMonthView(summaries: cachedSummaries) { date in
-                    showingDate = IdentifiableDate(date: date)
-                }
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .scale(scale: 0.98)),
-                    removal: .opacity.combined(with: .scale(scale: 1.02))
-                ))
+        TabView(selection: $viewMode) {
+            HistoryWeekView(summaries: cachedSummaries, targetDate: initialDate, hasScrolled: $hasScrolledWeek) { date in
+                showingDate = IdentifiableDate(date: date)
             }
+            .tag(ViewMode.week)
+            
+            HistoryMonthView(summaries: cachedSummaries, targetDate: initialDate, hasScrolled: $hasScrolledMonth) { date in
+                showingDate = IdentifiableDate(date: date)
+            }
+            .tag(ViewMode.month)
+            
+            HistoryFavoritesView(onUpdate: updateSummaries)
+                .tag(ViewMode.favorites)
+            
+            HistoryTagsView(onUpdate: updateSummaries)
+                .tag(ViewMode.tags)
         }
-        .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.8), value: viewMode)
+        .tabViewStyle(.page(indexDisplayMode: .never))
     }
     
+    
+    private func checkPhotoPermission() {
+        let status = photoService.authorizationStatus
+        if status == .notDetermined {
+            photoService.requestPermission { granted in
+                if granted {
+                    showingPhotoImportRange = true
+                }
+            }
+        } else if status == .authorized || status == .limited {
+            showingPhotoImportRange = true
+        } else {
+            showingPermissionAlert = true
+        }
+    }
     
     private func startScanning(start: Date, end: Date) {
         isScanning = true
@@ -273,6 +301,8 @@ struct HistoryListView: View {
 // MARK: - Week View
 struct HistoryWeekView: View {
     let summaries: [Date: DaySummary]
+    let targetDate: Date
+    @Binding var hasScrolled: Bool
     let onDayTap: (Date) -> Void
     
     var weeks: [[Date]] {
@@ -286,7 +316,10 @@ struct HistoryWeekView: View {
         let earliestDate = allDates.min() ?? calendar.date(byAdding: .weekOfYear, value: -8, to: today)!
         let startOfEarliestWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: earliestDate))!
         
-        let weekCount = calendar.dateComponents([.weekOfYear], from: startOfEarliestWeek, to: startOfTodayWeek).weekOfYear ?? 0
+        // Also consider the targetDate to ensure it's included in the range
+        let minStartWeek = targetDate < startOfEarliestWeek ? calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: targetDate))! : startOfEarliestWeek
+        
+        let weekCount = calendar.dateComponents([.weekOfYear], from: minStartWeek, to: startOfTodayWeek).weekOfYear ?? 0
         
         return (0...max(weekCount, 4)).map { weekOffset in
             let startOfWeek = calendar.date(byAdding: .weekOfYear, value: -weekOffset, to: startOfTodayWeek)!
@@ -298,26 +331,63 @@ struct HistoryWeekView: View {
     }
     
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 16, pinnedViews: [.sectionHeaders]) {
-                ForEach(weeks, id: \.self) { weekDates in
-                    if let firstDate = weekDates.first {
-                        Section(header: weekHeader(for: firstDate)) {
-                            VStack(spacing: 8) {
-                                ForEach(weekDates, id: \.self) { date in
-                                    DayCell(
-                                        date: date,
-                                        summary: summaries[date],
-                                        onTap: { onDayTap(date) }
-                                    )
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 16, pinnedViews: [.sectionHeaders]) {
+                    ForEach(weeks, id: \.self) { weekDates in
+                        if let firstDate = weekDates.first {
+                            // Find the Monday of this week for a stable ID
+                            let monday = Calendar.current.date(from: Calendar.current.dateComponents([.yearForWeekOfYear, .weekOfYear], from: firstDate))!
+                            Section(header: weekHeader(for: firstDate)) {
+                                VStack(spacing: 8) {
+                                    ForEach(weekDates, id: \.self) { date in
+                                        DayCell(
+                                            date: date,
+                                            targetDate: targetDate, // Pass target date
+                                            summary: summaries[date],
+                                            onTap: { onDayTap(date) }
+                                        )
+                                    }
                                 }
+                                .padding(.horizontal)
                             }
-                            .padding(.horizontal)
+                            .id("week-" + monday.dayID)
+                        }
+                    }
+                }
+                .padding(.top)
+            }
+            .task(id: targetDate) {
+                // Only scroll if we haven't scrolled for this view instance yet
+                if !hasScrolled {
+                    // Attempt multiple scrolls as layout and data might change
+                    for delay in [200_000_000, 600_000_000, 1_200_000_000] {
+                        if !hasScrolled {
+                            try? await Task.sleep(nanoseconds: UInt64(delay))
+                            scrollToTarget(proxy: proxy)
                         }
                     }
                 }
             }
-            .padding(.top)
+            .onChange(of: summaries) { _, newValue in
+                if !newValue.isEmpty && !hasScrolled {
+                    scrollToTarget(proxy: proxy)
+                }
+            }
+        }
+    }
+    
+    private func scrollToTarget(proxy: ScrollViewProxy) {
+        if !summaries.isEmpty {
+            hasScrolled = true
+        }
+        
+        let calendar = Calendar.current
+        let components = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: targetDate)
+        if let startOfWeek = calendar.date(from: components) {
+            withAnimation {
+                proxy.scrollTo("week-" + startOfWeek.dayID, anchor: UnitPoint(x: 0.5, y: 0.3))
+            }
         }
     }
     
@@ -343,11 +413,13 @@ struct HistoryWeekView: View {
 // MARK: - Day Cell (for Week View)
 struct DayCell: View {
     let date: Date
+    let targetDate: Date
     let summary: DaySummary?
     let onTap: () -> Void
     
     var body: some View {
         let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
+        let isTarget = Calendar.current.isDate(date, inSameDayAs: targetDate)
         let hasData = summary != nil && (summary?.footprintCount ?? 0) > 0
         
         HStack(spacing: 12) {
@@ -379,6 +451,9 @@ struct DayCell: View {
                 if isToday {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(Color.dfkAccent.opacity(0.06))
+                } else if isTarget {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.gray.opacity(0.12))
                 }
             }
         )
@@ -417,6 +492,8 @@ struct ActivityBar: View {
 // MARK: - Month View
 struct HistoryMonthView: View {
     let summaries: [Date: DaySummary]
+    let targetDate: Date
+    @Binding var hasScrolled: Bool
     let onDayTap: (Date) -> Void
     
     var months: [Date] {
@@ -427,24 +504,52 @@ struct HistoryMonthView: View {
         let earliestDate = allDates.min() ?? calendar.date(byAdding: .month, value: -6, to: today)!
         let startOfEarliestMonth = earliestDate.startOfMonth ?? earliestDate
         
+        // Ensure targetDate's month is included too
+        let minStartMonth = targetDate < startOfEarliestMonth ? targetDate.startOfMonth ?? startOfEarliestMonth : startOfEarliestMonth
+        
         // Calculate number of months between startOfEarliestMonth and today
-        let monthCount = calendar.dateComponents([.month], from: startOfEarliestMonth, to: today).month ?? 0
+        let monthCount = calendar.dateComponents([.month], from: minStartMonth, to: today).month ?? 0
         
         return (0...max(monthCount, 5)).compactMap { calendar.date(byAdding: .month, value: -$0, to: today) }
     }
     
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 32, pinnedViews: [.sectionHeaders]) {
-                ForEach(months, id: \.self) { month in
-                    Section(header: monthHeader(for: month)) {
-                        monthGrid(for: month)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 32, pinnedViews: [.sectionHeaders]) {
+                    ForEach(months, id: \.self) { month in
+                        Section(header: monthHeader(for: month)) {
+                            monthGrid(for: month)
+                        }
+                        .id("month-" + month.dayID)
                     }
                 }
+                .padding(.bottom, 30)
             }
-            .padding(.bottom, 30)
+            .background(Color.dfkBackground)
+            .task(id: targetDate) {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                if !hasScrolled {
+                    scrollToTarget(proxy: proxy)
+                }
+            }
+            .onChange(of: summaries) { _, newValue in
+                if !newValue.isEmpty && !hasScrolled {
+                    scrollToTarget(proxy: proxy)
+                }
+            }
         }
-        .background(Color.dfkBackground)
+    }
+    
+    private func scrollToTarget(proxy: ScrollViewProxy) {
+        if !summaries.isEmpty {
+            hasScrolled = true
+        }
+        if let startOfMonth = targetDate.startOfMonth {
+            withAnimation {
+                proxy.scrollTo("month-" + startOfMonth.dayID, anchor: UnitPoint(x: 0.5, y: 0.2))
+            }
+        }
     }
     
     private func monthHeader(for date: Date) -> some View {
@@ -466,7 +571,7 @@ struct HistoryMonthView: View {
         return VStack(spacing: 8) {
             // Weekday Headers
             HStack(spacing: 0) {
-                ForEach(["一", "二", "三", "四", "五", "六", "日"], id: \.self) { day in
+                ForEach(["日", "一", "二", "三", "四", "五", "六"], id: \.self) { day in
                     Text(day)
                         .font(.system(size: 12, weight: .bold))
                         .foregroundColor(.secondary.opacity(0.6))
@@ -485,6 +590,7 @@ struct HistoryMonthView: View {
                 ForEach(days, id: \.self) { date in
                     MonthDayCell(
                         date: date,
+                        targetDate: targetDate,
                         summary: summaries[date],
                         onTap: { onDayTap(date) }
                     )
@@ -498,10 +604,9 @@ struct HistoryMonthView: View {
         let calendar = Calendar.current
         guard let firstDay = month.startOfMonth else { return 0 }
         let weekday = calendar.component(.weekday, from: firstDay)
-        // We want Monday = 0... Sunday = 6
-        // Calendar weekday (1 = Sun, 2 = Mon...)
-        let adjusted = (weekday + 5) % 7
-        return adjusted
+        // Sunday = 1, Monday = 2 ... Saturday = 7
+        // We want Sunday = 0, Monday = 1 ... Saturday = 6
+        return weekday - 1
     }
     
     private func daysInMonth(for month: Date) -> [Date] {
@@ -517,17 +622,19 @@ struct HistoryMonthView: View {
 
 struct MonthDayCell: View {
     let date: Date
+    let targetDate: Date
     let summary: DaySummary?
     let onTap: () -> Void
     
     var body: some View {
         let hasData = summary != nil && (summary?.footprintCount ?? 0) > 0
         let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
+        let isTarget = Calendar.current.isDate(date, inSameDayAs: targetDate)
         
         VStack(spacing: 2) {
             Text("\(Calendar.current.component(.day, from: date))")
                 .font(.system(size: 18, weight: .semibold, design: .rounded))
-                .foregroundColor(hasData ? (isToday ? .dfkAccent : .primary) : .secondary.opacity(0.4))
+                .foregroundColor(hasData ? .primary : .secondary.opacity(0.4))
             
             ZStack {
                 if let summary = summary, summary.footprintCount > 0 {
@@ -551,9 +658,11 @@ struct MonthDayCell: View {
         .background(
             ZStack {
                 if isToday {
-                    Circle()
-                        .stroke(Color.dfkAccent.opacity(hasData ? 0.2 : 0.1), lineWidth: 1)
-                        .padding(2)
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.dfkAccent.opacity(0.06))
+                } else if isTarget {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.gray.opacity(0.12))
                 }
             }
         )
@@ -569,6 +678,12 @@ struct MonthDayCell: View {
 
 // MARK: - Extensions
 extension Date {
+    var dayID: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd"
+        return formatter.string(from: self)
+    }
+    
     var startOfWeek: Date {
         Calendar.current.dateComponents([.calendar, .yearForWeekOfYear, .weekOfYear], from: self).date!
     }
@@ -605,6 +720,7 @@ struct ImportOverlaysModifier: ViewModifier {
     let isScanning: Bool
     @Binding var showingNoResultsAlert: Bool
     @Binding var showingImportSuccessAlert: Bool
+    @Binding var showingPermissionAlert: Bool
     let successCount: Int
     
     func body(content: Content) -> some View {
@@ -619,10 +735,20 @@ struct ImportOverlaysModifier: ViewModifier {
             } message: {
                 Text("成功寻回并入库了 \(successCount) 个历史足迹！")
             }
+            .alert("照片权限未开启", isPresented: $showingPermissionAlert) {
+                Button("去设置") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+                Button("好", role: .cancel) { }
+            } message: {
+                Text("“地方客”需要访问您的相册以发现那时的足迹。请在系统设置中开启照片读取权限。")
+            }
             .overlay {
                 if isScanning {
                     ZStack {
-                        Color.black.opacity(0.4).ignoresSafeArea()
+                        Color.black.opacity(0.2).ignoresSafeArea()
                         VStack(spacing: 20) {
                             ProgressView()
                                 .scaleEffect(1.5)
@@ -632,7 +758,7 @@ struct ImportOverlaysModifier: ViewModifier {
                                 .font(.headline)
                         }
                         .padding(40)
-                        .background(RoundedRectangle(cornerRadius: 20).fill(Color.dfkBackground.opacity(0.8)))
+                        .background(RoundedRectangle(cornerRadius: 20).fill(Color.black.opacity(0.7)))
                     }
                 }
             }
@@ -640,13 +766,13 @@ struct ImportOverlaysModifier: ViewModifier {
 }
 
 struct ImportToolbarModifier: ViewModifier {
-    @Binding var showingPhotoImportRange: Bool
+    let onTapAction: () -> Void
     func body(content: Content) -> some View {
         content
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        showingPhotoImportRange = true
+                        onTapAction()
                     } label: {
                         Image(systemName: "square.and.arrow.down.badge.clock")
                     }
@@ -658,42 +784,81 @@ struct ImportToolbarModifier: ViewModifier {
 // MARK: - Date Range Picker View
 struct PhotoImportRangePicker: View {
     @Environment(\.dismiss) var dismiss
-    @State private var startDate = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
-    @State private var endDate = Date()
+    @State private var selectedYear = Calendar.current.component(.year, from: Date())
+    @State private var earliestYear: Int = 2010
     
     var onSelect: (Date, Date) -> Void
+    
+    private var years: [Int] {
+        let currentYear = Calendar.current.component(.year, from: Date())
+        return Array((earliestYear...currentYear).reversed())
+    }
     
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                Form {
-                    Section {
-                        DatePicker("开始日期", selection: $startDate, in: ...endDate, displayedComponents: .date)
-                        DatePicker("结束日期", selection: $endDate, in: startDate...Date(), displayedComponents: .date)
-                    } header: {
-                        Text("选择日期范围")
-                    } footer: {
-                        Text("我们将分析选定时间段内的照片地理位置，为您生成足迹。")
-                    }
-                    
-                    Section {
+                ScrollView {
+                    VStack(spacing: 24) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("选择年份")
+                                .font(.caption.bold())
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 20)
+                            
+                            Picker("年份", selection: $selectedYear) {
+                                ForEach(years, id: \.self) { year in
+                                    Text("\(String(format: "%04d", year))年").tag(year)
+                                }
+                            }
+                            .pickerStyle(.wheel)
+                            .frame(height: 150)
+                            .clipped()
+                            .background(Color(.secondarySystemGroupedBackground))
+                            .cornerRadius(12)
+                            .padding(.horizontal)
+                            
+                            Text("我们将纵览您在 \(String(format: "%d", selectedYear)) 年全年的影像，为您找回失落的足迹。")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 20)
+                        }
+                        .padding(.top, 20)
+                        
                         Button(action: {
-                            onSelect(startDate, endDate)
+                            let calendar = Calendar.current
+                            var components = DateComponents()
+                            components.year = selectedYear
+                            components.month = 1
+                            components.day = 1
+                            let start = calendar.date(from: components) ?? Date()
+                            
+                            components.month = 12
+                            components.day = 31
+                            components.hour = 23
+                            components.minute = 59
+                            components.second = 59
+                            let end = calendar.date(from: components) ?? Date()
+                            
+                            onSelect(start, end)
                         }) {
                             HStack {
                                 Spacer()
-                                Text("下一步")
+                                Text("开启穿越")
                                     .fontWeight(.bold)
                                     .foregroundColor(.white)
                                 Spacer()
                             }
-                            .padding(.vertical, 8)
+                            .frame(height: 50)
+                            .background(Color.dfkAccent)
+                            .cornerRadius(12)
                         }
-                        .listRowBackground(Color.dfkAccent)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 30)
                     }
                 }
+                .background(Color(.systemGroupedBackground))
             }
-            .navigationTitle("找回那天的足迹")
+            .navigationTitle("寻回那年的记忆")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -701,7 +866,19 @@ struct PhotoImportRangePicker: View {
                 }
             }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.fraction(0.6), .large])
+        .presentationDragIndicator(.visible)
+        .onAppear {
+            if let date = PhotoService.shared.getEarliestAssetDate() {
+                let year = Calendar.current.component(.year, from: date)
+                let currentYear = Calendar.current.component(.year, from: Date())
+                self.earliestYear = min(year, currentYear)
+                // 确保默认选中年不在范围外
+                if selectedYear < self.earliestYear {
+                    selectedYear = currentYear
+                }
+            }
+        }
     }
 }
 
@@ -740,17 +917,11 @@ struct PhotoImportResultsView: View {
                 }
                 
                 ForEach(results, id: \.footprintID) { fp in
+                    let isSelected = selectedIDs.contains(fp.footprintID)
                     HStack(spacing: 12) {
-                        Image(systemName: selectedIDs.contains(fp.footprintID) ? "checkmark.circle.fill" : "circle")
-                            .foregroundColor(selectedIDs.contains(fp.footprintID) ? .dfkAccent : .secondary)
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .foregroundColor(isSelected ? .dfkAccent : .secondary)
                             .font(.system(size: 20))
-                            .onTapGesture {
-                                if selectedIDs.contains(fp.footprintID) {
-                                    selectedIDs.remove(fp.footprintID)
-                                } else {
-                                    selectedIDs.insert(fp.footprintID)
-                                }
-                            }
                         
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
@@ -763,9 +934,17 @@ struct PhotoImportResultsView: View {
                                     .foregroundColor(.secondary)
                             }
                             
-                            FootprintCardView(footprint: fp, allPlaces: allPlaces) { _, _ in }
+                            FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false) { _, _ in }
                                 .disabled(true)
-                                .opacity(selectedIDs.contains(fp.footprintID) ? 1.0 : 0.6)
+                                .opacity(isSelected ? 1.0 : 0.6)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if isSelected {
+                            selectedIDs.remove(fp.footprintID)
+                        } else {
+                            selectedIDs.insert(fp.footprintID)
                         }
                     }
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -793,8 +972,196 @@ struct PhotoImportResultsView: View {
     }
 }
 
+// MARK: - History Favorites View
+struct HistoryFavoritesView: View {
+    @Query(filter: #Predicate<Footprint> { $0.isHighlight == true && $0.statusValue != "ignored" }, sort: \Footprint.startTime, order: .reverse) 
+    private var favoriteFootprints: [Footprint]
+    
+    @Query(sort: \Place.name) private var allPlaces: [Place]
+    @State private var selectedFootprint: Footprint?
+    let onUpdate: () -> Void
+    
+    private var groupedFavorites: [(Date, [Footprint])] {
+        let dictionary = Dictionary(grouping: favoriteFootprints) { footprint in
+            Calendar.current.startOfDay(for: footprint.startTime)
+        }
+        return dictionary.sorted { $0.key > $1.key }
+    }
+    
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
+                if favoriteFootprints.isEmpty {
+                    VStack(spacing: 20) {
+                        Spacer().frame(height: 100)
+                        Image(systemName: "star.slash")
+                            .font(.system(size: 60))
+                            .foregroundColor(Color.dfkCandidate)
+                        Text("还没有收藏任何足迹")
+                            .font(.subheadline.bold())
+                            .foregroundColor(Color.dfkSecondaryText)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                } else {
+                    ForEach(groupedFavorites, id: \.0) { date, footprints in
+                        Section(header: dateHeader(for: date)) {
+                            VStack(spacing: 0) {
+                                ForEach(footprints) { fp in
+                                    FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false) { item, _ in
+                                        selectedFootprint = item
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .onChange(of: fp.isHighlight) { _, _ in
+                                        onUpdate()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 10)
+        }
+        .background(Color.dfkBackground)
+        .sheet(item: $selectedFootprint) { footprint in
+            FootprintModalView(footprint: footprint, autoFocus: false)
+                .onDisappear { onUpdate() }
+        }
+    }
+    
+    private func dateHeader(for date: Date) -> some View {
+        HStack {
+            Text(date.formatted(.dateTime.year().month().day()))
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.dfkBackground.opacity(0.95))
+            Spacer()
+        }
+    }
+}
+
+// MARK: - History Tags View
+struct HistoryTagsView: View {
+    @Query(sort: \Footprint.startTime, order: .reverse) private var allFootprints: [Footprint]
+    @Query(sort: \Place.name) private var allPlaces: [Place]
+    @State private var selectedFootprint: Footprint?
+    let onUpdate: () -> Void
+    
+    private var validFootprints: [Footprint] {
+        allFootprints.filter { $0.statusValue != "ignored" }
+    }
+    
+    struct TagSummary: Identifiable {
+        var id: String { name }
+        let name: String
+        let count: Int
+        let lastDate: Date
+        let score: Double
+        let relativeTimeString: String
+    }
+    
+    private var tagSummaries: [TagSummary] {
+        var counts: [String: Int] = [:]
+        var latestDates: [String: Date] = [:]
+        
+        for fp in validFootprints {
+            for tag in fp.tags {
+                counts[tag, default: 0] += 1
+                if let date = latestDates[tag] {
+                    if fp.date > date { latestDates[tag] = fp.date }
+                } else {
+                    latestDates[tag] = fp.date
+                }
+            }
+        }
+        
+        let now = Date()
+        return counts.map { name, count in
+            let lastDate = latestDates[name] ?? Date.distantPast
+            let daysSince = Calendar.current.dateComponents([.day], from: lastDate, to: now).day ?? 0
+            
+            // RecencyWeight = 1.0 / (1.0 + daysSince/7.0) // 衰减慢一点点
+            let recencyWeight = 1.0 / (1.0 + Double(daysSince))
+            let score = Double(count) * 0.6 + recencyWeight * 0.4
+            
+            let relativeStr: String
+            if daysSince == 0 { relativeStr = "今天" }
+            else if daysSince == 1 { relativeStr = "昨天" }
+            else { relativeStr = "\(daysSince) 天前" }
+            
+            return TagSummary(name: name, count: count, lastDate: lastDate, score: score, relativeTimeString: relativeStr)
+        }
+        .sorted { $0.score > $1.score }
+    }
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 30) {
+                if tagSummaries.isEmpty {
+                    VStack(spacing: 20) {
+                        Spacer().frame(height: 100)
+                        Image(systemName: "tag.slash")
+                            .font(.system(size: 60))
+                            .foregroundColor(Color.dfkCandidate)
+                        Text("还没有给任何足迹打过标签")
+                            .font(.subheadline.bold())
+                            .foregroundColor(Color.dfkSecondaryText)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                } else {
+                    ForEach(tagSummaries) { tag in
+                        VStack(alignment: .leading, spacing: 12) {
+                            // Tag Header
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("# \(tag.name)").font(.title3.bold()).foregroundColor(.primary)
+                                Text("\(tag.count) 次 · 最近 \(tag.relativeTimeString)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 16)
+                            
+                            // Horizontal List of Cards
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                LazyHStack(spacing: 12) {
+                                    let taggedFootprints = validFootprints.filter { $0.tags.contains(tag.name) }
+                                    ForEach(taggedFootprints) { fp in
+                                        FootprintCardView(
+                                            footprint: fp, 
+                                            allPlaces: allPlaces, 
+                                            showTimeline: false,
+                                            showDateAboveTitle: true,
+                                            fixedWidth: 260
+                                        ) { item, _ in
+                                            selectedFootprint = item
+                                        }
+                                        .onChange(of: fp.isHighlight) { _, _ in
+                                            onUpdate()
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                            }
+                        }
+                    }
+                    .padding(.top, 10)
+                }
+            }
+            .padding(.vertical, 10)
+        }
+        .background(Color.dfkBackground)
+        .sheet(item: $selectedFootprint) { footprint in
+            FootprintModalView(footprint: footprint, autoFocus: false)
+                .onDisappear { onUpdate() }
+        }
+    }
+}
+
 #Preview {
     NavigationStack {
-        HistoryListView()
+        HistoryListView(initialDate: Date())
     }
 }

@@ -40,6 +40,10 @@ struct FootprintModalView: View {
     @State private var showingPhotoDeleteAlert = false
     @State private var photoToDelete: String? = nil
     
+    @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
+    @State private var isGeneratingAI = false
+    @State private var showingAINotEnabledAlert = false
+    
     var body: some View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
@@ -214,6 +218,16 @@ struct FootprintModalView: View {
             } message: {
                 Text("这张照片将从该足迹中移除。")
             }
+            .alert("AI 助手未开启", isPresented: $showingAINotEnabledAlert) {
+                Button("去开启") { 
+                    // This is a simple app, we can just dismiss and assume they find settings or add a deep link if possible
+                    // Or just let them know they need to turn it on in settings.
+                    // For now, just OK is fine as per usual SwiftUI patterns unless navigation is planned.
+                }
+                Button("取消", role: .cancel) { }
+            } message: {
+                Text("请在设置中开启 AI 智能分析功能，以解锁自动生成标题和感悟的功能。")
+            }
         }
     }
     
@@ -233,57 +247,101 @@ struct FootprintModalView: View {
         let isReasonEmpty = (footprint.reason ?? "").trimmingCharacters(in: .whitespaces).isEmpty
         
         if isTitleEmpty || isReasonEmpty {
-            // Find matched place name for background context
-            let matchedPlace = savedPlaces.first(where: { $0.placeID == footprint.placeID })
-            
-            OpenAIService.shared.analyzeFootprint(
-                locations: zip(footprint.latitudeArray, footprint.longitudeArray).map { ($0, $1) },
-                duration: footprint.duration,
-                startTime: footprint.startTime,
-                endTime: footprint.endTime,
-                placeName: matchedPlace?.name,
-                placeTags: footprint.tags, // Only footprint tags, place no longer has tags
-                address: footprint.address,
-                isOngoing: false
-            ) { title, reason, score in
-                DispatchQueue.main.async {
-                    if isTitleEmpty {
-                        footprint.title = title
-                    }
-                    if isReasonEmpty {
-                        footprint.reason = reason
-                    }
-                    try? modelContext.save()
+            // Auto generation should be silent if AI is off
+            regenerateAIContent(forcePrompt: false)
+        }
+    }
+    
+    private func regenerateAIContent(forcePrompt: Bool = true) {
+        guard isAiAssistantEnabled else {
+            if forcePrompt {
+                showingAINotEnabledAlert = true
+            }
+            return
+        }
+        
+        guard !isGeneratingAI else { return }
+        
+        isGeneratingAI = true
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        
+        // Find matched place name for background context
+        let matchedPlace = savedPlaces.first(where: { $0.placeID == footprint.placeID })
+        
+        OpenAIService.shared.analyzeFootprint(
+            locations: zip(footprint.latitudeArray, footprint.longitudeArray).map { ($0, $1) },
+            duration: footprint.duration,
+            startTime: footprint.startTime,
+            endTime: footprint.endTime,
+            placeName: matchedPlace?.name,
+            placeTags: footprint.tags,
+            address: footprint.address,
+            isOngoing: false
+        ) { title, reason, score in
+            DispatchQueue.main.async {
+                withAnimation {
+                    footprint.title = title
+                    footprint.reason = reason
+                    footprint.aiScore = score
                 }
+                isGeneratingAI = false
+                try? modelContext.save()
             }
         }
     }
     
     private var titleSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 6) {
-                VStack(alignment: .leading, spacing: 6) {
-                    TextField("你在哪里做什么？", text: $footprint.title)
-                        .font(.system(.title3, design: .rounded).bold())
-                        .foregroundColor(Color.dfkMainText)
-                        .submitLabel(.done)
-                        .focused($titleFocused)
-                        .lineLimit(1)
-                        .onSubmit { titleFocused = false; try? modelContext.save() }
+            HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .top, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        TextField("你在哪里做什么？", text: $footprint.title)
+                            .font(.system(.title3, design: .rounded).bold())
+                            .foregroundColor(Color.dfkMainText)
+                            .submitLabel(.done)
+                            .focused($titleFocused)
+                            .lineLimit(1)
+                            .onSubmit { titleFocused = false; try? modelContext.save() }
+                    }
+                    
+                    if !titleFocused {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 14))
+                            .foregroundColor(.secondary.opacity(0.6))
+                            .padding(.top, 6)
+                    }
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 12).fill(titleFocused ? Color.dfkAccent.opacity(0.05) : Color.secondary.opacity(0.05)))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(titleFocused ? Color.dfkAccent.opacity(0.3) : Color.clear, lineWidth: 1))
+                .onTapGesture { titleFocused = true }
                 
-                if !titleFocused {
-                    Image(systemName: "pencil")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary.opacity(0.6))
-                        .padding(.top, 6)
+                Button {
+                    regenerateAIContent()
+                } label: {
+                    ZStack {
+                        if isGeneratingAI {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(
+                                    LinearGradient(
+                                        colors: [.purple, .blue, .cyan],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .symbolEffect(.bounce, value: isGeneratingAI)
+                        }
+                    }
+                    .frame(width: 40, height: 40)
+                    .background(Circle().fill(Color.secondary.opacity(0.05)))
                 }
+                .buttonStyle(.plain)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 12).fill(titleFocused ? Color.dfkAccent.opacity(0.05) : Color.secondary.opacity(0.05)))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(titleFocused ? Color.dfkAccent.opacity(0.3) : Color.clear, lineWidth: 1))
-            .onTapGesture { titleFocused = true }
         }
     }
     

@@ -48,6 +48,14 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             }
         }
     }
+
+    func getEarliestAssetDate() -> Date? {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
+        options.fetchLimit = 1
+        let assets = PHAsset.fetchAssets(with: .image, options: options)
+        return assets.firstObject?.creationDate
+    }
     
     // PHPhotoLibraryChangeObserver
     func photoLibraryDidChange(_ changeInstance: PHChange) {
@@ -238,6 +246,11 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             let prioritizedClusters = Array(sortedClusters.prefix(20))
             let otherClusters = sortedClusters.count > 20 ? Array(sortedClusters.suffix(from: 20)) : []
             
+            let candidateTitles = [
+                "时光里的足迹", "拾起的旧时光", "重逢的轨迹", "岁月里的痕迹",
+                "被唤醒的记忆", "那一刻的流连", "走过的老地方", "往昔的剪影", "时间的注脚"
+            ]
+            
             // 处理重要足迹（带解析）
             for cluster in prioritizedClusters {
                 group.enter()
@@ -257,16 +270,34 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 let hash = "\(Int(firstLoc.coordinate.latitude * 10000))\(Int(firstLoc.coordinate.longitude * 10000))"
                 
                 // 1. 优先匹配已有的重要地点
-                var title = "那时的足迹"
+                var title = candidateTitles.randomElement() ?? "时光里的足迹"
                 var matchedPlaceID: UUID? = nil
                 
+                var isIgnoredPlace = false
                 for place in allPlaces {
                     let placeLoc = CLLocation(latitude: place.latitude, longitude: place.longitude)
                     if firstLoc.distance(from: placeLoc) <= Double(place.radius) {
-                        title = place.name
-                        matchedPlaceID = place.placeID
+                        if place.isIgnored {
+                            isIgnoredPlace = true
+                        } else {
+                            title = place.name
+                            matchedPlaceID = place.placeID
+                        }
                         break
                     }
+                }
+                
+                if isIgnoredPlace {
+                    group.leave()
+                    continue
+                }
+                
+                // --- 自动带入历史标签 ---
+                let tagsToApply: [String]
+                if let context = self.modelContext {
+                    tagsToApply = self.findHistoricalTags(for: firstLoc.coordinate.latitude, longitude: firstLoc.coordinate.longitude, in: context)
+                } else {
+                    tagsToApply = []
                 }
                 
                 if matchedPlaceID == nil {
@@ -290,7 +321,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                             title: title,
                             status: .confirmed,
                             placeID: matchedPlaceID,
-                            photoAssetIDs: cluster.map { $0.localIdentifier }
+                            photoAssetIDs: cluster.map { $0.localIdentifier },
+                            tags: tagsToApply
                         )
                         finalFootprints.append(fp)
                         group.leave()
@@ -308,7 +340,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         title: title,
                         status: .confirmed,
                         placeID: matchedPlaceID,
-                        photoAssetIDs: cluster.map { $0.localIdentifier }
+                        photoAssetIDs: cluster.map { $0.localIdentifier },
+                        tags: tagsToApply
                     )
                     finalFootprints.append(fp)
                     group.leave()
@@ -327,16 +360,28 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 let hash = "\(Int(firstLoc.coordinate.latitude * 10000))\(Int(firstLoc.coordinate.longitude * 10000))"
                 
                 // 仅做位置匹配，不调用 Geocoder
-                var title = "那时的足迹"
+                var title = candidateTitles.randomElement() ?? "时光里的足迹"
                 var matchedPlaceID: UUID? = nil
+                var isIgnoredPlace = false
                 for place in allPlaces {
                     let placeLoc = CLLocation(latitude: place.latitude, longitude: place.longitude)
                     if firstLoc.distance(from: placeLoc) <= Double(place.radius) {
-                        title = place.name
-                        matchedPlaceID = place.placeID
+                        if place.isIgnored {
+                            isIgnoredPlace = true
+                        } else {
+                            title = place.name
+                            matchedPlaceID = place.placeID
+                        }
                         break
                     }
                 }
+                
+                if isIgnoredPlace { continue }
+                
+                // --- 自动带入历史标签 ---
+                let tagsForBatch = self.modelContext.map { 
+                    self.findHistoricalTags(for: firstLoc.coordinate.latitude, longitude: firstLoc.coordinate.longitude, in: $0)
+                } ?? []
                 
                 let fp = Footprint(
                     date: Calendar.current.startOfDay(for: startTime),
@@ -348,7 +393,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     title: title,
                     status: .confirmed,
                     placeID: matchedPlaceID,
-                    photoAssetIDs: cluster.map { $0.localIdentifier }
+                    photoAssetIDs: cluster.map { $0.localIdentifier },
+                    tags: tagsForBatch
                 )
                 finalFootprints.append(fp)
             }
@@ -359,6 +405,33 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 completion(sorted)
             }
         }
+    }
+    
+    /// 寻找物理距离相近的地点最近一次使用的标签
+    private func findHistoricalTags(for lat: Double, longitude lon: Double, in context: ModelContext) -> [String] {
+        let center = CLLocation(latitude: lat, longitude: lon)
+        let inheritanceDistance: CLLocationDistance = 150.0
+        
+        // 1. 获取所有带标签的足迹 (按时间倒序)
+        var descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate<Footprint> { fp in
+                fp.tags.count > 0 
+            },
+            sortBy: [SortDescriptor(\.startTime, order: .reverse)]
+        )
+        descriptor.fetchLimit = 100 
+        
+        guard let recentTagged = try? context.fetch(descriptor) else { return [] }
+        
+        // 2. 找到距离最近且满足阈值的第一个记录（即该地点的最近一次打标）
+        for fp in recentTagged {
+            let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
+            if fpLoc.distance(from: center) <= inheritanceDistance {
+                return fp.tags
+            }
+        }
+        
+        return []
     }
 }
 

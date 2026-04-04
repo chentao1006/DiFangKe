@@ -537,7 +537,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         if let start = potentialStopStartLocation?.timestamp {
             let duration = Date().timeIntervalSince(start)
             if duration >= 5 * 60 {
-                if ongoingTitle == nil || (lastAIAnalysisTime != nil && Date().timeIntervalSince(lastAIAnalysisTime!) > 30 * 60) {
+                let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
+                if isAiEnabled && (ongoingTitle == nil || (lastAIAnalysisTime != nil && Date().timeIntervalSince(lastAIAnalysisTime!) > 30 * 60)) {
                     // 只在有坐标时分析
                     analyzeOngoingStay(at: location)
                 }
@@ -669,6 +670,16 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
 
     private func analyzeFootprint(_ footprint: Footprint) {
         if footprint.status == .ignored { return }
+        
+        let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
+        if !isAiEnabled {
+            // 如果 AI 关闭，设置一个默认标题而不进入分析队列
+            if footprint.title == "正在分析足迹..." || footprint.title == "那时的足迹" {
+                footprint.title = matchedPlace?.name ?? footprint.address ?? "未知位置"
+            }
+            return
+        }
+        
         let locations = footprint.footprintLocations.map { ($0.latitude, $0.longitude) }
         
         // 提前获取必要信息，避免在闭包中直接访问 Model 可能导致的问题（虽然当前闭包是在主线程）
@@ -707,8 +718,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                 footprint.aiScore = score
                 try? footprint.modelContext?.save()
                 
-                // If it's a "highlight" (high score), send an immediate notification
-                if score >= 0.8 {
+                // 如果判定为“精彩”足迹（0.7 分以上），仅发送通知，不再自动收藏
+                if score >= 0.7 {
                     NotificationManager.shared.sendHighlightNotification(
                         title: title,
                         body: reason

@@ -95,6 +95,11 @@ struct DiFangKeApp: App {
                             )
                             
                             setupDefaultData(context: context)
+                            
+                            // 启动后恢复未完成的 AI 分析
+                            if UserDefaults.standard.bool(forKey: "isAiAssistantEnabled") {
+                                resumeUnfinishedAIAnalysis(context: context)
+                            }
                         }
                         .transition(.opacity)
                 }
@@ -122,6 +127,22 @@ struct DiFangKeApp: App {
         
         try? context.save()
     }
+    
+    private func resumeUnfinishedAIAnalysis(context: ModelContext) {
+        // 查找所有尚未进行过 AI 分析（isHighlight 为 nil）的足迹
+        let descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate<Footprint> { $0.isHighlight == nil },
+            sortBy: [SortDescriptor(\.startTime, order: .reverse)]
+        )
+        
+        Task {
+            if let unanalyzed = try? context.fetch(descriptor), !unanalyzed.isEmpty {
+                // 将首批 50 个待分析项加入队列，避免冷启动压力过大
+                let targetBatch = Array(unanalyzed.prefix(50))
+                OpenAIService.shared.enqueueFootprintsForAnalysis(targetBatch)
+            }
+        }
+    }
 }
 
 struct OnboardingView: View {
@@ -136,7 +157,7 @@ struct OnboardingView: View {
             if step == 0 {
                 onboardingStep(
                     title: "记录走过的足迹",
-                    description: "地方客需要后台位置权限以自动记录您的足迹。",
+                    description: "地方客需要后台位置权限以自动记录您的足迹，我们将为您在本地生成精美的足迹卡片。",
                     image: "location.circle.fill",
                     color: Color.dfkAccent,
                     buttonText: locationManager.isAlwaysAuthorized ? "已开启始终允许" : (locationManager.isAuthorized ? "去设置开启始终允许" : "允许获取位置")
@@ -151,26 +172,60 @@ struct OnboardingView: View {
                 }
                 .onAppear {
                     if locationManager.isAlwaysAuthorized {
-                        isFirstLaunch = false
+                        withAnimation {
+                            step = 1
+                        }
                     }
                 }
                 .onChange(of: locationManager.isAuthorized) { _, newValue in
                     if newValue {
                         UserDefaults.standard.set(true, forKey: "isTrackingEnabled")
                         locationManager.startTracking()
-                        // 如果用户已经授权了（即使只是使用期间），我们也允许进入主界面
-                        isFirstLaunch = false
+                        withAnimation {
+                            step = 1
+                        }
                     }
                 }
                 
                 // 给已经授权了“使用期间”的用户一个前进选项，或者引导他们点击主按钮去设置
                 if locationManager.isAuthorized && !locationManager.isAlwaysAuthorized {
                     Button("暂时仅在使用期间允许") {
-                        isFirstLaunch = false
+                        withAnimation {
+                            step = 1
+                        }
                     }
                     .padding()
                     .foregroundColor(.secondary)
                 }
+            } else if step == 1 {
+                onboardingStep(
+                    title: "AI 智能分析",
+                    description: "开启 AI 助手为您自动总结地点特色，让足迹更有温度。此功能可随时在设置中关闭。",
+                    image: "sparkles",
+                    color: .purple,
+                    buttonText: "开启 AI 智能分析"
+                ) {
+                    UserDefaults.standard.set(true, forKey: "isAiAssistantEnabled")
+                    withAnimation {
+                        isFirstLaunch = false
+                    }
+                }
+                
+                Button("以后再说") {
+                    UserDefaults.standard.set(false, forKey: "isAiAssistantEnabled")
+                    withAnimation {
+                        isFirstLaunch = false
+                    }
+                }
+                .padding(.top, 10)
+                .foregroundColor(.secondary)
+                
+                Text("隐私受保护：AI 分析仅针对坐标和时长进行。我们将通过匿名处理进行概括，不涉及个人身份。")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 20)
+                    .padding(.horizontal, 20)
             }
             
             Spacer()

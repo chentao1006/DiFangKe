@@ -80,9 +80,15 @@ class NotificationManager {
         }
         
         guard !descriptions.isEmpty else { return }
-
-        OpenAIService.shared.generateDailySummary(footprintDescriptions: descriptions) { summary in
-            self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, body: summary)
+        
+        let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
+        if isAiEnabled {
+            OpenAIService.shared.generateDailySummary(footprintDescriptions: descriptions) { summary in
+                self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, body: summary)
+            }
+        } else {
+            // Fallback for when AI is disabled
+            self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, body: "今日足迹已准备就绪，点击查看并回顾你的一天。")
         }
     }
 

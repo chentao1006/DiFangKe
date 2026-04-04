@@ -10,6 +10,7 @@ struct PlacesManagerView: View {
     @Query(sort: \Place.name) private var allPlacesList: [Place]
     private var places: [Place] {
         allPlacesList.filter { $0.isUserDefined }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
     @Query private var footprints: [Footprint]
     var startInAddMode: Bool = false
@@ -21,6 +22,14 @@ struct PlacesManagerView: View {
 
     var body: some View {
         List {
+            Section {
+                Text("重要地点用于识别您的常用位置。您可以设置“忽略足迹”，系统将不再自动记录发生在该地点的琐迹。")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+
             ForEach(places) { place in
                 placeRow(place)
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -111,7 +120,7 @@ struct PlacesManagerView: View {
                             .foregroundColor(place.isIgnored ? .secondary.opacity(0.8) : .primary)
                         
                         if place.isIgnored {
-                            Text("已静默")
+                            Text("忽略足迹")
                                 .font(.system(size: 10, weight: .bold))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)

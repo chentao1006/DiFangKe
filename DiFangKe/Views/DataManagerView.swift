@@ -14,6 +14,7 @@ struct DataManagerView: View {
     @State private var showingExportFileExporter = false
     @State private var showingImportFilePicker = false
     @State private var exportData: Data?
+    @State private var alertTitle = ""
     @State private var alertMessage = ""
     @State private var showAlert = false
     
@@ -65,8 +66,8 @@ struct DataManagerView: View {
                       allowsMultipleSelection: false) { result in
             importData(from: result)
         }
-        .alert("提示", isPresented: $showAlert) {
-            Button("好的", role: .cancel) { }
+        .alert(alertTitle, isPresented: $showAlert) {
+            Button("确定", role: .cancel) { }
         } message: {
             Text(alertMessage)
         }
@@ -82,7 +83,8 @@ struct DataManagerView: View {
             self.exportData = data
             self.showingExportFileExporter = true
         } catch {
-            self.alertMessage = "导出失败: \(error.localizedDescription)"
+            self.alertTitle = "导出失败"
+            self.alertMessage = error.localizedDescription
             self.showAlert = true
         }
     }
@@ -101,16 +103,29 @@ struct DataManagerView: View {
             
             let data = try Data(contentsOf: url)
             let report = try BackupService.shared.restoreBackup(data: data, context: modelContext)
-            
-            if report.total == 0 {
-                self.alertMessage = "文件中未发现有效足迹数据。"
+            if report.total == 0 && report.newPlaces == 0 && report.newTags == 0 {
+                self.alertTitle = "导入结果"
+                self.alertMessage = "文件中未发现任何有效数据。"
             } else {
-                self.alertMessage = "导入完成！\n• 新增: \(report.new)\n• 跳过(已存在): \(report.skipped)\n• 总计: \(report.total)"
+                self.alertTitle = "导入完成"
+                var message = ""
+                message += "• 足迹: 新增 \(report.new), 跳过 \(report.skipped)"
+                
+                if report.newPlaces > 0 || report.skippedPlaces > 0 {
+                    message += "\n• 重要地点: 新增 \(report.newPlaces), 跳过 \(report.skippedPlaces)"
+                }
+                
+                if report.newTags > 0 || report.skippedTags > 0 {
+                    message += "\n• 标签: 新增 \(report.newTags), 跳过 \(report.skippedTags)"
+                }
+                
+                self.alertMessage = message
             }
             self.showAlert = true
             
         } catch {
-            self.alertMessage = "导入失败: \(error.localizedDescription)"
+            self.alertTitle = "导入失败"
+            self.alertMessage = error.localizedDescription
             self.showAlert = true
         }
     }
@@ -123,10 +138,12 @@ struct DataManagerView: View {
             try modelContext.save()
             locationManager.allTodayPoints = []
             
+            self.alertTitle = "数据清空"
             self.alertMessage = "所有数据已彻底清空。"
             self.showAlert = true
         } catch {
-            self.alertMessage = "删除失败: \(error.localizedDescription)"
+            self.alertTitle = "操作失败"
+            self.alertMessage = error.localizedDescription
             self.showAlert = true
         }
     }
@@ -221,6 +238,10 @@ final class BackupService {
         let total: Int
         let new: Int
         let skipped: Int
+        let newPlaces: Int
+        let skippedPlaces: Int
+        let newTags: Int
+        let skippedTags: Int
     }
     
     func restoreBackup(data: Data, context: ModelContext) throws -> RestoreReport {
@@ -229,14 +250,21 @@ final class BackupService {
         let backup = try decoder.decode(BackupDTO.self, from: data)
         
         // 1. Restore Tags
+        var newTags = 0
+        var skippedTags = 0
         for tagName in backup.tags {
             let descriptor = FetchDescriptor<PlaceTag>(predicate: #Predicate { $0.name == tagName })
             if (try? context.fetch(descriptor).first) == nil {
                 context.insert(PlaceTag(name: tagName))
+                newTags += 1
+            } else {
+                skippedTags += 1
             }
         }
         
         // 2. Restore Places
+        var newPlaces = 0
+        var skippedPlaces = 0
         for p in backup.places {
             let id = p.id
             let descriptor = FetchDescriptor<Place>(predicate: #Predicate { $0.placeID == id })
@@ -249,12 +277,15 @@ final class BackupService {
                     address: p.addr
                 )
                 context.insert(place)
+                newPlaces += 1
+            } else {
+                skippedPlaces += 1
             }
         }
         
         // 3. Restore Footprints
-        var newCount = 0
-        var skippedCount = 0
+        var newFootprints = 0
+        var skippedFootprints = 0
         for f in backup.footprints {
             let id = f.id
             let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
@@ -278,14 +309,22 @@ final class BackupService {
                     address: f.addr
                 )
                 context.insert(footprint)
-                newCount += 1
+                newFootprints += 1
             } else {
-                skippedCount += 1
+                skippedFootprints += 1
             }
         }
         
         try context.save()
-        return RestoreReport(total: backup.footprints.count, new: newCount, skipped: skippedCount)
+        return RestoreReport(
+            total: backup.footprints.count, 
+            new: newFootprints, 
+            skipped: skippedFootprints,
+            newPlaces: newPlaces,
+            skippedPlaces: skippedPlaces,
+            newTags: newTags,
+            skippedTags: skippedTags
+        )
     }
 }
 

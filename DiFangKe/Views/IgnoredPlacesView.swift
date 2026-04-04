@@ -8,7 +8,7 @@ struct IgnoredPlacesView: View {
     @Query(sort: \Place.name) private var allPlacesList: [Place]
     
     private var ignoredPlaces: [Place] {
-        allPlacesList.filter { $0.isIgnored }
+        allPlacesList.filter { $0.isIgnored && !$0.isUserDefined }
     }
     
     @State private var placeToDelete: Place?
@@ -32,7 +32,7 @@ struct IgnoredPlacesView: View {
                         } label: {
                             Label("恢复", systemImage: "arrow.uturn.backward")
                         }
-                        .tint(.blue)
+                        .tint(.dfkAccent)
                     }
             }
 
@@ -66,7 +66,7 @@ struct IgnoredPlacesView: View {
                 Circle()
                     .fill(Color.secondary.opacity(0.12))
                     .frame(width: 44, height: 44)
-                Image(systemName: "mappin.slash.circle.fill")
+                Image(systemName: "mappin.slash")
                     .font(.system(size: 20))
                     .foregroundColor(.secondary)
             }
@@ -87,13 +87,9 @@ struct IgnoredPlacesView: View {
             Button {
                 restorePlace(place)
             } label: {
-                Text("恢复")
-                    .font(.subheadline.bold())
-                    .foregroundColor(.blue)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.blue.opacity(0.1))
-                    .clipShape(Capsule())
+                Image(systemName: "arrow.uturn.backward.circle.fill")
+                    .font(.system(size: 22))
+                    .foregroundColor(.dfkAccent)
             }
             .buttonStyle(.plain)
         }

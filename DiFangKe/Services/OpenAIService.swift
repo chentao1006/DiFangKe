@@ -7,6 +7,9 @@ import UIKit
 class OpenAIService {
     static let shared = OpenAIService()
     
+    private var analysisQueue: [Footprint] = []
+    private var isProcessingQueue = false
+    
     private var config: [String: String]? {
         guard let path = Bundle.main.path(forResource: "Config", ofType: "plist"),
               let xml = FileManager.default.contents(atPath: path),
@@ -88,7 +91,7 @@ class OpenAIService {
             duration: footprint.duration,
             startTime: footprint.startTime,
             endTime: footprint.endTime,
-            placeName: footprint.title == "那时的足迹" ? nil : footprint.title,
+            placeName: footprint.title == "时光里的足迹" ? nil : footprint.title,
             address: nil, // 可以后续扩展读取地址
             isOngoing: false
         ) { title, reason, score in
@@ -96,8 +99,31 @@ class OpenAIService {
                 footprint.title = title
                 footprint.reason = reason
                 footprint.aiScore = score
-                footprint.isHighlight = score >= 0.7
+                // 此时不再由 AI 决定是否收藏，保持纯用户行为
                 completion(footprint)
+            }
+        }
+    }
+
+    /// 将足迹加入分析队列，按序分析，间隔30秒
+    func enqueueFootprintsForAnalysis(_ footprints: [Footprint]) {
+        DispatchQueue.main.async {
+            self.analysisQueue.append(contentsOf: footprints)
+            self.processNextInQueue()
+        }
+    }
+
+    private func processNextInQueue() {
+        guard !isProcessingQueue, !analysisQueue.isEmpty else { return }
+        
+        isProcessingQueue = true
+        let footprint = analysisQueue.removeFirst()
+        
+        analyzeFootprint(footprint) { _ in
+            // 分析完成后，等待 30 秒再处理下一个
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                self.isProcessingQueue = false
+                self.processNextInQueue()
             }
         }
     }

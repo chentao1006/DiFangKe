@@ -14,11 +14,20 @@ struct DayTimelineView: View {
     @Environment(LocationManager.self) private var locationManager
     
     @State private var repeatTimer: Timer?
+    @State private var repeatTimerInterval: Double = 0.2
     @State private var isPressingArrow = false
     @State private var currentPressDirection = 0
     
     @Query(sort: \Place.name) private var allPlaces: [Place]
     
+    @AppStorage("timelineFilter") private var timelineFilter: TimelineFilter = .all
+    enum TimelineFilter: String, CaseIterable, Identifiable {
+        case all = "全部日期"
+        case footprintsOnly = "仅有足迹日期"
+        var id: String { self.rawValue }
+    }
+    @State private var cachedFilteredOffsets: [Int] = []
+
     init(selectedDate: Date = Calendar.current.startOfDay(for: Date())) {
         self._selectedDate = State(initialValue: selectedDate)
         self._scrollID = State(initialValue: selectedDate)
@@ -32,7 +41,7 @@ struct DayTimelineView: View {
                 ZStack(alignment: .top) {
                     ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 0) {
-                        ForEach(pastLimitOffset...1, id: \.self) { offset in
+                        ForEach(cachedFilteredOffsets, id: \.self) { offset in
                             if let date = Calendar.current.date(byAdding: .day, value: offset, to: Date()) {
                                 TimelinePageView(date: date, footprints: footprints, offset: offset, locationManager: locationManager, pastLimitOffset: pastLimitOffset)
                                     .frame(width: UIScreen.main.bounds.width)
@@ -44,8 +53,11 @@ struct DayTimelineView: View {
                 }
                 .scrollTargetBehavior(.paging)
                 .scrollPosition(id: $scrollID)
-                .onChange(of: scrollID) { _, newValue in
+                .onChange(of: scrollID) { oldValue, newValue in
                     if let newValue {
+                        if newValue != oldValue {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        }
                         selectedDate = newValue
                         // 如果滑动到了非今天的日期，记录已学会滑动
                         if !Calendar.current.isDate(newValue, inSameDayAs: Date()) {
@@ -82,13 +94,17 @@ struct DayTimelineView: View {
         )
         .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    NavigationLink(destination: HistoryListView()) {
+                    NavigationLink(destination: HistoryListView(initialDate: selectedDate)) {
                         Image(systemName: "calendar")
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(destination: SettingsView()) {
-                        Image(systemName: "gearshape")
+                    HStack(spacing: 16) {
+                        filterMenu
+                        
+                        NavigationLink(destination: SettingsView()) {
+                            Image(systemName: "gearshape")
+                        }
                     }
                 }
             }
@@ -98,9 +114,20 @@ struct DayTimelineView: View {
                 if UserDefaults.standard.bool(forKey: "isTrackingEnabled") && !locationManager.isTracking {
                     locationManager.startTracking()
                 }
+                updateFilteredOffsets()
             }
             .onDisappear {
                 stopRepeatTimer()
+            }
+            .onChange(of: footprints) { _, _ in
+                updateFilteredOffsets()
+            }
+            .onChange(of: timelineFilter) { _, _ in
+                updateFilteredOffsets()
+                // 当切换过滤模式时，如果当前选中的日期被过滤了，跳回今天
+                if !cachedFilteredOffsets.contains(latestOffsetIn(date: selectedDate)) {
+                    jumpToToday()
+                }
             }
             .onChange(of: allPlaces) { _, newValue in
                 locationManager.allPlaces = newValue
@@ -110,6 +137,42 @@ struct DayTimelineView: View {
         }
     }
     
+    private var filterMenu: some View {
+        Menu {
+            Picker("日期过滤", selection: $timelineFilter) {
+                ForEach(TimelineFilter.allCases) { option in
+                    Text(option.rawValue).tag(option)
+                }
+            }
+        } label: {
+            Image(systemName: timelineFilter == .footprintsOnly ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease")
+                .foregroundColor(timelineFilter == .footprintsOnly ? .dfkAccent : .primary)
+        }
+    }
+    
+    private func updateFilteredOffsets() {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let all = Array(pastLimitOffset...1)
+        
+        if timelineFilter == .all {
+            self.cachedFilteredOffsets = all
+            return
+        }
+        
+        let validDatesWithData = Set(footprints.compactMap { $0.status != .ignored ? calendar.startOfDay(for: $0.date) : nil })
+        
+        self.cachedFilteredOffsets = all.filter { offset in
+            // 明天 (1), 今天 (0), 和 最早一天 (pastLimitOffset) 始终显示
+            if offset == 1 || offset == 0 || offset == pastLimitOffset { return true }
+            
+            if let date = calendar.date(byAdding: .day, value: offset, to: today) {
+                return validDatesWithData.contains(date)
+            }
+            return false
+        }
+    }
+
     private var dateNavigator: some View {
         HStack {
             navigationArrow(direction: -1)
@@ -201,8 +264,17 @@ struct DayTimelineView: View {
     }
     
     private var isAtEnd: Bool {
-        let tomorrow = Calendar.current.startOfDay(for: Calendar.current.date(byAdding: .day, value: 1, to: Date())!)
-        return selectedDate >= tomorrow
+        if !cachedFilteredOffsets.isEmpty {
+            return (cachedFilteredOffsets.firstIndex(of: latestOffsetIn(date: selectedDate)) ?? 0) >= (cachedFilteredOffsets.count - 1)
+        }
+        return true
+    }
+    
+    private func latestOffsetIn(date: Date) -> Int {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let diff = calendar.dateComponents([.day], from: today, to: calendar.startOfDay(for: date)).day ?? 0
+        return diff
     }
     
     private var pastLimitOffset: Int {
@@ -233,7 +305,10 @@ struct DayTimelineView: View {
     }
     
     private var isAtStart: Bool {
-        selectedDate <= limitDate
+        if !cachedFilteredOffsets.isEmpty {
+             return (cachedFilteredOffsets.firstIndex(of: latestOffsetIn(date: selectedDate)) ?? 0) <= 0
+        }
+        return true
     }
     
     private var isTodaySelected: Bool {
@@ -249,17 +324,25 @@ struct DayTimelineView: View {
     
     private func startRepeatTimer(direction: Int) {
         stopRepeatTimer()
+        repeatTimerInterval = 0.2 // 初始间隔 0.2s
+        
         // 延迟一段时间后开始连续触发
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             guard self.isPressingArrow && self.currentPressDirection == direction else { return }
-            
-            self.repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { _ in
-                if self.isPressingArrow && self.currentPressDirection == direction {
-                    self.step(direction: direction)
-                } else {
-                    self.stopRepeatTimer()
-                }
-            }
+            self.triggerNextStep(direction: direction)
+        }
+    }
+    
+    private func triggerNextStep(direction: Int) {
+        guard isPressingArrow && currentPressDirection == direction else { return }
+        
+        step(direction: direction)
+        
+        // 速度递增逻辑：每次缩短 10% 的间隔，直到达到最快 0.05s
+        repeatTimerInterval = max(0.05, repeatTimerInterval * 0.9)
+        
+        repeatTimer = Timer.scheduledTimer(withTimeInterval: repeatTimerInterval, repeats: false) { _ in
+            self.triggerNextStep(direction: direction)
         }
     }
     
@@ -271,11 +354,7 @@ struct DayTimelineView: View {
     private func step(direction: Int) {
         let isDisabled = (direction == -1) ? isAtStart : isAtEnd
         if !isDisabled {
-            if direction == 1 && isFarFromToday {
-                jumpToToday()
-            } else {
-                changeDate(by: direction)
-            }
+            changeDate(by: direction)
         } else {
             stopRepeatTimer()
         }
@@ -289,19 +368,23 @@ struct DayTimelineView: View {
         }
     }
     
-    private func changeDate(by days: Int) {
-        if let newDate = Calendar.current.date(byAdding: .day, value: days, to: selectedDate) {
-            let targetDate = Calendar.current.startOfDay(for: newDate)
-            
-            // 安全边界检查
-            let today = Calendar.current.startOfDay(for: Date())
-            let endLimit = Calendar.current.date(byAdding: .day, value: 1, to: today)!
-            
-            if targetDate < limitDate || targetDate > endLimit { return }
-
-            withAnimation(.spring()) {
-                selectedDate = targetDate
-                scrollID = targetDate
+    private func changeDate(by direction: Int) {
+        let currentOffset = latestOffsetIn(date: selectedDate)
+        guard let currentIndex = cachedFilteredOffsets.firstIndex(of: currentOffset) else {
+            // 如果当前日期不在过滤列表中（切换过滤模式时可能发生），尝试找最近的
+            jumpToToday()
+            return
+        }
+        
+        let nextIndex = currentIndex + direction
+        if nextIndex >= 0 && nextIndex < cachedFilteredOffsets.count {
+            let nextOffset = cachedFilteredOffsets[nextIndex]
+            if let nextDate = Calendar.current.date(byAdding: .day, value: nextOffset, to: Date()) {
+                let targetDate = Calendar.current.startOfDay(for: nextDate)
+                withAnimation(.spring()) {
+                    selectedDate = targetDate
+                    scrollID = targetDate
+                }
             }
         }
     }
@@ -725,6 +808,9 @@ struct FootprintCardView: View {
     var isFirst: Bool = false
     var isLast: Bool = false
     var isToday: Bool = false
+    var showTimeline: Bool = true
+    var showDateAboveTitle: Bool = false
+    var fixedWidth: CGFloat? = nil
     let onTap: (Footprint, Bool) -> Void
     
     @Environment(\.modelContext) private var modelContext
@@ -736,9 +822,18 @@ struct FootprintCardView: View {
     
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            timelineIndicator
+            if showTimeline {
+                timelineIndicator
+            }
             ZStack(alignment: .bottomTrailing) {
                 VStack(alignment: .leading, spacing: 4) {
+                    if showDateAboveTitle {
+                        Text(footprint.date.formatted(.dateTime.year().month().day()))
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.secondary)
+                            .padding(.bottom, -2)
+                    }
+                    
                     HStack(spacing: 6) {
                         Text(footprint.title)
                             .font(.system(.headline, design: .rounded))
@@ -800,6 +895,7 @@ struct FootprintCardView: View {
                     }
                 }
                 .padding(.vertical, 14)
+                .padding(.leading, showTimeline ? 0 : 16)
                 .padding(.trailing, 16)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 
@@ -842,6 +938,7 @@ struct FootprintCardView: View {
                 .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: 4)
         )
         .padding(.bottom, 12)
+        .frame(width: fixedWidth)
         .contentShape(Rectangle())
         .onTapGesture { onTap(footprint, false) }
         .contextMenu { longPressMenu }
