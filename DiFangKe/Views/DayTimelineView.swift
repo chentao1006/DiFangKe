@@ -745,19 +745,16 @@ struct RecordingStatusCard: View {
                 .padding(.leading, 8)
                 .padding(.trailing, 16)
                 
-                // Map Section
-                Map(position: $cameraPosition) {
-                    UserAnnotation()
-                    ForEach(locationManager.allPlaces) { place in
-                        MapCircle(center: CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude), radius: Double(place.radius))
-                            .foregroundStyle(Color.orange.opacity(0.1))
-                            .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                    }
-                }
+                // DFKMapView Section
+                DFKMapView(
+                    cameraPosition: $cameraPosition,
+                    isInteractive: false,
+                    showsUserLocation: true,
+                    points: [] // Snapshot map usually shouldn't show entire today's path if it's too cluttered? User choice.
+                    // But in tracking card, we sometimes show current stay?
+                )
                 .frame(height: 160)
                 .cornerRadius(12)
-                .disabled(true)
-                .allowsHitTesting(false)
                 .padding(.leading, 8)
                 .padding(.trailing, 12)
                 .padding(.bottom, 12)
@@ -869,13 +866,12 @@ struct FootprintCardView: View {
                     .minimumScaleFactor(0.8)
                     .layoutPriority(1)
                     
-                    if let reason = footprint.reason, !reason.isEmpty {
-                        Text(reason)
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundColor(Color.dfkSecondaryText.opacity(0.8))
-                            .lineLimit(1)
-                            .padding(.top, 2)
-                    }
+                    Text(footprint.reason ?? "")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundColor(Color.dfkSecondaryText.opacity(0.8))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, minHeight: 14, alignment: .leading)
+                        .padding(.top, 2)
                 }
                 .padding(.vertical, 14)
                 .padding(.leading, showTimeline ? 0 : 16)
@@ -1100,26 +1096,21 @@ struct TrackingStatusModalView: View {
                         Text("今日轨迹预览").font(.subheadline.bold()).foregroundColor(.secondary).padding(.leading, 16)
                         
                         ZStack(alignment: .topTrailing) {
-                            Map(position: $cameraPosition) {
-                                UserAnnotation()
-                                
-                                // 从本地文件读取包含所有设备的轨迹流水
-                                let totalPoints = RawLocationStore.shared.loadAllDevicesLocations(for: Date()).map { $0.coordinate }
-                                
-                                if !totalPoints.isEmpty {
-                                    MapPolyline(coordinates: totalPoints)
-                                        .stroke(Color.dfkAccent, lineWidth: 3)
-                                }
+                            // 从本地文件读取包含所有设备的轨迹流水
+                            let totalPoints = RawLocationStore.shared.loadAllDevicesLocations(for: Date()).map { $0.coordinate }
 
-                                ForEach(locationManager.allPlaces) { place in
-                                    MapCircle(center: place.coordinate, radius: Double(place.radius))
-                                        .foregroundStyle(Color.orange.opacity(0.1))
-                                        .stroke(Color.orange.opacity(0.4), lineWidth: 1)
-                                }
-                            }
+                            DFKMapView(
+                                cameraPosition: $cameraPosition, 
+                                isInteractive: false,
+                                showsUserLocation: true,
+                                points: totalPoints
+                            )
                             .frame(height: 200)
                             .cornerRadius(12)
-                            .disabled(true)
+                            .contentShape(Rectangle())
+                            .onTapGesture { 
+                                showFullscreenMap = true 
+                            }
                             
                             Image(systemName: "arrow.up.left.and.arrow.down.right")
                                 .padding(8)
@@ -1308,18 +1299,12 @@ struct FullFrameTrackingMapView: View {
     
     var body: some View {
         NavigationStack {
-            Map(position: $cameraPosition) {
-                UserAnnotation()
-                if !points.isEmpty {
-                    MapPolyline(coordinates: points)
-                        .stroke(Color.dfkAccent, lineWidth: 4)
-                }
-                ForEach(locationManager.allPlaces) { place in
-                    MapCircle(center: place.coordinate, radius: Double(place.radius))
-                        .foregroundStyle(Color.orange.opacity(0.1))
-                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                }
-            }
+            DFKMapView(
+                cameraPosition: $cameraPosition,
+                isInteractive: true,
+                showsUserLocation: true,
+                points: points
+            )
             .onAppear {
                 if let loc = locationManager.lastLocation {
                     cameraPosition = .region(MKCoordinateRegion(center: loc.coordinate, latitudinalMeters: 1500, longitudinalMeters: 1500))

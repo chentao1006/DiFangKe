@@ -200,7 +200,7 @@ struct OnboardingView: View {
             } else if step == 1 {
                 onboardingStep(
                     title: "AI 智能分析",
-                    description: "开启 AI 助手为您自动总结地点特色，让足迹更有温度。此功能可随时在设置中关闭。",
+                    description: "开启 AI 助手为您自动总结地点特色，让足迹更有个性和温度。此功能可随时在设置中关闭。",
                     image: "sparkles",
                     color: .purple,
                     buttonText: "开启 AI 智能分析"

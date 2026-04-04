@@ -225,10 +225,17 @@ struct FootprintModalView: View {
             } message: {
                 Text("这张照片将从该足迹中移除。")
             }
-            .alert("AI 助手未开启", isPresented: $showingAINotEnabledAlert) {
-                Button("确定", role: .cancel) { }
+            .alert("开启 AI 智能助手", isPresented: $showingAINotEnabledAlert) {
+                Button("立刻开启") { 
+                    isAiAssistantEnabled = true
+                    // 开启后立即触发一次生成
+                    regenerateAIContent()
+                }
+                .tint(Color.dfkAccent)
+                
+                Button("暂时不用", role: .cancel) { }
             } message: {
-                Text("请在设置中开启 AI 智能分析功能，以解锁自动生成标题和感悟的功能。")
+                Text("开启后，地方客将利用 AI 为您的足迹自动建议标题、感悟并丰富标签，让您的记录更生动。")
             }
             .alert("AI 分析失败", isPresented: $showingAIErrorAlert) {
                 Button("确定", role: .cancel) { }
@@ -1230,11 +1237,12 @@ struct FootprintDetailMapView: View {
     @State private var cameraPosition: MapCameraPosition = .automatic
 
     var body: some View {
-        Map(position: $cameraPosition, interactionModes: isInteractive ? .all : []) {
-            MapPolyline(coordinates: footprint.coordinates)
-                .stroke(Color.dfkAccent, lineWidth: 5)
-        }
-        .mapStyle(.standard)
+        DFKMapView(
+            cameraPosition: $cameraPosition,
+            isInteractive: isInteractive,
+            showsUserLocation: true,
+            points: footprint.coordinates
+        )
         .onAppear {
             if let region = footprint.region {
                 cameraPosition = .region(region)

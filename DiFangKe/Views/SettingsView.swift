@@ -80,7 +80,7 @@ struct SettingsView: View {
                             Image(systemName: "mappin.slash").foregroundColor(.secondary)
                         }
                         Spacer()
-                        let ignoredCount = allPlaces.filter { $0.isIgnored }.count
+                        let ignoredCount = allPlaces.filter { $0.isIgnored && !$0.isUserDefined }.count
                         Text("\(ignoredCount)")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
