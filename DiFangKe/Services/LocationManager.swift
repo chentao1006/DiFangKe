@@ -283,11 +283,11 @@ final class FootprintProcessor {
     private let minAccuracy: CLLocationAccuracy = 100.0   // 精度过滤
     private let minTimeInterval: TimeInterval = 5.0       // 时间间隔过滤
     private let driftDistanceThreshold: CLLocationDistance = 200.0
-    private let driftSpeedThreshold: CLLocationSpeed = 30.0 // m/s，异常飘移速度
+    private let driftSpeedThreshold: CLLocationSpeed = 45.0 // m/s，异常飘移速度（约162km/h，兼顾高铁环境）
     
     // 1.3 停留点识别参数
-    private let stayRadiusThreshold: CLLocationDistance = 80.0   // 半径 < 80m
-    private let stayDurationThreshold: TimeInterval = 10 * 60    // 持续 >= 10 分钟
+    private let stayRadiusThreshold: CLLocationDistance = 100.0  // 半径 < 100m（适配大型商场与室内漂移）
+    private let stayDurationThreshold: TimeInterval = 7 * 60     // 持续 >= 7 分钟（捕捉买咖啡等微足迹）
     
     // 1.4 合并参数（更严格：避免跨度过大的地点合并）
     private let mergeTimeThreshold: TimeInterval = 15 * 60       // 间隔 < 15 分钟
