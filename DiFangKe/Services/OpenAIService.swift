@@ -185,7 +185,9 @@ class OpenAIService {
         ) { title, reason, tags, score, success in
             DispatchQueue.main.async {
                 if success {
-                    footprint.title = title
+                    if !footprint.isTitleEditedByHand {
+                        footprint.title = title
+                    }
                     footprint.reason = reason
                     footprint.aiScore = score
                     footprint.aiAnalyzed = true

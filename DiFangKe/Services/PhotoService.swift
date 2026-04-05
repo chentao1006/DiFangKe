@@ -184,7 +184,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     
     
     /// 自动扫描指定日期范围内的照片并根据时空聚类生成足迹候选
-    func autoScanFootprints(from startDate: Date, to endDate: Date, allPlaces: [Place], excludedAssetIDs: Set<String>, completion: @escaping ([Footprint]) -> Void) {
+    func autoScanFootprints(from startDate: Date, to endDate: Date, allPlaces: [Place], excludedAssetIDs: Set<String>, onProgress: ((Int, Int) -> Void)? = nil, completion: @escaping ([Footprint]) -> Void) {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else {
             completion([])
@@ -252,6 +252,16 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             let prioritizedClusters = Array(sortedClusters.prefix(20))
             let otherClusters = sortedClusters.count > 20 ? Array(sortedClusters.suffix(from: 20)) : []
             
+            var processedPhotosCount = 0
+            let totalPhotosCount = assetsWithLocation.count
+            
+            let incrementProgress = { (count: Int) in
+                processedPhotosCount += count
+                DispatchQueue.main.async {
+                    onProgress?(processedPhotosCount, totalPhotosCount)
+                }
+            }
+            
             let candidateTitles = Footprint.candidateTitles
             
             // 处理重要足迹（带解析）
@@ -259,6 +269,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 group.enter()
                 guard let first = cluster.first, let last = cluster.last,
                       let rawLoc = first.location else { 
+                    incrementProgress(cluster.count)
                     group.leave()
                     continue 
                 }
@@ -289,6 +300,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 
                 // --- 优先判断忽略逻辑 ---
                 if matches.contains(where: { $0.isIgnored }) {
+                    incrementProgress(cluster.count)
                     group.leave()
                     continue
                 }
@@ -306,6 +318,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         place.isIgnored && centerLoc.distance(from: CLLocation(latitude: place.latitude, longitude: place.longitude)) < 250.0
                     }
                     if ignoredNearby != nil {
+                        incrementProgress(cluster.count)
                         group.leave()
                         continue
                     }
@@ -325,6 +338,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                             }
                             
                             if isAddressIgnored {
+                                incrementProgress(cluster.count)
                                 group.leave()
                                 return
                             }
@@ -352,6 +366,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         // CLGeocoder completion usually runs on main thread, but finalFootprints must be thread-safe
                         DispatchQueue.main.async {
                             finalFootprints.append(fp)
+                            incrementProgress(cluster.count)
                             group.leave()
                         }
                     }
@@ -373,6 +388,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     )
                     DispatchQueue.main.async {
                         finalFootprints.append(fp)
+                        incrementProgress(cluster.count)
                         group.leave()
                     }
                 }
@@ -383,6 +399,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 group.enter()
                 guard let first = cluster.first, let last = cluster.last,
                       let rawLoc = first.location else { 
+                    incrementProgress(cluster.count)
                     group.leave()
                     continue 
                 }
@@ -410,6 +427,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 
                 // --- 优先判断忽略逻辑 ---
                 if matches.contains(where: { $0.isIgnored }) {
+                    incrementProgress(cluster.count)
                     group.leave()
                     continue
                 }
@@ -427,6 +445,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         place.isIgnored && centerLoc.distance(from: CLLocation(latitude: place.latitude, longitude: place.longitude)) < 250.0
                     }
                     if ignoredNearby != nil {
+                        incrementProgress(cluster.count)
                         group.leave()
                         continue
                     }
@@ -450,6 +469,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 )
                 DispatchQueue.main.async {
                     finalFootprints.append(fp)
+                    incrementProgress(cluster.count)
                     group.leave()
                 }
             }

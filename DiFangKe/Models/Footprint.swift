@@ -34,6 +34,7 @@ final class Footprint {
     var isHighlight: Bool?
     var isPlaceSuggestionIgnored: Bool = false
     var aiAnalyzed: Bool = false
+    var isTitleEditedByHand: Bool = false
     
     static let candidateTitles = [
         "时光里的足迹", "拾起的旧时光", "重逢的轨迹", "岁月里的痕迹",
@@ -111,7 +112,8 @@ final class Footprint {
          tags: [String] = [],
          address: String? = nil,
          isPlaceSuggestionIgnored: Bool = false,
-         aiAnalyzed: Bool = false) {
+         aiAnalyzed: Bool = false,
+         isTitleEditedByHand: Bool = false) {
         
         self.footprintID = footprintID
         self.date = date
@@ -132,6 +134,7 @@ final class Footprint {
         self.address = address
         self.isPlaceSuggestionIgnored = isPlaceSuggestionIgnored
         self.aiAnalyzed = aiAnalyzed
+        self.isTitleEditedByHand = isTitleEditedByHand
         
         // Use setters for computed properties
         self.latitudeArray = footprintLocations.map { $0.latitude }

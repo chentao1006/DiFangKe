@@ -48,6 +48,7 @@ struct FootprintModalView: View {
     @State private var showingAINotEnabledAlert = false
     @State private var showingAIErrorAlert = false
     @State private var aiErrorMessage = ""
+    @State private var isAIPerformingUpdate = false
     
     var body: some View {
         NavigationStack {
@@ -261,11 +262,11 @@ struct FootprintModalView: View {
     }
     
     private func checkAndGenerateAIContent() {
-        // 只要标题是预设的文艺占位符之一，就认为它是“空”的需要被 AI 覆盖
-        let isTitleEmpty = footprint.title.trimmingCharacters(in: .whitespaces).isEmpty || Footprint.candidateTitles.contains(footprint.title)
+        // 如果用户手动修改过标题，我们不再认为它是“空”的需要被 AI 覆盖
+        let isTitleNeedsAI = !footprint.isTitleEditedByHand && (footprint.title.trimmingCharacters(in: .whitespaces).isEmpty || Footprint.candidateTitles.contains(footprint.title))
         let isReasonEmpty = (footprint.reason ?? "").trimmingCharacters(in: .whitespaces).isEmpty
         
-        if isTitleEmpty || isReasonEmpty {
+        if isTitleNeedsAI || isReasonEmpty {
             // Auto generation should be silent if AI is off
             regenerateAIContent(forcePrompt: false)
         }
@@ -300,14 +301,26 @@ struct FootprintModalView: View {
         ) { title, reason, tags, score, success in
             DispatchQueue.main.async {
                 if success {
+                    self.isAIPerformingUpdate = true 
                     withAnimation {
-                        footprint.title = title
+                        // 如果是手动触发（forcePrompt为true），或者从未手动修改过标题，则更新标题
+                        if forcePrompt || !footprint.isTitleEditedByHand {
+                            footprint.title = title
+                            // 如果是手动点击 AI 按钮，重置手动修改标记（因为它现在又是 AI 生成的了）
+                            if forcePrompt {
+                                footprint.isTitleEditedByHand = false
+                            }
+                        }
                         footprint.reason = reason
                         footprint.aiScore = score
                         
                         // 直接应用 AI 建议的标签（AI 已被要求只从现有池中选择）
                         footprint.tags = tags
                         footprint.aiAnalyzed = true
+                    }
+                    // 稍微延迟重置标志，确保 onChange 已经触发
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        self.isAIPerformingUpdate = false
                     }
                 } else if forcePrompt {
                     self.aiErrorMessage = reason
@@ -333,7 +346,12 @@ struct FootprintModalView: View {
                             .focused($titleFocused)
                             .lineLimit(1)
                             .onSubmit { titleFocused = false; footprint.aiAnalyzed = true; try? modelContext.save() }
-                            .onChange(of: footprint.title) { _, _ in footprint.aiAnalyzed = true }
+                            .onChange(of: footprint.title) { _, _ in 
+                                if !isAIPerformingUpdate {
+                                    footprint.isTitleEditedByHand = true
+                                }
+                                footprint.aiAnalyzed = true 
+                            }
                     }
                     
                     if !titleFocused {

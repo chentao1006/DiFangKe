@@ -109,18 +109,22 @@ final class RawLocationStore {
         return locations
     }
     
-    /// 获取最近一段（默认 2 小时内）的点
-    func loadRecentLocations(lookbackHours: Double = 2.0) -> [CLLocation] {
+    /// 获取最近一段的点。如果提供了 since，则至少获取到 since 那个时间点。
+    func loadRecentLocations(lookbackHours: Double = 2.0, since: Date? = nil) -> [CLLocation] {
         let now = Date()
-        let threshold = now.addingTimeInterval(-lookbackHours * 3600)
+        let defaultThreshold = now.addingTimeInterval(-lookbackHours * 3600)
+        let threshold = since.map { min($0, defaultThreshold) } ?? defaultThreshold
+        
+        // 限制回溯至 24 小时内，防止数据量过大导致崩溃
+        let finalThreshold = max(threshold, now.addingTimeInterval(-24 * 3600))
         
         let today = loadLocations(for: now)
-        var recent = today.filter { $0.timestamp > threshold }
+        var recent = today.filter { $0.timestamp >= finalThreshold }
         
-        if threshold < Calendar.current.startOfDay(for: now) {
+        if finalThreshold < Calendar.current.startOfDay(for: now) {
             let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: now)!
             let yesterdayLocations = loadLocations(for: yesterday)
-            let yesterdayRecent = yesterdayLocations.filter { $0.timestamp > threshold }
+            let yesterdayRecent = yesterdayLocations.filter { $0.timestamp >= finalThreshold }
             recent = yesterdayRecent + recent
         }
         
@@ -407,10 +411,29 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     
     // 从 View 同步过来的参数
     var allPlaces: [Place] = []
-    var modelContext: ModelContext?
+    var modelContext: ModelContext? {
+        didSet {
+            if modelContext != nil {
+                loadPointsFromStore() // 获得数据库后，重新加载点并同步最后处理时间
+            }
+        }
+    }
     
     // 正在记录的临时停留状态
     var potentialStopStartLocation: CLLocation?
+    
+    /// 根据当前精度/省电模式，提供给 UI 呈现不同频率的“呼吸”动画时长
+    var pulseDuration: Double {
+        if !isTracking { return 4.0 }
+        let acc = locationManager.desiredAccuracy
+        if acc < 20.0 { // 10m - 高频
+            return 0.8
+        } else if locationManager.activityType == .automotiveNavigation { // 高速巡航
+            return 1.8
+        } else { // 100m - 低功耗
+            return 3.5
+        }
+    }
     
     // 服务引用
     private let footprintProcessor = FootprintProcessor.shared
@@ -427,7 +450,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         self.locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters // 恢复平衡精度
         self.locationManager.distanceFilter = 20.0 // 恢复常规频率
         self.locationManager.allowsBackgroundLocationUpdates = true
-        self.locationManager.pausesLocationUpdatesAutomatically = false
+        self.locationManager.pausesLocationUpdatesAutomatically = true // 允许自动暂停以省电
+        self.locationManager.showsBackgroundLocationIndicator = false
         self.locationManager.activityType = .other
         
         // Initialize stored properties
@@ -754,9 +778,45 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         lastUpdateTime = Date()
         accuracy = location.horizontalAccuracy
         
-        // 反地理编码更新地址（节流：距离上次超过50m才触发）
+        // 0. 智能节能：根据速度和停留状态动态调整定位参数
+        let place = matchedPlace
+        let speed = location.speed
+        
+        // 判定是否正在长久停留 (非忽略地点也会进入低功耗，但门槛稍高)
+        let isStationary = potentialStopStartLocation.map { Date().timeIntervalSince($0.timestamp) > 300 && location.distance(from: $0) < 50.0 } ?? false
+        
+        if let p = place, p.isIgnored {
+            // 已忽略地点：进入强制低功耗
+            if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters {
+                manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+                manager.distanceFilter = 100.0
+            }
+        } else if isStationary {
+            // 普通地点但已停留：进入节能模式
+            if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters {
+                manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+                manager.distanceFilter = 50.0
+            }
+        } else if speed > 10.0 {
+            // 高速移动中 (时速 > 36km/h)：中等精度，因为高速下 10 米和 100 米对轨迹影响不大但非常省电
+            if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters {
+                manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+                manager.distanceFilter = 100.0
+                manager.activityType = .automotiveNavigation
+            }
+        } else {
+            // 步行或骑行记录：恢复高精度录入
+            if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
+                manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+                manager.distanceFilter = 20.0
+                manager.activityType = .fitness
+            }
+        }
+
+        // 反地理编码更新地址（节流：如果是高速移动或已经在停留，降低反向地理编码频率）
+        let geocodeThrottleDist: Double = (speed > 10.0) ? 500.0 : 100.0 
         let shouldGeocode = lastGeocodedLocation.map {
-            location.distance(from: $0) > 50
+            location.distance(from: $0) > geocodeThrottleDist
         } ?? true
         
         if shouldGeocode {
@@ -791,8 +851,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         
         // 3. 更新当前停留状态用于 UI 显示
         if let startLoc = potentialStopStartLocation {
-            // 如果当前位置已经远离了正在记录的起点（比如离开了家），重置起点以开启新的计时
-            if location.distance(from: startLoc) > 100.0 {
+            // 如果新位置偏差过大（>100m），并且精度尚可（<100m），判定为离开（防止 GPS 启动冷开始的漂移误判）
+            let distance = location.distance(from: startLoc)
+            if distance > 100.0 && location.horizontalAccuracy < 100.0 {
                 potentialStopStartLocation = location
                 savePotentialStop()
             }
@@ -802,12 +863,12 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             ongoingTitle = nil
         }
         
-        // 3. 触发正在持续停留的 AI 分析 (停留 5 分钟后触发第一次，之后每 30 分钟刷新)
+        // 3. 触发正在持续停留的 AI 分析 (停留 5 分钟后触发第一次，之后每 60 分钟刷新)
         if let start = potentialStopStartLocation?.timestamp {
             let duration = Date().timeIntervalSince(start)
             if duration >= 5 * 60 {
                 let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
-                if isAiEnabled && !isAnalyzingOngoing && (ongoingTitle == nil || (lastAIAnalysisTime != nil && Date().timeIntervalSince(lastAIAnalysisTime!) > 30 * 60)) {
+                if isAiEnabled && !isAnalyzingOngoing && (ongoingTitle == nil || (lastAIAnalysisTime != nil && Date().timeIntervalSince(lastAIAnalysisTime!) > 60 * 60)) {
                     // 只在有坐标时分析
                     analyzeOngoingStay(at: location)
                 }
@@ -858,12 +919,12 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         
         // 检查是否需要合并之前的记录
         // 注意：#Predicate 不支持 Calendar.startOfDay，改用预计算的日期区间
-        let now = Date()
-        let todayStart = Calendar.current.startOfDay(for: now)
-        let tomorrowStart = todayStart.addingTimeInterval(86400)
+        // 重要：使用足迹开始的时间来计算合并区间（支持跨天合并）
+        let targetStart = Calendar.current.startOfDay(for: candidate.startTime)
+        let targetEnd = targetStart.addingTimeInterval(86400)
         
         var fetchDescriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate { $0.date >= todayStart && $0.date < tomorrowStart },
+            predicate: #Predicate { $0.date >= targetStart && $0.date < targetEnd },
             sortBy: [SortDescriptor(\.endTime, order: .reverse)]
         )
         fetchDescriptor.fetchLimit = 1
@@ -887,9 +948,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             
             analyzeFootprint(last)
         } else {
-            // 创建新足迹
+            // 创建新足迹。重要的：日期应归于足迹开始的那一天，而非生成时的这一秒
             let newFootprint = Footprint(
-                date: Calendar.current.startOfDay(for: now),
+                date: Calendar.current.startOfDay(for: candidate.startTime),
                 startTime: candidate.startTime,
                 endTime: candidate.endTime,
                 footprintLocations: candidate.rawLocations.map { $0.coordinate },
@@ -921,8 +982,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             analyzeFootprint(newFootprint)
         }
         
-        // 关键：处理完一个足迹段后，将停留起始时间重置为当前（新段的起点）
-        potentialStopStartLocation = candidate.rawLocations.last
+        // 处理完一个段后，为了防止同一个位置被重复识别为足迹，同时重置“未归类流水”的锚点
         if !candidate.rawLocations.isEmpty {
             // --- 只删 3 天之前的过期流水数据 ---
             let threeDaysAgo = Date().addingTimeInterval(-3 * 24 * 3600)
@@ -952,8 +1012,10 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
 
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
         if !isAiEnabled {
-            // 如果 AI 关闭，设置一个默认标题而不进入分析队列
-            footprint.title = matchedPlace?.name ?? footprint.address ?? "记录于此"
+            // 如果 AI 关闭，且用户没手动改过，设置一个默认标题
+            if !footprint.isTitleEditedByHand {
+                footprint.title = matchedPlace?.name ?? footprint.address ?? "记录于此"
+            }
             return
         }
         
@@ -992,7 +1054,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         ) { title, reason, tags, score, success in
             DispatchQueue.main.async {
                 if success {
-                    footprint.title = title
+                    if !footprint.isTitleEditedByHand {
+                        footprint.title = title
+                    }
                     footprint.reason = reason
                     footprint.aiScore = score
                     footprint.aiAnalyzed = true
@@ -1077,8 +1141,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         let time = UserDefaults.standard.double(forKey: "pending_time")
         if lat != 0 && lng != 0 {
             let timestamp = Date(timeIntervalSince1970: time)
-            // 只接受 12 小时内且不是未来时间的状态，防止灵异数据
-            if abs(Date().timeIntervalSince(timestamp)) < 12 * 3600 {
+            // 只接受 48 小时内且不是未来时间的状态，支持跨周末或超长宅家状态
+            if abs(Date().timeIntervalSince(timestamp)) < 48 * 3600 {
                 potentialStopStartLocation = CLLocation(
                     coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lng),
                     altitude: 0,
@@ -1121,24 +1185,57 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         UserDefaults.standard.set(todayTotalPointsCount, forKey: "points_total_count")
     }
 
-    private func loadPointsFromStore() {
+    func loadPointsFromStore() {
         // 从本地存储恢复今日点，用于 UI 流水显示
         let todayPoints = RawLocationStore.shared.loadLocations(for: Date())
         self.allTodayPoints = todayPoints
         self.todayTotalPointsCount = todayPoints.count
         
-        // 从本地存储恢复滑动窗口，用于足迹识别。限制在最近 2 小时
-        let recent = RawLocationStore.shared.loadRecentLocations(lookbackHours: 2.0)
+        // 从本地存储恢复滑动窗口，用于足迹识别。强制回溯至 24 小时前，以确保发现并恢复超长夜间停留。
+        let now = Date()
+        let startBound = now.addingTimeInterval(-24 * 3600)
+        // 核心修正：无论当前有没有停留，回溯范围都至少应覆盖 24 小时，以便自愈逻辑能向前追溯到更早的起始点
+        let lookbackStart = startBound 
+        let recent = RawLocationStore.shared.loadRecentLocations(lookbackHours: 24.0, since: lookbackStart)
         self.trackingPoints = recent
         
-        // 如果我们恢复了轨道点，并且存在潜在停留状态，我们将窗口同步给识别器，防止由于 app 重启导致的历史点丢失
         if let last = recent.last {
             self.lastUpdateTime = last.timestamp
             self.lastLocation = last
+            
+            // --- 停留自动恢复 (Self-Healing) ---
+            // 我们从 recent 点位中自后向前寻找最近的一个连续停留段，回溯出更真实的起始点。
+            var foundStart = last
+            for i in (0..<recent.count).reversed() {
+                let p = recent[i]
+                if p.distance(from: last) < 200.0 { // 放宽到 200m 以应对更大范围的停留点偏差（如果是家/写字楼）
+                    foundStart = p
+                } else {
+                    break
+                }
+            }
+            
+            let fileDuration = last.timestamp.timeIntervalSince(foundStart.timestamp)
+            let currentDuration = potentialStopStartLocation.map { last.timestamp.timeIntervalSince($0.timestamp) } ?? 0
+            
+            // 如果文件里发现的连续停留时间明显长于当前内存中的停留时间，则以文件为准
+            if fileDuration > currentDuration + 300 {
+                self.potentialStopStartLocation = foundStart
+                savePotentialStop()
+            }
         }
 
         // 重要：重新设置 lastProcessedTimestamp 为最近的一个足迹截止时间
         // 这将防止重新加载的旧数据被二次识别生成重复足迹 (此处仅为补丁逻辑)
+        if let context = modelContext {
+            var fetchDescriptor = FetchDescriptor<Footprint>(
+                sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+            )
+            fetchDescriptor.fetchLimit = 1
+            if let lastFp = try? context.fetch(fetchDescriptor).first {
+                self.lastProcessedTimestamp = lastFp.endTime
+            }
+        }
     }
 
     // MARK: - Ignore Location Logic

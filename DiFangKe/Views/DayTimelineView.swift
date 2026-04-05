@@ -425,6 +425,11 @@ struct TimelinePageView: View {
                             RecordingStatusCard(locationManager: locationManager, footprintCount: currentDayFootprints.count)
                                 .padding(.horizontal, 16)
                             
+                            if currentDayFootprints.isEmpty {
+                                PlaceholderFootprintCard()
+                                    .padding(.horizontal, 0) // Already has horizontal structure inside
+                            }
+                            
                             // Important Place Guide
                             if allPlaces.isEmpty && !isGuideDismissed {
                                 importantPlaceGuide
@@ -661,7 +666,6 @@ struct RecordingStatusCard: View {
     let footprintCount: Int
     @State private var showingStatusModal = false
     @State private var cameraPosition: MapCameraPosition = .automatic
-    @State private var pulseScale: CGFloat = 1.0
     
     private var displayTitle: String {
         let isStopped = !locationManager.isTracking
@@ -676,26 +680,28 @@ struct RecordingStatusCard: View {
     
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            // 1. 时间轴指示器：第一个点对齐标题，线上端不伸出
+            // 1. 时间轴指示器
             VStack(spacing: 0) {
-                // 顶部留白，使圆点圆心与卡片标题对齐 (16px padding + 5px height diff = 21px)
                 Spacer().frame(height: 22)
                 
-                // 第一个圆点（带脉冲）
-                ZStack {
-                    Circle().stroke(Color.dfkAccent.opacity(0.3), lineWidth: 2)
-                        .frame(width: 10, height: 10)
-                        .scaleEffect(pulseScale)
-                        .opacity(2.2 - Double(pulseScale))
-                    Circle().fill(Color.dfkAccent).frame(width: 10, height: 10)
-                }.frame(width: 24, height: 24)
-                .onAppear {
-                    withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) {
-                        pulseScale = 2.2
+                // 呼吸圆点 (采用 TimelineView 彻底解决重绘导致的动画跳变)
+                TimelineView(.animation) { timeline in
+                    let now = timeline.date.timeIntervalSinceReferenceDate
+                    let duration = locationManager.pulseDuration
+                    let progress = (now.truncatingRemainder(dividingBy: duration)) / duration
+                    let scale = 1.0 + (progress * 2.5) // 1.0 -> 3.5
+                    let opacity = (1.0 - progress) * 0.4
+                    
+                    ZStack {
+                        Circle().stroke(Color.dfkAccent.opacity(opacity), lineWidth: 3)
+                            .frame(width: 8, height: 8)
+                            .scaleEffect(scale)
+                        
+                        Circle().fill(Color.dfkAccent).frame(width: 10, height: 10)
                     }
                 }
+                .frame(width: 24, height: 24)
                 
-                // 只有向下的线下
                 Rectangle().fill(Color.secondary.opacity(0.15))
                     .frame(width: 1.5)
                     .frame(maxHeight: .infinity)
@@ -724,27 +730,51 @@ struct RecordingStatusCard: View {
                                 Text("点击开启或查看说明")
                                     .font(.caption2)
                                     .foregroundColor(.orange)
-                            } else if let duration = locationManager.stayDuration {
-                                Text("已停留 \(duration)")
+                            } else if let durationStr = locationManager.stayDuration {
+                                Text("已停留 \(durationStr)")
                                     .font(.caption2)
                                     .foregroundColor(Color.dfkSecondaryText)
-                                    .id("duration-\(duration)")
+                                    .id("duration-\(durationStr)")
                             }
                         }
                     }
                     
                     Spacer()
                     
-                    if let place = locationManager.matchedPlace {
-                        let label = place.name
-                        Text(label)
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.orange.opacity(0.12))
-                            .foregroundColor(.orange)
-                            .clipShape(Capsule())
+                    VStack(alignment: .trailing, spacing: 6) {
+                        if locationManager.isTracking {
+                            // 精度/能效状态标识
+                            Group {
+                                let duration = locationManager.pulseDuration
+                                if duration < 1.0 {
+                                    Text("高精度")
+                                        .foregroundColor(.dfkAccent)
+                                } else if duration < 2.0 {
+                                    Text("巡航中")
+                                        .foregroundColor(.blue)
+                                } else {
+                                    Text("低功耗")
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.secondary.opacity(0.06))
+                            .cornerRadius(6)
+                        }
+
+                        if let place = locationManager.matchedPlace {
+                            Text(place.name)
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.orange.opacity(0.12))
+                                .foregroundColor(.orange)
+                                .clipShape(Capsule())
+                        }
                     }
+                    .padding(.top, -2) // 微调垂直对齐
                 }
                 .padding(.vertical, 16)
                 .padding(.leading, 8)
@@ -755,8 +785,7 @@ struct RecordingStatusCard: View {
                     cameraPosition: $cameraPosition,
                     isInteractive: false,
                     showsUserLocation: true,
-                    points: [] // Snapshot map usually shouldn't show entire today's path if it's too cluttered? User choice.
-                    // But in tracking card, we sometimes show current stay?
+                    points: []
                 )
                 .frame(height: 160)
                 .cornerRadius(12)
@@ -777,7 +806,7 @@ struct RecordingStatusCard: View {
                 .fill(Color(uiColor: .secondarySystemGroupedBackground))
                 .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: 4)
         )
-        .padding(.bottom, 14) // 使左侧线能连贯到下一个卡片
+        .padding(.bottom, 14)
         .onTapGesture {
             showingStatusModal = true
         }
@@ -1542,6 +1571,86 @@ struct LocationSearchSheet: View {
             return String(format: "%.0f米", dist)
         } else {
             return String(format: "%.1f公里", dist / 1000.0)
+        }
+    }
+}
+
+struct PlaceholderFootprintCard: View {
+    private let phrases = [
+        "今日份回忆正在后台悄悄酝酿...",
+        "正在捕捉第一段时光足迹...",
+        "别急，这一天的故事正在落笔...",
+        "时光正在被系统悉心收纳...",
+        "正在为您打磨今日的轨迹线...",
+        "第一段记忆正在慢慢发酵..."
+    ]
+    
+    @State private var phrase: String = ""
+    
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let now = timeline.date.timeIntervalSinceReferenceDate
+            let phase = (now.truncatingRemainder(dividingBy: 3.5)) / 3.5
+            let sinValue = sin(phase * .pi * 2) // -1 to 1
+            let opacity = 0.7 + (sinValue + 1.0) / 2.0 * 0.3 // 0.7 to 1.0
+            
+            HStack(alignment: .top, spacing: 0) {
+                // 1. 时间轴指示器 (严格对齐 RecordingStatusCard)
+                VStack(spacing: 0) {
+                    // 上半部分连线 (高度 22 对齐逻辑上的卡片顶部边距)
+                    Rectangle().fill(Color.secondary.opacity(0.15))
+                        .frame(width: 1.5, height: 22)
+                    
+                    // 占位空心圆点
+                    ZStack {
+                        Circle().stroke(Color.secondary.opacity(0.2), lineWidth: 1.5)
+                            .frame(width: 8, height: 8)
+                            .background(Circle().fill(Color(uiColor: .systemBackground)))
+                    }.frame(width: 24, height: 24)
+                    
+                    Spacer()
+                }
+                .frame(width: 36)
+                
+                // 2. 占位文字与骨架
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(phrase)
+                        .font(.system(.headline, design: .rounded))
+                        .foregroundColor(.secondary.opacity(0.4))
+                        .lineLimit(2)
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color.secondary.opacity(0.05))
+                            .frame(width: 140, height: 8)
+                        
+                        HStack(spacing: 6) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color.secondary.opacity(0.03))
+                                .frame(width: 60, height: 8)
+                            Circle().fill(Color.secondary.opacity(0.03)).frame(width: 3, height: 3)
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color.secondary.opacity(0.03))
+                                .frame(width: 40, height: 8)
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+                .padding(.vertical, 14)
+                .padding(.trailing, 16)
+                .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
+            }
+            .opacity(opacity) // 应用呼吸透明度
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(uiColor: .secondarySystemGroupedBackground))
+                    .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: 4)
+            )
+            .padding(.horizontal, 16)
+            .padding(.bottom, 14)
+        }
+        .onAppear {
+            phrase = phrases.randomElement() ?? phrases[0]
         }
     }
 }

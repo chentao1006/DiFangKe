@@ -98,6 +98,8 @@ struct HistoryListView: View {
     @State private var showingImportSuccessAlert = false
     @State private var successCount = 0
     @State private var showingPermissionAlert = false
+    @State private var scanProgress = 0
+    @State private var scanTotal = 0
     @ObservedObject private var photoService = PhotoService.shared
     
     @Query(sort: \Place.name) private var allPlacesForScan: [Place]
@@ -158,6 +160,8 @@ struct HistoryListView: View {
         ))
         .modifier(ImportOverlaysModifier(
             isScanning: isScanning,
+            scanProgress: scanProgress,
+            scanTotal: scanTotal,
             showingNoResultsAlert: $showingNoResultsAlert,
             showingImportSuccessAlert: $showingImportSuccessAlert,
             showingPermissionAlert: $showingPermissionAlert,
@@ -219,6 +223,8 @@ struct HistoryListView: View {
     }
     
     private func startScanning(start: Date, end: Date) {
+        self.scanProgress = 0
+        self.scanTotal = 0
         isScanning = true
         // 适当延迟以确保 UI 切换完成
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -227,7 +233,10 @@ struct HistoryListView: View {
             // 收集所有已存在的照片 ID 用于过滤
             let existingIDs = Set(self.allFootprints.flatMap { $0.photoAssetIDs })
             
-            PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: allPlacesForScan, excludedAssetIDs: existingIDs) { results in
+            PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: allPlacesForScan, excludedAssetIDs: existingIDs, onProgress: { current, total in
+                self.scanProgress = current
+                self.scanTotal = total
+            }) { results in
                 self.isScanning = false
                 if !results.isEmpty {
                     self.scannedResults = results
@@ -718,6 +727,8 @@ struct ImportSheetsModifier: ViewModifier {
 
 struct ImportOverlaysModifier: ViewModifier {
     let isScanning: Bool
+    let scanProgress: Int
+    let scanTotal: Int
     @Binding var showingNoResultsAlert: Bool
     @Binding var showingImportSuccessAlert: Bool
     @Binding var showingPermissionAlert: Bool
@@ -750,9 +761,23 @@ struct ImportOverlaysModifier: ViewModifier {
                     ZStack {
                         Color.black.opacity(0.2).ignoresSafeArea()
                         VStack(spacing: 20) {
-                            ProgressView()
-                                .scaleEffect(1.5)
-                                .tint(.white)
+                            if scanTotal > 0 {
+                                VStack(spacing: 12) {
+                                    ProgressView(value: Double(scanProgress), total: Double(scanTotal))
+                                        .progressViewStyle(.linear)
+                                        .tint(.white)
+                                        .frame(width: 200)
+                                    
+                                    Text("\(scanProgress)/\(scanTotal)")
+                                        .foregroundColor(.white)
+                                        .font(.system(.subheadline, design: .monospaced))
+                                }
+                            } else {
+                                ProgressView()
+                                    .scaleEffect(1.5)
+                                    .tint(.white)
+                            }
+                            
                             Text("正在穿越时空...")
                                 .foregroundColor(.white)
                                 .font(.headline)
@@ -903,9 +928,6 @@ struct PhotoImportResultsView: View {
             List {
                 Section {
                     HStack {
-                        Text("共寻回 **\(results.count)** 个足迹")
-                            .font(.subheadline)
-                        Spacer()
                         Button(selectedIDs.count == results.count ? "取消全选" : "全选") {
                             if selectedIDs.count == results.count {
                                 selectedIDs = []
@@ -913,8 +935,16 @@ struct PhotoImportResultsView: View {
                                 selectedIDs = Set(results.map { $0.footprintID })
                             }
                         }
-                        .font(.caption)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.dfkAccent)
+                        
+                        Spacer()
+                        
+                        Text("共寻回 **\(results.count)** 个足迹")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
+                    .padding(.vertical, 4)
                 }
                 
                 ForEach(results, id: \.footprintID) { fp in
