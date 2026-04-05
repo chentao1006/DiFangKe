@@ -160,6 +160,10 @@ struct DayTimelineView: View {
         let validFootprints = footprints.filter { $0.status != .ignored }
         self.groupedFootprints = Dictionary(grouping: validFootprints) { calendar.startOfDay(for: $0.date) }
         
+        // 关键补丁：如果当前正在显示的日期列表不再包含被过滤后的有效数据，需要触发重新加载
+        // 这解决了“删除足迹后依然显示灰色点”的问题，因为 groupedFootprints 之前可能没有及时刷新
+        self.groupedFootprints = Dictionary(grouping: validFootprints) { calendar.startOfDay(for: $0.date) }
+        
         var limitOffset = -1
         if let earliestFootprint = validFootprints.last {
             let earliestDataDate = calendar.startOfDay(for: earliestFootprint.date)
@@ -444,8 +448,9 @@ struct TimelinePageView: View {
                                      .padding(.bottom, 16)
                              }
                              
-                             let count = currentDayFootprints.count
-                             ForEach(Array(currentDayFootprints.enumerated()), id: \.element.id) { index, footprint in
+                             let validDayFootprints = currentDayFootprints.filter { $0.status != .ignored }
+                             let count = validDayFootprints.count
+                             ForEach(Array(validDayFootprints.enumerated()), id: \.element.id) { index, footprint in
                                  FootprintCardView(
                                      footprint: footprint, 
                                      allPlaces: allPlaces,
@@ -801,11 +806,14 @@ struct FootprintCardView: View {
     @State private var confirmedAnimating: Bool = false
     
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            if showTimeline {
-                timelineIndicator
-            }
-            ZStack(alignment: .bottomTrailing) {
+        if footprint.status == .ignored {
+            EmptyView()
+        } else {
+            HStack(alignment: .top, spacing: 0) {
+                 if showTimeline {
+                     timelineIndicator
+                 }
+                 ZStack(alignment: .bottomTrailing) {
                 VStack(alignment: .leading, spacing: 4) {
                     if showDateAboveTitle {
                         Text(footprint.date.formatted(.dateTime.year().month().day()))
@@ -942,6 +950,7 @@ struct FootprintCardView: View {
             geocodeAddress()
         }
     }
+}
     
     private func geocodeAddress() {
         guard (footprint.address ?? "").isEmpty else { return }
@@ -1021,7 +1030,7 @@ struct FootprintCardView: View {
                 if footprint.isHighlight == true {
                     Image(systemName: "star.fill").font(.system(size: 14)).foregroundColor(Color.dfkHighlight).padding(4).background(Circle().fill(Color(uiColor: .systemBackground)))
                 } else {
-                    Circle().fill(footprint.status == .ignored ? Color.secondary.opacity(0.4) : Color.dfkAccent).frame(width: 10, height: 10)
+                    Circle().fill(Color.dfkAccent).frame(width: 10, height: 10)
                         .scaleEffect(confirmedAnimating ? 1.4 : 1.0)
                         .animation(.spring(response: 0.3, dampingFraction: 0.5), value: confirmedAnimating)
                 }
@@ -1388,9 +1397,7 @@ struct LocationSearchSheet: View {
     @State private var searchResults: [LocationSuggestion] = []
     @State private var isSearching = false
     @FocusState private var isFocused: Bool
-    
-    // Completer Logic
-    @StateObject private var completerDelegate = SearchCompleterDelegate()
+    @State private var searchTask: Task<Void, Never>? = nil
 
     var body: some View {
         NavigationStack {
@@ -1404,9 +1411,17 @@ struct LocationSearchSheet: View {
                         .autocorrectionDisabled()
                         .focused($isFocused)
                         .onChange(of: searchText) { oldValue, newValue in
-                            completerDelegate.updateQueryFragment(newValue)
+                            searchTask?.cancel()
+                            searchTask = Task {
+                                // 500ms 抖动处理，避免频繁调用 API
+                                try? await Task.sleep(nanoseconds: 500_000_000)
+                                if !Task.isCancelled {
+                                    performFullSearch(query: newValue)
+                                }
+                            }
                         }
                         .onSubmit {
+                            searchTask?.cancel()
                             performFullSearch(query: searchText)
                         }
                     
@@ -1426,28 +1441,8 @@ struct LocationSearchSheet: View {
 
                 // 结果列表
                 List {
-                    if !completerDelegate.results.isEmpty {
-                        Section("猜你想找") {
-                            ForEach(completerDelegate.results, id: \.self) { completion in
-                                Button {
-                                    performSearch(for: completion)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(completion.title)
-                                            .font(.body)
-                                            .foregroundColor(.primary)
-                                        Text(completion.subtitle)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
                     if !searchResults.isEmpty {
-                        Section("搜索结果") {
-                            ForEach(searchResults) { suggestion in
+                        ForEach(searchResults) { suggestion in
                                 Button {
                                     selectSuggestion(suggestion)
                                 } label: {
@@ -1467,7 +1462,6 @@ struct LocationSearchSheet: View {
                                     }
                                 }
                             }
-                        }
                     }
                 }
                 .listStyle(.plain)
@@ -1488,9 +1482,6 @@ struct LocationSearchSheet: View {
                 }
             }
             .onAppear {
-                if let coord = coordinate {
-                    completerDelegate.setupRegion(center: coord)
-                }
                 // Autofocus on sheet appear
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     isFocused = true
@@ -1537,26 +1528,6 @@ struct LocationSearchSheet: View {
         }
     }
 
-    private func performSearch(for completion: MKLocalSearchCompletion) {
-        isSearching = true
-        let request = MKLocalSearch.Request(completion: completion)
-        let search = MKLocalSearch(request: request)
-        search.start { response, error in
-            isSearching = false
-            guard let item = response?.mapItems.first else { return }
-            
-            let suggestion = LocationSuggestion(
-                id: UUID(),
-                name: item.name ?? completion.title,
-                address: item.placemark.title ?? completion.subtitle,
-                coordinate: item.placemark.coordinate,
-                isExistingPlace: false,
-                placeID: nil
-            )
-            selectSuggestion(suggestion)
-        }
-    }
-    
     private func selectSuggestion(_ suggestion: LocationSuggestion) {
         locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint)
         dismiss()
@@ -1575,31 +1546,5 @@ struct LocationSearchSheet: View {
     }
 }
 
-// MARK: - Search Completer Delegate Wrapper
-class SearchCompleterDelegate: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
-    @Published var results: [MKLocalSearchCompletion] = []
-    private var completer = MKLocalSearchCompleter()
-    
-    override init() {
-        super.init()
-        completer.delegate = self
-        completer.resultTypes = .pointOfInterest
-    }
-    
-    func setupRegion(center: CLLocationCoordinate2D) {
-        completer.region = MKCoordinateRegion(center: center, latitudinalMeters: 5000, longitudinalMeters: 5000)
-    }
-    
-    func updateQueryFragment(_ fragment: String) {
-        completer.queryFragment = fragment
-    }
-    
-    func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
-        self.results = completer.results
-    }
-    
-    func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
-        // Silent fail
-    }
-}
+
 

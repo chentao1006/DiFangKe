@@ -236,12 +236,18 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
         
         // 3. 将耗时操作移动到后台执行
+        guard let container = self.modelContext?.container else {
+            completion([])
+            return
+        }
+
         DispatchQueue.global(qos: .userInitiated).async {
             var finalFootprints: [Footprint] = []
+            let bgContext = ModelContext(container)
             let group = DispatchGroup()
             let geocoder = CLGeocoder()
             
-            // 为了防止 Hammer 系统的 Geocoder 服务导致卡死，我们只对照片最多的前 10 个足迹进行详细解析
+            // 为了防止 Hammer 系统的 Geocoder 服务导致卡死，我们只对照片最多的前 20 个足迹进行详细解析
             let sortedClusters = clusters.sorted(by: { $0.count > $1.count })
             let prioritizedClusters = Array(sortedClusters.prefix(20))
             let otherClusters = sortedClusters.count > 20 ? Array(sortedClusters.suffix(from: 20)) : []
@@ -259,50 +265,72 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 
                 // 修正坐标偏移：将 WGS84 转换为 GCJ02
                 let firstLoc = rawLoc.gcj02
+                let lastLoc = (cluster.last?.location ?? rawLoc).gcj02
+                
+                // 使用中点进行地点匹配，比仅用第一个点更稳健
+                let centerLat = (firstLoc.coordinate.latitude + lastLoc.coordinate.latitude) / 2.0
+                let centerLon = (firstLoc.coordinate.longitude + lastLoc.coordinate.longitude) / 2.0
+                let centerLoc = CLLocation(latitude: centerLat, longitude: centerLon)
                 
                 let startTime = first.creationDate ?? Date()
                 let endTime = last.creationDate ?? Date()
                 let duration = endTime.timeIntervalSince(startTime)
                 let coords = cluster.compactMap { $0.location?.gcj02.coordinate }
-                let hash = "\(Int(firstLoc.coordinate.latitude * 10000))\(Int(firstLoc.coordinate.longitude * 10000))"
+                let hash = "\(Int(centerLat * 10000))\(Int(centerLon * 10000))"
                 
-                // 1. 优先匹配已有的重要地点
+                // 1. 优先匹配已有的重要地点 (放宽匹配范围以适配照片 GPS 精度)
                 var title = candidateTitles.randomElement() ?? "时光里的足迹"
                 var matchedPlaceID: UUID? = nil
                 
-                var isIgnoredPlace = false
-                for place in allPlaces {
+                let matches = allPlaces.filter { place in
                     let placeLoc = CLLocation(latitude: place.latitude, longitude: place.longitude)
-                    if firstLoc.distance(from: placeLoc) <= Double(place.radius) {
-                        if place.isIgnored {
-                            isIgnoredPlace = true
-                        } else {
-                            title = place.name
-                            matchedPlaceID = place.placeID
-                        }
-                        break
-                    }
+                    return centerLoc.distance(from: placeLoc) <= Double(place.radius) + 120.0
                 }
                 
-                if isIgnoredPlace {
+                // --- 优先判断忽略逻辑 ---
+                if matches.contains(where: { $0.isIgnored }) {
                     group.leave()
                     continue
                 }
                 
-                // --- 自动带入历史标签 ---
-                let tagsToApply: [String]
-                if let context = self.modelContext {
-                    tagsToApply = self.findHistoricalTags(for: firstLoc.coordinate.latitude, longitude: firstLoc.coordinate.longitude, in: context)
+                if let bestMatch = matches.min(by: { p1, p2 in
+                    let d1 = centerLoc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude))
+                    let d2 = centerLoc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
+                    return d1 < d2
+                }) {
+                    title = bestMatch.name
+                    matchedPlaceID = bestMatch.placeID
                 } else {
-                    tagsToApply = []
+                    // 二次兜底检查：即使没有在 120m 内匹配到精准地点，如果 250m 内有“已忽略”地点，也应倾向于忽略
+                    let ignoredNearby = allPlaces.first { place in
+                        place.isIgnored && centerLoc.distance(from: CLLocation(latitude: place.latitude, longitude: place.longitude)) < 250.0
+                    }
+                    if ignoredNearby != nil {
+                        group.leave()
+                        continue
+                    }
                 }
+                
+                // --- 自动带入历史标签 ---
+                let tagsToApply = TagService.shared.findHistoricalTags(for: firstLoc.coordinate.latitude, longitude: firstLoc.coordinate.longitude, targetDate: startTime, in: bgContext)
                 
                 if matchedPlaceID == nil {
                     // 串行执行地名反查
                     geocoder.reverseGeocodeLocation(firstLoc) { placemarks, error in
                         if let pm = placemarks?.first {
-                            if let name = pm.name, !name.isEmpty {
-                                title = name
+                            let pmName = pm.name ?? ""
+                            // 即使坐标没匹配上，如果反查出的地名/地址和已忽略地点的名称或地址匹配（模糊匹配），也过滤掉
+                            let isAddressIgnored = allPlaces.contains { p in
+                                p.isIgnored && (p.name == pmName || p.address == pmName || (p.address?.contains(pmName) == true))
+                            }
+                            
+                            if isAddressIgnored {
+                                group.leave()
+                                return
+                            }
+                            
+                            if !pmName.isEmpty {
+                                title = pmName
                             } else if let area = pm.subLocality {
                                 title = "\(area) 附近"
                             }
@@ -321,8 +349,11 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                             photoAssetIDs: cluster.map { $0.localIdentifier },
                             tags: tagsToApply
                         )
-                        finalFootprints.append(fp)
-                        group.leave()
+                        // CLGeocoder completion usually runs on main thread, but finalFootprints must be thread-safe
+                        DispatchQueue.main.async {
+                            finalFootprints.append(fp)
+                            group.leave()
+                        }
                     }
                     // 给 Geocoder 一点喘息时间（0.2秒间隔）
                     Thread.sleep(forTimeInterval: 0.2)
@@ -340,45 +371,69 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         photoAssetIDs: cluster.map { $0.localIdentifier },
                         tags: tagsToApply
                     )
-                    finalFootprints.append(fp)
-                    group.leave()
+                    DispatchQueue.main.async {
+                        finalFootprints.append(fp)
+                        group.leave()
+                    }
                 }
             }
             
             // 处理剩余足迹（不解析，直接生成）
             for cluster in otherClusters {
+                group.enter()
                 guard let first = cluster.first, let last = cluster.last,
-                      let rawLoc = first.location else { continue }
+                      let rawLoc = first.location else { 
+                    group.leave()
+                    continue 
+                }
                 
+                // 修正坐标偏移并计算中心点
                 let firstLoc = rawLoc.gcj02
+                let lastLoc = (cluster.last?.location ?? rawLoc).gcj02
+                let centerLat = (firstLoc.coordinate.latitude + lastLoc.coordinate.latitude) / 2.0
+                let centerLon = (firstLoc.coordinate.longitude + lastLoc.coordinate.longitude) / 2.0
+                let centerLoc = CLLocation(latitude: centerLat, longitude: centerLon)
+                
                 let startTime = first.creationDate ?? Date()
                 let endTime = last.creationDate ?? Date()
                 let coords = cluster.compactMap { $0.location?.gcj02.coordinate }
-                let hash = "\(Int(firstLoc.coordinate.latitude * 10000))\(Int(firstLoc.coordinate.longitude * 10000))"
+                let hash = "\(Int(centerLat * 10000))\(Int(centerLon * 10000))"
                 
-                // 仅做位置匹配，不调用 Geocoder
+                // 仅做位置匹配 (放宽匹配范围)
                 var title = candidateTitles.randomElement() ?? "时光里的足迹"
                 var matchedPlaceID: UUID? = nil
-                var isIgnoredPlace = false
-                for place in allPlaces {
+                
+                let matches = allPlaces.filter { place in
                     let placeLoc = CLLocation(latitude: place.latitude, longitude: place.longitude)
-                    if firstLoc.distance(from: placeLoc) <= Double(place.radius) {
-                        if place.isIgnored {
-                            isIgnoredPlace = true
-                        } else {
-                            title = place.name
-                            matchedPlaceID = place.placeID
-                        }
-                        break
+                    return centerLoc.distance(from: placeLoc) <= Double(place.radius) + 120.0
+                }
+                
+                // --- 优先判断忽略逻辑 ---
+                if matches.contains(where: { $0.isIgnored }) {
+                    group.leave()
+                    continue
+                }
+                
+                if let bestMatch = matches.min(by: { p1, p2 in
+                    let d1 = centerLoc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude))
+                    let d2 = centerLoc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
+                    return d1 < d2
+                }) {
+                    title = bestMatch.name
+                    matchedPlaceID = bestMatch.placeID
+                } else {
+                    // 二次兜底检查：250m 内若有已忽略地点则忽略
+                    let ignoredNearby = allPlaces.first { place in
+                        place.isIgnored && centerLoc.distance(from: CLLocation(latitude: place.latitude, longitude: place.longitude)) < 250.0
+                    }
+                    if ignoredNearby != nil {
+                        group.leave()
+                        continue
                     }
                 }
                 
-                if isIgnoredPlace { continue }
-                
                 // --- 自动带入历史标签 ---
-                let tagsForBatch = self.modelContext.map { 
-                    self.findHistoricalTags(for: firstLoc.coordinate.latitude, longitude: firstLoc.coordinate.longitude, in: $0)
-                } ?? []
+                let tagsForBatch = TagService.shared.findHistoricalTags(for: firstLoc.coordinate.latitude, longitude: firstLoc.coordinate.longitude, targetDate: startTime, in: bgContext)
                 
                 let fp = Footprint(
                     date: Calendar.current.startOfDay(for: startTime),
@@ -393,7 +448,10 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     photoAssetIDs: cluster.map { $0.localIdentifier },
                     tags: tagsForBatch
                 )
-                finalFootprints.append(fp)
+                DispatchQueue.main.async {
+                    finalFootprints.append(fp)
+                    group.leave()
+                }
             }
             
             // 完成后返回主线程
@@ -402,33 +460,6 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 completion(sorted)
             }
         }
-    }
-    
-    /// 寻找物理距离相近的地点最近一次使用的标签
-    private func findHistoricalTags(for lat: Double, longitude lon: Double, in context: ModelContext) -> [String] {
-        let center = CLLocation(latitude: lat, longitude: lon)
-        let inheritanceDistance: CLLocationDistance = 150.0
-        
-        // 1. 获取所有带标签的足迹 (按时间倒序)
-        var descriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate<Footprint> { fp in
-                fp.tags.count > 0 
-            },
-            sortBy: [SortDescriptor(\.startTime, order: .reverse)]
-        )
-        descriptor.fetchLimit = 100 
-        
-        guard let recentTagged = try? context.fetch(descriptor) else { return [] }
-        
-        // 2. 找到距离最近且满足阈值的第一个记录（即该地点的最近一次打标）
-        for fp in recentTagged {
-            let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
-            if fpLoc.distance(from: center) <= inheritanceDistance {
-                return fp.tags
-            }
-        }
-        
-        return []
     }
 }
 

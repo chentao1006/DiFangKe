@@ -839,7 +839,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             startTime: startTs,
             endTime: now,
             placeName: place?.name,
-            placeTags: [], // Place no longer has tags
+            placeTags: [], 
+            allAvailableTags: getAllAvailableTags(),
             address: currentAddress,
             isOngoing: true
         ) { [weak self] title, _, _, _, success in
@@ -986,6 +987,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             endTime: fpEnd,
             placeName: mPlace?.name,
             placeTags: fpTags,
+            allAvailableTags: getAllAvailableTags(),
             address: fpAddress
         ) { title, reason, tags, score, success in
             DispatchQueue.main.async {
@@ -995,24 +997,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                     footprint.aiScore = score
                     footprint.aiAnalyzed = true
                     
-                    // 合并新生成的标签
-                    var currentTags = footprint.tags
-                    for tag in tags {
-                        let trimmed = tag.trimmingCharacters(in: .whitespaces)
-                        if !trimmed.isEmpty && !currentTags.contains(trimmed) {
-                            currentTags.append(trimmed)
-                            
-                            // 如果是全局未有的新标签，尝试同步到 modelContext
-                            if let context = footprint.modelContext {
-                                let tagName = trimmed
-                                let descriptor = FetchDescriptor<PlaceTag>(predicate: #Predicate<PlaceTag> { $0.name == tagName })
-                                if (try? context.fetch(descriptor).first) == nil {
-                                    context.insert(PlaceTag(name: tagName))
-                                }
-                            }
-                        }
-                    }
-                    footprint.tags = currentTags
+                    // 直接应用 AI 建议的标签（AI 已被要求只从现有池中选择）
+                    footprint.tags = tags
                     
                     try? footprint.modelContext?.save()
                     
@@ -1230,32 +1216,65 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         }
         allFound.append(contentsOf: saved.map { $0.0 })
         
-        // 2. 并行执行多项搜索以提高效率并增加多样性
-        async let poisFromRequest = performPOIRequest(at: coordinate, radius: 1000)
-        async let poisFromNatureSearch = performNaturalLanguageSearch(at: coordinate, query: "公园 景点 博物馆 校园 车站", radius: 2500)
-        async let poisFromBuildingSearch = performNaturalLanguageSearch(at: coordinate, query: "大厦 写字楼 商场 办公 住宅", radius: 1500)
-        async let poisFromGeneralSearch = performNaturalLanguageSearch(at: coordinate, query: "地点", radius: 1000)
-        
-        allFound.append(contentsOf: await poisFromRequest)
-        allFound.append(contentsOf: await poisFromNatureSearch)
-        allFound.append(contentsOf: await poisFromBuildingSearch)
-        allFound.append(contentsOf: await poisFromGeneralSearch)
-        
-        // 3. 反向地理编码补充 (提供纯粹的“路号”地址，作为兜底)
+        // 2. 先进行反地理编码，获取当前所在的街道、区域和地标潜力名
         let geocoder = CLGeocoder()
-        if let placemarks = try? await geocoder.reverseGeocodeLocation(center), let first = placemarks.first {
-            let name = first.name ?? ""
-            if !name.isEmpty {
+        let placemarks = try? await geocoder.reverseGeocodeLocation(center)
+        let firstMark = placemarks?.first
+        
+        let street = firstMark?.thoroughfare
+        let subLocality = firstMark?.subLocality
+        let nameMark = firstMark?.name
+        
+        // 3. 并行执行多项搜索以提高效率并增加多样性
+        // A. 系统原生兴趣点 (最准确的“附近有什么”，不依赖关键词)
+        async let poisFromPOI = performPOIRequest(at: coordinate, radius: 1500)
+        async let poisFromGeneral = performNaturalLanguageSearch(at: coordinate, query: "附近 周边 地点", radius: 1000)
+        
+        // B. 基于街道和区域的搜索 (找回不带通用分类词的写字楼、住宅楼或小商铺)
+        async let poisFromStreet = street != nil ? performNaturalLanguageSearch(at: coordinate, query: street!, radius: 1000) : []
+        async let poisFromName = (nameMark != nil && nameMark != street) ? performNaturalLanguageSearch(at: coordinate, query: nameMark!, radius: 1000) : []
+        async let poisFromDistrict = subLocality != nil ? performNaturalLanguageSearch(at: coordinate, query: subLocality!, radius: 1500) : []
+        
+        // C. 重点设施搜索 (针对用户高频率打卡的非通用词地点)
+        async let poisFromOffice = performNaturalLanguageSearch(at: coordinate, query: "大厦 写字楼 中心 广场 工业区 软件园", radius: 1500)
+        async let poisFromLife = performNaturalLanguageSearch(at: coordinate, query: "公园 景点 馆 商场 社区 小区 酒店 旅馆 医院 学校", radius: 2000)
+        
+        // 4. 合并所有结果
+        allFound.append(contentsOf: await poisFromPOI)
+        allFound.append(contentsOf: await poisFromGeneral)
+        allFound.append(contentsOf: await poisFromStreet)
+        allFound.append(contentsOf: await poisFromName)
+        allFound.append(contentsOf: await poisFromDistrict)
+        allFound.append(contentsOf: await poisFromOffice)
+        allFound.append(contentsOf: await poisFromLife)
+        
+        // 补充反向地理编码自身带有的 AOI (直接对应的地标)
+        if let aois = firstMark?.areasOfInterest {
+            for aoi in aois {
                 allFound.append(LocationSuggestion(
                     id: UUID(),
-                    name: name,
-                    address: first.thoroughfare ?? "",
+                    name: aoi,
+                    address: (firstMark?.thoroughfare ?? firstMark?.subLocality) ?? "",
                     coordinate: coordinate,
                     isExistingPlace: false,
                     placeID: nil
                 ))
             }
         }
+        
+        // 5. 兜底添加当前位置的具体地名/门牌号
+        if let name = firstMark?.name, !name.isEmpty, !allFound.contains(where: { $0.name == name }) {
+            allFound.append(LocationSuggestion(
+                id: UUID(),
+                name: name,
+                address: firstMark?.thoroughfare ?? firstMark?.subLocality ?? "",
+                coordinate: coordinate,
+                isExistingPlace: false,
+                placeID: nil
+            ))
+        }
+        
+
         
         // 4. 排序与去重 (保留 10-15 个)
         var seenNames = Set<String>()
@@ -1273,7 +1292,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                 seenNames.insert(s.name)
                 unique.append(s)
             }
-            if unique.count >= 15 { break } // 适当增加一些名额，方便用户选择
+            if unique.count >= 25 { break } // 增加到 25 个，方便用户从更多结果中选择
         }
         
         return unique
@@ -1353,6 +1372,15 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             modelContext?.insert(newPlace)
             return newPlace
         }
+    }
+    
+    private func getAllAvailableTags() -> [String] {
+        guard let context = modelContext else { return [] }
+        let descriptor = FetchDescriptor<PlaceTag>()
+        if let tags = try? context.fetch(descriptor) {
+            return tags.map { $0.name }
+        }
+        return []
     }
 }
 

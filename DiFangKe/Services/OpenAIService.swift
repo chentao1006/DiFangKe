@@ -145,12 +145,41 @@ class OpenAIService {
     func analyzeFootprint(_ footprint: Footprint, completion: @escaping (Footprint) -> Void) {
         let locations = footprint.footprintLocations.map { ($0.latitude, $0.longitude) }
         
+        // --- 核心优化：为 AI 提供“时空相似”的历史标签背景，使其生成更具延续性 ---
+        var contextTags: [String] = []
+        if let context = footprint.modelContext {
+            contextTags = TagService.shared.findHistoricalTags(
+                for: footprint.latitude, 
+                longitude: footprint.longitude, 
+                targetDate: footprint.startTime, 
+                in: context
+            )
+        }
+        
+        // 获取系统内所有现有的标签，确保 AI 不会乱造
+        var allAvailableTags: [String] = []
+        if let context = footprint.modelContext {
+            let descriptor = FetchDescriptor<PlaceTag>()
+            if let tags = try? context.fetch(descriptor) {
+                allAvailableTags = tags.map { $0.name }
+            }
+        }
+
+        // 只使用数据库中的正式名称作为背景，完全避免使用不稳定的标题进行判断
+        var explicitPlaceName: String? = nil
+        if let pid = footprint.placeID, let context = footprint.modelContext {
+            let descriptor = FetchDescriptor<Place>(predicate: #Predicate<Place> { $0.placeID == pid })
+            explicitPlaceName = (try? context.fetch(descriptor))?.first?.name
+        }
+        
         analyzeFootprint(
             locations: locations,
             duration: footprint.duration,
             startTime: footprint.startTime,
             endTime: footprint.endTime,
-            placeName: footprint.title == "时光里的足迹" ? nil : footprint.title,
+            placeName: explicitPlaceName,
+            placeTags: contextTags,
+            allAvailableTags: allAvailableTags,
             address: footprint.address,
             isOngoing: false
         ) { title, reason, tags, score, success in
@@ -161,28 +190,8 @@ class OpenAIService {
                     footprint.aiScore = score
                     footprint.aiAnalyzed = true
                     
-                    // 为 Footprint 添加标签，并排除重复
-                    var current = footprint.tags
-                    for tag in tags {
-                        if !current.contains(tag) {
-                            current.append(tag)
-                        }
-                    }
-                    footprint.tags = current
-                    
-                    // 尝试在 modelContext 中同步新增标签（如果有的话）
-                    if let context = footprint.modelContext {
-                        for tag in tags {
-                            let trimmed = tag.trimmingCharacters(in: .whitespaces)
-                            if !trimmed.isEmpty {
-                                let tagName = trimmed
-                                let descriptor = FetchDescriptor<PlaceTag>(predicate: #Predicate<PlaceTag> { $0.name == tagName })
-                                if (try? context.fetch(descriptor).first) == nil {
-                                    context.insert(PlaceTag(name: tagName))
-                                }
-                            }
-                        }
-                    }
+                    // 为 Footprint 添加标签，并排除重复（仅保留 AI 建议的、且本就在系统中的标签）
+                    footprint.tags = tags
                 }
                 completion(footprint)
             }
@@ -241,6 +250,7 @@ class OpenAIService {
                           endTime: Date, 
                           placeName: String? = nil, 
                           placeTags: [String] = [],
+                          allAvailableTags: [String] = [],
                           address: String? = nil,
                           isOngoing: Bool = false, 
                           completion: @escaping (String, String, [String], Float, Bool) -> Void) {
@@ -264,6 +274,14 @@ class OpenAIService {
         } else {
             promptSnippet = address != nil ? "这里的具体参考地址是：\(address!)。" : "该位置是一个未曾记录的新去处。"
         }
+        
+        var tagContext = ""
+        if !allAvailableTags.isEmpty {
+            tagContext = "\n候选标签池（仅限从中选择）：\(allAvailableTags.joined(separator: "、"))"
+        } else {
+            tagContext = "\n目前系统暂无预设标签，请务必返回空标签数组 []。"
+        }
+
         let statusText = isOngoing ? "（目前正在此地停留中）" : ""
         
         let prompt = """
@@ -271,11 +289,11 @@ class OpenAIService {
         日期环境：\(dateContext)
         时间：\(startStr) - \(endStr)
         时长：\(Int(duration / 60))分钟
-        地点信息：\(promptSnippet)
+        地点信息：\(promptSnippet)\(tagContext)
 
         请输出：
         1. 简短标题（10字以内，反映活动或地点特点。**绝对禁止使用“定位中停留”、“位置记录”、“非预设地点”、“具有标签”等死板或技术性词汇**，也不要直接复述地点信息。尽量具体且有生活气息，如“在咖啡馆小憩”或“办公中”）
-        2. 标签：根据地点和活动，给出 0-2 个关键词标签。**要求：极其吻合情景才加标签；如果该地点之前已经有标记或类似活动（见地点信息），优先沿用；如果不确定或情景不明显，请返回空数组 []**。
+        2. 标签：根据地点和活动，从上方提供的“候选标签池”中选择 0-2 个最合适的关键词标签。**绝对禁止创建任何不在列表中的自定义标签**。如果没有合适的，请返回空数组 []。
         3. 精彩程度（0.0 ~ 1.0评分，1.0代表非常有意义或新奇。如果是节假日或有纪念意义的活动，评分可以适当高一点）
         4. 简短原因（20字以内，基于地点特点、日期环境给出一个温馨或有见地的理由）
 
@@ -298,7 +316,7 @@ class OpenAIService {
         ]
         
         guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
-            DispatchQueue.main.async { completion("时光里的停留", "分析中...", [], 0.0, false) }
+            DispatchQueue.main.async { completion(Footprint.candidateTitles.randomElement() ?? "新足迹", "分析中...", [], 0.0, false) }
             return
         }
         
@@ -345,7 +363,7 @@ class OpenAIService {
                            let parsedConfig = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any] {
                             let title = parsedConfig["title"] as? String ?? "新足迹"
                             let reason = parsedConfig["reason"] as? String ?? "在这个熟悉或陌生的地方留下了一段回忆。"
-                            let tags = parsedConfig["tags"] as? [String] ?? []
+                            let tags = (parsedConfig["tags"] as? [String] ?? []).filter { allAvailableTags.contains($0) }
                             let score = (parsedConfig["score"] as? NSNumber)?.floatValue ?? (parsedConfig["aiScore"] as? NSNumber)?.floatValue ?? 0.0
                             DispatchQueue.main.async { completion(title, reason, tags, score, true) }
                             return

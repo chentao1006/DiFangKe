@@ -41,6 +41,7 @@ struct FootprintModalView: View {
     @State private var showingPhotoDeleteAlert = false
     @State private var photoToDelete: String? = nil
     @State private var showingSearchSheet = false
+    @State private var showingTagSheet = false
     
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @State private var isGeneratingAI = false
@@ -212,6 +213,9 @@ struct FootprintModalView: View {
             .sheet(isPresented: $showFullscreenMap) {
                 FullFrameMapView(footprint: footprint)
             }
+            .sheet(isPresented: $showingTagSheet) {
+                TagSelectionSheet(footprint: footprint)
+            }
             .alert("添加新标签", isPresented: $showingAddTagAlert) {
                 TextField("输入标签名称", text: $newTagName)
                 Button("确定") {
@@ -257,7 +261,8 @@ struct FootprintModalView: View {
     }
     
     private func checkAndGenerateAIContent() {
-        let isTitleEmpty = footprint.title.trimmingCharacters(in: .whitespaces).isEmpty || footprint.title == "时光里的停留"
+        // 只要标题是预设的文艺占位符之一，就认为它是“空”的需要被 AI 覆盖
+        let isTitleEmpty = footprint.title.trimmingCharacters(in: .whitespaces).isEmpty || Footprint.candidateTitles.contains(footprint.title)
         let isReasonEmpty = (footprint.reason ?? "").trimmingCharacters(in: .whitespaces).isEmpty
         
         if isTitleEmpty || isReasonEmpty {
@@ -289,6 +294,7 @@ struct FootprintModalView: View {
             endTime: footprint.endTime,
             placeName: matchedPlace?.name,
             placeTags: footprint.tags,
+            allAvailableTags: availableTags.map { $0.name },
             address: footprint.address,
             isOngoing: false
         ) { title, reason, tags, score, success in
@@ -299,21 +305,8 @@ struct FootprintModalView: View {
                         footprint.reason = reason
                         footprint.aiScore = score
                         
-                        // 合并新生成的标签
-                        var currentTags = footprint.tags
-                        for tag in tags {
-                            let trimmed = tag.trimmingCharacters(in: .whitespaces)
-                            if !trimmed.isEmpty && !currentTags.contains(trimmed) {
-                                currentTags.append(trimmed)
-                                
-                                // 如果是全局未有的新标签，创建它
-                                let descriptor = FetchDescriptor<PlaceTag>(predicate: #Predicate { $0.name == trimmed })
-                                if (try? modelContext.fetch(descriptor).first) == nil {
-                                    modelContext.insert(PlaceTag(name: trimmed))
-                                }
-                            }
-                        }
-                        footprint.tags = currentTags
+                        // 直接应用 AI 建议的标签（AI 已被要求只从现有池中选择）
+                        footprint.tags = tags
                         footprint.aiAnalyzed = true
                     }
                 } else if forcePrompt {
@@ -429,6 +422,14 @@ struct FootprintModalView: View {
             }
             .buttonStyle(.plain)
             HStack(spacing: 6) { 
+                Image(systemName: "calendar")
+                    .font(.caption)
+                    .foregroundColor(Color.dfkSecondaryText)
+                Text(footprint.date.formatted(.dateTime.year().month().day().weekday()))
+                    .font(.subheadline)
+                    .foregroundColor(Color.dfkSecondaryText) 
+            }
+            HStack(spacing: 6) { 
                 Image(systemName: "clock")
                     .font(.caption)
                     .foregroundColor(Color.dfkSecondaryText)
@@ -473,30 +474,9 @@ struct FootprintModalView: View {
                     .clipShape(Capsule())
                 }
                 
-                // 3. Add Tag Menu
-                Menu {
-                    let candidates = availableTags
-                        .filter { !footprint.tags.contains($0.name) }
-                        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-                    
-                    if !candidates.isEmpty {
-                        Section("已有标签") {
-                            ForEach(candidates) { tag in
-                                Button(tag.name) {
-                                    toggleTag(tag.name)
-                                }
-                            }
-                        }
-                    }
-                    
-                    Divider()
-                    
-                    Button {
-                        newTagName = ""
-                        showingAddTagAlert = true
-                    } label: {
-                        Label("创建新标签...", systemImage: "plus.circle")
-                    }
+                // 3. Add Tag Button (Replaced old Menu)
+                Button {
+                    showingTagSheet = true
                 } label: {
                     Image(systemName: "tag")
                         .font(.system(size: 13))

@@ -889,6 +889,7 @@ struct PhotoImportResultsView: View {
     @Environment(\.dismiss) var dismiss
     @Query private var allPlaces: [Place]
     @State private var selectedIDs: Set<UUID> = []
+    @State private var editingFootprint: Footprint?
 
     init(results: [Footprint], onConfirm: @escaping ([Footprint]) -> Void) {
         self.results = results
@@ -922,6 +923,13 @@ struct PhotoImportResultsView: View {
                         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                             .foregroundColor(isSelected ? .dfkAccent : .secondary)
                             .font(.system(size: 20))
+                            .onTapGesture {
+                                if isSelected {
+                                    selectedIDs.remove(fp.footprintID)
+                                } else {
+                                    selectedIDs.insert(fp.footprintID)
+                                }
+                            }
                         
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
@@ -934,17 +942,10 @@ struct PhotoImportResultsView: View {
                                     .foregroundColor(.secondary)
                             }
                             
-                            FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false) { _, _ in }
-                                .disabled(true)
-                                .opacity(isSelected ? 1.0 : 0.6)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if isSelected {
-                            selectedIDs.remove(fp.footprintID)
-                        } else {
-                            selectedIDs.insert(fp.footprintID)
+                            FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false) { item, _ in 
+                                self.editingFootprint = item
+                            }
+                            .opacity(isSelected ? 1.0 : 0.6)
                         }
                     }
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -952,6 +953,9 @@ struct PhotoImportResultsView: View {
                 }
             }
             .listStyle(.plain)
+            .sheet(item: $editingFootprint) { footprint in
+                FootprintModalView(footprint: footprint, autoFocus: false)
+            }
             .navigationTitle("寻回的记忆")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
