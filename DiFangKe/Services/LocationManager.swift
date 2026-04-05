@@ -475,6 +475,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         guard let start = potentialStopStartLocation?.timestamp else { return nil }
         let duration = Date().timeIntervalSince(start)
         let totalMinutes = Int(duration / 60)
+        
+        // 如果停留时间还在 1 分钟内，可能刚开始记录，此时不显示时长
         if totalMinutes < 1 { return nil }
         
         if totalMinutes >= 60 {
@@ -858,16 +860,27 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         
         // 3. 更新当前停留状态用于 UI 显示
         if let startLoc = potentialStopStartLocation {
-            // 如果新位置偏差过大（>100m），并且精度尚可（<100m），判定为离开（防止 GPS 启动冷开始的漂移误判）
+            // 改进：增加地点粘性。如果当前位置依然匹配到与起始点相同的“重要地点”，则不应判定为离开并重置停留时间。
+            let startPlace = matchedPlaceFor(coordinate: startLoc.coordinate)
+            let currentPlace = matchedPlaceFor(coordinate: location.coordinate)
+            
+            // 判定是否离开：
+            // A: 如果有匹配地点，且地点 ID 变了，判定为离开
+            // B: 如果没有匹配地点，且位移超过 300m，且精度尚可，判定为离开（放宽到 300m 减少因室内飘移导致的停留时刻重置）
+            let isSamePlace = (startPlace != nil && startPlace?.placeID == currentPlace?.placeID)
             let distance = location.distance(from: startLoc)
-            if distance > 100.0 && location.horizontalAccuracy < 100.0 {
+            
+            if !isSamePlace && distance > 300.0 && location.horizontalAccuracy < 100.0 {
                 potentialStopStartLocation = location
                 savePotentialStop()
+                ongoingTitle = nil
+                saveOngoingTitle()
             }
         } else {
             potentialStopStartLocation = location
             savePotentialStop()
             ongoingTitle = nil
+            saveOngoingTitle()
         }
         
         // 3. 触发正在持续停留的 AI 分析 (停留 5 分钟后触发第一次，之后每 60 分钟刷新)
@@ -916,8 +929,37 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                 self?.isAnalyzingOngoing = false
                 if success {
                     self?.ongoingTitle = title
+                    self?.saveOngoingTitle()
                 }
             }
+        }
+    }
+    
+    private func saveOngoingTitle() {
+        if let title = ongoingTitle {
+            UserDefaults.standard.set(title, forKey: "pending_title")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "pending_title")
+        }
+    }
+    
+    /// 辅助方法：判断特定坐标匹配到的地点
+    private func matchedPlaceFor(coordinate: CLLocationCoordinate2D) -> Place? {
+        let loc = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        let validMatches = allPlaces.filter { place in
+            let placeLocation = CLLocation(latitude: place.latitude, longitude: place.longitude)
+            let distance = loc.distance(from: placeLocation)
+            return distance <= Double(place.radius) + 100.0
+        }
+        
+        if let priorityMatch = validMatches.first(where: { $0.isPriority }) {
+            return priorityMatch
+        }
+        
+        return validMatches.min { p1, p2 in
+            let d1 = loc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude))
+            let d2 = loc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
+            return d1 < d2
         }
     }
 
@@ -1148,8 +1190,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         let time = UserDefaults.standard.double(forKey: "pending_time")
         if lat != 0 && lng != 0 {
             let timestamp = Date(timeIntervalSince1970: time)
-            // 只接受 48 小时内且不是未来时间的状态，支持跨周末或超长宅家状态
-            if abs(Date().timeIntervalSince(timestamp)) < 48 * 3600 {
+            // 允许恢复 30 天内的状态，不再激进地清除长达数天的“宅家”状态
+            if abs(Date().timeIntervalSince(timestamp)) < 30 * 24 * 3600 {
                 potentialStopStartLocation = CLLocation(
                     coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lng),
                     altitude: 0,
@@ -1157,6 +1199,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                     verticalAccuracy: 50,
                     timestamp: timestamp
                 )
+                ongoingTitle = UserDefaults.standard.string(forKey: "pending_title")
             } else {
                 // 清理过时状态
                 UserDefaults.standard.removeObject(forKey: "pending_lat")
