@@ -595,6 +595,21 @@ struct TimelinePageView: View {
                 Text(pastQuoteTitle).font(.title3.bold())
                 Text(pastQuoteSubtitle).font(.subheadline).foregroundColor(Color.dfkSecondaryText)
             }
+            
+            NavigationLink(destination: HistoryListView(initialDate: date, showImportOnAppear: true)) {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.and.arrow.down.badge.clock")
+                    Text("从相册寻回当时的足迹")
+                }
+                .font(.system(size: 14, weight: .bold))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+                .background(Color.dfkAccent.opacity(0.1))
+                .foregroundColor(.dfkAccent)
+                .cornerRadius(20)
+            }
+            .padding(.top, 10)
+            
             Spacer()
         }
         .onAppear {

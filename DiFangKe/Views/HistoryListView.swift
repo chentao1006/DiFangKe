@@ -86,6 +86,7 @@ struct HistoryListView: View {
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
     
     let initialDate: Date
+    let showImportOnAppear: Bool
     @State private var viewMode: ViewMode = .week
     @State private var cachedSummaries: [Date: DaySummary] = [:]
     @State private var showingDate: IdentifiableDate? = nil
@@ -119,8 +120,9 @@ struct HistoryListView: View {
     @State private var hasScrolledWeek = false
     @State private var hasScrolledMonth = false
     
-    init(initialDate: Date = Date()) {
+    init(initialDate: Date = Date(), showImportOnAppear: Bool = false) {
         self.initialDate = Calendar.current.startOfDay(for: initialDate)
+        self.showImportOnAppear = showImportOnAppear
     }
     
     var body: some View {
@@ -134,7 +136,12 @@ struct HistoryListView: View {
         .navigationTitle("往昔足迹")
         .navigationBarTitleDisplayMode(.large)
         .background(Color.dfkBackground)
-        .onAppear { updateSummaries() }
+        .onAppear { 
+            updateSummaries() 
+            if showImportOnAppear {
+                checkPhotoPermission()
+            }
+        }
         .onChange(of: allFootprints) { updateSummaries() }
         .sheet(item: $showingDate) { item in
             SimpleDayTimelineView(date: item.date)

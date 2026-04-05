@@ -1322,28 +1322,46 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         let subLocality = firstMark?.subLocality
         let nameMark = firstMark?.name
         
-        // 3. 并行执行多项搜索以提高效率并增加多样性
-        // A. 系统原生兴趣点 (最准确的“附近有什么”，不依赖关键词)
-        async let poisFromPOI = performPOIRequest(at: coordinate, radius: 1500)
+        // 3. 优化分级搜索 (降低 API 并发，提高响应速度与电池效能)
+        // A. 系统级基础探测
+        async let poisFromPOI = performPOIRequest(at: coordinate, radius: 1000)
         async let poisFromGeneral = performNaturalLanguageSearch(at: coordinate, query: "附近 周边 地点", radius: 1000)
         
-        // B. 基于街道和区域的搜索 (找回不带通用分类词的写字楼、住宅楼或小商铺)
+        // B. 即时生活圈 & 社交网红 (办公、社交、生活、网红点 - 半径 1.5km)
+        async let poisFromLife = performNaturalLanguageSearch(at: coordinate, query: "大厦 写字楼 中心 商务 SOHO CBD 国际中心 塔 咖啡 书店 瑞幸 Luckin 星巴克 喜茶 玩具 潮玩 乐高 POP MART 旗舰店 网红 打卡 拍照 绝美 出片 秘境 停车场 驿站", radius: 1500)
+        
+        // C. 文体、商业与公共空间 (商场、剧院、体育、公园、游乐场、广场、城市空间 - 半径 2.5km)
+        async let poisFromVenuesPublic = performNaturalLanguageSearch(at: coordinate, query: "公园 游乐场 广场 园 林 绿地 湖 岛 湾 滩 漫步道 步道 骑行 体育馆 运动场 网球馆 游泳馆 场馆 剧院 剧场 电影院 影城 影院 音乐厅 艺术中心 展览馆 美术馆 科技馆 商场 购物中心 万象 城 悦 恒隆 苹果 华为", radius: 2500)
+        
+        // D. 宏大地标、交通、文旅与教育 (枢纽、机场、火车站、景区、地标、大学、医院 - 半径 5km)
+        async let poisFromLandmarksLandscale = performNaturalLanguageSearch(at: coordinate, query: "机场 车站 火车站 高铁站 枢纽 总站 码头 港 景区 景点 故居 寺 庙 遗址 古镇 纪念碑 雕像 祠 宫 塔 大学 学院 医院 卫生 局 馆", radius: 5000)
+        
+        // E. 区域 AOI 定向深挖 (针对反地理编码结果进行精准确认)
+        async let poisFromAOITask: [LocationSuggestion] = {
+            guard let aois = firstMark?.areasOfInterest, !aois.isEmpty else { return [] }
+            var results: [LocationSuggestion] = []
+            for aoi in aois {
+                let aoiResults = await performNaturalLanguageSearch(at: coordinate, query: aoi, radius: 1500)
+                results.append(contentsOf: aoiResults)
+            }
+            return results
+        }()
+        
+        // F. 基础地址辅助搜索 (街道、具体名称、区县)
         async let poisFromStreet = street != nil ? performNaturalLanguageSearch(at: coordinate, query: street!, radius: 1000) : []
         async let poisFromName = (nameMark != nil && nameMark != street) ? performNaturalLanguageSearch(at: coordinate, query: nameMark!, radius: 1000) : []
         async let poisFromDistrict = subLocality != nil ? performNaturalLanguageSearch(at: coordinate, query: subLocality!, radius: 1500) : []
-        
-        // C. 重点设施搜索 (针对用户高频率打卡的非通用词地点)
-        async let poisFromOffice = performNaturalLanguageSearch(at: coordinate, query: "大厦 写字楼 中心 广场 工业区 软件园", radius: 1500)
-        async let poisFromLife = performNaturalLanguageSearch(at: coordinate, query: "公园 景点 馆 商场 社区 小区 酒店 旅馆 医院 学校", radius: 2000)
-        
+
         // 4. 合并所有结果
         allFound.append(contentsOf: await poisFromPOI)
         allFound.append(contentsOf: await poisFromGeneral)
         allFound.append(contentsOf: await poisFromStreet)
         allFound.append(contentsOf: await poisFromName)
         allFound.append(contentsOf: await poisFromDistrict)
-        allFound.append(contentsOf: await poisFromOffice)
         allFound.append(contentsOf: await poisFromLife)
+        allFound.append(contentsOf: await poisFromVenuesPublic)
+        allFound.append(contentsOf: await poisFromLandmarksLandscale)
+        allFound.append(contentsOf: await poisFromAOITask)
         
         // 补充反向地理编码自身带有的 AOI (直接对应的地标)
         if let aois = firstMark?.areasOfInterest {
