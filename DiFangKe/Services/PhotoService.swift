@@ -262,8 +262,6 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 }
             }
             
-            let candidateTitles = Footprint.candidateTitles
-            
             // 处理重要足迹（带解析）
             for cluster in prioritizedClusters {
                 group.enter()
@@ -290,7 +288,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 let hash = "\(Int(centerLat * 10000))\(Int(centerLon * 10000))"
                 
                 // 1. 优先匹配已有的重要地点 (放宽匹配范围以适配照片 GPS 精度)
-                var title = candidateTitles.randomElement() ?? "时光里的足迹"
+                var title = "发现足迹"
                 var matchedPlaceID: UUID? = nil
                 
                 let matches = allPlaces.filter { place in
@@ -417,7 +415,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 let hash = "\(Int(centerLat * 10000))\(Int(centerLon * 10000))"
                 
                 // 仅做位置匹配 (放宽匹配范围)
-                var title = candidateTitles.randomElement() ?? "时光里的足迹"
+                var title = "发现足迹"
                 var matchedPlaceID: UUID? = nil
                 
                 let matches = allPlaces.filter { place in

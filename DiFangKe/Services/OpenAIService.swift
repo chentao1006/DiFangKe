@@ -294,7 +294,7 @@ class OpenAIService {
         地点信息：\(promptSnippet)\(tagContext)
 
         请输出：
-        1. 简短标题（10字以内，反映活动或地点特点。**绝对禁止使用“定位中停留”、“位置记录”、“非预设地点”、“具有标签”等死板或技术性词汇**，也不要直接复述地点信息。尽量具体且有生活气息，如“在咖啡馆小憩”或“办公中”）
+        1. 简短标题（10字以内，应反映地点名称或具体的活动，如“在咖啡馆小憩”、“公司办公”、“超市购物”或“回家”。**绝对禁止使用“定位中停留”、“位置记录”、“非预设地点”等词汇**。禁止使用单纯的感叹或文学化描述，如“时光流逝”。应明确所在的“地方”。）
         2. 标签：根据地点和活动，从上方提供的“候选标签池”中选择 0-2 个最合适的关键词标签。**绝对禁止创建任何不在列表中的自定义标签**。如果没有合适的，请返回空数组 []。
         3. 精彩程度（0.0 ~ 1.0评分，1.0代表非常有意义或新奇。如果是节假日或有纪念意义的活动，评分可以适当高一点）
         4. 简短原因（20字以内，基于地点特点、日期环境给出一个温馨或有见地的理由）
@@ -318,7 +318,7 @@ class OpenAIService {
         ]
         
         guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
-            DispatchQueue.main.async { completion(Footprint.candidateTitles.randomElement() ?? "新足迹", "分析中...", [], 0.0, false) }
+            DispatchQueue.main.async { completion(placeName ?? address ?? "地点记录", "分析中...", [], 0.0, false) }
             return
         }
         

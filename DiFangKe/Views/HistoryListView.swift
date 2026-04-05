@@ -37,7 +37,7 @@ struct SimpleDayTimelineView: View {
     
     var dailyFootprints: [Footprint] {
         allFootprints.filter { 
-            Calendar.current.isDate($0.date, inSameDayAs: date) &&
+            Calendar.current.isDate($0.startTime, inSameDayAs: date) &&
             $0.status != .ignored
         }
     }
@@ -257,7 +257,7 @@ struct HistoryListView: View {
     
     private func updateSummaries() {
         let validFootprints = allFootprints.filter { $0.status != .ignored }
-        let grouped = Dictionary(grouping: validFootprints) { Calendar.current.startOfDay(for: $0.date) }
+        let grouped = Dictionary(grouping: validFootprints) { Calendar.current.startOfDay(for: $0.startTime) }
         var dict: [Date: DaySummary] = [:]
         
         for (date, footprints) in grouped {

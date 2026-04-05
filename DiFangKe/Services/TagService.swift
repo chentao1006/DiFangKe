@@ -82,14 +82,44 @@ class TagService {
     }
     
     /// 当重命名一个全局标签时，同步更新所有足迹中的引用
+    /// 如果新名称已存在，则合并这两个标签
     func renameTag(oldName: String, newName: String, in tag: PlaceTag, allFootprints: [Footprint], in context: ModelContext) {
         let trimmedNewName = newName.trimmingCharacters(in: .whitespaces)
         guard !trimmedNewName.isEmpty && trimmedNewName != oldName else { return }
         
-        tag.name = trimmedNewName
+        // 检查新名称是否已经存在
+        let descriptor = FetchDescriptor<PlaceTag>()
+        let allTags = (try? context.fetch(descriptor)) ?? []
+        
+        if allTags.contains(where: { $0.name == trimmedNewName }) {
+            // 如果新名称已存在，删除当前的 tag (因为它将被合并到 existingTag 中)
+            context.delete(tag)
+        } else {
+            // 如果不存在，直接重命名
+            tag.name = trimmedNewName
+        }
+        
+        // 同步更所有足迹
         for footprint in allFootprints {
             if let index = footprint.tags.firstIndex(of: oldName) {
                 footprint.tags[index] = trimmedNewName
+            }
+        }
+        
+        try? context.save()
+    }
+    
+    /// 清理并合并所有名称完全重复的标签
+    func mergeDuplicateTags(in context: ModelContext) {
+        let descriptor = FetchDescriptor<PlaceTag>(sortBy: [SortDescriptor(\.name)])
+        guard let allTags = try? context.fetch(descriptor) else { return }
+        
+        var seenNames = Set<String>()
+        for tag in allTags {
+            if seenNames.contains(tag.name) {
+                context.delete(tag)
+            } else {
+                seenNames.insert(tag.name)
             }
         }
         try? context.save()

@@ -8,17 +8,22 @@ final class TransportManualSelection {
     var startTime: Date = Date()
     var endTime: Date = Date()
     var vehicleType: String = ""
+    var isDeleted: Bool = false
+    var startLocationOverride: String?
+    var endLocationOverride: String?
     
-    init(recordID: UUID = UUID(), startTime: Date = Date(), endTime: Date = Date(), vehicleType: String = "") {
+    init(recordID: UUID = UUID(), startTime: Date = Date(), endTime: Date = Date(), vehicleType: String = "", isDeleted: Bool = false, startLocationOverride: String? = nil, endLocationOverride: String? = nil) {
         self.recordID = recordID
         self.startTime = startTime
         self.endTime = endTime
         self.vehicleType = vehicleType
+        self.isDeleted = isDeleted
+        self.startLocationOverride = startLocationOverride
+        self.endLocationOverride = endLocationOverride
     }
 }
 
 enum TransportType: String, CaseIterable, Codable {
-    case superSlow = "superSlow"       // 龟速
     case slow = "slow"                 // 步行
     case bicycle = "bicycle"           // 自行车
     case motorcycle = "motorcycle"     // 摩托车
@@ -29,7 +34,6 @@ enum TransportType: String, CaseIterable, Codable {
     
     var icon: String {
         switch self {
-        case .superSlow: return "turtle.fill"
         case .slow: return "figure.walk"
         case .bicycle: return "bicycle"
         case .motorcycle: return "moped.fill"
@@ -42,7 +46,6 @@ enum TransportType: String, CaseIterable, Codable {
     
     var sfSymbol: String {
         switch self {
-        case .superSlow: return "tortoise.fill"
         case .slow: return "figure.walk"
         case .bicycle: return "bicycle"
         case .motorcycle: return "moped.fill"
@@ -55,14 +58,11 @@ enum TransportType: String, CaseIterable, Codable {
     
     static func from(speed: Double) -> TransportType {
         let kmh = speed * 3.6
-        if kmh < 3 { return .superSlow }
-        if kmh < 8 { return .slow }
-        if kmh < 20 { return .bicycle }
-        if kmh < 40 { return .motorcycle }
-        if kmh < 70 { return .bus }
-        if kmh < 120 { return .car }
-        if kmh < 450 { return .train }
-        return .airplane
+        if kmh < 6.5 { return .slow }      // < 6.5 km/h: 步行
+        if kmh < 12 { return .bicycle }    // 6.5 - 12 km/h: 自行车
+        if kmh < 120 { return .car }       // 12 - 120 km/h: 汽车
+        if kmh < 450 { return .train }     // 120 - 450 km/h: 火车/高铁
+        return .airplane                   // > 450 km/h: 飞机
     }
 }
 
@@ -89,6 +89,10 @@ struct Transport: Identifiable {
         self.averageSpeed = averageSpeed
         self.points = points
         self.manualType = manualType
+    }
+    
+    var duration: TimeInterval {
+        endTime.timeIntervalSince(startTime)
     }
     
     var currentType: TransportType {

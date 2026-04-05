@@ -18,9 +18,10 @@ struct TagManagerView: View {
     // Focus & Editing State
     enum FocusField: Hashable {
         case newTag
-        case editingTag(String)
+        case editingTag(PersistentIdentifier)
     }
     @FocusState private var focusedField: FocusField?
+    @State private var editingTagID: PersistentIdentifier?
     @State private var editingTagOriginalName: String?
     @State private var editingTagName = ""
     
@@ -62,9 +63,9 @@ struct TagManagerView: View {
                 } else {
                     ForEach(list) { tag in
                         Group {
-                            if editingTagOriginalName == tag.name && editMode == .inactive {
+                            if editingTagID == tag.persistentModelID && editMode == .inactive {
                                 TextField("", text: $editingTagName)
-                                    .focused($focusedField, equals: .editingTag(tag.name))
+                                    .focused($focusedField, equals: .editingTag(tag.persistentModelID))
                                     .submitLabel(.done)
                                     .onSubmit {
                                         finishEditingTag(tag)
@@ -149,12 +150,15 @@ struct TagManagerView: View {
         .onTapGesture {
             if editMode == .inactive {
                 focusedField = nil
-                if editingTagOriginalName != nil {
-                    if let tag = tags.first(where: { $0.name == editingTagOriginalName }) {
+                if let tagID = editingTagID {
+                    if let tag = tags.first(where: { $0.persistentModelID == tagID }) {
                         finishEditingTag(tag)
                     }
                 }
             }
+        }
+        .onAppear {
+            TagService.shared.mergeDuplicateTags(in: modelContext)
         }
         .alert("确认删除", isPresented: $showDeleteConfirm) {
             Button("删除", role: .destructive) {
@@ -220,9 +224,10 @@ struct TagManagerView: View {
     }
     
     private func startEditingTag(_ tag: PlaceTag) {
+        editingTagID = tag.persistentModelID
         editingTagOriginalName = tag.name
         editingTagName = tag.name
-        focusedField = .editingTag(tag.name)
+        focusedField = .editingTag(tag.persistentModelID)
     }
     
     private func finishEditingTag(_ tag: PlaceTag) {
@@ -231,6 +236,7 @@ struct TagManagerView: View {
         
         TagService.shared.renameTag(oldName: oldName, newName: newName, in: tag, allFootprints: footprints, in: modelContext)
         
+        editingTagID = nil
         editingTagOriginalName = nil
         focusedField = nil
     }

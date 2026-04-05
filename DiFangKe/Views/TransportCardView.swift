@@ -9,6 +9,7 @@ struct TransportCardView: View {
     var isLast: Bool = false
     var isToday: Bool = false
     var onSelect: ((Transport) -> Void)? = nil
+    var onDelete: ((Transport) -> Void)? = nil
     
     var body: some View {
         Button {
@@ -89,10 +90,33 @@ struct TransportCardView: View {
                     .fill(Color(uiColor: .secondarySystemGroupedBackground))
                     .shadow(color: .black.opacity(0.04), radius: 6, x: 0, y: 3)
             )
-            .padding(.bottom, 8)
+            .padding(.bottom, 12)
+            .contextMenu {
+                Button {
+                    onSelect?(transport)
+                } label: {
+                    Label("编辑", systemImage: "pencil")
+                }
+                
+                Button(role: .destructive) {
+                    showingDeleteAlert = true
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+            }
+            .alert("确认删除此交通记录？", isPresented: $showingDeleteAlert) {
+                Button("取消", role: .cancel) { }
+                Button("删除", role: .destructive) {
+                    onDelete?(transport)
+                }
+            } message: {
+                Text("删除后该段交通将从时间轴中隐藏。")
+            }
         }
         .buttonStyle(.plain)
     }
+    
+    @State private var showingDeleteAlert = false
     
     @ViewBuilder
     private var transportIcon: some View {
@@ -118,6 +142,24 @@ struct TransportModalView: View {
     @State private var position: MapCameraPosition = .automatic
     @State private var localManualType: TransportType? = nil
     
+    @Environment(LocationManager.self) private var locationManager
+    @State private var showingSearchSheet: LocationType? = nil
+    @State private var localStartOverride: String? = nil
+    @State private var localEndOverride: String? = nil
+    
+    enum LocationType: Identifiable {
+        case start, end
+        var id: Int { self == .start ? 0 : 1 }
+    }
+    
+    private var currentStartLocation: String {
+        localStartOverride ?? transport.startLocation
+    }
+    
+    private var currentEndLocation: String {
+        localEndOverride ?? transport.endLocation
+    }
+    
     // Use the effective type for display
     private var displayType: TransportType {
         localManualType ?? transport.currentType
@@ -128,16 +170,56 @@ struct TransportModalView: View {
             ZStack(alignment: .top) {
                 // 1. Map View
                 Map(position: $position) {
-                    // Start Marker
+                    // Start Annotation
                     if let start = transport.points.first {
-                        Marker(transport.startLocation, coordinate: start)
-                            .tint(.green)
+                        Annotation(currentStartLocation, coordinate: start) {
+                            Menu {
+                                SuggestionsMenuContent(locationManager: locationManager, coordinate: start, forOngoing: false) {
+                                    showingSearchSheet = .start
+                                } onCustomSelection: { newName in
+                                    saveLocationOverride(type: .start, name: newName)
+                                }
+                            } label: {
+                                VStack(spacing: 4) {
+                                    Text(currentStartLocation)
+                                        .font(.caption2.bold())
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 2)
+                                        .background(.ultraThinMaterial)
+                                        .cornerRadius(4)
+                                    Image(systemName: "mappin.circle.fill")
+                                        .font(.title)
+                                        .foregroundColor(.green)
+                                        .shadow(radius: 2)
+                                }
+                            }
+                        }
                     }
                     
-                    // End Marker
+                    // End Annotation
                     if let end = transport.points.last {
-                        Marker(transport.endLocation, coordinate: end)
-                            .tint(.red)
+                        Annotation(currentEndLocation, coordinate: end) {
+                            Menu {
+                                SuggestionsMenuContent(locationManager: locationManager, coordinate: end, forOngoing: false) {
+                                    showingSearchSheet = .end
+                                } onCustomSelection: { newName in
+                                    saveLocationOverride(type: .end, name: newName)
+                                }
+                            } label: {
+                                VStack(spacing: 4) {
+                                    Text(currentEndLocation)
+                                        .font(.caption2.bold())
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 2)
+                                        .background(.ultraThinMaterial)
+                                        .cornerRadius(4)
+                                    Image(systemName: "mappin.circle.fill")
+                                        .font(.title)
+                                        .foregroundColor(.red)
+                                        .shadow(radius: 2)
+                                }
+                            }
+                        }
                     }
                     
                     // Route Polyline
@@ -154,8 +236,8 @@ struct TransportModalView: View {
             .navigationTitle("交通详情")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("关闭") { dismiss() }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { dismiss() }.fontWeight(.bold)
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -208,7 +290,41 @@ struct TransportModalView: View {
                     .padding()
                 }
             }
+            .sheet(item: $showingSearchSheet) { type in
+                LocationSearchSheet(
+                    locationManager: locationManager,
+                    coordinate: type == .start ? transport.points.first : transport.points.last,
+                    forOngoing: false
+                ) { newName in
+                    saveLocationOverride(type: type, name: newName)
+                }
+            }
         }
+    }
+    
+    private func saveLocationOverride(type: LocationType, name: String) {
+        withAnimation(.spring(response: 0.3)) {
+            if type == .start {
+                localStartOverride = name
+            } else {
+                localEndOverride = name
+            }
+        }
+        
+        let selection = TransportManualSelection(startTime: transport.startTime, endTime: transport.endTime)
+        if type == .start {
+            selection.startLocationOverride = name
+        } else {
+            selection.endLocationOverride = name
+        }
+        
+        // Preserve existing type if available
+        selection.vehicleType = (localManualType ?? transport.manualType ?? transport.type).rawValue
+        
+        modelContext.insert(selection)
+        try? modelContext.save()
+        
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
     
     private var distanceString: String {
@@ -240,7 +356,6 @@ struct TransportModalView: View {
 extension TransportType {
     var localizedName: String {
         switch self {
-        case .superSlow: return "龟速/停留"
         case .slow: return "步行"
         case .bicycle: return "自行车"
         case .motorcycle: return "摩托车"

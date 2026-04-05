@@ -263,7 +263,8 @@ struct FootprintModalView: View {
     
     private func checkAndGenerateAIContent() {
         // 如果用户手动修改过标题，我们不再认为它是“空”的需要被 AI 覆盖
-        let isTitleNeedsAI = !footprint.isTitleEditedByHand && (footprint.title.trimmingCharacters(in: .whitespaces).isEmpty || Footprint.candidateTitles.contains(footprint.title))
+        let isDefaultTitle = footprint.title == "地点记录" || footprint.title == "发现足迹" || footprint.title.trimmingCharacters(in: .whitespaces).isEmpty
+        let isTitleNeedsAI = !footprint.isTitleEditedByHand && isDefaultTitle
         let isReasonEmpty = (footprint.reason ?? "").trimmingCharacters(in: .whitespaces).isEmpty
         
         if isTitleNeedsAI || isReasonEmpty {
@@ -547,8 +548,10 @@ struct FootprintModalView: View {
 
     
     private var timeRangeString: String {
-        let startStr = footprint.startTime.formatted(.dateTime.hour().minute())
-        let endStr = footprint.endTime.formatted(.dateTime.hour().minute())
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        let startStr = formatter.string(from: footprint.startTime)
+        let endStr = formatter.string(from: footprint.endTime)
         
         let calendar = Calendar.current
         let isStartSameDay = calendar.isDate(footprint.startTime, inSameDayAs: footprint.date)
@@ -561,7 +564,9 @@ struct FootprintModalView: View {
         } else if isStartSameDay && !isEndSameDay {
             return "\(startStr)-次日\(endStr)"
         } else {
-            return "\(footprint.startTime.formatted(.dateTime.month().day().hour().minute()))-\(footprint.endTime.formatted(.dateTime.month().day().hour().minute()))"
+            let monthDayFormatter = DateFormatter()
+            monthDayFormatter.dateFormat = "M月d日 HH:mm"
+            return "\(monthDayFormatter.string(from: footprint.startTime))-\(monthDayFormatter.string(from: footprint.endTime))"
         }
     }
     
