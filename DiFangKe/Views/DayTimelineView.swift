@@ -394,6 +394,7 @@ struct TimelinePageView: View {
     let pastLimitOffset: Int
     
     @State private var selectedFootprint: Footprint?
+    @State private var selectedTransport: Transport?
     @State private var autoFocusOnOpen = false
     @State private var tomorrowQuoteTitle: String = "明天是个未拆的礼物"
     @State private var tomorrowQuoteSubtitle: String = "愿明天的你，能在平凡中发现惊喜。"
@@ -407,6 +408,12 @@ struct TimelinePageView: View {
     @AppStorage("hasSwiped") private var hasSwiped = false
     @State private var animateHint = false
     @State private var notificationAuthStatus: UNAuthorizationStatus = .notDetermined
+    
+    @Query private var manualSelections: [TransportManualSelection]
+    
+    // New: Transport Support
+    @State private var timelineItems: [TimelineItem] = []
+    @State private var isLoadingTimeline = true
     
     var body: some View {
         let currentDayFootprints = self.footprints
@@ -425,7 +432,7 @@ struct TimelinePageView: View {
                             RecordingStatusCard(locationManager: locationManager, footprintCount: currentDayFootprints.count)
                                 .padding(.horizontal, 16)
                             
-                            if currentDayFootprints.isEmpty {
+                            if timelineItems.isEmpty && !isLoadingTimeline {
                                 PlaceholderFootprintCard()
                                     .padding(.horizontal, 0) // Already has horizontal structure inside
                             }
@@ -453,20 +460,33 @@ struct TimelinePageView: View {
                                      .padding(.bottom, 16)
                              }
                              
-                             let validDayFootprints = currentDayFootprints.filter { $0.status != .ignored }
-                             let count = validDayFootprints.count
-                             ForEach(Array(validDayFootprints.enumerated()), id: \.element.id) { index, footprint in
-                                 FootprintCardView(
-                                     footprint: footprint, 
-                                     allPlaces: allPlaces,
-                                     isFirst: index == 0,
-                                     isLast: index == count - 1,
-                                     isToday: isToday
-                                 ) { item, focus in
-                                     self.autoFocusOnOpen = focus
-                                     self.selectedFootprint = item
+                             let items = self.timelineItems
+                             let count = items.count
+                             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                                 switch item {
+                                 case .footprint(let footprint):
+                                     FootprintCardView(
+                                         footprint: footprint, 
+                                         allPlaces: allPlaces,
+                                         isFirst: index == 0,
+                                         isLast: index == count - 1,
+                                         isToday: isToday
+                                     ) { item, focus in
+                                         self.autoFocusOnOpen = focus
+                                         self.selectedFootprint = item
+                                     }
+                                     .padding(.horizontal, 16)
+                                 case .transport(let transport):
+                                     TransportCardView(
+                                         transport: transport,
+                                         isFirst: index == 0,
+                                         isLast: index == count - 1,
+                                         isToday: isToday
+                                     ) { selected in
+                                         self.selectedTransport = selected
+                                     }
+                                     .padding(.horizontal, 16)
                                  }
-                                 .padding(.horizontal, 16)
                              }
                          }
                     }
@@ -491,7 +511,9 @@ struct TimelinePageView: View {
             NotificationManager.shared.getAuthorizationStatus { status in
                 self.notificationAuthStatus = status
             }
+            refreshTimeline()
         }
+        .onChange(of: footprints) { _, _ in refreshTimeline() }
         .sheet(item: $selectedFootprint) { footprint in
             FootprintModalView(footprint: footprint, autoFocus: autoFocusOnOpen)
                 .onDisappear { autoFocusOnOpen = false }
@@ -501,6 +523,76 @@ struct TimelinePageView: View {
                           initialName: locationManager.currentAddress) { newPlace in
                 modelContext.insert(newPlace)
                 try? modelContext.save()
+            }
+        }
+        .sheet(item: $selectedTransport) { transport in
+            TransportModalView(transport: transport) { newType in
+                // Immediate local UI update
+                if let index = timelineItems.firstIndex(where: { 
+                    if case .transport(let t) = $0, t.id == transport.id { return true }
+                    return false
+                }) {
+                    if case .transport(let t) = timelineItems[index] {
+                        let updated = t.updatingType(newType)
+                        timelineItems[index] = .transport(updated)
+                    }
+                }
+            }
+        }
+    }
+    
+    @MainActor
+    private func refreshTimeline() {
+        // Capture snapshots of managed arrays on the main actor to avoid threading crashes
+        let currentFootprints = footprints.filter { $0.status != .ignored }
+        let currentOverrides = manualSelections
+        
+        Task {
+            isLoadingTimeline = true
+            let rawPoints = await Task.detached {
+                RawLocationStore.shared.loadAllDevicesLocations(for: date)
+            }.value
+            
+            let items = TimelineBuilder.buildTimeline(for: date, footprints: currentFootprints, allRawPoints: rawPoints, overrides: currentOverrides)
+            
+            await MainActor.run {
+                self.timelineItems = items
+                self.isLoadingTimeline = false
+            }
+            
+            // Resolve addresses asynchronously
+            resolveTransportAddresses(for: items)
+        }
+    }
+    
+    private func resolveTransportAddresses(for items: [TimelineItem]) {
+        for (index, item) in items.enumerated() {
+            if case .transport(let transport) = item {
+                // Resolve Start
+                if transport.startLocation == "出发点", let startCoord = transport.points.first {
+                    TimelineBuilder.resolveAddress(coordinate: startCoord) { name in
+                        updateTimelineItemAddress(index: index, type: .start, name: name)
+                    }
+                }
+                
+                // Resolve End
+                if transport.endLocation == "目的地", let endCoord = transport.points.last {
+                    TimelineBuilder.resolveAddress(coordinate: endCoord) { name in
+                        updateTimelineItemAddress(index: index, type: .end, name: name)
+                    }
+                }
+            }
+        }
+    }
+    
+    enum AddressType { case start, end }
+    
+    private func updateTimelineItemAddress(index: Int, type: AddressType, name: String) {
+        Task { @MainActor in
+            guard index < timelineItems.count else { return }
+            if case .transport(let transport) = timelineItems[index] {
+                let updated = type == .start ? transport.updatingStart(name) : transport.updatingEnd(name)
+                timelineItems[index] = .transport(updated)
             }
         }
     }
@@ -686,10 +778,24 @@ struct RecordingStatusCard: View {
         let isStopped = !locationManager.isTracking
         if isStopped {
             return "定位记录已关闭"
-        } else if let ongoing = locationManager.ongoingTitle {
+        }
+        
+        // 探测实时移动状态
+        if let location = locationManager.lastLocation, location.speed > 1.0 {
+            let speedKmh = location.speed * 3.6
+            if speedKmh > 90 {
+                return "正在高速移动"
+            } else if speedKmh > 30 {
+                return "正在快速移动"
+            } else if speedKmh > 5 {
+                return "正在持续移动"
+            }
+        }
+        
+        if let ongoing = locationManager.ongoingTitle {
             return ongoing
         } else {
-            return "正在记录足迹..."
+            return "正在此处停留"
         }
     }
     
@@ -721,7 +827,7 @@ struct RecordingStatusCard: View {
                     .frame(width: 1.5)
                     .frame(maxHeight: .infinity)
                     .padding(.bottom, -20)
-            }.frame(width: 36)
+            }.frame(width: 40)
             
             VStack(alignment: .leading, spacing: 0) {
                 // Top Section: Info
@@ -757,31 +863,31 @@ struct RecordingStatusCard: View {
                     Spacer()
                     
                     VStack(alignment: .trailing, spacing: 6) {
-                        if locationManager.isTracking {
-                            // 精度/能效状态标识
-                            Group {
-                                let duration = locationManager.pulseDuration
-                                if duration < 1.0 {
-                                    Text("高精度")
-                                        .foregroundColor(.dfkAccent)
-                                } else if duration < 2.0 {
-                                    Text("巡航中")
-                                        .foregroundColor(.blue)
-                                } else {
-                                    Text("低功耗")
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            .font(.system(size: 9, weight: .bold))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(Color.secondary.opacity(0.06))
-                            .cornerRadius(6)
-                        }
+                        // if locationManager.isTracking {
+                        //     // 精度/能效状态标识
+                        //     Group {
+                        //         let duration = locationManager.pulseDuration
+                        //         if duration < 1.0 {
+                        //             Text("高精度")
+                        //                 .foregroundColor(.dfkAccent)
+                        //         } else if duration < 2.0 {
+                        //             Text("巡航中")
+                        //                 .foregroundColor(.blue)
+                        //         } else {
+                        //             Text("低功耗")
+                        //                 .foregroundColor(.secondary)
+                        //         }
+                        //     }
+                        //     .font(.system(size: 9, weight: .bold))
+                        //     .padding(.horizontal, 6)
+                        //     .padding(.vertical, 3)
+                        //     .background(Color.secondary.opacity(0.06))
+                        //     .cornerRadius(6)
+                        // }
 
-                        if let place = locationManager.matchedPlace {
+                        if let place = locationManager.matchedPlace, place.isUserDefined {
                             Text(place.name)
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
                                 .background(Color.orange.opacity(0.12))
@@ -1364,7 +1470,7 @@ struct FullFrameTrackingMapView: View {
                 }
             }
             .ignoresSafeArea(edges: .bottom)
-            .navigationTitle("追踪地图")
+            .navigationTitle("今日轨迹")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -1390,7 +1496,7 @@ struct SuggestionsMenuContent: View {
             Button {
                 onSearchRequested()
             } label: {
-                Label("搜索其他地点...", systemImage: "magnifyingglass")
+                Text("搜索其他地点...")
             }
             
             Divider()
@@ -1406,9 +1512,6 @@ struct SuggestionsMenuContent: View {
                     } label: {
                         HStack {
                             Text(suggestion.name)
-                            if suggestion.isExistingPlace {
-                                Image(systemName: "mappin.circle.fill")
-                            }
                         }
                     }
                 }

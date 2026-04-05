@@ -31,6 +31,9 @@
 		C64D3DA62F8155D800BB3C3F /* TagSelectionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3DA52F8155D800BB3C3F /* TagSelectionSheet.swift */; };
 		C64D3DA82F81576800BB3C3F /* TagManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3DA72F81576800BB3C3F /* TagManagerView.swift */; };
 		C64D3DAC2F815E2C00BB3C3F /* TagService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3DAA2F815E2C00BB3C3F /* TagService.swift */; };
+		C65E583B2F8241350030A766 /* TimelineBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C65E583A2F8241350030A766 /* TimelineBuilder.swift */; };
+		C65E583D2F8241420030A766 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C65E583C2F8241420030A766 /* Transport.swift */; };
+		C65E583F2F82415C0030A766 /* TransportCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C65E583E2F82415C0030A766 /* TransportCardView.swift */; };
 		CDA3376C04480D9A7C70C2BC /* PlacePickerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F44E7F2A482D33533D342882 /* PlacePickerViewModel.swift */; };
 		D41ABCD1F214C4E81A5F8C0C /* PlacesManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D09C072C5681826463BD99 /* PlacesManagerView.swift */; };
 		DCF7DA8245034788006DA387 /* Footprint.swift in Sources */ = {isa = PBXBuildFile; fileRef = A49FF8D1053B68159E4D2EEC /* Footprint.swift */; };
@@ -69,6 +72,9 @@
 		C64D3DA72F81576800BB3C3F /* TagManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagManagerView.swift; sourceTree = "<group>"; };
 		C64D3DAA2F815E2C00BB3C3F /* TagService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagService.swift; sourceTree = "<group>"; };
 		C651F9AF2F7F6CBF00217426 /* DiFangKe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = DiFangKe.entitlements; sourceTree = "<group>"; };
+		C65E583A2F8241350030A766 /* TimelineBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineBuilder.swift; sourceTree = "<group>"; };
+		C65E583C2F8241420030A766 /* Transport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transport.swift; sourceTree = "<group>"; };
+		C65E583E2F82415C0030A766 /* TransportCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransportCardView.swift; sourceTree = "<group>"; };
 		F44E7F2A482D33533D342882 /* PlacePickerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacePickerViewModel.swift; sourceTree = "<group>"; };
 		FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -110,6 +116,7 @@
 		538DCFE6EA70DBBAA1239C2D /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				C65E583E2F82415C0030A766 /* TransportCardView.swift */,
 				C64D3DA72F81576800BB3C3F /* TagManagerView.swift */,
 				C64D3DA52F8155D800BB3C3F /* TagSelectionSheet.swift */,
 				C64D3DA32F81434600BB3C3F /* DFKMapView.swift */,
@@ -133,6 +140,7 @@
 		6C24D087F1ECA32C5EED5AC4 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				C65E583A2F8241350030A766 /* TimelineBuilder.swift */,
 				C64D3DAA2F815E2C00BB3C3F /* TagService.swift */,
 				1FAF51D5207C3CFEFBEB0667 /* ExportManager.swift */,
 				0F466FD610098E71DB17C54D /* LocationManager.swift */,
@@ -146,6 +154,7 @@
 		A0CC0B6B3717D956A36B0F02 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				C65E583C2F8241420030A766 /* Transport.swift */,
 				A49FF8D1053B68159E4D2EEC /* Footprint.swift */,
 				7338D01A9D36898197763A48 /* Place.swift */,
 			);
@@ -240,12 +249,15 @@
 				06A904412C0FBE70CFD67936 /* HistoryListView.swift in Sources */,
 				E59B828958C2254FFEEE593D /* LocationManager.swift in Sources */,
 				93AB9A1A347A786C40F60D26 /* MapPickerView.swift in Sources */,
+				C65E583F2F82415C0030A766 /* TransportCardView.swift in Sources */,
+				C65E583D2F8241420030A766 /* Transport.swift in Sources */,
 				B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */,
 				71F2E5B397A918D6AD287D07 /* OpenAIService.swift in Sources */,
 				C64D3DAC2F815E2C00BB3C3F /* TagService.swift in Sources */,
 				AA4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift in Sources */,
 				C64D3DA42F81434600BB3C3F /* DFKMapView.swift in Sources */,
 				C64D3DA02F8111A800BB3C3F /* RawLogsManagerView.swift in Sources */,
+				C65E583B2F8241350030A766 /* TimelineBuilder.swift in Sources */,
 				19D19D677339112CC0F14ED5 /* Place.swift in Sources */,
 				CDA3376C04480D9A7C70C2BC /* PlacePickerViewModel.swift in Sources */,
 				D41ABCD1F214C4E81A5F8C0C /* PlacesManagerView.swift in Sources */,

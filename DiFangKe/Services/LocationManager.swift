@@ -797,11 +797,18 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                 manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
                 manager.distanceFilter = 50.0
             }
+        } else if speed > 25.0 {
+            // 超高速移动中 (时速 > 90km/h)：公里精度，极大省电
+            if manager.desiredAccuracy != kCLLocationAccuracyKilometer {
+                manager.desiredAccuracy = kCLLocationAccuracyKilometer
+                manager.distanceFilter = 500.0
+                manager.activityType = .automotiveNavigation
+            }
         } else if speed > 10.0 {
-            // 高速移动中 (时速 > 36km/h)：中等精度，因为高速下 10 米和 100 米对轨迹影响不大但非常省电
+            // 高速移动中 (时速 > 36km/h)：中等精度
             if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters {
                 manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-                manager.distanceFilter = 100.0
+                manager.distanceFilter = 200.0
                 manager.activityType = .automotiveNavigation
             }
         } else {
@@ -813,8 +820,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             }
         }
 
-        // 反地理编码更新地址（节流：如果是高速移动或已经在停留，降低反向地理编码频率）
-        let geocodeThrottleDist: Double = (speed > 10.0) ? 500.0 : 100.0 
+        // 反地理编码更新地址（高速节流至 1000 米，兼顾体验与能效）
+        let geocodeThrottleDist: Double = (speed > 10.0) ? 1000.0 : 100.0 
         let shouldGeocode = lastGeocodedLocation.map {
             location.distance(from: $0) > geocodeThrottleDist
         } ?? true
@@ -1540,6 +1547,8 @@ extension CLLocation {
             altitude: self.altitude,
             horizontalAccuracy: self.horizontalAccuracy,
             verticalAccuracy: self.verticalAccuracy,
+            course: self.course,
+            speed: self.speed,
             timestamp: self.timestamp
         )
     }

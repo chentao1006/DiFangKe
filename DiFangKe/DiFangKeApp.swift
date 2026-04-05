@@ -34,13 +34,13 @@ struct DiFangKeApp: App {
         let schema = Schema([
             Footprint.self,
             Place.self,
-            PlaceTag.self
+            PlaceTag.self,
+            TransportManualSelection.self
         ])
         
-        // 我们通过显式指定一个带有“cloud”命名的数据库文件路径来强行重置存储。
-        // 这解决了老版本“非云端模式”产生的 .store 文件无法被升级为“云端同步模式”的问题。
+        // 提升存储版本号以解决之前的 Schema 冲突导致的死锁闪退
         let modelConfiguration = ModelConfiguration(
-            "dfk_v2_cloud",
+            "dfk_v4_stable",
             schema: schema, 
             isStoredInMemoryOnly: false,
             cloudKitDatabase: .automatic
