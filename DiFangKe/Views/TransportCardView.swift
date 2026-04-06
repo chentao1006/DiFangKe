@@ -134,10 +134,12 @@ struct TransportCardView: View {
 
 // MARK: - TransportModalView
 struct TransportModalView: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
     let transport: Transport
     var onUpdate: ((TransportType) -> Void)? = nil
+    var onLocationUpdate: (() -> Void)? = nil
+    
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     
     @State private var position: MapCameraPosition = .automatic
     @State private var localManualType: TransportType? = nil
@@ -172,7 +174,7 @@ struct TransportModalView: View {
                 Map(position: $position) {
                     // Start Annotation
                     if let start = transport.points.first {
-                        Annotation(currentStartLocation, coordinate: start) {
+                        Annotation("", coordinate: start) {
                             Menu {
                                 SuggestionsMenuContent(locationManager: locationManager, coordinate: start, forOngoing: false) {
                                     showingSearchSheet = .start
@@ -198,7 +200,7 @@ struct TransportModalView: View {
                     
                     // End Annotation
                     if let end = transport.points.last {
-                        Annotation(currentEndLocation, coordinate: end) {
+                        Annotation("", coordinate: end) {
                             Menu {
                                 SuggestionsMenuContent(locationManager: locationManager, coordinate: end, forOngoing: false) {
                                     showingSearchSheet = .end
@@ -302,6 +304,29 @@ struct TransportModalView: View {
         }
     }
     
+    private func findOrCreateSelection() -> TransportManualSelection {
+        let startTime = transport.startTime
+        let endTime = transport.endTime
+        let midTime = startTime.addingTimeInterval(transport.duration / 2)
+        
+        // Always fetch fresh from context to avoid stale snapshots from parent view
+        let descriptor = FetchDescriptor<TransportManualSelection>()
+        let all = (try? modelContext.fetch(descriptor)) ?? []
+        
+        // Use midpoint matching (same logic as TimelineBuilder) to find the relevant override
+        // This is much more robust than exact bound matching, especially if segments shift slightly.
+        if let existing = all.first(where: { midTime >= $0.startTime && midTime <= $0.endTime }) {
+            // Update the existing record's bounds to match the current segment for better future matching
+            existing.startTime = startTime
+            existing.endTime = endTime
+            return existing
+        }
+        
+        let newSelection = TransportManualSelection(startTime: startTime, endTime: endTime)
+        modelContext.insert(newSelection)
+        return newSelection
+    }
+    
     private func saveLocationOverride(type: LocationType, name: String) {
         withAnimation(.spring(response: 0.3)) {
             if type == .start {
@@ -311,19 +336,18 @@ struct TransportModalView: View {
             }
         }
         
-        let selection = TransportManualSelection(startTime: transport.startTime, endTime: transport.endTime)
+        let selection = findOrCreateSelection()
         if type == .start {
             selection.startLocationOverride = name
         } else {
             selection.endLocationOverride = name
         }
         
-        // Preserve existing type if available
+        // Preserve current type
         selection.vehicleType = (localManualType ?? transport.manualType ?? transport.type).rawValue
         
-        modelContext.insert(selection)
         try? modelContext.save()
-        
+        onLocationUpdate?()
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
     
@@ -341,9 +365,10 @@ struct TransportModalView: View {
             localManualType = type
         }
         
-        // 2. Create/Update Selection in SwiftData
-        let selection = TransportManualSelection(startTime: transport.startTime, endTime: transport.endTime, vehicleType: type.rawValue)
-        modelContext.insert(selection)
+        // 2. Find or Create selection
+        let selection = findOrCreateSelection()
+        selection.vehicleType = type.rawValue
+        
         try? modelContext.save()
         
         // 3. Notify parent to update UI
@@ -358,7 +383,7 @@ extension TransportType {
         switch self {
         case .slow: return "步行"
         case .bicycle: return "自行车"
-        case .motorcycle: return "摩托车"
+        case .motorcycle: return "摩托车/电动车"
         case .bus: return "公交/大巴"
         case .car: return "汽车"
         case .train: return "火车/高铁"

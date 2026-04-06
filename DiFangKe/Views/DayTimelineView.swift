@@ -158,10 +158,22 @@ struct DayTimelineView: View {
         
         // 1. Calculate pastLimitOffset and Group footprints
         let validFootprints = footprints.filter { $0.status != .ignored }
-        self.groupedFootprints = Dictionary(grouping: validFootprints) { calendar.startOfDay(for: $0.startTime) }
         
-        // 渲染一致性补丁：始终使用实时的 startTime 决定属于哪一天
-        self.groupedFootprints = Dictionary(grouping: validFootprints) { calendar.startOfDay(for: $0.startTime) }
+        // Fix: Group footprints by all days they intersect, not just the start date.
+        // This ensures a stay starting yesterday and ending today (like staying at home)
+        // appears on both days' timelines.
+        var newGrouped: [Date: [Footprint]] = [:]
+        for fp in validFootprints {
+            var datePtr = calendar.startOfDay(for: fp.startTime)
+            let lastDate = calendar.startOfDay(for: fp.endTime)
+            
+            while datePtr <= lastDate {
+                newGrouped[datePtr, default: []].append(fp)
+                guard let nextDate = calendar.date(byAdding: .day, value: 1, to: datePtr) else { break }
+                datePtr = nextDate
+            }
+        }
+        self.groupedFootprints = newGrouped
         
         var limitOffset = -1
         if let earliestFootprint = validFootprints.last {
@@ -533,9 +545,9 @@ struct TimelinePageView: View {
                 try? modelContext.save()
             }
         }
-        .sheet(item: $selectedTransport) { transport in
+          .sheet(item: $selectedTransport) { transport in
             TransportModalView(transport: transport) { newType in
-                // Immediate local UI update
+                // Immediate local UI update for type
                 if let index = timelineItems.firstIndex(where: { 
                     if case .transport(let t) = $0, t.id == transport.id { return true }
                     return false
@@ -545,6 +557,8 @@ struct TimelinePageView: View {
                         timelineItems[index] = .transport(updated)
                     }
                 }
+            } onLocationUpdate: {
+                refreshTimeline()
             }
         }
     }
@@ -570,38 +584,59 @@ struct TimelinePageView: View {
             }
             
             // Resolve addresses asynchronously
-            resolveTransportAddresses(for: items)
+            resolveTimelineAddresses(for: items)
         }
     }
     
-    private func resolveTransportAddresses(for items: [TimelineItem]) {
+    private func resolveTimelineAddresses(for items: [TimelineItem]) {
         for (index, item) in items.enumerated() {
-            if case .transport(let transport) = item {
+            switch item {
+            case .transport(let transport):
                 // Resolve Start
-                if (transport.startLocation == "正在获取位置..." || transport.startLocation == "出发点") && !transport.points.isEmpty {
+                if (transport.startLocation == "正在获取位置..." || transport.startLocation == "起点") && !transport.points.isEmpty {
                     TimelineBuilder.resolveAddress(coordinate: transport.points.first!) { name in
                         updateTimelineItemAddress(index: index, type: .start, name: name)
                     }
                 }
                 
                 // Resolve End
-                if (transport.endLocation == "正在获取位置..." || transport.endLocation == "目的地") && !transport.points.isEmpty {
+                if (transport.endLocation == "正在获取位置..." || transport.endLocation == "终点") && !transport.points.isEmpty {
                     TimelineBuilder.resolveAddress(coordinate: transport.points.last!) { name in
                         updateTimelineItemAddress(index: index, type: .end, name: name)
+                    }
+                }
+            case .footprint(let footprint):
+                 // Resolve "Gap Stay" footprints that don't have a title yet
+                if (footprint.title == "地点记录" || footprint.title == "正在获取位置...") && !footprint.footprintLocations.isEmpty {
+                    let avgLat = footprint.footprintLocations.map { $0.latitude }.reduce(0, +) / Double(footprint.footprintLocations.count)
+                    let avgLon = footprint.footprintLocations.map { $0.longitude }.reduce(0, +) / Double(footprint.footprintLocations.count)
+                    
+                    TimelineBuilder.resolveAddress(coordinate: CLLocationCoordinate2D(latitude: avgLat, longitude: avgLon)) { name in
+                        updateTimelineItemAddress(index: index, type: .stay, name: name)
                     }
                 }
             }
         }
     }
     
-    enum AddressType { case start, end }
+    enum AddressType { case start, end, stay }
     
     private func updateTimelineItemAddress(index: Int, type: AddressType, name: String) {
         Task { @MainActor in
             guard index < timelineItems.count else { return }
-            if case .transport(let transport) = timelineItems[index] {
+            let item = timelineItems[index]
+            switch item {
+            case .transport(let transport):
                 let updated = type == .start ? transport.updatingStart(name) : transport.updatingEnd(name)
                 timelineItems[index] = .transport(updated)
+            case .footprint(let footprint):
+                if type == .stay {
+                    // Update title and address for temporary footprint objects
+                    footprint.title = name
+                    footprint.address = name
+                    // Force UI refresh by re-setting the item
+                    timelineItems[index] = .footprint(footprint)
+                }
             }
         }
     }

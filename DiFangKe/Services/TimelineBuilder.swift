@@ -34,13 +34,36 @@ class TimelineBuilder {
             .filter { $0.status != .ignored }
             .sorted { $0.startTime < $1.startTime }
         
+        // UI-level merging of consecutive footprints for the same location
+        var finalizedSortedFootprints: [Footprint] = []
+        for fp in sortedFootprints {
+            if let last = finalizedSortedFootprints.last, shouldPerformUiMerge(last, fp) {
+                // Create a temporary footprint that covers the combined range
+                let combined = Footprint(
+                    date: last.date,
+                    startTime: last.startTime,
+                    endTime: max(last.endTime, fp.endTime),
+                    footprintLocations: last.footprintLocations + fp.footprintLocations,
+                    locationHash: "UI_MERGE",
+                    duration: max(last.endTime, fp.endTime).timeIntervalSince(last.startTime),
+                    title: last.title,
+                    status: last.status,
+                    address: last.address
+                )
+                combined.placeID = last.placeID
+                finalizedSortedFootprints[finalizedSortedFootprints.count - 1] = combined
+            } else {
+                finalizedSortedFootprints.append(fp)
+            }
+        }
+        
         var currentTime = startOfDay
         
         // --- Process Footprints and Gaps ---
-        for (index, fp) in sortedFootprints.enumerated() {
+        for (index, fp) in finalizedSortedFootprints.enumerated() {
             // Gap before current footprint
             if fp.startTime > currentTime {
-                fillGap(from: currentTime, to: fp.startTime, items: &items, allRawPoints: allRawPoints, sortedFootprints: sortedFootprints, currentIndex: index, allPlaces: allPlaces, overrides: overrides)
+                fillGap(from: currentTime, to: fp.startTime, items: &items, allRawPoints: allRawPoints, sortedFootprints: finalizedSortedFootprints, currentIndex: index, allPlaces: allPlaces, overrides: overrides)
             }
             
             // Add Footprint
@@ -50,10 +73,59 @@ class TimelineBuilder {
         
         // Final gap until now/end of day
         if dayLimit > currentTime {
-            fillGap(from: currentTime, to: dayLimit, items: &items, allRawPoints: allRawPoints, sortedFootprints: sortedFootprints, currentIndex: sortedFootprints.count, allPlaces: allPlaces, overrides: overrides)
+            fillGap(from: currentTime, to: dayLimit, items: &items, allRawPoints: allRawPoints, sortedFootprints: finalizedSortedFootprints, currentIndex: finalizedSortedFootprints.count, allPlaces: allPlaces, overrides: overrides)
         }
         
-        return items.reversed()
+        // Post-processing: Merge adjacent stationary items in the results
+        return mergeAdjacentItems(items).reversed()
+    }
+
+    private static func shouldPerformUiMerge(_ f1: Footprint, _ f2: Footprint) -> Bool {
+        // Gap too long: don't merge
+        if f2.startTime.timeIntervalSince(f1.endTime) > 300 { return false }
+        
+        // Same place ID
+        if let p1 = f1.placeID, let p2 = f2.placeID, p1 == p2 { return true }
+        
+        // Same coordinates and title
+        let loc1 = CLLocation(latitude: f1.latitude, longitude: f1.longitude)
+        let loc2 = CLLocation(latitude: f2.latitude, longitude: f2.longitude)
+        if loc1.distance(from: loc2) < 80 && f1.title == f2.title { return true }
+        
+        return false
+    }
+
+    private static func mergeAdjacentItems(_ items: [TimelineItem]) -> [TimelineItem] {
+        var merged: [TimelineItem] = []
+        for item in items {
+            if let last = merged.last {
+                switch (last, item) {
+                case (.footprint(let f1), .footprint(let f2)):
+                    if shouldPerformUiMerge(f1, f2) {
+                        let combined = Footprint(
+                            date: f1.date,
+                            startTime: f1.startTime,
+                            endTime: max(f1.endTime, f2.endTime),
+                            footprintLocations: f1.footprintLocations + f2.footprintLocations,
+                            locationHash: "UI_MERGE_FINAL",
+                            duration: max(f1.endTime, f2.endTime).timeIntervalSince(f1.startTime),
+                            title: f1.title,
+                            status: f1.status,
+                            address: f1.address
+                        )
+                        combined.placeID = f1.placeID
+                        merged[merged.count - 1] = .footprint(combined)
+                    } else {
+                        merged.append(item)
+                    }
+                default:
+                    merged.append(item)
+                }
+            } else {
+                merged.append(item)
+            }
+        }
+        return merged
     }
     
     private static func fillGap(from start: Date, to end: Date, items: inout [TimelineItem], allRawPoints: [CLLocation], sortedFootprints: [Footprint], currentIndex: Int, allPlaces: [Place], overrides: [TransportManualSelection]) {
@@ -61,96 +133,160 @@ class TimelineBuilder {
         guard duration > 60 else { return } // Ignore gaps < 1 min
         
         let gapPoints = allRawPoints.filter { $0.timestamp >= start && $0.timestamp < end }
+        guard !gapPoints.isEmpty else { return }
         
-        if !gapPoints.isEmpty {
-            var transports = extractTransports(gapPoints)
-            
-            // If movement was detected, add it
-            if !transports.isEmpty {
-                // Process all segments in the journey
-                for i in 0..<transports.count {
-                    let startCoord = transports[i].points.first
-                    let endCoord = transports[i].points.last
-                    
-                    // 1. Resolve Start Location
-                    if i == 0 && currentIndex > 0 {
-                        // First segment: check previous footprint
-                        let fp = sortedFootprints[currentIndex-1]
-                        let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
-                        // Use a tighter 150m threshold for "strictly" matching POI
-                        if let startCoord = startCoord, CLLocation(latitude: startCoord.latitude, longitude: startCoord.longitude).distance(from: fpLoc) < 150 {
-                            transports[i] = transports[i].updatingStart(getLocationName(for: fp, allPlaces: allPlaces))
-                        }
-                    } 
-                    
-                    // If still generic, try Places
-                    if transports[i].startLocation == "出发点", let startCoord = startCoord {
-                        if let name = getNameForCoordinate(startCoord, allPlaces: allPlaces) {
-                            transports[i] = transports[i].updatingStart(name)
-                        } else if i > 0 {
-                            // Inherit from previous end point
-                            transports[i] = transports[i].updatingStart(transports[i-1].endLocation)
-                        }
-                    }
-                    
-                    // 2. Resolve End Location
-                    if i == transports.count - 1 && currentIndex < sortedFootprints.count {
-                        // Last segment: check next footprint
-                        let fp = sortedFootprints[currentIndex]
-                        let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
-                        if let endCoord = endCoord, CLLocation(latitude: endCoord.latitude, longitude: endCoord.longitude).distance(from: fpLoc) < 150 {
-                            transports[i] = transports[i].updatingEnd(getLocationName(for: fp, allPlaces: allPlaces))
-                        }
-                    }
-                    
-                    // If still generic, try Places
-                    if transports[i].endLocation == "目的地", let endCoord = endCoord {
-                        if let name = getNameForCoordinate(endCoord, allPlaces: allPlaces) {
-                            transports[i] = transports[i].updatingEnd(name)
-                        } else if i < transports.count - 1 {
-                             transports[i] = transports[i].updatingEnd("移动中")
-                        }
-                    }
-                }
-                
-                // Final cleanup for any remaining placeholders
-                for i in 0..<transports.count {
-                    if transports[i].startLocation == "出发点" { transports[i] = transports[i].updatingStart("正在获取位置...") }
-                    if transports[i].endLocation == "目的地" { transports[i] = transports[i].updatingEnd("正在获取位置...") }
-                }
-                
-                // Apply manual overrides (Type changes or Deletion or Location Override)
-                var activeTransports: [Transport] = []
-                for transport in transports {
-                    let midTime = transport.startTime.addingTimeInterval(transport.duration / 2)
-                    if let override = overrides.first(where: { midTime >= $0.startTime && midTime <= $0.endTime }) {
-                        if override.isDeleted {
-                            // Don't add to active list
-                            continue
-                        }
-                        
-                        var updated = transport
-                        if let type = TransportType(rawValue: override.vehicleType) {
-                            updated.manualType = type
-                        }
-                        
-                        // Apply location overrides
-                        if let startOverride = override.startLocationOverride {
-                            updated = updated.updatingStart(startOverride)
-                        }
-                        if let endOverride = override.endLocationOverride {
-                            updated = updated.updatingEnd(endOverride)
-                        }
-                        
-                        activeTransports.append(updated)
-                    } else {
-                        activeTransports.append(transport)
-                    }
-                }
-                transports = activeTransports
-                
-                items.append(contentsOf: transports.map { .transport($0) })
+        let transports = extractTransports(gapPoints)
+        
+        // Intelligent Step: Process each piece of the gap (Stay -> Transport -> Stay -> ...)
+        var currentTime = start
+        let now = Date()
+        let isTodayView = Calendar.current.isDateInToday(start)
+
+        // Helper to detect and add a "phantom" footprint if there's a stationary period
+        func addStationaryStay(from s: Date, to e: Date) {
+            // Fix: Avoid duplicating the "ongoing" stay shown in the Tracking Status Card.
+            // If we are viewing "Today" and this segment reaches the current time, skip it.
+            if isTodayView && e >= now.addingTimeInterval(-120) {
+                return 
             }
+            
+            let stayPoints = gapPoints.filter { $0.timestamp >= s && $0.timestamp < e }
+            guard !stayPoints.isEmpty else { return }
+            
+            let stayDuration = e.timeIntervalSince(s)
+            
+            // Check span (Diameter)
+            let diameter = calculateMaxDiameter(stayPoints)
+            
+            // Fix Issue 1: If span is > 250m, it's likely a missing or rejected transport, not a stay.
+            // We should show it as "Moving" or "Unknown movement" instead of a flat footprint.
+            if diameter > 250 {
+                let transport = Transport(
+                    startTime: s,
+                    endTime: e,
+                    startLocation: "起点",
+                    endLocation: "终点",
+                    type: .slow,
+                    distance: calculateDistance(stayPoints),
+                    averageSpeed: stayDuration > 0 ? calculateDistance(stayPoints) / stayDuration : 0,
+                    points: stayPoints.map { $0.coordinate }
+                )
+                items.append(.transport(transport))
+                return
+            }
+
+            guard stayDuration >= 5 * 60 else { return } // Only show if at least 5 mins
+            
+            let avgLat = stayPoints.map { $0.coordinate.latitude }.reduce(0, +) / Double(stayPoints.count)
+            let avgLon = stayPoints.map { $0.coordinate.longitude }.reduce(0, +) / Double(stayPoints.count)
+            let center = CLLocationCoordinate2D(latitude: avgLat, longitude: avgLon)
+            
+            // Create a temporary footprint for display
+            let fp = Footprint(
+                date: Calendar.current.startOfDay(for: s),
+                startTime: s,
+                endTime: e,
+                footprintLocations: stayPoints.map { $0.coordinate },
+                locationHash: "GAP_STAY",
+                duration: stayDuration
+            )
+            
+            // Resolve Name and Place Linkage (Mirroring LocationManager matching logic)
+            if let place = getPlaceForCoordinate(center, allPlaces: allPlaces) {
+                fp.title = place.name
+                fp.placeID = place.placeID
+                fp.address = place.address
+            } else {
+                fp.title = "地点记录"
+            }
+            
+            items.append(.footprint(fp))
+        }
+
+        // Apply transport resolution logic (preserving original logic)
+        if !transports.isEmpty {
+            for i in 0..<transports.count {
+                // 1. Add stationary period BEFORE this transport if it exists
+                if transports[i].startTime > currentTime {
+                    addStationaryStay(from: currentTime, to: transports[i].startTime)
+                }
+                
+                // 2. Resolve locations for the transport (Existing Logic)
+                let startCoord = transports[i].points.first
+                let endCoord = transports[i].points.last
+                
+                var t = transports[i]
+                if i == 0 && currentIndex > 0 {
+                    let fp = sortedFootprints[currentIndex-1]
+                    let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
+                    if let startCoord = startCoord, CLLocation(latitude: startCoord.latitude, longitude: startCoord.longitude).distance(from: fpLoc) < 150 {
+                        t = t.updatingStart(getLocationName(for: fp, allPlaces: allPlaces))
+                    }
+                } 
+                
+                if t.startLocation == "起点", let startCoord = startCoord {
+                    if let place = getPlaceForCoordinate(startCoord, allPlaces: allPlaces) {
+                        t = t.updatingStart(place.name)
+                    } else if i > 0 {
+                        let prevEnd = transports[i-1].endLocation
+                        if prevEnd != "终点" && prevEnd != "正在获取位置..." && prevEnd != "目的地" {
+                            t = t.updatingStart(prevEnd)
+                        } else {
+                            t = t.updatingStart("起点") // Reset to standard start placeholder
+                        }
+                    }
+                }
+                
+                if i == transports.count - 1 && currentIndex < sortedFootprints.count {
+                    let fp = sortedFootprints[currentIndex]
+                    let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
+                    if let endCoord = endCoord, CLLocation(latitude: endCoord.latitude, longitude: endCoord.longitude).distance(from: fpLoc) < 150 {
+                        t = t.updatingEnd(getLocationName(for: fp, allPlaces: allPlaces))
+                    }
+                }
+                
+                if t.endLocation == "终点", let endCoord = endCoord {
+                    if let place = getPlaceForCoordinate(endCoord, allPlaces: allPlaces) {
+                        t = t.updatingEnd(place.name)
+                    } else if i < transports.count - 1 {
+                         t = t.updatingEnd("终点")
+                    }
+                }
+
+                // Final cleanup for placeholders
+                if t.startLocation == "起点" { t = t.updatingStart("正在获取位置...") }
+                if t.endLocation == "终点" { t = t.updatingEnd("正在获取位置...") }
+
+                // Apply Manual Overrides
+                let midTime = t.startTime.addingTimeInterval(t.duration / 2)
+                var finalTransport: Transport? = t
+                if let override = overrides.first(where: { midTime >= $0.startTime && midTime <= $0.endTime }) {
+                    if !override.isDeleted {
+                        var updated = t
+                        if let type = TransportType(rawValue: override.vehicleType) { updated.manualType = type }
+                        if let startOverride = override.startLocationOverride { updated = updated.updatingStart(startOverride) }
+                        if let endOverride = override.endLocationOverride { updated = updated.updatingEnd(endOverride) }
+                        finalTransport = updated
+                    } else {
+                        finalTransport = nil
+                    }
+                }
+                
+                if let ft = finalTransport {
+                    // Fix: Avoid duplicating "ongoing" transport that is already in the Status Card
+                    let isOngoing = isTodayView && ft.endTime >= now.addingTimeInterval(-120)
+                    if !isOngoing {
+                        items.append(.transport(ft))
+                    }
+                }
+                
+                currentTime = transports[i].endTime
+            }
+        }
+        
+        // 3. Add stationary period AFTER all transports (or if no transports at all)
+        if end > currentTime {
+            addStationaryStay(from: currentTime, to: end)
         }
     }
     
@@ -177,8 +313,8 @@ class TimelineBuilder {
         }
         
         // 3. Search by coordinates in allPlaces anyway (robust check)
-        if let nearbyPlaceName = getNameForCoordinate(CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), allPlaces: allPlaces) {
-            return nearbyPlaceName
+        if let nearbyPlace = getPlaceForCoordinate(CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), allPlaces: allPlaces) {
+            return nearbyPlace.name
         }
         
         // 4. Prefer existing title if it's not a generic placeholder
@@ -194,16 +330,39 @@ class TimelineBuilder {
         return "未知位置"
     }
     
-    private static func getNameForCoordinate(_ coordinate: CLLocationCoordinate2D, allPlaces: [Place], radius: Double = 150) -> String? {
+    private static func getPlaceForCoordinate(_ coordinate: CLLocationCoordinate2D, allPlaces: [Place]) -> Place? {
         let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
         
-        let nearest = allPlaces
-            .map { (place: $0, distance: location.distance(from: CLLocation(latitude: $0.latitude, longitude: $0.longitude))) }
-            .filter { $0.distance < Double($0.place.radius) || $0.distance < 80 } // Use place radius or a small 80m buffer
-            .sorted { $0.distance < $1.distance }
-            .first
+        struct Match {
+            let place: Place
+            let distance: Double
+        }
         
-        return nearest?.place.name
+        let validMatches: [Match] = allPlaces.compactMap { place in
+            if place.isIgnored { return nil }
+            let placeLocation = CLLocation(latitude: place.latitude, longitude: place.longitude)
+            let distance = location.distance(from: placeLocation)
+            let threshold = Double(place.radius) + 100.0
+            if distance <= threshold {
+                return Match(place: place, distance: distance)
+            }
+            return nil
+        }
+        
+        let sortedMatches = validMatches.sorted { p1, p2 in
+            // Priority 1: User defined
+            if p1.place.isUserDefined != p2.place.isUserDefined {
+                return p1.place.isUserDefined
+            }
+            // Priority 2: Priority flag
+            if p1.place.isPriority != p2.place.isPriority {
+                return p1.place.isPriority
+            }
+            // Priority 3: Distance
+            return p1.distance < p2.distance
+        }
+        
+        return sortedMatches.first?.place
     }
     
     private static func extractTransports(_ points: [CLLocation]) -> [Transport] {
@@ -223,7 +382,8 @@ class TimelineBuilder {
                 if let transport = finalizeTransport(currentPoints) {
                     transports.append(transport)
                 }
-                currentPoints = [p]
+                // Backtrack: Include prevP as the starting point of next segment to bridge the gap
+                currentPoints = [prevP, p] 
                 currentSegmentType = nil
                 continue
             }
@@ -254,7 +414,8 @@ class TimelineBuilder {
                             if let transport = finalizeTransport(currentPoints) {
                                 transports.append(transport)
                             }
-                            currentPoints = [p]
+                            // Backtrack: Start with previous point to ensure no missing gap
+                            currentPoints = [prevP, p]
                             currentSegmentType = nil
                             continue
                         }
@@ -349,8 +510,8 @@ class TimelineBuilder {
         return Transport(
             startTime: start,
             endTime: end,
-            startLocation: "出发点", 
-            endLocation: "目的地",
+            startLocation: "起点", 
+            endLocation: "终点",
             type: type,
             distance: distance,
             averageSpeed: averageSpeed,
