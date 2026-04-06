@@ -29,9 +29,6 @@
 		C64D3DA02F8111A800BB3C3F /* RawLogsManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3D9F2F8111A800BB3C3F /* RawLogsManagerView.swift */; };
 		C64D3DA22F81251E00BB3C3F /* AiSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3DA12F81251E00BB3C3F /* AiSettingsView.swift */; };
 		C64D3DA42F81434600BB3C3F /* DFKMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3DA32F81434600BB3C3F /* DFKMapView.swift */; };
-		C64D3DA62F8155D800BB3C3F /* TagSelectionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3DA52F8155D800BB3C3F /* TagSelectionSheet.swift */; };
-		C64D3DA82F81576800BB3C3F /* TagManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3DA72F81576800BB3C3F /* TagManagerView.swift */; };
-		C64D3DAC2F815E2C00BB3C3F /* TagService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3DAA2F815E2C00BB3C3F /* TagService.swift */; };
 		C65E583B2F8241350030A766 /* TimelineBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C65E583A2F8241350030A766 /* TimelineBuilder.swift */; };
 		C65E583D2F8241420030A766 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C65E583C2F8241420030A766 /* Transport.swift */; };
 		C65E583F2F82415C0030A766 /* TransportCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C65E583E2F82415C0030A766 /* TransportCardView.swift */; };
@@ -70,9 +67,6 @@
 		C64D3D9F2F8111A800BB3C3F /* RawLogsManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawLogsManagerView.swift; sourceTree = "<group>"; };
 		C64D3DA12F81251E00BB3C3F /* AiSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiSettingsView.swift; sourceTree = "<group>"; };
 		C64D3DA32F81434600BB3C3F /* DFKMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DFKMapView.swift; sourceTree = "<group>"; };
-		C64D3DA52F8155D800BB3C3F /* TagSelectionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagSelectionSheet.swift; sourceTree = "<group>"; };
-		C64D3DA72F81576800BB3C3F /* TagManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagManagerView.swift; sourceTree = "<group>"; };
-		C64D3DAA2F815E2C00BB3C3F /* TagService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagService.swift; sourceTree = "<group>"; };
 		C651F9AF2F7F6CBF00217426 /* DiFangKe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = DiFangKe.entitlements; sourceTree = "<group>"; };
 		C65E583A2F8241350030A766 /* TimelineBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineBuilder.swift; sourceTree = "<group>"; };
 		C65E583C2F8241420030A766 /* Transport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transport.swift; sourceTree = "<group>"; };
@@ -120,8 +114,6 @@
 			children = (
 				C61AA57D2F82D4F8002BF1AE /* LocationSelectionComponents.swift */,
 				C65E583E2F82415C0030A766 /* TransportCardView.swift */,
-				C64D3DA72F81576800BB3C3F /* TagManagerView.swift */,
-				C64D3DA52F8155D800BB3C3F /* TagSelectionSheet.swift */,
 				C64D3DA32F81434600BB3C3F /* DFKMapView.swift */,
 				C64D3DA12F81251E00BB3C3F /* AiSettingsView.swift */,
 				C64D3D9F2F8111A800BB3C3F /* RawLogsManagerView.swift */,
@@ -144,7 +136,6 @@
 			isa = PBXGroup;
 			children = (
 				C65E583A2F8241350030A766 /* TimelineBuilder.swift */,
-				C64D3DAA2F815E2C00BB3C3F /* TagService.swift */,
 				1FAF51D5207C3CFEFBEB0667 /* ExportManager.swift */,
 				0F466FD610098E71DB17C54D /* LocationManager.swift */,
 				66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */,
@@ -237,9 +228,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C64D3DA22F81251E00BB3C3F /* AiSettingsView.swift in Sources */,
-				C64D3DA82F81576800BB3C3F /* TagManagerView.swift in Sources */,
 				9F3F925B82CF4EEDED4E3AFF /* AddPlaceSheet.swift in Sources */,
-				C64D3DA62F8155D800BB3C3F /* TagSelectionSheet.swift in Sources */,
 				AC19D6437C18A309FE001E29 /* ContentView.swift in Sources */,
 				7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */,
 				08EBCFC9A52F3BC0EFC26A8F /* DayTimelineView.swift in Sources */,
@@ -257,7 +246,6 @@
 				B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */,
 				71F2E5B397A918D6AD287D07 /* OpenAIService.swift in Sources */,
 				C61AA57E2F82D4F8002BF1AE /* LocationSelectionComponents.swift in Sources */,
-				C64D3DAC2F815E2C00BB3C3F /* TagService.swift in Sources */,
 				AA4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift in Sources */,
 				C64D3DA42F81434600BB3C3F /* DFKMapView.swift in Sources */,
 				C64D3DA02F8111A800BB3C3F /* RawLogsManagerView.swift in Sources */,

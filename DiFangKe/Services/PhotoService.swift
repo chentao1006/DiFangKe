@@ -236,14 +236,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
         
         // 3. 将耗时操作移动到后台执行
-        guard let container = self.modelContext?.container else {
-            completion([])
-            return
-        }
-
         DispatchQueue.global(qos: .userInitiated).async {
             var finalFootprints: [Footprint] = []
-            let bgContext = ModelContext(container)
             let group = DispatchGroup()
             let geocoder = CLGeocoder()
             
@@ -322,8 +316,6 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     }
                 }
                 
-                // --- 自动带入历史标签 ---
-                let tagsToApply = TagService.shared.findHistoricalTags(for: firstLoc.coordinate.latitude, longitude: firstLoc.coordinate.longitude, targetDate: startTime, in: bgContext)
                 
                 if matchedPlaceID == nil {
                     // 串行执行地名反查
@@ -358,8 +350,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                             title: title,
                             status: .confirmed,
                             placeID: matchedPlaceID,
-                            photoAssetIDs: cluster.map { $0.localIdentifier },
-                            tags: tagsToApply
+                            photoAssetIDs: cluster.map { $0.localIdentifier }
                         )
                         // CLGeocoder completion usually runs on main thread, but finalFootprints must be thread-safe
                         DispatchQueue.main.async {
@@ -381,8 +372,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         title: title,
                         status: .confirmed,
                         placeID: matchedPlaceID,
-                        photoAssetIDs: cluster.map { $0.localIdentifier },
-                        tags: tagsToApply
+                        photoAssetIDs: cluster.map { $0.localIdentifier }
                     )
                     DispatchQueue.main.async {
                         finalFootprints.append(fp)
@@ -449,8 +439,6 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     }
                 }
                 
-                // --- 自动带入历史标签 ---
-                let tagsForBatch = TagService.shared.findHistoricalTags(for: firstLoc.coordinate.latitude, longitude: firstLoc.coordinate.longitude, targetDate: startTime, in: bgContext)
                 
                 let fp = Footprint(
                     date: Calendar.current.startOfDay(for: startTime),
@@ -462,8 +450,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     title: title,
                     status: .confirmed,
                     placeID: matchedPlaceID,
-                    photoAssetIDs: cluster.map { $0.localIdentifier },
-                    tags: tagsForBatch
+                    photoAssetIDs: cluster.map { $0.localIdentifier }
                 )
                 DispatchQueue.main.async {
                     finalFootprints.append(fp)

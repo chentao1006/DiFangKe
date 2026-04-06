@@ -16,7 +16,6 @@ struct FootprintModalView: View {
     var allPlaces: [Place] = []
     
     @Query private var savedPlaces: [Place]
-    @Query(sort: \PlaceTag.name) private var availableTags: [PlaceTag]
     
     @State private var showMap = false
     @State private var showAI = false
@@ -30,8 +29,6 @@ struct FootprintModalView: View {
     @State private var showCamera = false
     @State private var selectedPhotoID: String? = nil
     @State private var showAddPlaceModal = false
-    @State private var showingAddTagAlert = false
-    @State private var newTagName = ""
     @State private var isUpdatingAddress = false
     
     @State private var showFullscreenMap = false
@@ -41,7 +38,6 @@ struct FootprintModalView: View {
     @State private var showingPhotoDeleteAlert = false
     @State private var photoToDelete: String? = nil
     @State private var showingSearchSheet = false
-    @State private var showingTagSheet = false
     
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @State private var isGeneratingAI = false
@@ -49,6 +45,18 @@ struct FootprintModalView: View {
     @State private var showingAIErrorAlert = false
     @State private var aiErrorMessage = ""
     @State private var isAIPerformingUpdate = false
+    
+    private func ensureFootprintManaged() {
+        if footprint.modelContext == nil {
+            // 对于 fillGap 产生的“幻影”足迹 (locationHash == "GAP_STAY")，
+            // 必须先插入 Context 才能持久化。
+            modelContext.insert(footprint)
+            // 一旦插入，就不再仅仅是瞬时的 gap
+            if footprint.locationHash == "GAP_STAY" {
+                footprint.locationHash = "MANUAL_STAY"
+            }
+        }
+    }
     
     var body: some View {
         NavigationStack {
@@ -82,6 +90,7 @@ struct FootprintModalView: View {
                     Button { 
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         withAnimation(.spring(response: 0.3)) {
+                            ensureFootprintManaged()
                             footprint.isHighlight = !(footprint.isHighlight ?? false)
                             try? modelContext.save()
                         }
@@ -113,6 +122,7 @@ struct FootprintModalView: View {
                         PhotoService.shared.fetchAssets(startTime: footprint.startTime, endTime: footprint.endTime, near: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)) { assets in
                             if !assets.isEmpty {
                                 withAnimation {
+                                    ensureFootprintManaged()
                                     footprint.photoAssetIDs = assets.map { $0.localIdentifier }
                                     try? modelContext.save()
                                 }
@@ -159,6 +169,7 @@ struct FootprintModalView: View {
                             if let id = localID {
                                 await MainActor.run {
                                     withAnimation {
+                                        ensureFootprintManaged()
                                         var ids = footprint.photoAssetIDs
                                         ids.append(id)
                                         footprint.photoAssetIDs = ids
@@ -186,6 +197,7 @@ struct FootprintModalView: View {
                         }
                         if let id = localID {
                             await MainActor.run {
+                                ensureFootprintManaged()
                                 withAnimation {
                                     var ids = footprint.photoAssetIDs
                                     ids.append(id)
@@ -214,16 +226,6 @@ struct FootprintModalView: View {
             .sheet(isPresented: $showFullscreenMap) {
                 FullFrameMapView(footprint: footprint)
             }
-            .sheet(isPresented: $showingTagSheet) {
-                TagSelectionSheet(footprint: footprint)
-            }
-            .alert("添加新标签", isPresented: $showingAddTagAlert) {
-                TextField("输入标签名称", text: $newTagName)
-                Button("确定") {
-                    addNewTag(newTagName)
-                }
-                Button("取消", role: .cancel) { }
-            }
             .alert("确认移除照片？", isPresented: $showingPhotoDeleteAlert) {
                 Button("移除", role: .destructive) { deletePhoto() }
                 Button("取消", role: .cancel) { photoToDelete = nil }
@@ -240,7 +242,7 @@ struct FootprintModalView: View {
                 
                 Button("暂时不用", role: .cancel) { }
             } message: {
-                Text("开启后，地方客将利用 AI 为您的足迹自动建议标题、感悟并丰富标签，让您的记录更生动。")
+                Text("开启后，地方客将利用 AI 为您的足迹自动建议标题和感悟，让您的记录更生动。")
             }
             .alert("AI 分析失败", isPresented: $showingAIErrorAlert) {
                 Button("确定", role: .cancel) { }
@@ -252,6 +254,7 @@ struct FootprintModalView: View {
     
     private func deletePhoto() {
         guard let assetID = photoToDelete else { return }
+        ensureFootprintManaged()
         withAnimation {
             var ids = footprint.photoAssetIDs
             ids.removeAll(where: { $0 == assetID })
@@ -295,11 +298,9 @@ struct FootprintModalView: View {
             startTime: footprint.startTime,
             endTime: footprint.endTime,
             placeName: matchedPlace?.name,
-            placeTags: footprint.tags,
-            allAvailableTags: availableTags.map { $0.name },
             address: footprint.address,
             isOngoing: false
-        ) { title, reason, tags, score, success in
+        ) { title, reason, score, success in
             DispatchQueue.main.async {
                 if success {
                     self.isAIPerformingUpdate = true 
@@ -314,9 +315,6 @@ struct FootprintModalView: View {
                         }
                         footprint.reason = reason
                         footprint.aiScore = score
-                        
-                        // 直接应用 AI 建议的标签（AI 已被要求只从现有池中选择）
-                        footprint.tags = tags
                         footprint.aiAnalyzed = true
                     }
                     // 稍微延迟重置标志，确保 onChange 已经触发
@@ -329,6 +327,7 @@ struct FootprintModalView: View {
                 }
                 isGeneratingAI = false
                 if success {
+                    ensureFootprintManaged()
                     try? modelContext.save()
                 }
             }
@@ -346,7 +345,12 @@ struct FootprintModalView: View {
                             .submitLabel(.done)
                             .focused($titleFocused)
                             .lineLimit(1)
-                            .onSubmit { titleFocused = false; footprint.aiAnalyzed = true; try? modelContext.save() }
+                            .onSubmit { 
+                                titleFocused = false
+                                ensureFootprintManaged()
+                                footprint.aiAnalyzed = true
+                                try? modelContext.save() 
+                            }
                             .onChange(of: footprint.title) { _, _ in 
                                 if !isAIPerformingUpdate {
                                     footprint.isTitleEditedByHand = true
@@ -471,80 +475,11 @@ struct FootprintModalView: View {
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.04)))
     }
     
-    private var tagsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            FlowLayout(spacing: 8) {
-                // 1. Footprint Tags (Important Place now moved to address row)
-                ForEach(footprint.tags, id: \.self) { tag in
-                    HStack(spacing: 4) {
-                        Text(tag)
-                        Button {
-                            toggleTag(tag)
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 10, weight: .bold))
-                        }
-                    }
-                    .font(.system(size: 14, weight: .bold))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.green.opacity(0.12))
-                    .foregroundColor(.green)
-                    .clipShape(Capsule())
-                }
-                
-                // 3. Add Tag Button (Replaced old Menu)
-                Button {
-                    showingTagSheet = true
-                } label: {
-                    Image(systemName: "tag")
-                        .font(.system(size: 13))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.green.opacity(0.12))
-                        .foregroundColor(.green)
-                        .clipShape(Capsule())
-                }
-            }
-        }
-        .padding(.vertical, 4)
-    }
     
     private var matchedPlace: Place? {
         savedPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })
     }
     
-    private func toggleTag(_ name: String) {
-        withAnimation(.easeInOut(duration: 0.2)) {
-            var currentTags = footprint.tags
-            if currentTags.contains(name) {
-                currentTags.removeAll(where: { $0 == name })
-            } else {
-                currentTags.append(name)
-            }
-            footprint.tags = currentTags
-            try? modelContext.save()
-        }
-    }
-    
-    private func addNewTag(_ name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        
-        withAnimation(.easeInOut(duration: 0.2)) {
-            if !availableTags.contains(where: { $0.name == trimmed }) {
-                let tag = PlaceTag(name: trimmed)
-                modelContext.insert(tag)
-            }
-            
-            if !footprint.tags.contains(trimmed) {
-                var currentTags = footprint.tags
-                currentTags.append(trimmed)
-                footprint.tags = currentTags
-                try? modelContext.save()
-            }
-        }
-    }
 
     
     private var timeRangeString: String {
@@ -607,6 +542,7 @@ struct FootprintModalView: View {
                     
                     if !result.isEmpty {
                         withAnimation {
+                            ensureFootprintManaged()
                             footprint.address = result
                             try? modelContext.save()
                         }
@@ -620,7 +556,6 @@ struct FootprintModalView: View {
         Group {
             titleSection.padding(.horizontal, 24).padding(.top, 16)
             timeSection.padding(.horizontal, 24).padding(.top, 12)
-            tagsSection.padding(.horizontal, 24).padding(.top, 12)
         }
     }
     
@@ -723,6 +658,7 @@ struct FootprintModalView: View {
                 
                 Button {
                     withAnimation {
+                        ensureFootprintManaged()
                         footprint.isPlaceSuggestionIgnored = true
                         try? modelContext.save()
                     }
@@ -1215,13 +1151,7 @@ struct FullscreenImageItem: View {
     var body: some View {
         ZStack {
             if let image = image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .onTapGesture {
-                        // Optional: single tap to hide/show UI, but here we just dismiss if tapped?
-                        // Usually TabView prevents tap events from propagating easily if not careful.
-                    }
+                ZoomableImageView(image: image)
             } else {
                 ProgressView().tint(.white)
             }
@@ -1229,6 +1159,73 @@ struct FullscreenImageItem: View {
         .onAppear {
             PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 2000, height: 2000)) { img, _, _ in
                 self.image = img
+            }
+        }
+    }
+}
+
+// SwiftUI wrap for UIScrollView to support native zoom & pan
+struct ZoomableImageView: UIViewRepresentable {
+    let image: UIImage
+
+    func makeUIView(context: Context) -> UIScrollView {
+        let scrollView = UIScrollView()
+        scrollView.delegate = context.coordinator
+        scrollView.maximumZoomScale = 5.0
+        scrollView.minimumZoomScale = 1.0
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.backgroundColor = .clear
+
+        let imageView = UIImageView(image: image)
+        imageView.contentMode = .scaleAspectFit
+        imageView.tag = 100 // Use tag to find the view later
+        scrollView.addSubview(imageView)
+
+        // Setup constraints or frame
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            imageView.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
+            imageView.heightAnchor.constraint(equalTo: scrollView.heightAnchor),
+            imageView.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            imageView.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor)
+        ])
+
+        // Add double tap to zoom
+        let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        scrollView.addGestureRecognizer(doubleTap)
+
+        return scrollView
+    }
+
+    func updateUIView(_ uiView: UIScrollView, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    class Coordinator: NSObject, UIScrollViewDelegate {
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            return scrollView.viewWithTag(100)
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            guard let imageView = scrollView.viewWithTag(100) else { return }
+            let offsetX = max((scrollView.bounds.width - scrollView.contentSize.width) * 0.5, 0)
+            let offsetY = max((scrollView.bounds.height - scrollView.contentSize.height) * 0.5, 0)
+            imageView.center = CGPoint(x: scrollView.contentSize.width * 0.5 + offsetX, y: scrollView.contentSize.height * 0.5 + offsetY)
+        }
+
+        @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+            guard let scrollView = gesture.view as? UIScrollView else { return }
+            if scrollView.zoomScale > 1 {
+                scrollView.setZoomScale(1, animated: true)
+            } else {
+                let point = gesture.location(in: scrollView.viewWithTag(100))
+                let size = CGSize(width: scrollView.frame.size.width / 2.5, height: scrollView.frame.size.height / 2.5)
+                let rect = CGRect(origin: CGPoint(x: point.x - size.width/2, y: point.y - size.height/2), size: size)
+                scrollView.zoom(to: rect, animated: true)
             }
         }
     }

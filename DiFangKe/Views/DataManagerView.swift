@@ -8,7 +8,6 @@ struct DataManagerView: View {
     @Environment(LocationManager.self) private var locationManager
     @Query(sort: \Footprint.startTime, order: .reverse) private var allFootprints: [Footprint]
     @Query(sort: \Place.name) private var allPlaces: [Place]
-    @Query(sort: \PlaceTag.name) private var allTags: [PlaceTag]
     
     @State private var showDeleteAlert = false
     @State private var showingExportFileExporter = false
@@ -91,8 +90,7 @@ struct DataManagerView: View {
         do {
             let data = try BackupService.shared.generateBackup(
                 footprints: allFootprints, 
-                places: allPlaces, 
-                tags: allTags
+                places: allPlaces
             )
             self.exportData = data
             self.showingExportFileExporter = true
@@ -117,7 +115,7 @@ struct DataManagerView: View {
             
             let data = try Data(contentsOf: url)
             let report = try BackupService.shared.restoreBackup(data: data, context: modelContext)
-            if report.total == 0 && report.newPlaces == 0 && report.newTags == 0 {
+            if report.total == 0 && report.newPlaces == 0 {
                 self.alertTitle = "导入结果"
                 self.alertMessage = "文件中未发现任何有效数据。"
             } else {
@@ -127,10 +125,6 @@ struct DataManagerView: View {
                 
                 if report.newPlaces > 0 || report.skippedPlaces > 0 {
                     message += "\n• 重要地点: 新增 \(report.newPlaces), 跳过 \(report.skippedPlaces)"
-                }
-                
-                if report.newTags > 0 || report.skippedTags > 0 {
-                    message += "\n• 标签: 新增 \(report.newTags), 跳过 \(report.skippedTags)"
                 }
                 
                 self.alertMessage = message
@@ -148,7 +142,6 @@ struct DataManagerView: View {
         do {
             try modelContext.delete(model: Footprint.self)
             try modelContext.delete(model: Place.self)
-            try modelContext.delete(model: PlaceTag.self)
             try modelContext.save()
             locationManager.allTodayPoints = []
             
@@ -183,7 +176,6 @@ struct BackupDTO: Codable {
     let version: Int
     let places: [PlaceDTO]
     let footprints: [FootprintDTO]
-    let tags: [String]
     
     struct PlaceDTO: Codable {
         let id: UUID
@@ -207,7 +199,6 @@ struct BackupDTO: Codable {
         let score: Float
         let placeID: UUID?
         let photos: [String]
-        let tags: [String]
         let addr: String?
         let isHist: Bool?
     }
@@ -216,7 +207,7 @@ struct BackupDTO: Codable {
 final class BackupService {
     static let shared = BackupService()
     
-    func generateBackup(footprints: [Footprint], places: [Place], tags: [PlaceTag]) throws -> Data {
+    func generateBackup(footprints: [Footprint], places: [Place]) throws -> Data {
         let dto = BackupDTO(
             version: 1,
             places: places.map { BackupDTO.PlaceDTO(id: $0.placeID, name: $0.name, lat: $0.latitude, lon: $0.longitude, rad: $0.radius, addr: $0.address) },
@@ -234,12 +225,10 @@ final class BackupService {
                     score: $0.aiScore, 
                     placeID: $0.placeID, 
                     photos: $0.photoAssetIDs, 
-                    tags: $0.tags, 
                     addr: $0.address, 
                     isHist: $0.isHighlight
                 ) 
-            },
-            tags: tags.map { $0.name }
+            }
         )
         
         let encoder = JSONEncoder()
@@ -254,27 +243,12 @@ final class BackupService {
         let skipped: Int
         let newPlaces: Int
         let skippedPlaces: Int
-        let newTags: Int
-        let skippedTags: Int
     }
     
     func restoreBackup(data: Data, context: ModelContext) throws -> RestoreReport {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let backup = try decoder.decode(BackupDTO.self, from: data)
-        
-        // 1. Restore Tags
-        var newTags = 0
-        var skippedTags = 0
-        for tagName in backup.tags {
-            let descriptor = FetchDescriptor<PlaceTag>(predicate: #Predicate { $0.name == tagName })
-            if (try? context.fetch(descriptor).first) == nil {
-                context.insert(PlaceTag(name: tagName))
-                newTags += 1
-            } else {
-                skippedTags += 1
-            }
-        }
         
         // 2. Restore Places
         var newPlaces = 0
@@ -319,7 +293,6 @@ final class BackupService {
                     isHighlight: f.isHist,
                     placeID: f.placeID,
                     photoAssetIDs: f.photos,
-                    tags: f.tags,
                     address: f.addr
                 )
                 context.insert(footprint)
@@ -335,9 +308,7 @@ final class BackupService {
             new: newFootprints, 
             skipped: skippedFootprints,
             newPlaces: newPlaces,
-            skippedPlaces: skippedPlaces,
-            newTags: newTags,
-            skippedTags: skippedTags
+            skippedPlaces: skippedPlaces
         )
     }
 }

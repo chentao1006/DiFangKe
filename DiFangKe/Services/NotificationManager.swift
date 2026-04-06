@@ -34,7 +34,7 @@ class NotificationManager {
     }
     
     // Dynamic scheduling based on Settings
-    func updateDailySummary(isEnabled: Bool, hour: Int, minute: Int, body: String? = nil) {
+    func updateDailySummary(isEnabled: Bool, hour: Int, minute: Int, title: String? = nil, body: String? = nil) {
         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
         
         guard isEnabled else { 
@@ -49,7 +49,7 @@ class NotificationManager {
         let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: true)
         
         let content = UNMutableNotificationContent()
-        content.title = "今日足迹回顾"
+        content.title = title ?? "今日足迹回顾"
         content.body = body ?? "忙碌的一天结束了，快来看看你今天留下的足迹吧。"
         content.sound = .default
         
@@ -63,32 +63,29 @@ class NotificationManager {
         }
     }
     
-    func refreshDailySummary(with footprints: [Footprint]) {
+    func refreshDailySummary(footprintCount: Int, footprintTitles: [String], pointsCount: Int, mileage: Double) {
         let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }
         
-        // Only refresh if footprints exist
-        guard !footprints.isEmpty else { return }
+        // Only refresh if footprints or points exist
+        guard footprintCount > 0 || pointsCount > 0 else { return }
         
         let hour = UserDefaults.standard.integer(forKey: "dailyNotificationHour")
         let minute = UserDefaults.standard.integer(forKey: "dailyNotificationMinute")
         let finalHour = UserDefaults.standard.object(forKey: "dailyNotificationHour") != nil ? hour : 21
 
-        let descriptions = footprints.compactMap { fp -> String? in
-            if fp.status == .ignored { return nil }
-            return fp.title
-        }
-        
-        guard !descriptions.isEmpty else { return }
+        let mileageStr = mileage < 1000 ? "\(Int(mileage))m" : String(format: "%.1fkm", mileage / 1000.0)
+        let statsBody = "今日记录 \(pointsCount) 个位置点，留下 \(footprintCount) 个足迹，行程 \(mileageStr)。"
         
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
-        if isAiEnabled {
-            OpenAIService.shared.generateDailySummary(footprintDescriptions: descriptions) { summary in
-                self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, body: summary)
+        if isAiEnabled && !footprintTitles.isEmpty {
+            OpenAIService.shared.generateDailySummary(footprintDescriptions: footprintTitles) { aiTitle in
+                self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: aiTitle, body: statsBody)
             }
         } else {
-            // Fallback for when AI is disabled
-            self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, body: "今日足迹已准备就绪，点击查看并回顾你的一天。")
+            // Default catchy title when AI is disabled
+            let defaultTitle = "忙碌的一天结束了，快来看看你今天留下的足迹吧。"
+            self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: defaultTitle, body: statsBody)
         }
     }
 

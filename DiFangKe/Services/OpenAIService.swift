@@ -145,25 +145,6 @@ class OpenAIService {
     func analyzeFootprint(_ footprint: Footprint, completion: @escaping (Footprint) -> Void) {
         let locations = footprint.footprintLocations.map { ($0.latitude, $0.longitude) }
         
-        // --- 核心优化：为 AI 提供“时空相似”的历史标签背景，使其生成更具延续性 ---
-        var contextTags: [String] = []
-        if let context = footprint.modelContext {
-            contextTags = TagService.shared.findHistoricalTags(
-                for: footprint.latitude, 
-                longitude: footprint.longitude, 
-                targetDate: footprint.startTime, 
-                in: context
-            )
-        }
-        
-        // 获取系统内所有现有的标签，确保 AI 不会乱造
-        var allAvailableTags: [String] = []
-        if let context = footprint.modelContext {
-            let descriptor = FetchDescriptor<PlaceTag>()
-            if let tags = try? context.fetch(descriptor) {
-                allAvailableTags = tags.map { $0.name }
-            }
-        }
 
         // 只使用数据库中的正式名称作为背景，完全避免使用不稳定的标题进行判断
         var explicitPlaceName: String? = nil
@@ -178,11 +159,9 @@ class OpenAIService {
             startTime: footprint.startTime,
             endTime: footprint.endTime,
             placeName: explicitPlaceName,
-            placeTags: contextTags,
-            allAvailableTags: allAvailableTags,
             address: footprint.address,
             isOngoing: false
-        ) { title, reason, tags, score, success in
+        ) { title, reason, score, success in
             DispatchQueue.main.async {
                 if success {
                     if !footprint.isTitleEditedByHand {
@@ -191,9 +170,6 @@ class OpenAIService {
                     footprint.reason = reason
                     footprint.aiScore = score
                     footprint.aiAnalyzed = true
-                    
-                    // 为 Footprint 添加标签，并排除重复（仅保留 AI 建议的、且本就在系统中的标签）
-                    footprint.tags = tags
                 }
                 completion(footprint)
             }
@@ -250,12 +226,10 @@ class OpenAIService {
                           duration: TimeInterval, 
                           startTime: Date, 
                           endTime: Date, 
-                          placeName: String? = nil, 
-                          placeTags: [String] = [],
-                          allAvailableTags: [String] = [],
+                          placeName: String? = nil,
                           address: String? = nil,
                           isOngoing: Bool = false, 
-                          completion: @escaping (String, String, [String], Float, Bool) -> Void) {
+                          completion: @escaping (String, String, Float, Bool) -> Void) {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "HH:mm"
         let startStr = dateFormatter.string(from: startTime)
@@ -265,23 +239,8 @@ class OpenAIService {
         var promptSnippet = ""
         if let name = placeName {
             promptSnippet = "用户正在“\(name)”"
-            if !placeTags.isEmpty {
-                promptSnippet += "，相关的活动或氛围是：\(placeTags.joined(separator: "、"))"
-            }
-        } else if !placeTags.isEmpty {
-            promptSnippet = "该地点的活动标签为：\(placeTags.joined(separator: "、"))。"
-            if let addr = address {
-                promptSnippet += " 这里的具体参考地址是：\(addr)。"
-            }
         } else {
             promptSnippet = address != nil ? "这里的具体参考地址是：\(address!)。" : "该位置是一个未曾记录的新去处。"
-        }
-        
-        var tagContext = ""
-        if !allAvailableTags.isEmpty {
-            tagContext = "\n候选标签池（仅限从中选择）：\(allAvailableTags.joined(separator: "、"))"
-        } else {
-            tagContext = "\n目前系统暂无预设标签，请务必返回空标签数组 []。"
         }
 
         let statusText = isOngoing ? "（目前正在此地停留中）" : ""
@@ -291,18 +250,16 @@ class OpenAIService {
         日期环境：\(dateContext)
         时间：\(startStr) - \(endStr)
         时长：\(Int(duration / 60))分钟
-        地点信息：\(promptSnippet)\(tagContext)
+        地点信息：\(promptSnippet)
 
         请输出：
-        1. 简短标题（10字以内，应反映地点名称或具体的活动，如“在咖啡馆小憩”、“公司办公”、“超市购物”或“回家”。**绝对禁止使用“定位中停留”、“位置记录”、“非预设地点”等词汇**。禁止使用单纯的感叹或文学化描述，如“时光流逝”。应明确所在的“地方”。）
-        2. 标签：根据地点和活动，从上方提供的“候选标签池”中选择 0-2 个最合适的关键词标签。**绝对禁止创建任何不在列表中的自定义标签**。如果没有合适的，请返回空数组 []。
-        3. 精彩程度（0.0 ~ 1.0评分，1.0代表非常有意义或新奇。如果是节假日或有纪念意义的活动，评分可以适当高一点）
-        4. 简短原因（20字以内，基于地点特点、日期环境给出一个温馨或有见地的理由）
+        1. 简短标题（10字以内，应反映地点名称或具体的活动，如“在咖啡馆停留”、“公司办公”、“超市购物”或“回家”。**绝对禁止使用“定位中停留”、“位置记录”、“非预设地点”等词汇**。禁止使用单纯的感叹或文学化描述，如“时光流逝”。应明确所在的“地方”。）
+        2. 精彩程度（0.0 ~ 1.0评分，1.0代表非常有意义或新奇。如果是节假日或有纪念意义的活动，评分可以适当高一点）
+        3. 简短原因（20字以内，基于地点特点、日期环境给出一个温馨或有见地的理由）
 
         返回格式（严格JSON）：
         {
           "title": "标题内容",
-          "tags": ["标签1", "标签2"],
           "score": 0.85,
           "reason": "推荐理由"
         }
@@ -318,27 +275,27 @@ class OpenAIService {
         ]
         
         guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
-            DispatchQueue.main.async { completion(placeName ?? address ?? "地点记录", "分析中...", [], 0.0, false) }
+            DispatchQueue.main.async { completion(placeName ?? address ?? "地点记录", "分析中...", 0.0, false) }
             return
         }
         
         URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 print("OpenAI Error: \(error.localizedDescription)")
-                DispatchQueue.main.async { completion("新足迹", "网络连接异常 (\(error.localizedDescription))", [], 0.0, false) }
+                DispatchQueue.main.async { completion("新足迹", "网络连接异常 (\(error.localizedDescription))", 0.0, false) }
                 return
             }
             
             if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
                 print("OpenAI Error: HTTP \(httpResponse.statusCode)")
                 let msg = httpResponse.statusCode == 401 ? "认证失败，请检查服务配置" : "服务器繁忙 (错误码 \(httpResponse.statusCode))"
-                DispatchQueue.main.async { completion("新足迹", msg, [], 0.0, false) }
+                DispatchQueue.main.async { completion("新足迹", msg, 0.0, false) }
                 return
             }
             
             guard let data = data else {
                 print("OpenAI Error: No data received")
-                DispatchQueue.main.async { completion("新足迹", "未收到有效的分析结果", [], 0.0, false) }
+                DispatchQueue.main.async { completion("新足迹", "未收到有效的分析结果", 0.0, false) }
                 return
             }
             
@@ -346,7 +303,7 @@ class OpenAIService {
                 if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     if let errorJson = json["error"] as? [String: Any], let errorMsg = errorJson["message"] as? String {
                          print("OpenAI API Error: \(errorMsg)")
-                         DispatchQueue.main.async { completion("新足迹", "分析服务返回错误：\(errorMsg)", [], 0.0, false) }
+                         DispatchQueue.main.async { completion("新足迹", "分析服务返回错误：\(errorMsg)", 0.0, false) }
                          return
                     }
                     
@@ -365,19 +322,18 @@ class OpenAIService {
                            let parsedConfig = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any] {
                             let title = parsedConfig["title"] as? String ?? "新足迹"
                             let reason = parsedConfig["reason"] as? String ?? "在这个熟悉或陌生的地方留下了一段回忆。"
-                            let tags = (parsedConfig["tags"] as? [String] ?? []).filter { allAvailableTags.contains($0) }
                             let score = (parsedConfig["score"] as? NSNumber)?.floatValue ?? (parsedConfig["aiScore"] as? NSNumber)?.floatValue ?? 0.0
-                            DispatchQueue.main.async { completion(title, reason, tags, score, true) }
+                            DispatchQueue.main.async { completion(title, reason, score, true) }
                             return
                         }
                     }
                 }
                 
                 print("OpenAI Error: Failed to parse valid content from response")
-                DispatchQueue.main.async { completion("新足迹", "解析结果失败", [], 0.0, false) }
+                DispatchQueue.main.async { completion("新足迹", "解析结果失败", 0.0, false) }
             } catch {
                 print("Decode error: \(error)")
-                DispatchQueue.main.async { completion("新足迹", "解析结果异常", [], 0.0, false) }
+                DispatchQueue.main.async { completion("新足迹", "解析结果异常", 0.0, false) }
             }
         }.resume()
     }
@@ -525,15 +481,15 @@ class OpenAIService {
         let prompt = """
         请根据以下用户今天的足迹列表，写一段极简的晚间回顾文案（20字以内）。
         
+        要求：
+        1. 必须结合足迹列表中的具体地点名称或活动内容进行创作，不可仅使用空洞的通用语。
+        2. 从列表中挑选 1-2 个最具代表性的地点或瞬时感受。
+        3. 语气温馨、感性且有生活气息。
+        4. 示例：“在西单的喧嚣之后，北海公园的落日格外温柔。”
+        5. 示例：“从写字楼的繁忙到家门口的点点灯火，辛苦了。”
+        
         足迹列表：
         \(footprintList)
-        
-        要求：
-        1. 语气温馨、感性且有生活气息。
-        2. 像是在对老朋友说话。
-        3. 总结这一天的整体氛围或亮点。
-        示例：“在漫长的工作后，晚风中那一杯咖啡最是治愈。”
-        示例：“穿过熟悉的分叉路口，生活总有新的惊喜。”
         """
         
         let body: [String: Any] = [

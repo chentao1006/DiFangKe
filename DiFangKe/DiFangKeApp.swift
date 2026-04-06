@@ -34,7 +34,6 @@ struct DiFangKeApp: App {
         let schema = Schema([
             Footprint.self,
             Place.self,
-            PlaceTag.self,
             TransportManualSelection.self
         ])
         
@@ -116,14 +115,6 @@ struct DiFangKeApp: App {
     }
     
     private func setupDefaultData(context: ModelContext) {
-        // Seed Place Tags
-        let tagDescriptor = FetchDescriptor<PlaceTag>()
-        if let ts = try? context.fetch(tagDescriptor), ts.isEmpty {
-            let defaults = ["餐饮", "购物", "休息", "工作", "运动", "聚会", "旅行", "娱乐", "健身", "教育", "社交", "差旅"]
-            for name in defaults {
-                context.insert(PlaceTag(name: name))
-            }
-        }
         
         try? context.save()
     }

@@ -114,7 +114,6 @@ struct HistoryListView: View {
         case week = "周"
         case month = "月"
         case favorites = "收藏"
-        case tags = "标签"
     }
 
     @State private var hasScrolledWeek = false
@@ -207,8 +206,6 @@ struct HistoryListView: View {
             HistoryFavoritesView(onUpdate: updateSummaries)
                 .tag(ViewMode.favorites)
             
-            HistoryTagsView(onUpdate: updateSummaries)
-                .tag(ViewMode.tags)
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
     }
@@ -1084,122 +1081,6 @@ struct HistoryFavoritesView: View {
     }
 }
 
-// MARK: - History Tags View
-struct HistoryTagsView: View {
-    @Query(sort: \Footprint.startTime, order: .reverse) private var allFootprints: [Footprint]
-    @Query(sort: \Place.name) private var allPlaces: [Place]
-    @State private var selectedFootprint: Footprint?
-    let onUpdate: () -> Void
-    
-    private var validFootprints: [Footprint] {
-        allFootprints.filter { $0.statusValue != "ignored" }
-    }
-    
-    struct TagSummary: Identifiable {
-        var id: String { name }
-        let name: String
-        let count: Int
-        let lastDate: Date
-        let score: Double
-        let relativeTimeString: String
-    }
-    
-    private var tagSummaries: [TagSummary] {
-        var counts: [String: Int] = [:]
-        var latestDates: [String: Date] = [:]
-        
-        for fp in validFootprints {
-            for tag in fp.tags {
-                counts[tag, default: 0] += 1
-                if let date = latestDates[tag] {
-                    if fp.date > date { latestDates[tag] = fp.date }
-                } else {
-                    latestDates[tag] = fp.date
-                }
-            }
-        }
-        
-        let now = Date()
-        return counts.map { name, count in
-            let lastDate = latestDates[name] ?? Date.distantPast
-            let daysSince = Calendar.current.dateComponents([.day], from: lastDate, to: now).day ?? 0
-            
-            // RecencyWeight = 1.0 / (1.0 + daysSince/7.0) // 衰减慢一点点
-            let recencyWeight = 1.0 / (1.0 + Double(daysSince))
-            let score = Double(count) * 0.6 + recencyWeight * 0.4
-            
-            let relativeStr: String
-            if daysSince == 0 { relativeStr = "今天" }
-            else if daysSince == 1 { relativeStr = "昨天" }
-            else { relativeStr = "\(daysSince) 天前" }
-            
-            return TagSummary(name: name, count: count, lastDate: lastDate, score: score, relativeTimeString: relativeStr)
-        }
-        .sorted { $0.score > $1.score }
-    }
-    
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 30) {
-                if tagSummaries.isEmpty {
-                    VStack(spacing: 20) {
-                        Spacer().frame(height: 100)
-                        Image(systemName: "tag.slash")
-                            .font(.system(size: 60))
-                            .foregroundColor(Color.dfkCandidate)
-                        Text("还没有给任何足迹打过标签")
-                            .font(.subheadline.bold())
-                            .foregroundColor(Color.dfkSecondaryText)
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity)
-                } else {
-                    ForEach(tagSummaries) { tag in
-                        VStack(alignment: .leading, spacing: 12) {
-                            // Tag Header
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("# \(tag.name)").font(.title3.bold()).foregroundColor(.primary)
-                                Text("\(tag.count) 次 · 最近 \(tag.relativeTimeString)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.horizontal, 16)
-                            
-                            // Horizontal List of Cards
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                LazyHStack(spacing: 12) {
-                                    let taggedFootprints = validFootprints.filter { $0.tags.contains(tag.name) }
-                                    ForEach(taggedFootprints) { fp in
-                                        FootprintCardView(
-                                            footprint: fp, 
-                                            allPlaces: allPlaces, 
-                                            showTimeline: false,
-                                            showDateAboveTitle: true,
-                                            fixedWidth: 260
-                                        ) { item, _ in
-                                            selectedFootprint = item
-                                        }
-                                        .onChange(of: fp.isHighlight) { _, _ in
-                                            onUpdate()
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal, 16)
-                            }
-                        }
-                    }
-                    .padding(.top, 10)
-                }
-            }
-            .padding(.vertical, 10)
-        }
-        .background(Color.dfkBackground)
-        .sheet(item: $selectedFootprint) { footprint in
-            FootprintModalView(footprint: footprint, autoFocus: false)
-                .onDisappear { onUpdate() }
-        }
-    }
-}
 
 #Preview {
     NavigationStack {

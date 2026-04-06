@@ -5,7 +5,6 @@ struct SettingsView: View {
     @Environment(LocationManager.self) private var locationManager
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
     @Query(sort: \Place.name) private var allPlaces: [Place]
-    @Query(sort: \PlaceTag.name) private var allTags: [PlaceTag]
     @AppStorage("isICloudSyncEnabled") private var isICloudSyncEnabled = true
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @AppStorage("dailyNotificationHour") private var notificationHour: Int = 21
@@ -44,7 +43,7 @@ struct SettingsView: View {
                 Toggle("自动关联照片到足迹", isOn: $isAutoPhotoLinkEnabled)
             }
             
-            Section(header: Text("地点与标签管理")) {
+            Section(header: Text("地点管理")) {
                 NavigationLink(destination: PlacesManagerView()) {
                     HStack {
                         Label {
@@ -55,19 +54,6 @@ struct SettingsView: View {
                         Spacer()
                         let importantCount = allPlaces.filter { $0.isUserDefined }.count
                         Text("\(importantCount)")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                NavigationLink(destination: TagManagerView()) {
-                    HStack {
-                        Label {
-                            Text("常用标签").foregroundColor(.primary)
-                        } icon: {
-                            Image(systemName: "tag").foregroundColor(.green)
-                        }
-                        Spacer()
-                        Text("\(allTags.count)")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }

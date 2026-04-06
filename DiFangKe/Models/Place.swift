@@ -38,11 +38,3 @@ final class Place {
     }
 }
 
-@Model
-final class PlaceTag {
-    var name: String = ""
-    
-    init(name: String = "") {
-        self.name = name
-    }
-}

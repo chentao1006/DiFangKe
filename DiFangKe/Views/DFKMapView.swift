@@ -48,3 +48,37 @@ struct DFKMapView: View {
         .mapStyle(.standard)
     }
 }
+
+extension Array where Element == CLLocationCoordinate2D {
+    /// 计算包含所有坐标点的最佳矩形区域
+    func boundingRegion(paddingFactor: Double = 1.3) -> MKCoordinateRegion? {
+        guard !isEmpty else { return nil }
+        
+        var minLat = self[0].latitude
+        var maxLat = self[0].latitude
+        var minLon = self[0].longitude
+        var maxLon = self[0].longitude
+        
+        for p in self {
+            minLat = Swift.min(minLat, p.latitude)
+            maxLat = Swift.max(maxLat, p.latitude)
+            minLon = Swift.min(minLon, p.longitude)
+            maxLon = Swift.max(maxLon, p.longitude)
+        }
+        
+        let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2)
+        
+        // 计算跨度并增加外边距
+        let latDelta = (maxLat - minLat) * paddingFactor
+        let lonDelta = (maxLon - minLon) * paddingFactor
+        
+        // 确保跨度不为0 (比如只有一个点的情况)
+        let finalLatDelta = Swift.max(latDelta, 0.005) // 约 500m
+        let finalLonDelta = Swift.max(lonDelta, 0.005)
+        
+        return MKCoordinateRegion(
+            center: center,
+            span: MKCoordinateSpan(latitudeDelta: finalLatDelta, longitudeDelta: finalLonDelta)
+        )
+    }
+}
