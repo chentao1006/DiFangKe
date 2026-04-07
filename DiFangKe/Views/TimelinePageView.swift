@@ -1,0 +1,440 @@
+import SwiftUI
+import CoreLocation
+import MapKit
+import SwiftData
+
+struct TimelinePageView: View {
+    @Environment(\.modelContext) private var modelContext
+    let date: Date
+    let footprints: [Footprint]
+    let manualSelections: [TransportManualSelection]
+    let allPlaces: [Place]
+    let offset: Int
+    let locationManager: LocationManager
+    let pastLimitOffset: Int
+    
+    @State private var selectedFootprint: Footprint?
+    @State private var selectedTransport: Transport?
+    @State private var autoFocusOnOpen = false
+    @State private var tomorrowQuoteTitle: String = "明天是个未拆的礼物"
+    @State private var tomorrowQuoteSubtitle: String = "愿明天的你，能在平凡中发现惊喜。"
+    
+    @State private var pastQuoteTitle: String = "真希望能早点遇到你"
+    @State private var pastQuoteSubtitle: String = "要是早点遇见，就能记录更多精彩了。"
+    
+    @State private var showingAddPlaceSheet = false
+    @AppStorage("isGuideDismissed") private var isGuideDismissed = false
+    @AppStorage("isNotificationGuideDismissed") private var isNotificationGuideDismissed = false
+    @AppStorage("hasSwiped") private var hasSwiped = false
+    @State private var animateHint = false
+    @State private var notificationAuthStatus: UNAuthorizationStatus = .notDetermined
+    
+    @State private var timelineItems: [TimelineItem]
+    @State private var isLoadingTimeline: Bool
+    @State private var refreshTask: Task<Void, Never>?
+    
+    @State private var totalPointsCount: Int = 0
+    @State private var trajectoryPoints: [CLLocationCoordinate2D] = []
+    
+    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int) {
+        self.date = date
+        self.footprints = footprints
+        self.manualSelections = manualSelections
+        self.allPlaces = allPlaces
+        self.offset = offset
+        self.locationManager = locationManager
+        self.pastLimitOffset = pastLimitOffset
+        
+        let cached = TimelineBuilder.timelineCache[date]
+        self._timelineItems = State(initialValue: cached ?? [])
+        self._isLoadingTimeline = State(initialValue: cached == nil)
+    }
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
+                
+                if offset > 0 {
+                    futurePlaceholderView
+                } else if offset == pastLimitOffset {
+                    pastPlaceholderView
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        if isToday {
+                            RecordingStatusCard(locationManager: locationManager, footprintCount: footprints.count)
+                                .padding(.horizontal, 16)
+                        } else {
+                            DaySummaryCard(
+                                date: date,
+                                totalPoints: totalPointsCount,
+                                footprintCount: timelineItems.filter { if case .footprint = $0 { return true }; return false }.count,
+                                transportMileage: timelineItems.reduce(0) { sum, item in
+                                    if case .transport(let t) = item { return sum + t.distance }
+                                    return sum
+                                },
+                                points: trajectoryPoints
+                            )
+                            .padding(.horizontal, 16)
+                        }
+                        
+                        if timelineItems.isEmpty && !isLoadingTimeline {
+                            PlaceholderFootprintCard()
+                                .padding(.horizontal, 0)
+                        }
+                        
+                        if allPlaces.isEmpty && !isGuideDismissed {
+                            ImportantPlaceGuide(isGuideDismissed: $isGuideDismissed) {
+                                showingAddPlaceSheet = true
+                            }
+                            .padding(.top, 20)
+                            .padding(.bottom, 20)
+                        }
+                    }
+                    
+                    if footprints.isEmpty && timelineItems.isEmpty && (!isToday || locationManager.potentialStopStartLocation == nil) {
+                        if allPlaces.isEmpty && isToday && !isGuideDismissed {
+                            EmptyView()
+                        } else if !isLoadingTimeline {
+                            emptyStateView
+                        }
+                    } else {
+                        if !isNotificationGuideDismissed && isToday && notificationAuthStatus == .notDetermined && !footprints.isEmpty {
+                            NotificationGuide(isNotificationGuideDismissed: $isNotificationGuideDismissed)
+                                .padding(.top, 10)
+                                .padding(.bottom, 16)
+                        }
+                        
+                        let items = self.timelineItems
+                        let count = items.count
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                            switch item {
+                            case .footprint(let footprint):
+                                FootprintCardView(
+                                    footprint: footprint, 
+                                    allPlaces: allPlaces,
+                                    contextDate: date,
+                                    isFirst: index == 0,
+                                    isLast: index == count - 1,
+                                    isToday: isToday
+                                ) { item, focus in
+                                    self.autoFocusOnOpen = focus
+                                    self.selectedFootprint = item
+                                }
+                                .padding(.horizontal, 16)
+                            case .transport(let transport):
+                                TransportCardView(
+                                    transport: transport,
+                                    isFirst: index == 0,
+                                    isLast: index == count - 1,
+                                    isToday: isToday,
+                                    onSelect: { selected in
+                                        self.selectedTransport = selected
+                                    },
+                                    onDelete: { selected in
+                                        let selection = TransportManualSelection(startTime: selected.startTime, endTime: selected.endTime, isDeleted: true)
+                                        modelContext.insert(selection)
+                                        try? modelContext.save()
+                                        refreshTimeline()
+                                    }
+                                )
+                                .padding(.horizontal, 16)
+                            }
+                        }
+                    }
+                    
+                    if offset <= 0 && !hasSwiped {
+                        swipeHintFooter
+                            .padding(.top, 40)
+                            .padding(.bottom, 60)
+                            .onAppear {
+                                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                                    animateHint = true
+                                }
+                            }
+                    }
+                }
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 10)
+        }
+        .onAppear {
+            NotificationManager.shared.getAuthorizationStatus { status in
+                self.notificationAuthStatus = status
+            }
+            
+            let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
+            let notInCache = TimelineBuilder.timelineCache[date] == nil
+            
+            if timelineItems.isEmpty || (notInCache && isToday) || trajectoryPoints.isEmpty {
+                refreshTimeline()
+            }
+        }
+        .onDisappear {
+            refreshTask?.cancel()
+        }
+        .onChange(of: footprints) { _, _ in refreshTimeline() }
+        .onChange(of: manualSelections) { _, _ in refreshTimeline() }
+        .sheet(item: $selectedFootprint) { footprint in
+            FootprintModalView(footprint: footprint, autoFocus: autoFocusOnOpen)
+                .onDisappear { autoFocusOnOpen = false }
+        }
+        .sheet(isPresented: $showingAddPlaceSheet) {
+            AddPlaceSheet(initialCoordinate: locationManager.lastLocation?.coordinate, 
+                          initialName: locationManager.currentAddress) { newPlace in
+                modelContext.insert(newPlace)
+                try? modelContext.save()
+            }
+        }
+        .sheet(item: $selectedTransport) { transport in
+            TransportModalView(transport: transport) { newType in
+                if let index = timelineItems.firstIndex(where: { 
+                    if case .transport(let t) = $0, t.id == transport.id { return true }
+                    return false
+                }) {
+                    if case .transport(let t) = timelineItems[index] {
+                        let updated = t.updatingType(newType)
+                        timelineItems[index] = .transport(updated)
+                    }
+                }
+            } onLocationUpdate: {
+                refreshTimeline()
+            }
+        }
+    }
+    
+    @MainActor
+    private func refreshTimeline() {
+        refreshTask?.cancel()
+        
+        let currentFootprints = footprints.filter { $0.status != .ignored }
+        let currentOverrides = manualSelections
+        let currentPlaces = allPlaces
+        let targetDate = date
+        let availableRawDates = locationManager.availableRawDates
+        
+        let fpsLite = currentFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
+        let placesLite = currentPlaces.map { TimelineBuilder.convertToPlaceLite($0) }
+        let overridesLite = currentOverrides.map { TimelineBuilder.convertToOverrideLite($0) }
+
+        refreshTask = Task { @MainActor in
+            let isToday = Calendar.current.isDateInToday(targetDate)
+            let hasExistingFootprints = !currentFootprints.isEmpty
+            let hasRawData = availableRawDates.contains(Calendar.current.startOfDay(for: targetDate))
+            
+            if !isToday && !hasExistingFootprints && !hasRawData {
+                self.timelineItems = []
+                self.isLoadingTimeline = false
+                TimelineBuilder.timelineCache[targetDate] = []
+                return
+            }
+
+            if self.timelineItems.isEmpty {
+                if let cached = TimelineBuilder.timelineCache[targetDate] {
+                    self.timelineItems = cached 
+                    self.isLoadingTimeline = false
+                } else {
+                    self.isLoadingTimeline = true
+                }
+            }
+            
+            if !self.timelineItems.isEmpty || TimelineBuilder.timelineCache[targetDate] != nil {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            
+            if Task.isCancelled { return }
+            
+            let cachedItems = TimelineBuilder.timelineCache[targetDate]
+            let result = await Task.detached(priority: .userInitiated) {
+                let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
+                
+                if let cached = cachedItems, !isToday, !cached.isEmpty {
+                    return (cached, rawPoints.map { $0.coordinate }, rawPoints.count)
+                }
+                
+                let items = TimelineBuilder.buildTimeline(
+                    for: targetDate, 
+                    footprints: fpsLite, 
+                    allRawPoints: rawPoints, 
+                    allPlaces: placesLite, 
+                    overrides: overridesLite
+                )
+                return (items, rawPoints.map { $0.coordinate }, rawPoints.count)
+            }.value
+            
+            let items = result.0
+            self.trajectoryPoints = result.1
+            self.totalPointsCount = result.2
+            
+            if Task.isCancelled { return }
+            
+            if !self.timelineItems.isEmpty {
+                var mergedItems = items
+                for i in 0..<mergedItems.count {
+                    if i < self.timelineItems.count {
+                        let old = self.timelineItems[i]
+                        let new = mergedItems[i]
+                        
+                        if case .footprint(let oldF) = old, case .footprint(let newF) = new {
+                            let oldTitle = oldF.title.trimmingCharacters(in: .whitespaces)
+                            let newTitle = newF.title.trimmingCharacters(in: .whitespaces)
+                            
+                            let isOldValid = !oldTitle.isEmpty && !["地点记录", "正在获取位置...", "在某地停留", ""].contains(oldTitle)
+                            let isNewPlaceholder = newTitle.isEmpty || ["地点记录", "正在获取位置...", "在某地停留", ""].contains(newTitle)
+                            
+                            if isOldValid && isNewPlaceholder && abs(oldF.startTime.timeIntervalSince(newF.startTime)) < 300 {
+                                mergedItems[i] = old
+                            }
+                        }
+                    }
+                }
+                self.timelineItems = mergedItems
+            } else {
+                self.timelineItems = items
+            }
+            
+            TimelineBuilder.timelineCache[targetDate] = self.timelineItems
+            self.isLoadingTimeline = false
+            
+            locationManager.backfillGaps(for: targetDate)
+            resolveTimelineAddresses(for: self.timelineItems)
+        }
+    }
+    
+    private func resolveTimelineAddresses(for items: [TimelineItem]) {
+        for (index, item) in items.enumerated() {
+            switch item {
+            case .transport(let transport):
+                if (transport.startLocation == "正在获取位置..." || transport.startLocation == "起点") && !transport.points.isEmpty {
+                    TimelineBuilder.resolveAddress(coordinate: transport.points.first!) { name in
+                        updateTimelineItemAddress(index: index, type: .start, name: name)
+                    }
+                }
+                
+                if (transport.endLocation == "正在获取位置..." || transport.endLocation == "终点") && !transport.points.isEmpty {
+                    TimelineBuilder.resolveAddress(coordinate: transport.points.last!) { name in
+                        updateTimelineItemAddress(index: index, type: .end, name: name)
+                    }
+                }
+            case .footprint(let footprint):
+                let needsResolution = (footprint.title == "地点记录" || footprint.title == "正在获取位置..." || footprint.title == "在某地停留") 
+                    && (footprint.address == nil || footprint.address!.isEmpty || footprint.address == "正在解析位置...")
+                
+                if needsResolution && !footprint.footprintLocations.isEmpty {
+                    let avgLat = footprint.footprintLocations.map { $0.latitude }.reduce(0, +) / Double(footprint.footprintLocations.count)
+                    let avgLon = footprint.footprintLocations.map { $0.longitude }.reduce(0, +) / Double(footprint.footprintLocations.count)
+                    
+                    TimelineBuilder.resolveAddress(coordinate: CLLocationCoordinate2D(latitude: avgLat, longitude: avgLon)) { name in
+                        updateTimelineItemAddress(index: index, type: .stay, name: name)
+                    }
+                }
+            }
+        }
+    }
+    
+    enum AddressType { case start, end, stay }
+    
+    private func updateTimelineItemAddress(index: Int, type: AddressType, name: String) {
+        Task { @MainActor in
+            guard index < timelineItems.count else { return }
+            let item = timelineItems[index]
+            switch item {
+            case .transport(let transport):
+                let updated = type == .start ? transport.updatingStart(name) : transport.updatingEnd(name)
+                timelineItems[index] = .transport(updated)
+            case .footprint(let footprint):
+                if type == .stay {
+                    footprint.title = name
+                    footprint.address = name
+                    
+                    if let context = footprint.modelContext {
+                        try? context.save()
+                    }
+                    
+                    timelineItems[index] = .footprint(footprint)
+                }
+            }
+        }
+    }
+    
+    var emptyStateView: some View {
+        VStack(spacing: 20) {
+            Spacer().frame(height: 100)
+            Image(systemName: "mappin.and.ellipse")
+                .font(.system(size: 60))
+                .foregroundColor(Color.dfkCandidate)
+            Text("比较平常，没有发现特别足迹")
+                .font(.subheadline.bold())
+                .foregroundColor(Color.dfkSecondaryText)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+        .multilineTextAlignment(.center)
+    }
+    
+    var futurePlaceholderView: some View {
+        VStack(spacing: 30) {
+            Spacer().frame(height: 100)
+            Image(systemName: "sparkles").font(.system(size: 70)).foregroundColor(Color.dfkHighlight)
+            VStack(spacing: 12) {
+                Text(tomorrowQuoteTitle).font(.title3.bold())
+                Text(tomorrowQuoteSubtitle).font(.subheadline).foregroundColor(Color.dfkSecondaryText)
+            }
+            Spacer()
+        }
+        .onAppear {
+            if offset == 1 {
+                OpenAIService.shared.generateTomorrowQuote { title, sub in
+                    self.tomorrowQuoteTitle = title
+                    self.tomorrowQuoteSubtitle = sub
+                }
+            }
+        }
+    }
+    
+    var pastPlaceholderView: some View {
+        VStack(spacing: 30) {
+            Spacer().frame(height: 100)
+            Image(systemName: "timer") .font(.system(size: 70)).foregroundColor(Color.dfkCandidate)
+            VStack(spacing: 12) {
+                Text(pastQuoteTitle).font(.title3.bold())
+                Text(pastQuoteSubtitle).font(.subheadline).foregroundColor(Color.dfkSecondaryText)
+            }
+            
+            NavigationLink(destination: HistoryListView(initialDate: date, showImportOnAppear: true)) {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.and.arrow.down.badge.clock")
+                    Text("从相册寻回当时的足迹")
+                }
+                .font(.system(size: 14, weight: .bold))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+                .background(Color.dfkAccent.opacity(0.1))
+                .foregroundColor(.dfkAccent)
+                .cornerRadius(20)
+            }
+            .padding(.top, 10)
+            
+            Spacer()
+        }
+        .onAppear {
+            OpenAIService.shared.generatePastQuote { title, sub in
+                self.pastQuoteTitle = title
+                self.pastQuoteSubtitle = sub
+            }
+        }
+    }
+    
+    var swipeHintFooter: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "chevron.left")
+                .offset(x: animateHint ? -8 : 8)
+            Text("左右滑动切换日期")
+                .font(.caption.bold())
+            Image(systemName: "chevron.right")
+                .offset(x: animateHint ? 8 : -8)
+        }
+        .foregroundColor(.secondary.opacity(0.6))
+        .frame(maxWidth: .infinity)
+    }
+}

@@ -75,7 +75,7 @@ struct SettingsView: View {
             }
 
             Section(header: Text("推送通知")) {
-                Toggle("每日动态汇总", isOn: $isDailyNotificationEnabled)
+                Toggle("每日足迹汇总", isOn: $isDailyNotificationEnabled)
                     .onChange(of: isDailyNotificationEnabled) { _, newValue in
                         if newValue {
                             NotificationManager.shared.requestAuthorization { granted in

@@ -8,6 +8,8 @@ struct DFKMapView: View {
     var isInteractive: Bool = false
     var showsUserLocation: Bool = true
     var points: [CLLocationCoordinate2D] = []
+    var mainAnnotationCoordinate: CLLocationCoordinate2D? = nil
+    var mainAnnotationTitle: String? = nil
     
     @Query(sort: \Place.name) private var allPlaces: [Place]
     
@@ -20,6 +22,11 @@ struct DFKMapView: View {
             if !points.isEmpty {
                 MapPolyline(coordinates: points)
                     .stroke(Color.dfkAccent, lineWidth: isInteractive ? 5 : 3)
+            }
+            
+            if let mainCoord = mainAnnotationCoordinate {
+                Marker(mainAnnotationTitle ?? "", coordinate: mainCoord)
+                    .tint(Color.dfkAccent)
             }
             
             // 重要地点呈现

@@ -27,46 +27,27 @@ struct DaySummary: Identifiable, Equatable {
     }
 }
 
-// MARK: - Simple Daily Timeline Modal
+// MARK: - Daily Timeline Modal
 struct SimpleDayTimelineView: View {
     let date: Date
     @Query(sort: \Footprint.startTime, order: .reverse) private var allFootprints: [Footprint]
-    @Query private var allPlaces: [Place]
+    @Query private var allManualSelections: [TransportManualSelection]
+    @Query(sort: \Place.name) private var allPlaces: [Place]
+    @Environment(LocationManager.self) private var locationManager
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedFootprint: Footprint?
-    
-    var dailyFootprints: [Footprint] {
-        allFootprints.filter { 
-            Calendar.current.isDate($0.startTime, inSameDayAs: date) &&
-            $0.status != .ignored
-        }
-    }
     
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 0) {
-                    if dailyFootprints.isEmpty {
-                        VStack(spacing: 20) {
-                            Spacer().frame(height: 100)
-                            Image(systemName: "mappin.and.ellipse").font(.system(size: 60)).foregroundColor(Color.dfkCandidate)
-                            Text("比较平常，没有发现特别足迹").font(.subheadline.bold()).foregroundColor(Color.dfkSecondaryText)
-                            Spacer()
-                        }
-                    } else {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(dailyFootprints) { footprint in
-                                FootprintCardView(footprint: footprint, allPlaces: allPlaces) { item, _ in
-                                    self.selectedFootprint = item
-                                }
-                                .padding(.horizontal, 16)
-                            }
-                        }
-                    }
-                }
-                .padding(.vertical, 10)
-            }
-            .navigationTitle(date.formatted(.dateTime.year(.defaultDigits).month(.wide).day()))
+            TimelinePageView(
+                date: date,
+                footprints: allFootprints.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) },
+                manualSelections: allManualSelections.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) },
+                allPlaces: allPlaces,
+                offset: Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: Date()), to: date).day ?? 0,
+                locationManager: locationManager,
+                pastLimitOffset: -3650
+            )
+            .navigationTitle(date.formatted(.dateTime.year().month().day()))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -74,15 +55,13 @@ struct SimpleDayTimelineView: View {
                         .fontWeight(.bold)
                 }
             }
-            .sheet(item: $selectedFootprint) { footprint in
-                FootprintModalView(footprint: footprint, autoFocus: false)
-            }
         }
     }
 }
 
 struct HistoryListView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(LocationManager.self) private var locationManager
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
     
     let initialDate: Date
@@ -144,6 +123,7 @@ struct HistoryListView: View {
         .onChange(of: allFootprints) { updateSummaries() }
         .sheet(item: $showingDate) { item in
             SimpleDayTimelineView(date: item.date)
+                .environment(locationManager)
                 .onDisappear { updateSummaries() }
         }
         .modifier(ImportSheetsModifier(

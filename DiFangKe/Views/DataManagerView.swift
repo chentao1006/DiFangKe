@@ -57,7 +57,7 @@ struct DataManagerView: View {
                 Button(role: .destructive, action: {
                     showDeleteAlert = true
                 }) {
-                    Text("彻底重置所有数据")
+                    Text("清空所有数据")
                 }
                 .alert("确认删除", isPresented: $showDeleteAlert) {
                     Button("删除", role: .destructive) { deleteAllData() }

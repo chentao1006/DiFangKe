@@ -418,63 +418,65 @@ struct FootprintModalView: View {
                             .font(.subheadline)
                             .foregroundColor(Color.dfkMainText.opacity(0.5))
                     } else {
-                        HStack(spacing: 4) {
+                        HStack(spacing: 6) {
                             Text(footprint.address ?? (matchedPlace?.address ?? "未记录位置"))
-                                .font(.subheadline)
-                                .foregroundColor(Color.dfkMainText.opacity(0.8))
+                                .font(.system(size: 16, design: .rounded))
+                                .foregroundColor(Color.dfkMainText)
                                 .lineLimit(2)
                             
+                            if let place = matchedPlace {
+                                Text(place.name)
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.orange.opacity(0.12))
+                                    .foregroundColor(.orange)
+                                    .clipShape(Capsule())
+                                    .fixedSize()
+                            }
+                            
                             Image(systemName: "pencil")
-                                .font(.system(size: 11))
-                                .foregroundColor(Color.dfkSecondaryText.opacity(0.6))
+                                .font(.system(size: 12))
+                                .foregroundColor(Color.dfkSecondaryText.opacity(0.5))
                         }
-                    }
-                    
-                    if let place = matchedPlace {
-                        Spacer(minLength: 8)
-                        Text(place.name)
-                            .font(.system(size: 13, weight: .bold, design: .rounded))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Color.orange.opacity(0.12))
-                            .foregroundColor(.orange)
-                            .clipShape(Capsule())
-                            .fixedSize()
                     }
                 }
             }
             .buttonStyle(.plain)
-            HStack(spacing: 6) { 
-                Image(systemName: "calendar")
-                    .font(.caption)
-                    .foregroundColor(Color.dfkSecondaryText)
-                Text(footprint.date.formatted(.dateTime.year().month().day().weekday()))
-                    .font(.subheadline)
-                    .foregroundColor(Color.dfkSecondaryText) 
+            
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) { 
+                    Image(systemName: "calendar")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.secondary)
+                    Text(footprint.date.formatted(.dateTime.year().month().day().weekday()))
+                        .font(.system(size: 14, design: .rounded))
+                        .foregroundColor(Color.secondary) 
+                }
+                HStack(spacing: 6) { 
+                    Image(systemName: "clock")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.secondary)
+                    Text(timeRangeString)
+                        .font(.system(size: 14, design: .monospaced))
+                        .foregroundColor(Color.secondary) 
+                }
+                HStack(spacing: 6) { 
+                    Image(systemName: "hourglass")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.secondary)
+                    Text("停留 \(durationString)")
+                        .font(.system(size: 14, design: .rounded))
+                        .foregroundColor(Color.secondary) 
+                }
             }
-            HStack(spacing: 6) { 
-                Image(systemName: "clock")
-                    .font(.caption)
-                    .foregroundColor(Color.dfkSecondaryText)
-                Text(timeRangeString)
-                    .font(.system(.subheadline, design: .monospaced))
-                    .foregroundColor(Color.dfkSecondaryText) 
-            }
-            HStack(spacing: 6) { 
-                Image(systemName: "hourglass")
-                    .font(.caption)
-                    .foregroundColor(Color.dfkSecondaryText)
-                Text("停留 \(durationString)")
-                    .font(.subheadline)
-                    .foregroundColor(Color.dfkSecondaryText) 
-            }            
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.04)))
     }
-    
     
     private var matchedPlace: Place? {
         savedPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })
@@ -1241,7 +1243,9 @@ struct FootprintDetailMapView: View {
             cameraPosition: $cameraPosition,
             isInteractive: isInteractive,
             showsUserLocation: true,
-            points: footprint.coordinates
+            points: footprint.coordinates,
+            mainAnnotationCoordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude),
+            mainAnnotationTitle: footprint.title
         )
         .onAppear {
             if let region = footprint.region {
@@ -1279,45 +1283,5 @@ struct SpringButtonStyle: ButtonStyle {
     }
 }
 
-struct FlowLayout: Layout {
-    var spacing: CGFloat = 8
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let containerWidth = proposal.width ?? .infinity
-        var height: CGFloat = 0
-        var currentRowWidth: CGFloat = 0
-        var currentRowHeight: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if currentRowWidth + size.width > containerWidth {
-                height += currentRowHeight + spacing
-                currentRowWidth = size.width + spacing
-                currentRowHeight = size.height
-            } else {
-                currentRowWidth += size.width + spacing
-                currentRowHeight = max(currentRowHeight, size.height)
-            }
-        }
-        return CGSize(width: containerWidth, height: height + currentRowHeight)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var currentRowHeight: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX {
-                x = bounds.minX
-                y += currentRowHeight + spacing
-                currentRowHeight = 0
-            }
-            subview.place(at: CGPoint(x: x, y: y), proposal: .unspecified)
-            x += size.width + spacing
-            currentRowHeight = max(currentRowHeight, size.height)
-        }
-    }
-}
 

@@ -143,6 +143,8 @@ struct TransportModalView: View {
     
     @State private var position: MapCameraPosition = .automatic
     @State private var localManualType: TransportType? = nil
+    @State private var selectedMarker: LocationType? = nil
+    @State private var showingMarkerDialog: LocationType? = nil
     
     @Environment(LocationManager.self) private var locationManager
     @State private var showingSearchSheet: LocationType? = nil
@@ -172,9 +174,15 @@ struct TransportModalView: View {
             ZStack(alignment: .top) {
                 // 1. Map View
                 Map(position: $position) {
-                    // Start Annotation
+                    // Start Marker (Physical Look & Title)
                     if let start = transport.points.first {
-                        Annotation("", coordinate: start) {
+                        Marker(currentStartLocation, coordinate: start)
+                            .tint(.green)
+                    }
+                    
+                    // Start Interaction Layer
+                    if let start = transport.points.first {
+                        Annotation("", coordinate: start, anchor: .top) {
                             Menu {
                                 SuggestionsMenuContent(locationManager: locationManager, coordinate: start, forOngoing: false) {
                                     showingSearchSheet = .start
@@ -182,25 +190,26 @@ struct TransportModalView: View {
                                     saveLocationOverride(type: .start, name: newName)
                                 }
                             } label: {
-                                VStack(spacing: 4) {
-                                    Text(currentStartLocation)
-                                        .font(.caption2.bold())
-                                        .padding(.horizontal, 4)
-                                        .padding(.vertical, 2)
-                                        .background(.ultraThinMaterial)
-                                        .cornerRadius(4)
-                                    Image(systemName: "mappin.circle.fill")
-                                        .font(.title)
-                                        .foregroundColor(.green)
-                                        .shadow(radius: 2)
-                                }
+                                Text(currentStartLocation)
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(.primary)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
+                                    .overlay(Capsule().stroke(Color.green, lineWidth: 1))
                             }
                         }
                     }
                     
-                    // End Annotation
+                    // End Marker (Physical Look & Title)
                     if let end = transport.points.last {
-                        Annotation("", coordinate: end) {
+                        Marker(currentEndLocation, coordinate: end)
+                            .tint(.blue)
+                    }
+                    
+                    // End Interaction Layer
+                    if let end = transport.points.last {
+                        Annotation("", coordinate: end, anchor: .top) {
                             Menu {
                                 SuggestionsMenuContent(locationManager: locationManager, coordinate: end, forOngoing: false) {
                                     showingSearchSheet = .end
@@ -208,18 +217,13 @@ struct TransportModalView: View {
                                     saveLocationOverride(type: .end, name: newName)
                                 }
                             } label: {
-                                VStack(spacing: 4) {
-                                    Text(currentEndLocation)
-                                        .font(.caption2.bold())
-                                        .padding(.horizontal, 4)
-                                        .padding(.vertical, 2)
-                                        .background(.ultraThinMaterial)
-                                        .cornerRadius(4)
-                                    Image(systemName: "mappin.circle.fill")
-                                        .font(.title)
-                                        .foregroundColor(.red)
-                                        .shadow(radius: 2)
-                                }
+                                Text(currentEndLocation)
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(.primary)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
+                                    .overlay(Capsule().stroke(Color.blue, lineWidth: 1))
                             }
                         }
                     }
@@ -244,52 +248,112 @@ struct TransportModalView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 // Bottom Info Summary
-                VStack(spacing: 12) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(transport.startTime.formatted(.dateTime.hour().minute()) + " - " + transport.endTime.formatted(.dateTime.hour().minute()))
-                                .font(.headline)
-                            
-                            // 交通工具选择器
-                            Menu {
-                                ForEach(TransportType.allCases, id: \.self) { type in
-                                    Button {
-                                        saveChoice(type)
-                                    } label: {
-                                        Label(type.localizedName, systemImage: type.sfSymbol)
+                VStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        // Start/End Locations Section
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "circle.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundColor(.green)
+                                
+                                Menu {
+                                    SuggestionsMenuContent(locationManager: locationManager, coordinate: transport.points.first, forOngoing: false) {
+                                        showingSearchSheet = .start
+                                    } onCustomSelection: { newName in
+                                        saveLocationOverride(type: .start, name: newName)
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Text("起点: " + currentStartLocation)
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundColor(.primary)
+                                            .lineLimit(1)
+                                        Image(systemName: "pencil")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary.opacity(0.6))
                                     }
                                 }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: displayType.sfSymbol)
-                                        .foregroundColor(Color.dfkAccent)
-                                    Text(displayType.localizedName)
-                                        .font(.subheadline.bold())
-                                        .foregroundColor(.secondary)
-                                    Image(systemName: "chevron.up.chevron.down")
-                                        .font(.system(size: 10))
-                                        .foregroundColor(.secondary.opacity(0.5))
+                                .buttonStyle(.plain)
+                            }
+                            
+                            HStack(spacing: 12) {
+                                Image(systemName: "circle.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundColor(.blue)
+                                
+                                Menu {
+                                    SuggestionsMenuContent(locationManager: locationManager, coordinate: transport.points.last, forOngoing: false) {
+                                        showingSearchSheet = .end
+                                    } onCustomSelection: { newName in
+                                        saveLocationOverride(type: .end, name: newName)
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Text("终点: " + currentEndLocation)
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundColor(.primary)
+                                            .lineLimit(1)
+                                        Image(systemName: "pencil")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary.opacity(0.6))
+                                    }
                                 }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(Capsule().fill(Color.secondary.opacity(0.1)))
+                                .buttonStyle(.plain)
                             }
                         }
+                        .padding(.bottom, 4)
                         
-                        Spacer()
+                        Divider().opacity(0.5)
                         
-                        VStack(alignment: .trailing, spacing: 4) {
-                            Text(distanceString)
-                                .font(.headline)
-                                .foregroundColor(Color.dfkAccent)
-                            Text(String(format: "平均速度 %.1f km/h", transport.averageSpeed * 3.6))
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
+                        HStack {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(transport.startTime.formatted(.dateTime.hour().minute()) + " - " + transport.endTime.formatted(.dateTime.hour().minute()))
+                                    .font(.headline)
+                                
+                                // 交通工具选择器
+                                Menu {
+                                    ForEach(TransportType.allCases, id: \.self) { type in
+                                        Button {
+                                            saveChoice(type)
+                                        } label: {
+                                            Label(type.localizedName, systemImage: type.sfSymbol)
+                                        }
+                                    }
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: displayType.sfSymbol)
+                                            .foregroundColor(Color.dfkAccent)
+                                        Text(displayType.localizedName)
+                                            .font(.subheadline.bold())
+                                            .foregroundColor(.secondary)
+                                        Image(systemName: "chevron.up.chevron.down")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary.opacity(0.5))
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Capsule().fill(Color.secondary.opacity(0.1)))
+                                }
+                            }
+                            
+                            Spacer()
+                            
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text(distanceString)
+                                    .font(.headline)
+                                    .foregroundColor(Color.dfkAccent)
+                                Text(String(format: "平均速度 %.1f km/h", transport.averageSpeed * 3.6))
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
-                    .padding()
-                    .background(RoundedRectangle(cornerRadius: 16).fill(.ultraThinMaterial))
-                    .padding()
+                    .padding(20)
+                    .background(RoundedRectangle(cornerRadius: 24).fill(.ultraThinMaterial))
+                    .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: -2)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 16)
                 }
             }
             .sheet(item: $showingSearchSheet) { type in

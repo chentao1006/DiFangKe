@@ -131,7 +131,7 @@ struct LocationSearchSheet: View {
                 }
                 .listStyle(.plain)
             }
-            .navigationTitle("手动修正地址")
+            .navigationTitle("搜索其他地点")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("取消") { dismiss() } }
