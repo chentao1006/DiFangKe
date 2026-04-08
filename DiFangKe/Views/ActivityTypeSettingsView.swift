@@ -118,32 +118,55 @@ struct ActivityTypeEditorView: View {
     @State private var icon: String = "tag.fill"
     @State private var color: Color = .blue
     
-    let icons = [
-        "house.fill", "briefcase.fill", "graduationcap.fill", "airplane",
-        "moon.stars.fill", "fork.knife", "bag.fill", "figure.run",
-        "gamecontroller.fill", "book.fill", "cross.fill", "car.fill",
-        "bus.fill", "tram.fill", "map.fill", "mappin.and.ellipse",
-        "star.fill", "heart.fill", "gift.fill", "cart.fill",
-        "cup.and.saucer.fill", "wineglass.fill", "pills.fill", "camera.fill",
-        "laptopcomputer", "desktopcomputer", "keyboard", "printer.fill",
-        "tv.fill", "umbrella.fill", "sun.max.fill", "cloud.fill",
-        "bicycle", "ferry.fill", "fuelpump.fill",
-        "creditcard.fill", "cart.badge.plus", "shippingbox.fill", "hammer.fill",
-        "wrench.adjustable.fill", "theatermasks.fill", "music.note", "mic.fill",
-        "mountain.2.fill", "leaf.fill", "pawprint.fill", "drop.fill",
-        "bolt.fill", "flame.fill", "stethoscope", "bed.double.fill",
-        "sofa.fill", "lamp.floor.fill", "toilet.fill", "shower.fill",
-        "facemask.fill", "tshirt.fill", "comb.fill", "scissors",
-        "magnifyingglass", "bell.fill", "envelope.fill", "phone.fill",
-        "dog.fill", "cat.fill", "hare.fill", "tortoise.fill",
-        "birthday.cake.fill", "face.smiling", "eyeglasses", 
-        "puzzlepiece.fill", "brain.head.profile", "lightbulb.fill", "calendar", "play.rectangle.fill",
-        "person.fill", "person.2.fill", "person.3.fill", "party.popper.fill",
-        "figure.2.and.child.holdinghands", "figure.and.child.holdinghands"
+    struct IconCategory: Identifiable {
+        let id = UUID()
+        let name: String
+        let icons: [String]
+    }
+    
+    let iconCategories: [IconCategory] = [
+        IconCategory(name: "基础与生活", icons: [
+            "house.fill", "briefcase.fill", "graduationcap.fill", "airplane",
+            "moon.stars.fill", "fork.knife", "bag.fill", "cart.fill",
+            "cup.and.saucer.fill", "wineglass.fill", "pills.fill", "camera.fill",
+            "gift.fill", "birthday.cake.fill", "face.smiling", "party.popper.fill",
+            "star.fill", "heart.fill", "bell.fill", "envelope.fill", "phone.fill"
+        ]),
+        IconCategory(name: "运动与健身", icons: [
+            "figure.run", "figure.walk", "figure.hiking", "figure.outdoor.cycle",
+            "figure.pool.swim", "figure.strengthtraining.traditional", "figure.yoga", "figure.climbing", 
+            "figure.badminton", "figure.table.tennis", "figure.basketball", "figure.soccer", 
+            "figure.tennis", "figure.golf", "figure.bowling", "figure.dance",
+            "figure.skiing.downhill", "figure.skateboarding", "figure.surfing", "figure.fishing"
+        ]),
+        IconCategory(name: "交通与出行", icons: [
+            "car.fill", "bus.fill", "tram.fill", "ferry.fill", "bicycle", 
+            "map.fill", "mappin.and.ellipse", "fuelpump.fill"
+        ]),
+        IconCategory(name: "工作与学习", icons: [
+            "book.fill", "laptopcomputer", "desktopcomputer", "keyboard", "printer.fill",
+            "tv.fill", "lightbulb.fill", "brain.head.profile", "puzzlepiece.fill", 
+            "hammer.fill", "wrench.adjustable.fill", "stethoscope", "cross.fill"
+        ]),
+        IconCategory(name: "休闲与娱乐", icons: [
+            "gamecontroller.fill", "music.note", "mic.fill", "theatermasks.fill", 
+            "play.rectangle.fill", "camera.aperture", "paintpalette.fill"
+        ]),
+        IconCategory(name: "自然与居家", icons: [
+            "leaf.fill", "pawprint.fill", "drop.fill", "bolt.fill", "flame.fill", 
+            "sun.max.fill", "cloud.fill", "umbrella.fill", "mountain.2.fill",
+            "bed.double.fill", "sofa.fill", "lamp.floor.fill", "toilet.fill", "shower.fill"
+        ]),
+        IconCategory(name: "人物与服饰", icons: [
+            "person.fill", "person.2.fill", "person.3.fill", "figure.and.child.holdinghands",
+            "facemask.fill", "tshirt.fill", "comb.fill", "scissors", "eyeglasses"
+        ])
     ]
     
     let colors: [Color] = [
-        .red, .orange, .yellow, .green, .mint, .teal, .cyan, .blue, .indigo, .purple, .pink, .brown, .gray
+        .red, .orange, .yellow, .green, .mint, .teal,
+        .cyan, .blue, .indigo, .purple, .pink, .brown,
+        .gray, Color(white: 0.2), Color(red: 0.5, green: 0.7, blue: 1.0), Color(red: 1.0, green: 0.4, blue: 0.4), Color(red: 0.4, green: 0.9, blue: 0.4), Color(red: 0.8, green: 0.6, blue: 1.0)
     ]
     
     init(activity: ActivityType? = nil) {
@@ -194,25 +217,36 @@ struct ActivityTypeEditorView: View {
                 }
                 
                 Section(header: Text("活动图标").font(.caption)) {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 12) {
-                        ForEach(icons, id: \.self) { iconName in
-                            Button {
-                                self.icon = iconName
-                            } label: {
-                                Image(systemName: iconName)
-                                    .font(.system(size: 18))
-                                    .frame(width: 40, height: 40)
-                                    .background(icon == iconName ? color.opacity(0.15) : Color.clear)
-                                    .foregroundColor(icon == iconName ? color : .secondary)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(iconCategories) { category in
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(category.name)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(.secondary.opacity(0.7))
+                                    .padding(.leading, 2)
+                                
+                                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 12) {
+                                    ForEach(category.icons, id: \.self) { iconName in
+                                        Button {
+                                            self.icon = iconName
+                                        } label: {
+                                            Image(systemName: iconName)
+                                                .font(.system(size: 18))
+                                                .frame(width: 40, height: 40)
+                                                .background(icon == iconName ? color.opacity(0.15) : Color.clear)
+                                                .foregroundColor(icon == iconName ? color : .secondary.opacity(0.8))
+                                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
                             }
-                            .buttonStyle(.plain)
                         }
                     }
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 8)
                 }
             }
-            .scrollDismissesKeyboard(.interactively)
+            .scrollDismissesKeyboard(.immediately)
             .onTapGesture {
                 UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             }

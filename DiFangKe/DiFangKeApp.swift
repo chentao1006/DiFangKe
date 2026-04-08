@@ -79,6 +79,7 @@ struct DiFangKeApp: App {
                             let context = Self.sharedModelContainer.mainContext
                             locationManager.modelContext = context
                             PhotoService.shared.modelContext = context
+                            OpenAIService.shared.modelContainer = Self.sharedModelContainer
                             
                             // Only start tracking if enabled in settings
                             if UserDefaults.standard.bool(forKey: "isTrackingEnabled") {
@@ -146,8 +147,9 @@ struct DiFangKeApp: App {
         Task.detached(priority: .background) {
             let backgroundContext = ModelContext(container)
             if let unanalyzed = try? backgroundContext.fetch(descriptor), !unanalyzed.isEmpty {
-                // 将待分析项加入队列
-                OpenAIService.shared.enqueueFootprintsForAnalysis(unanalyzed)
+                // 将待分析项的 ID 加入队列，由 OpenAIService 自行 fetch，避免 context 失效
+                let identifiers = unanalyzed.map { $0.persistentModelID }
+                OpenAIService.shared.enqueueFootprintsForAnalysis(identifiers)
             }
         }
     }

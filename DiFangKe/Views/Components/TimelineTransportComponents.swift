@@ -2,6 +2,7 @@ import SwiftUI
 import CoreLocation
 import MapKit
 import SwiftData
+import Photos
 
 struct TransportCardView: View {
     let transport: Transport
@@ -150,6 +151,8 @@ struct TransportModalView: View {
     @State private var showingSearchSheet: LocationType? = nil
     @State private var localStartOverride: String? = nil
     @State private var localEndOverride: String? = nil
+    @State private var mapPhotos: [PHAsset] = []
+    @State private var selectedPhotoAsset: IdentifiableString?
     
     enum LocationType: Identifiable {
         case start, end
@@ -231,6 +234,23 @@ struct TransportModalView: View {
                     // Route Polyline
                     MapPolyline(coordinates: transport.points)
                         .stroke(Color.dfkAccent, lineWidth: 5)
+                    
+                    // Photos along the route
+                    ForEach(mapPhotos, id: \.localIdentifier) { asset in
+                        if let coord = asset.location?.gcj02.coordinate {
+                            Annotation("", coordinate: coord) {
+                                AssetThumbnailView(assetID: asset.localIdentifier)
+                                    .frame(width: 32, height: 32)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.5))
+                                    .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        selectedPhotoAsset = IdentifiableString(value: asset.localIdentifier)
+                                    }
+                            }
+                        }
+                    }
                 }
                 .mapStyle(.standard(emphasis: .muted))
                 .mapControls {
@@ -365,6 +385,18 @@ struct TransportModalView: View {
                 ) { newName in
                     saveLocationOverride(type: type, name: newName)
                 }
+            }
+            .onAppear {
+                // 为交通路线地图获取照片，同样限制显示 10 张，避免图标堆叠
+                PhotoService.shared.fetchAssets(startTime: transport.startTime, endTime: transport.endTime) { assets in
+                    let filtered = assets.filter { $0.location != nil }
+                    self.mapPhotos = Array(filtered.suffix(10))
+                }
+            }
+            .sheet(item: $selectedPhotoAsset) { item in
+                let assetIDs = mapPhotos.map { $0.localIdentifier }
+                let index = assetIDs.firstIndex(of: item.value) ?? 0
+                PhotoFullscreenView(assetIDs: assetIDs, currentIndex: index)
             }
         }
     }

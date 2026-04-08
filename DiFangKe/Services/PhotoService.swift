@@ -113,6 +113,19 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
     }
     
+    /// 获取一段时间内的照片总数 (高性能)
+    func fetchCount(startTime: Date, endTime: Date) -> Int {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return 0 }
+        
+        let options = PHFetchOptions()
+        let bufferStart = startTime.addingTimeInterval(-60)
+        let bufferEnd = endTime.addingTimeInterval(60)
+        let predicate = NSPredicate(format: "creationDate > %@ AND creationDate < %@", bufferStart as NSDate, bufferEnd as NSDate)
+        options.predicate = predicate
+        return PHAsset.fetchAssets(with: .image, options: options).count
+    }
+    
     /// 获取一段时间内且在一定范围内的照片
     func fetchAssets(startTime: Date, endTime: Date, near location: CLLocationCoordinate2D? = nil, maxDistance: CLLocationDistance = 500, completion: @escaping ([PHAsset]) -> Void) {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)

@@ -7,7 +7,7 @@ import Photos
 
 struct DayTimelineView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(filter: #Predicate<Footprint> { $0.statusValue != "ignored" }, sort: \Footprint.startTime, order: .reverse) private var footprints: [Footprint]
+    @Query(sort: \Footprint.startTime, order: .reverse) private var footprints: [Footprint]
     
     @State private var selectedDate: Date
     @State private var scrollID: Date?
@@ -161,6 +161,9 @@ struct DayTimelineView: View {
                 updateTask?.cancel()
             }
             .onChange(of: footprints) { _, _ in
+                updateData()
+            }
+            .onChange(of: manualSelections) { _, _ in
                 updateData()
             }
 
@@ -485,7 +488,13 @@ struct DayTimelineView: View {
     
     private func jumpToToday() {
         let today = Calendar.current.startOfDay(for: Date())
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+        let days = abs(Calendar.current.dateComponents([.day], from: selectedDate, to: today).day ?? 0)
+        
+        // 动态计算响应时间：日期间隔越远，滚动越慢
+        // 基准 0.5s，每增加 1 天约增加 0.01s，上限 1.2s (约 70 天时达到上限)
+        let response = min(1.2, 0.5 + Double(days) * 0.01)
+        
+        withAnimation(.spring(response: response, dampingFraction: 0.85)) {
             selectedDate = today
             scrollID = today
         }

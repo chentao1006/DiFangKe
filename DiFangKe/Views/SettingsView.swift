@@ -94,7 +94,7 @@ struct SettingsView: View {
                         Label {
                             Text("活动类型").foregroundColor(.primary)
                         } icon: {
-                            Image(systemName: "tag.circle").foregroundColor(.purple)
+                            Image(systemName: "tag.circle").foregroundColor(.green)
                         }
                         Spacer()
                         Text("\(allActivities.count)")

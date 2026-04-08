@@ -16,15 +16,22 @@ enum TimelineItem: Identifiable {
     var startTime: Date {
         switch self {
         case .footprint(let f): return f.startTime
-        case .transport(let t): return t.endTime // Reverse order usually, but let's see
+        case .transport(let t): return t.startTime
         }
     }
     
-    // Use for sorting
-    var chronologicalStartTime: Date {
+    var endTime: Date {
+        switch self {
+        case .footprint(let f): return f.endTime
+        case .transport(let t): return t.endTime
+        }
+    }
+    
+    // Use for UI sorting consistency if needed
+    var sortingTime: Date {
         switch self {
         case .footprint(let f): return f.startTime
-        case .transport(let t): return t.startTime
+        case .transport(let t): return t.endTime
         }
     }
     
@@ -34,7 +41,7 @@ enum TimelineItem: Identifiable {
             // Note: In a real app, this should resolve the activity type icon
             return f.activityTypeValue ?? "mappin.and.ellipse"
         case .transport(let t):
-            return t.type.icon
+            return t.currentType.icon
         }
     }
     
@@ -44,14 +51,14 @@ enum TimelineItem: Identifiable {
         case .footprint(let f):
             return f.getActivityType(from: allActivityTypes)?.icon ?? "mappin.and.ellipse"
         case .transport(let t):
-            return t.type.icon
+            return t.currentType.icon
         }
     }
     
     func getColor(allActivityTypes: [ActivityType]) -> String {
         switch self {
         case .footprint(let f):
-            return f.getActivityType(from: allActivityTypes)?.colorHex ?? "#007AFF"
+            return f.getActivityType(from: allActivityTypes)?.colorHex ?? ""
         case .transport:
             return "#8E8E93"
         }
@@ -59,6 +66,11 @@ enum TimelineItem: Identifiable {
     
     var isTransport: Bool {
         if case .transport = self { return true }
+        return false
+    }
+    
+    var isHighlight: Bool {
+        if case .footprint(let f) = self { return f.isHighlight == true }
         return false
     }
 }
@@ -168,7 +180,6 @@ class TimelineBuilder {
         let dayLimit = min(endOfDay, now)
         
         let sortedFootprints = footprints
-            .filter { $0.status != .ignored }
             .sorted { $0.startTime < $1.startTime }
         
         // UI-level merging of consecutive footprints for the same location
@@ -212,28 +223,30 @@ class TimelineBuilder {
                 fillGap(from: currentTime, to: fp.startTime, items: &items, gapPoints: gapPoints, sortedFootprints: finalizedSortedFootprints, currentIndex: index, allPlaces: allPlaces, overrides: overrides)
             }
             
-            // Add Footprint (Convert back to real Footprint internally if needed, or keep it Lite)
-            // For UI, we convert Lite back to temporary Footprint models
-            let model = Footprint(
-                footprintID: fp.footprintID,
-                date: fp.date,
-                startTime: fp.startTime,
-                endTime: fp.endTime,
-                footprintLocations: fp.footprintLocations,
-                locationHash: "UI_LITE",
-                duration: fp.duration,
-                title: fp.title,
-                reason: fp.reason,
-                status: fp.status,
-                isHighlight: fp.isHighlight,
-                photoAssetIDs: fp.photoAssetIDs,
-                address: fp.address,
-                aiAnalyzed: fp.aiAnalyzed,
-                activityTypeValue: fp.activityTypeValue
-            )
-            model.placeID = fp.placeID
-            model.isTitleEditedByHand = fp.isTitleEditedByHand
-            items.append(.footprint(model))
+            if fp.status != .ignored {
+                // Add Footprint (Convert back to real Footprint internally if needed, or keep it Lite)
+                // For UI, we convert Lite back to temporary Footprint models
+                let model = Footprint(
+                    footprintID: fp.footprintID,
+                    date: fp.date,
+                    startTime: fp.startTime,
+                    endTime: fp.endTime,
+                    footprintLocations: fp.footprintLocations,
+                    locationHash: "UI_LITE",
+                    duration: fp.duration,
+                    title: fp.title,
+                    reason: fp.reason,
+                    status: fp.status,
+                    isHighlight: fp.isHighlight,
+                    photoAssetIDs: fp.photoAssetIDs,
+                    address: fp.address,
+                    aiAnalyzed: fp.aiAnalyzed,
+                    activityTypeValue: fp.activityTypeValue
+                )
+                model.placeID = fp.placeID
+                model.isTitleEditedByHand = fp.isTitleEditedByHand
+                items.append(.footprint(model))
+            }
             
             currentTime = max(currentTime, fp.endTime)
         }

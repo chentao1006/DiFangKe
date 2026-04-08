@@ -8,8 +8,9 @@ import UIKit
 class OpenAIService {
     static let shared = OpenAIService()
     
-    private var analysisQueue: [Footprint] = []
+    private var analysisQueue: [PersistentIdentifier] = []
     private var isProcessingQueue = false
+    var modelContainer: ModelContainer?
     
     private var config: [String: String]? {
         guard let path = Bundle.main.path(forResource: "Config", ofType: "plist"),
@@ -142,15 +143,30 @@ class OpenAIService {
     
     
     // 便捷方法：直接分析 Footprint 对象
+    // 注意：此方法现在仅在主线程且 context 有效时使用比较安全
     func analyzeFootprint(_ footprint: Footprint, completion: @escaping (Footprint) -> Void) {
+        // 尝试获取 context - 必须在访问 persistentModelID 前检查，否则对临时对象访问 ID 可能崩溃
+        guard let context = footprint.modelContext else {
+            completion(footprint)
+            return
+        }
+
         let locations = footprint.footprintLocations.map { ($0.latitude, $0.longitude) }
         
-
         // 只使用数据库中的正式名称作为背景，完全避免使用不稳定的标题进行判断
         var explicitPlaceName: String? = nil
-        if let pid = footprint.placeID, let context = footprint.modelContext {
+        let footprintID = footprint.persistentModelID
+        
+        if let pid = footprint.placeID {
             let descriptor = FetchDescriptor<Place>(predicate: #Predicate<Place> { $0.placeID == pid })
             explicitPlaceName = (try? context.fetch(descriptor))?.first?.name
+        }
+        
+        // 获取活动名称供 AI 参考
+        var activityName: String? = nil
+        if let aid = footprint.activityTypeValue {
+            let activityFetch = FetchDescriptor<ActivityType>()
+            activityName = (try? context.fetch(activityFetch))?.first(where: { $0.id.uuidString == aid || $0.name == aid })?.name
         }
         
         analyzeFootprint(
@@ -160,9 +176,80 @@ class OpenAIService {
             endTime: footprint.endTime,
             placeName: explicitPlaceName,
             address: footprint.address,
+            activityName: activityName,
             isOngoing: false
         ) { title, reason, score, success in
-            DispatchQueue.main.async {
+            Task { @MainActor in
+                // 核心修复：从 ID 重新恢复模型且在主线程操作，避免 capturing self/model across thread boundaries
+                guard let fp = context.model(for: footprintID) as? Footprint else {
+                    completion(footprint)
+                    return
+                }
+                
+                if success {
+                    if !fp.isTitleEditedByHand {
+                        fp.title = title
+                    }
+                    fp.reason = reason
+                    fp.aiScore = score
+                    fp.aiAnalyzed = true
+                    try? context.save()
+                }
+                completion(fp)
+            }
+        }
+    }
+
+    /// 将足迹 ID 加入分析队列，按序分析，间隔30秒
+    func enqueueFootprintsForAnalysis(_ identifiers: [PersistentIdentifier]) {
+        DispatchQueue.main.async {
+            self.analysisQueue.append(contentsOf: identifiers)
+            self.processNextInQueue()
+        }
+    }
+
+    private func processNextInQueue() {
+        guard !isProcessingQueue, !analysisQueue.isEmpty, let container = modelContainer else { return }
+        
+        isProcessingQueue = true
+        let identifier = analysisQueue.removeFirst()
+        
+        // 在后台线程创建新 context 进行分析
+        Task.detached(priority: .background) {
+            let context = ModelContext(container)
+            guard let footprint = context.model(for: identifier) as? Footprint else {
+                DispatchQueue.main.async {
+                    self.isProcessingQueue = false
+                    self.processNextInQueue()
+                }
+                return
+            }
+            
+            // 执行模型分析
+            let locations = footprint.footprintLocations.map { ($0.latitude, $0.longitude) }
+            var explicitPlaceName: String? = nil
+            if let pid = footprint.placeID {
+                let descriptor = FetchDescriptor<Place>(predicate: #Predicate<Place> { $0.placeID == pid })
+                explicitPlaceName = (try? context.fetch(descriptor))?.first?.name
+            }
+            
+            // 获取活动名称供 AI 参考
+            var activityName: String? = nil
+            if let aid = footprint.activityTypeValue {
+                let activityFetch = FetchDescriptor<ActivityType>()
+                activityName = (try? context.fetch(activityFetch))?.first(where: { $0.id.uuidString == aid || $0.name == aid })?.name
+            }
+            
+            self.analyzeFootprint(
+                locations: locations,
+                duration: footprint.duration,
+                startTime: footprint.startTime,
+                endTime: footprint.endTime,
+                placeName: explicitPlaceName,
+                address: footprint.address,
+                activityName: activityName,
+                isOngoing: false
+            ) { title, reason, score, success in
                 if success {
                     if !footprint.isTitleEditedByHand {
                         footprint.title = title
@@ -170,31 +257,14 @@ class OpenAIService {
                     footprint.reason = reason
                     footprint.aiScore = score
                     footprint.aiAnalyzed = true
+                    try? context.save()
                 }
-                completion(footprint)
-            }
-        }
-    }
-
-    /// 将足迹加入分析队列，按序分析，间隔30秒
-    func enqueueFootprintsForAnalysis(_ footprints: [Footprint]) {
-        DispatchQueue.main.async {
-            self.analysisQueue.append(contentsOf: footprints)
-            self.processNextInQueue()
-        }
-    }
-
-    private func processNextInQueue() {
-        guard !isProcessingQueue, !analysisQueue.isEmpty else { return }
-        
-        isProcessingQueue = true
-        let footprint = analysisQueue.removeFirst()
-        
-        analyzeFootprint(footprint) { _ in
-            // 分析完成后，等待 30 秒再处理下一个
-            DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
-                self.isProcessingQueue = false
-                self.processNextInQueue()
+                
+                // 分析完成后，等待 30 秒再处理下一个
+                DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                    self.isProcessingQueue = false
+                    self.processNextInQueue()
+                }
             }
         }
     }
@@ -218,6 +288,7 @@ class OpenAIService {
                           endTime: Date, 
                           placeName: String? = nil,
                           address: String? = nil,
+                          activityName: String? = nil,
                           isOngoing: Bool = false, 
                           completion: @escaping (String, String, Float, Bool) -> Void) {
         let dateFormatter = DateFormatter()
@@ -229,8 +300,14 @@ class OpenAIService {
         var promptSnippet = ""
         if let name = placeName {
             promptSnippet = "用户正在“\(name)”"
+            if let act = activityName {
+                promptSnippet += "进行“\(act)”活动。"
+            }
         } else {
             promptSnippet = address != nil ? "这里的具体参考地址是：\(address!)。" : "该位置是一个未曾记录的新去处。"
+            if let act = activityName {
+                promptSnippet += "用户正在这里进行“\(act)”。"
+            }
         }
 
         let statusText = isOngoing ? "（目前正在此地停留中）" : ""
@@ -240,7 +317,7 @@ class OpenAIService {
         日期环境：\(dateContext)
         时间：\(startStr) - \(endStr)
         时长：\(Int(duration / 60))分钟
-        地点信息：\(promptSnippet)
+        地点与活动信息：\(promptSnippet)
 
         请输出：
         1. 简短标题（10字以内，应反映地点名称或具体的活动，如“在咖啡馆停留”、“公司办公”、“超市购物”或“回家”。**绝对禁止使用“定位中停留”、“位置记录”、“非预设地点”等词汇**。禁止使用单纯的感叹或文学化描述，如“时光流逝”。应明确所在的“地方”。）

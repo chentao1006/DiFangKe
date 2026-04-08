@@ -2,6 +2,7 @@ import SwiftUI
 import CoreLocation
 import MapKit
 import SwiftData
+import Photos
 
 // MARK: - Day Summary Card
 struct DaySummaryCard: View {
@@ -12,6 +13,7 @@ struct DaySummaryCard: View {
     let points: [CLLocationCoordinate2D]
     var timelineItems: [TimelineItem] = []
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
+    var photoAssets: [PHAsset] = []
     
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
@@ -51,21 +53,35 @@ struct DaySummaryCard: View {
                 .padding(.leading, 8)
                 .padding(.trailing, 16)
                 
-                // Mini Map Section
-                if !points.isEmpty {
+                 // Mini Map Section
+                if !points.isEmpty || !photoAssets.isEmpty {
                     DFKMapView(
                         cameraPosition: $cameraPosition,
                         isInteractive: false,
                         showsUserLocation: false,
                         points: points,
                         timelineItems: timelineItems,
-                        onTimelineItemTap: onTimelineItemTap
+                        photoAssets: photoAssets,
+                        onTimelineItemTap: onTimelineItemTap,
                     )
                     .frame(height: 140)
                     .cornerRadius(12)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if !points.isEmpty || !photoAssets.isEmpty {
+                            showFullscreenMap = true
+                        }
+                    }
                     .onAppear {
-                        if let region = points.boundingRegion() {
-                            cameraPosition = .region(region)
+                        if !points.isEmpty {
+                            if let region = points.boundingRegion() {
+                                cameraPosition = .region(region)
+                            }
+                        } else if !photoAssets.isEmpty {
+                            let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
+                            if let region = photoCoords.boundingRegion() {
+                                cameraPosition = .region(region)
+                            }
                         }
                     }
                     .padding(.leading, 8)
@@ -94,7 +110,7 @@ struct DaySummaryCard: View {
         )
         .padding(.bottom, 14)
         .onTapGesture {
-            if !points.isEmpty {
+            if !points.isEmpty || !photoAssets.isEmpty {
                 showFullscreenMap = true
             }
         }
@@ -104,6 +120,7 @@ struct DaySummaryCard: View {
                 points: points,
                 timelineItems: timelineItems,
                 onTimelineItemTap: onTimelineItemTap,
+                photoAssets: photoAssets,
                 showsUserLocation: false
             )
         }
@@ -148,11 +165,13 @@ struct FullFrameTrajectoryMapView: View {
     let points: [CLLocationCoordinate2D]
     var timelineItems: [TimelineItem] = []
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
+    var photoAssets: [PHAsset] = []
     var showsUserLocation: Bool = false
     @Environment(\.dismiss) private var dismiss
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var selectedFootprint: Footprint?
     @State private var selectedTransport: Transport?
+    @State private var selectedPhotoAsset: IdentifiableString?
     
     var body: some View {
         NavigationStack {
@@ -162,6 +181,7 @@ struct FullFrameTrajectoryMapView: View {
                 showsUserLocation: showsUserLocation,
                 points: points,
                 timelineItems: timelineItems,
+                photoAssets: photoAssets,
                 onTimelineItemTap: { item in
                     switch item {
                     case .footprint(let footprint):
@@ -170,6 +190,9 @@ struct FullFrameTrajectoryMapView: View {
                         self.selectedTransport = transport
                     }
                     onTimelineItemTap?(item) // Still notify parent if needed
+                },
+                onPhotoTap: { asset in
+                    self.selectedPhotoAsset = IdentifiableString(value: asset.localIdentifier)
                 }
             )
             .sheet(item: $selectedFootprint) { footprint in
@@ -183,10 +206,22 @@ struct FullFrameTrajectoryMapView: View {
                     // Location update handled by parent via callbacks
                 }
             }
+            .sheet(item: $selectedPhotoAsset) { item in
+                let assetIDs = photoAssets.map { $0.localIdentifier }
+                let index = assetIDs.firstIndex(of: item.value) ?? 0
+                PhotoFullscreenView(assetIDs: assetIDs, currentIndex: index)
+            }
             .ignoresSafeArea(edges: .bottom)
             .onAppear {
-                if let region = points.boundingRegion() {
-                    cameraPosition = .region(region)
+                if !points.isEmpty {
+                    if let region = points.boundingRegion() {
+                        cameraPosition = .region(region)
+                    }
+                } else if !photoAssets.isEmpty {
+                    let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
+                    if let region = photoCoords.boundingRegion() {
+                        cameraPosition = .region(region)
+                    }
                 }
             }
             .navigationTitle(title)
@@ -206,6 +241,7 @@ struct RecordingStatusCard: View {
     let footprintCount: Int
     var timelineItems: [TimelineItem] = []
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
+    var photoAssets: [PHAsset] = []
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
     
@@ -320,17 +356,27 @@ struct RecordingStatusCard: View {
                     showsUserLocation: true,
                     points: locationManager.allTodayPoints.map { $0.coordinate },
                     timelineItems: timelineItems,
-                    onTimelineItemTap: onTimelineItemTap
+                    photoAssets: photoAssets,
+                    onTimelineItemTap: onTimelineItemTap,
                 )
                 .frame(height: 160)
                 .cornerRadius(12)
                 .padding(.leading, 8)
                 .padding(.trailing, 12)
                 .padding(.bottom, 12)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    showFullscreenMap = true
+                }
                 .onAppear {
                     let todayPoints = locationManager.allTodayPoints.map { $0.coordinate }
                     if let region = todayPoints.boundingRegion() {
                         cameraPosition = .region(region)
+                    } else if !photoAssets.isEmpty {
+                        let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
+                        if let region = photoCoords.boundingRegion() {
+                            cameraPosition = .region(region)
+                        }
                     } else if let newLoc = locationManager.lastLocation {
                         cameraPosition = .region(MKCoordinateRegion(center: newLoc.coordinate, latitudinalMeters: 500, longitudinalMeters: 500))
                     }
@@ -369,6 +415,7 @@ struct RecordingStatusCard: View {
                 points: locationManager.allTodayPoints.map { $0.coordinate },
                 timelineItems: timelineItems,
                 onTimelineItemTap: onTimelineItemTap,
+                photoAssets: photoAssets,
                 showsUserLocation: true
             )
         }
@@ -685,7 +732,15 @@ struct FootprintCardView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { confirmedAnimating = false }
     }
     
-    private func ignoreFootprint() { withAnimation { footprint.status = .ignored; try? modelContext.save() } }
+    private func ignoreFootprint() {
+        withAnimation {
+            footprint.status = .ignored
+            if footprint.modelContext == nil {
+                modelContext.insert(footprint)
+            }
+            try? modelContext.save()
+        }
+    }
 }
 
 // MARK: - Placeholder Footprint Card

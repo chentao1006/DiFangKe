@@ -2,6 +2,7 @@ import SwiftUI
 import CoreLocation
 import MapKit
 import SwiftData
+import Photos
 
 struct TimelinePageView: View {
     @Environment(\.modelContext) private var modelContext
@@ -35,6 +36,7 @@ struct TimelinePageView: View {
     
     @State private var totalPointsCount: Int = 0
     @State private var trajectoryPoints: [CLLocationCoordinate2D] = []
+    @State private var dayPhotoAssets: [PHAsset] = []
     
     init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int) {
         self.date = date
@@ -70,95 +72,8 @@ struct TimelinePageView: View {
                 } else if offset == pastLimitOffset {
                     pastPlaceholderView
                 } else {
-                    VStack(alignment: .leading, spacing: 0) {
-                        if isToday {
-                            RecordingStatusCard(
-                                locationManager: locationManager, 
-                                footprintCount: footprints.count,
-                                timelineItems: timelineItems,
-                                onTimelineItemTap: handleTimelineItemTap
-                            )
-                            .padding(.horizontal, 16)
-                        } else {
-                            DaySummaryCard(
-                                date: date,
-                                totalPoints: totalPointsCount,
-                                footprintCount: timelineItems.filter { if case .footprint = $0 { return true }; return false }.count,
-                                transportMileage: timelineItems.reduce(0) { sum, item in
-                                    if case .transport(let t) = item { return sum + t.distance }
-                                    return sum
-                                },
-                                points: trajectoryPoints,
-                                timelineItems: timelineItems,
-                                onTimelineItemTap: handleTimelineItemTap
-                            )
-                            .padding(.horizontal, 16)
-                        }
-                        
-                        if timelineItems.isEmpty && !isLoadingTimeline {
-                            PlaceholderFootprintCard()
-                                .padding(.horizontal, 0)
-                        }
-                        
-                        if allPlaces.isEmpty && !isGuideDismissed {
-                            ImportantPlaceGuide(isGuideDismissed: $isGuideDismissed) {
-                                showingAddPlaceSheet = true
-                            }
-                            .padding(.top, 20)
-                            .padding(.bottom, 20)
-                        }
-                    }
-                    
-                    if footprints.isEmpty && timelineItems.isEmpty && (!isToday || locationManager.potentialStopStartLocation == nil) {
-                        if allPlaces.isEmpty && isToday && !isGuideDismissed {
-                            EmptyView()
-                        } else if !isLoadingTimeline {
-                            emptyStateView
-                        }
-                    } else {
-                        if !isNotificationGuideDismissed && isToday && notificationAuthStatus == .notDetermined && !footprints.isEmpty {
-                            NotificationGuide(isNotificationGuideDismissed: $isNotificationGuideDismissed)
-                                .padding(.top, 10)
-                                .padding(.bottom, 16)
-                        }
-                        
-                        let items = self.timelineItems
-                        let count = items.count
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                            switch item {
-                            case .footprint(let footprint):
-                                FootprintCardView(
-                                    footprint: footprint, 
-                                    allPlaces: allPlaces,
-                                    contextDate: date,
-                                    isFirst: index == 0,
-                                    isLast: index == count - 1,
-                                    isToday: isToday
-                                ) { item, focus in
-                                    self.autoFocusOnOpen = focus
-                                    self.selectedFootprint = item
-                                }
-                                .padding(.horizontal, 16)
-                            case .transport(let transport):
-                                TransportCardView(
-                                    transport: transport,
-                                    isFirst: index == 0,
-                                    isLast: index == count - 1,
-                                    isToday: isToday,
-                                    onSelect: { selected in
-                                        self.selectedTransport = selected
-                                    },
-                                    onDelete: { selected in
-                                        let selection = TransportManualSelection(startTime: selected.startTime, endTime: selected.endTime, isDeleted: true)
-                                        modelContext.insert(selection)
-                                        try? modelContext.save()
-                                        refreshTimeline()
-                                    }
-                                )
-                                .padding(.horizontal, 16)
-                            }
-                        }
-                    }
+                    summaryCardSection(isToday: isToday)
+                    timelineListSection(isToday: isToday)
                     
                     if offset <= 0 && !hasSwiped {
                         swipeHintFooter
@@ -190,9 +105,9 @@ struct TimelinePageView: View {
         .onDisappear {
             refreshTask?.cancel()
         }
-        .onChange(of: footprints) { _, _ in refreshTimeline() }
-        .onChange(of: manualSelections) { _, _ in refreshTimeline() }
-        .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in refreshTimeline() }
+        .onChange(of: footprints) { _, _ in refreshTimeline(force: true) }
+        .onChange(of: manualSelections) { _, _ in refreshTimeline(force: true) }
+        .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in refreshTimeline(force: true) }
         .sheet(item: $selectedFootprint) { footprint in
             FootprintModalView(footprint: footprint, autoFocus: autoFocusOnOpen)
                 .environment(locationManager)
@@ -218,9 +133,107 @@ struct TimelinePageView: View {
                     }
                 }
             } onLocationUpdate: {
-                refreshTimeline()
+                refreshTimeline(force: true)
             }
             .environment(locationManager)
+        }
+    }
+    
+    @ViewBuilder
+    private func summaryCardSection(isToday: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if isToday {
+                RecordingStatusCard(
+                    locationManager: locationManager, 
+                    footprintCount: footprints.count,
+                    timelineItems: timelineItems,
+                    onTimelineItemTap: handleTimelineItemTap,
+                    photoAssets: dayPhotoAssets
+                )
+                .padding(.horizontal, 16)
+            } else {
+                DaySummaryCard(
+                    date: date,
+                    totalPoints: totalPointsCount,
+                    footprintCount: timelineItems.filter { if case .footprint = $0 { return true }; return false }.count,
+                    transportMileage: timelineItems.reduce(0) { sum, item in
+                        if case .transport(let t) = item { return sum + t.distance }
+                        return sum
+                    },
+                    points: trajectoryPoints,
+                    timelineItems: timelineItems,
+                    onTimelineItemTap: handleTimelineItemTap,
+                    photoAssets: dayPhotoAssets
+                )
+                .padding(.horizontal, 16)
+            }
+            
+            if timelineItems.isEmpty && !isLoadingTimeline {
+                PlaceholderFootprintCard()
+                    .padding(.horizontal, 0)
+            }
+            
+            if allPlaces.isEmpty && !isGuideDismissed {
+                ImportantPlaceGuide(isGuideDismissed: $isGuideDismissed) {
+                    showingAddPlaceSheet = true
+                }
+                .padding(.top, 20)
+                .padding(.bottom, 20)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func timelineListSection(isToday: Bool) -> some View {
+        if footprints.isEmpty && timelineItems.isEmpty && dayPhotoAssets.isEmpty && (!isToday || locationManager.potentialStopStartLocation == nil) {
+            if allPlaces.isEmpty && isToday && !isGuideDismissed {
+                EmptyView()
+            } else if !isLoadingTimeline {
+                emptyStateView
+            }
+        } else {
+            if !isNotificationGuideDismissed && isToday && notificationAuthStatus == .notDetermined && !footprints.isEmpty {
+                NotificationGuide(isNotificationGuideDismissed: $isNotificationGuideDismissed)
+                    .padding(.top, 10)
+                    .padding(.bottom, 16)
+            }
+            
+            let items = self.timelineItems
+            let count = items.count
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                switch item {
+                case .footprint(let footprint):
+                    FootprintCardView(
+                        footprint: footprint, 
+                        allPlaces: allPlaces,
+                        contextDate: date,
+                        isFirst: index == 0,
+                        isLast: index == count - 1,
+                        isToday: isToday
+                    ) { item, focus in
+                        self.autoFocusOnOpen = focus
+                        self.selectedFootprint = item
+                    }
+                    .padding(.horizontal, 16)
+                case .transport(let transport):
+                    TransportCardView(
+                        transport: transport,
+                        isFirst: index == 0,
+                        isLast: index == count - 1,
+                        isToday: isToday,
+                        onSelect: { selected in
+                            self.selectedTransport = selected
+                        },
+                        onDelete: { selected in
+                            let selection = TransportManualSelection(startTime: selected.startTime, endTime: selected.endTime, isDeleted: true)
+                            modelContext.insert(selection)
+                            try? modelContext.save()
+                            refreshTimeline(force: true)
+                        }
+                    )
+                    .padding(.horizontal, 16)
+                }
+            }
         }
     }
     
@@ -234,10 +247,10 @@ struct TimelinePageView: View {
     }
     
     @MainActor
-    private func refreshTimeline() {
+    private func refreshTimeline(force: Bool = false) {
         refreshTask?.cancel()
         
-        let currentFootprints = footprints.filter { $0.status != .ignored }
+        let currentFootprints = footprints
         let currentOverrides = manualSelections
         let currentPlaces = allPlaces
         let targetDate = date
@@ -278,7 +291,7 @@ struct TimelinePageView: View {
             let result = await Task.detached(priority: .userInitiated) {
                 let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
                 
-                if let cached = cachedItems, !isToday, !cached.isEmpty {
+                if !force, let cached = cachedItems, !isToday, !cached.isEmpty {
                     return (cached, rawPoints.map { $0.coordinate }, rawPoints.count)
                 }
                 
@@ -337,6 +350,43 @@ struct TimelinePageView: View {
             TimelineBuilder.timelineCache[targetDate] = self.timelineItems
             self.isLoadingTimeline = false
             
+            // 异步加载当天的照片用于地图显示
+            let start = Calendar.current.startOfDay(for: targetDate)
+            let end = Calendar.current.date(byAdding: .day, value: 1, to: start)!
+            PhotoService.shared.fetchAssets(startTime: start, endTime: end) { assets in
+                let filtered = assets.filter { $0.location != nil }
+                var finalAssets: [PHAsset] = []
+                
+                // 策略调整：不再全局限制 10 张，而是每个足迹/交通段最多显示 10 张最接近终点的照片
+                // 这样可以避免单个停留点产生上百个图标，同时保证全天的地理标记都能显示出来
+                if items.isEmpty {
+                    // 如果还没有生成时间线（比如刚进入），先取全局前 10 作为占位
+                    finalAssets = Array(filtered.suffix(10))
+                } else {
+                    for item in items {
+                        let itemStart = item.startTime
+                        let itemEnd = item.endTime
+                        
+                        let cluster = filtered.filter { asset in
+                            guard let creation = asset.creationDate else { return false }
+                            return creation >= itemStart && creation <= itemEnd
+                        }
+                        
+                        // 每个段取最新的 10 张
+                        finalAssets.append(contentsOf: cluster.suffix(10))
+                    }
+                    
+                    // 补充那些不在任何段里的零散照片（比如段与段之间的间隙），也限制 10 张
+                    let orphans = filtered.filter { asset in
+                        guard let creation = asset.creationDate else { return false }
+                        return !items.contains { creation >= $0.startTime && creation <= $0.endTime }
+                    }
+                    finalAssets.append(contentsOf: orphans.suffix(10))
+                }
+                
+                self.dayPhotoAssets = finalAssets
+            }
+            
             locationManager.backfillGaps(for: targetDate)
             resolveTimelineAddresses(for: self.timelineItems)
         }
@@ -358,8 +408,8 @@ struct TimelinePageView: View {
                     }
                 }
             case .footprint(let footprint):
-                // 1. 自动关联缺失的照片（防止后台漏扫或由于权限延迟导致的初期无照片）
-                if footprint.photoAssetIDs.isEmpty {
+                // 1. 自动关联缺失的照片（仅对已持久化的真实模型）
+                if footprint.photoAssetIDs.isEmpty && footprint.modelContext != nil {
                     locationManager.linkPhotos(to: footprint, context: modelContext)
                 }
                 

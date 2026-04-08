@@ -31,6 +31,7 @@ struct FootprintModalView: View {
     @State private var selectedPhotoID: String? = nil
     @State private var showAddPlaceModal = false
     @State private var isUpdatingAddress = false
+    @State private var mapPhotos: [PHAsset] = []
     
     @State private var showFullscreenMap = false
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
@@ -152,6 +153,12 @@ struct FootprintModalView: View {
                     refreshAddress()
                 }
                 
+                // 为地图获取照片，并应用每个足迹最多 10 张的显示策略
+                PhotoService.shared.fetchAssets(startTime: footprint.startTime, endTime: footprint.endTime) { assets in
+                    let filtered = assets.filter { $0.location != nil }
+                    self.mapPhotos = Array(filtered.suffix(10))
+                }
+                
                 // 第一次进入足迹详情且状态为“未定义”时，强提示授权
                 if !hasSeenPhotoPermissionGuide && PhotoService.shared.authorizationStatus == .notDetermined {
                     // 我们可以在这里简单打个标记，页面底部的大按钮（原本就有的引导位）已经能承担说明作用。
@@ -229,7 +236,7 @@ struct FootprintModalView: View {
                 AddToFavoriteModal(footprint: footprint)
             }
             .sheet(isPresented: $showFullscreenMap) {
-                FullFrameMapView(footprint: footprint)
+                FullFrameMapView(footprint: footprint, photoAssets: mapPhotos)
             }
             .alert("确认移除照片？", isPresented: $showingPhotoDeleteAlert) {
                 Button("移除", role: .destructive) { deletePhoto() }
@@ -615,7 +622,7 @@ struct FootprintModalView: View {
             Button {
                 showFullscreenMap = true
             } label: {
-                FootprintDetailMapView(footprint: footprint, isInteractive: false)
+                FootprintDetailMapView(footprint: footprint, photoAssets: mapPhotos, isInteractive: false)
                     .frame(height: 220)
                     .cornerRadius(16)
                     .shadow(color: .black.opacity(0.06), radius: 10, x: 0, y: 4)
@@ -824,11 +831,12 @@ struct FootprintModalView: View {
 
 struct FullFrameMapView: View {
     let footprint: Footprint
+    var photoAssets: [PHAsset] = []
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
         NavigationStack {
-            FootprintDetailMapView(footprint: footprint, isInteractive: true)
+            FootprintDetailMapView(footprint: footprint, photoAssets: photoAssets, isInteractive: true)
                 .ignoresSafeArea(edges: .bottom)
                 .navigationTitle("查看地图")
                 .navigationBarTitleDisplayMode(.inline)
@@ -1268,8 +1276,10 @@ struct ZoomableImageView: UIViewRepresentable {
 
 struct FootprintDetailMapView: View {
     let footprint: Footprint
+    var photoAssets: [PHAsset] = []
     var isInteractive: Bool = false
     @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var selectedPhotoAsset: IdentifiableString?
 
     var body: some View {
         DFKMapView(
@@ -1277,12 +1287,21 @@ struct FootprintDetailMapView: View {
             isInteractive: isInteractive,
             showsUserLocation: true,
             points: footprint.coordinates,
-            timelineItems: [.footprint(footprint)]
+            timelineItems: [.footprint(footprint)],
+            photoAssets: photoAssets,
+            onPhotoTap: { asset in
+                self.selectedPhotoAsset = IdentifiableString(value: asset.localIdentifier)
+            }
         )
         .onAppear {
             if let region = footprint.region {
                 cameraPosition = .region(region)
             }
+        }
+        .sheet(item: $selectedPhotoAsset) { item in
+            let assetIDs = photoAssets.map { $0.localIdentifier }
+            let index = assetIDs.firstIndex(of: item.value) ?? 0
+            PhotoFullscreenView(assetIDs: assetIDs, currentIndex: index)
         }
     }
 }

@@ -873,9 +873,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                 let baseStart = fp.startTime
                 
                 // 进行逻辑拆分
+                var splitFootprints: [Footprint] = []
                 for (idx, cluster) in distinctClusters.enumerated() {
                     let subCoords = Array(coords[cluster.start...cluster.end])
-                    // 估算时间段
                     let sTime = baseStart.addingTimeInterval(totalDuration * (Double(cluster.start) / totalPoints))
                     let eTime = baseStart.addingTimeInterval(totalDuration * (Double(cluster.end) / totalPoints))
                     
@@ -883,13 +883,13 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                         fp.footprintLocations = subCoords
                         fp.startTime = sTime
                         fp.endTime = eTime
-                        fp.date = Calendar.current.startOfDay(for: sTime) // 修正：日期必须随时间更新
+                        fp.date = Calendar.current.startOfDay(for: sTime)
                         fp.duration = eTime.timeIntervalSince(sTime)
                         fp.locationHash = "SPLIT_FIXED"
-                        self.analyzeFootprint(fp, context: context)
+                        splitFootprints.append(fp)
                     } else {
                         let newFp = Footprint(
-                            date: Calendar.current.startOfDay(for: sTime), // 修正：日期必须随时间更新
+                            date: Calendar.current.startOfDay(for: sTime),
                             startTime: sTime,
                             endTime: eTime,
                             footprintLocations: subCoords,
@@ -899,10 +899,17 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                             address: nil
                         )
                         context.insert(newFp)
-                        self.analyzeFootprint(newFp, context: context)
+                        splitFootprints.append(newFp)
                     }
                 }
+                
+                // 先统一保存以生成永久 ID
                 try? context.save()
+                
+                // 再执行分析
+                for splitFp in splitFootprints {
+                    self.analyzeFootprint(splitFp, context: context)
+                }
             }
         }
     }
@@ -1133,6 +1140,16 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         
         let place = matchedPlace
         isAnalyzingOngoing = true
+        
+        // --- 尝试获取该地点历史上的“习惯”活动类型供 AI 参考 ---
+        var activityName: String? = nil
+        if let pid = place?.placeID, let context = modelContext {
+            if let habitValue = self.findFrequentActivityType(for: pid, at: startTs, context: context) {
+                let activityFetch = FetchDescriptor<ActivityType>()
+                activityName = (try? context.fetch(activityFetch))?.first(where: { $0.id.uuidString == habitValue || $0.name == habitValue })?.name
+            }
+        }
+        
         openAIService.analyzeFootprint(
             locations: [(location.coordinate.latitude, location.coordinate.longitude)],
             duration: duration,
@@ -1140,6 +1157,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             endTime: now,
             placeName: place?.address ?? place?.name, // Use original name for title
             address: currentAddress,
+            activityName: activityName,
             isOngoing: true
 ) { [weak self] title, _, _, success in
             DispatchQueue.main.async {
@@ -1186,6 +1204,45 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
          
          return sortedMatches.first
      }
+
+    /// 核心算法：识别习惯活动
+    /// 只有在同一地点、同一时间段（前后2小时）出现过 3 次及以上的手动标记，才自动关联类型
+    private func findFrequentActivityType(for placeID: UUID, at time: Date, context: ModelContext) -> String? {
+        let descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate<Footprint> { $0.placeID == placeID && $0.activityTypeValue != nil }
+        )
+        guard let history = try? context.fetch(descriptor) else { return nil }
+        
+        let calendar = Calendar.current
+        let targetHour = calendar.component(.hour, from: time)
+        let targetMinute = calendar.component(.minute, from: time)
+        let targetTotal = targetHour * 60 + targetMinute
+        
+        let window = 120 // 2小时
+        
+        // 过滤时间窗口相近的记录
+        let matches = history.filter { fp in
+            let h = calendar.component(.hour, from: fp.startTime)
+            let m = calendar.component(.minute, from: fp.startTime)
+            let fpTotal = h * 60 + m
+            let diff = abs(targetTotal - fpTotal)
+            return min(diff, 1440 - diff) <= window
+        }
+        
+        var counts: [String: Int] = [:]
+        for fp in matches {
+            if let type = fp.activityTypeValue {
+                counts[type, default: 0] += 1
+            }
+        }
+        
+        // 门槛：3次
+        let sorted = counts.sorted { $0.value > $1.value }
+        if let best = sorted.first, best.value >= 3 {
+            return best.key
+        }
+        return nil
+    }
 
     private func handleNewCandidateFootprint(_ candidate: CandidateFootprint,
                                   isHistorical: Bool = false,
@@ -1238,7 +1295,12 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             )
             
             if let mPlace = self.matchedPlaceFor(coordinate: candidate.centerCoordinate) {
-                newFootprint.placeID = mPlace.placeID
+                let pid = mPlace.placeID
+                newFootprint.placeID = pid
+                
+                // --- 自动关联习惯活动类型 ---
+                // 只有同一地点、同一时间段出现过3次以上才关联
+                newFootprint.activityTypeValue = self.findFrequentActivityType(for: pid, at: candidate.startTime, context: context)
                 
                 // Address uses original raw location context
                 newFootprint.address = mPlace.address ?? mPlace.name
@@ -1254,6 +1316,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             
             
             context.insert(newFootprint)
+            // 必须先保存，确保获得永久 ID，否则后续异步分析（AI/照片）可能会因为 ID 失效而闪退
+            try? context.save()
             
             if !isHistorical {
                 analyzeFootprint(newFootprint, context: context)
@@ -1293,6 +1357,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         // 关键：如果已经关联过照片，且数量不少，说明已经稳定，不再重复抓取
         if !footprint.photoAssetIDs.isEmpty { return }
         
+        // 核心修复：必须有 context 才能访问 persistentModelID 并在主线程恢复，否则说明是 UI Lite 对象
+        guard footprint.modelContext != nil else { return }
+        
         let id = footprint.persistentModelID
         let startTime = footprint.startTime
         let endTime = footprint.endTime
@@ -1319,6 +1386,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
 
     private func analyzeFootprint(_ footprint: Footprint, context: ModelContext) {
         if footprint.status == .ignored { return }
+        
+        // 核心修复：必须是受管理的持久化模型才能进行后续 AI 分析并保存
+        guard footprint.modelContext != nil else { return }
         
         // 核心检查：使用显式标识判断是否已分析
         if footprint.aiAnalyzed {
@@ -1359,6 +1429,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         let fpStart = footprint.startTime
         let fpEnd = footprint.endTime
         let fpAddress = footprint.address
+        let id = footprint.persistentModelID
 
         // 匹配已知地点，给 AI 提供背景信息 (应用「最近优先」原则)
         let mPlace = allPlaces.filter { place in
@@ -1381,24 +1452,36 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             return d1 < d2
         }
         
+        // 尝试获取当前关联或历史关联的活动名称，供 AI 参考
+        let activityID = footprint.activityTypeValue
+        var activityName: String? = nil
+        if let aid = activityID {
+            let activityFetch = FetchDescriptor<ActivityType>()
+            activityName = (try? context.fetch(activityFetch))?.first(where: { $0.id.uuidString == aid || $0.name == aid })?.name
+        }
+        
         openAIService.analyzeFootprint(
             locations: locations,
             duration: fpDuration,
             startTime: fpStart,
             endTime: fpEnd,
             placeName: mPlace?.address ?? mPlace?.name, // Use original address/name for title generation
-            address: fpAddress
-        ) { title, reason, score, success in
-            DispatchQueue.main.async {
+            address: fpAddress,
+            activityName: activityName
+        ) { [weak self] title, reason, score, success in
+            Task { @MainActor [weak self] in
+                guard let self = self, let context = self.modelContext,
+                      let fp = context.model(for: id) as? Footprint else { return }
+                
                 if success {
-                    if !footprint.isTitleEditedByHand {
-                        footprint.title = title
+                    if !fp.isTitleEditedByHand {
+                        fp.title = title
                     }
-                    footprint.reason = reason
-                    footprint.aiScore = score
-                    footprint.aiAnalyzed = true
+                    fp.reason = reason
+                    fp.aiScore = score
+                    fp.aiAnalyzed = true
                     
-                    try? footprint.modelContext?.save()
+                    try? context.save()
                     
                     // 如果判定为“精彩”足迹（0.7 分以上），仅发送通知，不再自动收藏
                     if score >= 0.7 {
@@ -1425,7 +1508,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         let tomorrowStart = targetDate.addingTimeInterval(86400)
         
         let fetchDescriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate { $0.date >= targetDate && $0.date < tomorrowStart && $0.statusValue != "ignored" },
+            predicate: #Predicate { $0.date >= targetDate && $0.date < tomorrowStart },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]
         )
         
@@ -1604,7 +1687,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                 guard let currentContext = self.modelContext else { return [] }
                 
                 let fetchDescriptor = FetchDescriptor<Footprint>(
-                    predicate: #Predicate { $0.date >= startOfDay && $0.date < endOfDay && $0.statusValue != "ignored" },
+                    predicate: #Predicate { $0.date >= startOfDay && $0.date < endOfDay },
                     sortBy: [SortDescriptor(\.startTime)]
                 )
                 
@@ -1636,34 +1719,44 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                 }
             }
             
-            // 4. 回到主线程执行持久化
-            if !gapsToInsert.isEmpty {
-                let itemsToInsert = gapsToInsert
-                await MainActor.run {
-                    guard let context = self.modelContext else { return }
-                    for gap in itemsToInsert {
-                        let newFp = Footprint(
-                            date: Calendar.current.startOfDay(for: gap.start),
-                            startTime: gap.start,
-                            endTime: gap.end,
-                            footprintLocations: gap.points,
-                            locationHash: "GAP_STAY",
-                            duration: gap.duration
-                        )
-                        newFp.title = "在某地停留"
-                        context.insert(newFp)
-                        
-                        if let mPlace = self.matchedPlaceFor(coordinate: gap.center) {
-                            newFp.placeID = mPlace.placeID
-                            newFp.address = mPlace.address ?? mPlace.name
-                            newFp.title = Footprint.generateRandomTitle(for: mPlace.name, seed: Int(gap.start.timeIntervalSince1970))
+                    // 4. 回到主线程执行持久化
+                    if !gapsToInsert.isEmpty {
+                        let itemsToInsert = gapsToInsert
+                        await MainActor.run {
+                            guard let context = self.modelContext else { return }
+                            var insertedFootprints: [Footprint] = []
+                            for gap in itemsToInsert {
+                                let newFp = Footprint(
+                                    date: Calendar.current.startOfDay(for: gap.start),
+                                    startTime: gap.start,
+                                    endTime: gap.end,
+                                    footprintLocations: gap.points,
+                                    locationHash: "GAP_STAY",
+                                    duration: gap.duration
+                                )
+                                newFp.title = "在某地停留"
+                                context.insert(newFp)
+                                
+                                if let mPlace = self.matchedPlaceFor(coordinate: gap.center) {
+                                    let pid = mPlace.placeID
+                                    newFp.placeID = pid
+                                    newFp.address = mPlace.address ?? mPlace.name
+                                    newFp.title = Footprint.generateRandomTitle(for: mPlace.name, seed: Int(gap.start.timeIntervalSince1970))
+                                    
+                                    // --- 自动关联历史习惯 ---
+                                    newFp.activityTypeValue = self.findFrequentActivityType(for: pid, at: gap.start, context: context)
+                                }
+                                insertedFootprints.append(newFp)
+                            }
+                            // 后刷入数据库以获得正式 ID
+                            try? context.save()
+                            
+                            // 再触发分析
+                            for fp in insertedFootprints {
+                                self.analyzeFootprint(fp, context: context)
+                            }
                         }
-                        
-                        self.analyzeFootprint(newFp, context: context)
                     }
-                    try? context.save()
-                }
-            }
         }
     }
     

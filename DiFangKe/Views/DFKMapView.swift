@@ -1,6 +1,7 @@
 import SwiftUI
 import MapKit
 import SwiftData
+import Photos
 
 /// DiFangKe 统一地图组件，用于确保全应用地图表现一致
 struct DFKMapView: View {
@@ -11,7 +12,9 @@ struct DFKMapView: View {
     var mainAnnotationCoordinate: CLLocationCoordinate2D? = nil
     var mainAnnotationTitle: String? = nil
     var timelineItems: [TimelineItem] = []
+    var photoAssets: [PHAsset] = []
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
+    var onPhotoTap: ((PHAsset) -> Void)? = nil
     
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
@@ -48,37 +51,75 @@ struct DFKMapView: View {
                         let baseSize: CGFloat = 28
                         let size = baseSize * scale
                         
-                        ZStack {
-                            Circle()
-                                .fill(Color(uiColor: .systemBackground))
-                                .frame(width: size, height: size)
-                                .overlay(Circle().stroke(Color.white, lineWidth: 1.5 * scale))
-                                .shadow(color: .black.opacity(0.18), radius: 4 * scale, x: 0, y: 3 * scale)
-                            
+                        let footprintIcon = ZStack {
                             let activity = fp.getActivityType(from: allActivities)
+                            let activityColor = activity?.color ?? .dfkAccent
+                            
+                            Circle()
+                                .fill(activityColor)
+                                .frame(width: size, height: size)
+                                .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1.5 * scale))
+                            
                             Image(systemName: activity?.icon ?? "mappin.and.ellipse")
                                 .font(.system(size: 13 * scale, weight: .bold))
-                                .foregroundColor(activity?.color ?? .dfkAccent)
+                                .foregroundColor(Color(uiColor: .systemBackground))
                         }
                         .contentShape(Circle())
-                        .onTapGesture { onTimelineItemTap?(.footprint(fp)) }
+                        
+                        Group {
+                            if let onTimelineItemTap {
+                                footprintIcon.onTapGesture { onTimelineItemTap(.footprint(fp)) }
+                            } else {
+                                footprintIcon
+                            }
+                        }
                     }
                 case .transport(let transport):
                     if let midPoint = transport.points.distanceMidpoint {
                         Annotation("", coordinate: midPoint) {
-                            ZStack {
+                            let transportIcon = ZStack {
                                 RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color(uiColor: .systemBackground))
+                                    .fill(Color.dfkAccent)
                                     .frame(width: 20, height: 20)
-                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.2))
-                                    .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 2)
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(uiColor: .systemBackground), lineWidth: 1.2))
                                 
                                 Image(systemName: transport.currentType.sfSymbol)
                                     .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(.primary)
+                                    .foregroundColor(Color(uiColor: .systemBackground))
                             }
                             .contentShape(RoundedRectangle(cornerRadius: 6))
-                            .onTapGesture { onTimelineItemTap?(.transport(transport)) }
+                            
+                            Group {
+                                if let onTimelineItemTap {
+                                    transportIcon.onTapGesture { onTimelineItemTap(.transport(transport)) }
+                                } else {
+                                    transportIcon
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 照片标注 (用真正在该地拍摄的照片做图标)
+            ForEach(photoAssets, id: \.localIdentifier) { asset in
+                if let coord = asset.location?.gcj02.coordinate {
+                    Annotation("", coordinate: coord) {
+                        let content = AssetThumbnailView(assetID: asset.localIdentifier)
+                            .frame(width: 32, height: 32)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.5))
+                            .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
+                            .contentShape(Rectangle())
+                        
+                        // IMPORTANT: Only attach gesture if handler exists.
+                        // If nil, touch passes through to Map, then to Card.
+                        Group {
+                            if let onPhotoTap {
+                                content.onTapGesture { onPhotoTap(asset) }
+                            } else {
+                                content
+                            }
                         }
                     }
                 }
@@ -96,11 +137,11 @@ struct DFKMapView: View {
 
     private func calculateScale(for duration: TimeInterval) -> CGFloat {
         let minutes = duration / 60
-        if minutes < 15 { return 0.85 }
+        if minutes < 15 { return 0.8 }
         if minutes < 60 { return 1.0 }
-        if minutes < 180 { return 1.25 }
-        if minutes < 480 { return 1.45 }
-        return 1.65
+        if minutes < 180 { return 1.15 }
+        if minutes < 480 { return 1.25 }
+        return 1.35
     }
 }
 
