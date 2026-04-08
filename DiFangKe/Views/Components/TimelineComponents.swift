@@ -546,6 +546,11 @@ struct FootprintCardView: View {
                     withAnimation(.easeOut(duration: 0.3).delay(0.2)) { highlightVisible = true }
                 }
                 geocodeAddress()
+                
+                // 自动关联缺失的照片（针对首次入场或后台漏扫的情况）
+                if footprint.photoAssetIDs.isEmpty {
+                    locationManager.linkPhotos(to: footprint, context: modelContext)
+                }
             }
         }
     }

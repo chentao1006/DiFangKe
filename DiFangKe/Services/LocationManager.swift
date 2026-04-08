@@ -176,8 +176,30 @@ final class RawLocationStore {
                 }
             }
         }
-        
         return allPoints.sorted { $0.timestamp < $1.timestamp }
+    }
+    
+    /// 高效获取指定日期的总点数（统计行数，不解析对象）
+    func getTotalPointsCount(for date: Date) -> Int {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let datePrefix = formatter.string(from: date)
+        
+        guard let files = try? fileManager.contentsOfDirectory(at: baseDirectory, includingPropertiesForKeys: nil) else {
+            return 0
+        }
+        
+        var totalCount = 0
+        let relevantFiles = files.filter { $0.lastPathComponent.hasPrefix(datePrefix) && $0.pathExtension == "csv" }
+        
+        for fileURL in relevantFiles {
+            if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
+                // 统计换行符数量作为行数估算，比完全解析成 CLLocation 快得多
+                let count = content.components(separatedBy: .newlines).filter { !$0.isEmpty }.count
+                totalCount += count
+            }
+        }
+        return totalCount
     }
 
     // --- CloudKit 手动同步相关 ---

@@ -27,6 +27,40 @@ enum TimelineItem: Identifiable {
         case .transport(let t): return t.startTime
         }
     }
+    
+    var icon: String {
+        switch self {
+        case .footprint(let f):
+            // Note: In a real app, this should resolve the activity type icon
+            return f.activityTypeValue ?? "mappin.and.ellipse"
+        case .transport(let t):
+            return t.type.icon
+        }
+    }
+    
+    // Helper to resolve icon with activity list
+    func getIcon(allActivityTypes: [ActivityType]) -> String {
+        switch self {
+        case .footprint(let f):
+            return f.getActivityType(from: allActivityTypes)?.icon ?? "mappin.and.ellipse"
+        case .transport(let t):
+            return t.type.icon
+        }
+    }
+    
+    func getColor(allActivityTypes: [ActivityType]) -> String {
+        switch self {
+        case .footprint(let f):
+            return f.getActivityType(from: allActivityTypes)?.colorHex ?? "#007AFF"
+        case .transport:
+            return "#8E8E93"
+        }
+    }
+    
+    var isTransport: Bool {
+        if case .transport = self { return true }
+        return false
+    }
 }
 
 // Lite versions for thread-safe background building
@@ -518,7 +552,8 @@ class TimelineBuilder {
         let kmh = averageSpeed * 3.6
         
         if distance < 50 { return nil }
-        if duration < 60 && kmh < 3 { return nil }
+        if duration < 300 && distance < 200 { return nil }
+        if duration < 60 && kmh < 3 { return nil } // 保持原有的极短距离高速过滤
         
         let maxDiameter = calculateMaxDiameter(points)
         // 增加对“室内漂移”的过滤：如果最大跨度较小且总路径过长（比值 > 2），判定为原地漂移而非位移

@@ -195,6 +195,7 @@ struct TimelinePageView: View {
         .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in refreshTimeline() }
         .sheet(item: $selectedFootprint) { footprint in
             FootprintModalView(footprint: footprint, autoFocus: autoFocusOnOpen)
+                .environment(locationManager)
                 .onDisappear { autoFocusOnOpen = false }
         }
         .sheet(isPresented: $showingAddPlaceSheet) {
@@ -219,6 +220,7 @@ struct TimelinePageView: View {
             } onLocationUpdate: {
                 refreshTimeline()
             }
+            .environment(locationManager)
         }
     }
     

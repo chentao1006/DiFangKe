@@ -221,11 +221,13 @@
 				LastUpgradeCheck = 2640;
 			};
 			buildConfigurationList = A4C9CFFD682E947343B0C99F /* Build configuration list for PBXProject "DiFangKe" */;
-			developmentRegion = en;
+			developmentRegion = zh_CN;
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				Base,
 				en,
+				zh_CN,
+				"zh-Hans",
 			);
 			mainGroup = CE21BCBC42E9B032C1E986C7;
 			minimizedProjectReferenceProxies = 1;

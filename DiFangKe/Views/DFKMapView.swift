@@ -37,15 +37,6 @@ struct DFKMapView: View {
                 MapCircle(center: place.coordinate, radius: Double(place.radius))
                     .foregroundStyle(Color.orange.opacity(0.1))
                     .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                
-                Annotation("", coordinate: place.coordinate) {
-                    Text(place.name)
-                        .font(.system(size: isInteractive ? 10 : 8, weight: .bold))
-                        .foregroundColor(.orange)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.8)))
-                }
             }
             
             // 每一个 TimelineItem 在地图上的标注 (放在最后以确保在顶层显示)

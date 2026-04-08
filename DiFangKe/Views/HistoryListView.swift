@@ -3,6 +3,13 @@ import SwiftData
 import MapKit
 
 struct DaySummary: Identifiable, Equatable {
+    struct TimelineIcon: Identifiable, Equatable {
+        let id = UUID()
+        let icon: String
+        let colorHex: String
+        let isTransport: Bool
+    }
+    
     var id: Date { date }
     let date: Date
     let totalDuration: TimeInterval
@@ -13,6 +20,9 @@ struct DaySummary: Identifiable, Equatable {
     let hasCandidate: Bool
     let activeHours: Set<Int>
     let favoriteHours: Set<Int>
+    let timelineIcons: [TimelineIcon]
+    let trajectoryCount: Int // New field
+    let mileage: Double // New field
     
     var activityLevel: Float {
         let maxHours: TimeInterval = 8 * 3600
@@ -63,6 +73,8 @@ struct HistoryListView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(LocationManager.self) private var locationManager
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
+    @Query private var allManualSelections: [TransportManualSelection]
+    @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
     
     let initialDate: Date
     let showImportOnAppear: Bool
@@ -184,6 +196,7 @@ struct HistoryListView: View {
             .tag(ViewMode.month)
             
             HistoryFavoritesView(onUpdate: updateSummaries)
+                .environment(locationManager)
                 .tag(ViewMode.favorites)
             
         }
@@ -234,60 +247,81 @@ struct HistoryListView: View {
     
     private func updateSummaries() {
         let validFootprints = allFootprints.filter { $0.status != .ignored }
-        let grouped = Dictionary(grouping: validFootprints) { Calendar.current.startOfDay(for: $0.startTime) }
-        var dict: [Date: DaySummary] = [:]
+        let manualSelections = allManualSelections.filter { !$0.isDeleted }
+        let rawDates = locationManager.availableRawDates
         
-        for (date, footprints) in grouped {
-            let totalDuration = footprints.reduce(0) { $0 + $1.duration }
-            let highlightCount = footprints.filter { $0.isHighlight == true }.count
-            let highlights = footprints.filter { $0.isHighlight == true }
-            let highlightTitle = highlights.first?.title
-            let hasConfirmed = footprints.contains { $0.status == .confirmed }
-            let hasCandidate = footprints.contains { $0.status == .candidate }
-            
-            var activeHours = Set<Int>()
-            var favoriteHours = Set<Int>()
-            for fp in footprints {
-                let calendar = Calendar.current
-                let startH = calendar.component(.hour, from: fp.startTime)
-                let endH = calendar.component(.hour, from: fp.endTime)
-                let isFav = fp.isHighlight == true
+        let allDates = Set(validFootprints.map { Calendar.current.startOfDay(for: $0.startTime) } + 
+                           manualSelections.map { Calendar.current.startOfDay(for: $0.startTime) } + 
+                           rawDates.map { Calendar.current.startOfDay(for: $0) })
+        
+        let activityTypes = allActivityTypes
+        Task {
+            let newDict = await Task.detached(priority: .userInitiated) {
+                var results: [Date: DaySummary] = [:]
                 
-                if startH <= endH {
-                    for h in startH...endH {
-                        activeHours.insert(h)
-                        if isFav { favoriteHours.insert(h) }
+                for date in allDates.sorted(by: { $0 > $1 }) {
+                    let dayFootprints = validFootprints.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) }
+                    let dayManual = manualSelections.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) }
+                    
+                    let highlightCount = dayFootprints.filter { $0.isHighlight == true }.count
+                    let highlights = dayFootprints.filter { $0.isHighlight == true }
+                    let highlightTitle = highlights.first?.title
+                    let hasConfirmed = dayFootprints.contains { $0.status == .confirmed }
+                    let hasCandidate = dayFootprints.contains { $0.status == .candidate }
+                    let totalDuration = dayFootprints.reduce(0) { $0 + $1.duration }
+                    
+                    let totalTrajectoryCount = RawLocationStore.shared.getTotalPointsCount(for: date)
+                    let fpsLite = dayFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
+                    let manualLite = dayManual.map { TimelineBuilder.convertToOverrideLite($0) }
+                    let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
+                    
+                    let timelineItems = TimelineBuilder.buildTimeline(
+                        for: date,
+                        footprints: fpsLite,
+                        allRawPoints: rawPoints,
+                        allPlaces: [],
+                        overrides: manualLite
+                    )
+                    
+                    let timelineIcons = timelineItems.reversed().map { item in
+                        DaySummary.TimelineIcon(
+                            icon: item.getIcon(allActivityTypes: activityTypes),
+                            colorHex: item.getColor(allActivityTypes: activityTypes),
+                            isTransport: item.isTransport
+                        )
                     }
-                } else {
-                    // Spans midnight
-                    for h in startH...23 {
-                        activeHours.insert(h)
-                        if isFav { favoriteHours.insert(h) }
+                    
+                    let totalMileage = timelineItems.reduce(0.0) { sum, item in
+                        if case .transport(let t) = item { return sum + t.distance }
+                        return sum
                     }
-                    for h in 0...endH {
-                        activeHours.insert(h)
-                        if isFav { favoriteHours.insert(h) }
-                    }
+                    
+                    results[date] = DaySummary(
+                        date: date,
+                        totalDuration: totalDuration,
+                        footprintCount: dayFootprints.count,
+                        highlightCount: highlightCount,
+                        highlightTitle: highlightTitle,
+                        hasConfirmed: hasConfirmed,
+                        hasCandidate: hasCandidate,
+                        activeHours: [],
+                        favoriteHours: [],
+                        timelineIcons: timelineIcons,
+                        trajectoryCount: totalTrajectoryCount,
+                        mileage: totalMileage
+                    )
                 }
-            }
+                return results
+            }.value
             
-            dict[date] = DaySummary(
-                date: date,
-                totalDuration: totalDuration,
-                footprintCount: footprints.count,
-                highlightCount: highlightCount,
-                highlightTitle: highlightTitle,
-                hasConfirmed: hasConfirmed,
-                hasCandidate: hasCandidate,
-                activeHours: activeHours,
-                favoriteHours: favoriteHours
-            )
+            await MainActor.run {
+                self.cachedSummaries = newDict
+            }
         }
-        self.cachedSummaries = dict
     }
     
     private func emptySummary(for date: Date) -> DaySummary {
-        DaySummary(date: date, totalDuration: 0, footprintCount: 0, highlightCount: 0, highlightTitle: nil, hasConfirmed: false, hasCandidate: false, activeHours: [], favoriteHours: [])
+        DaySummary(date: date, totalDuration: 0, footprintCount: 0, highlightCount: 0, highlightTitle: nil, hasConfirmed: false, hasCandidate: false, activeHours: [], favoriteHours: [], timelineIcons: [], trajectoryCount: 0, mileage: 0)
     }
 }
 
@@ -413,40 +447,57 @@ struct DayCell: View {
     var body: some View {
         let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
         let isTarget = Calendar.current.isDate(date, inSameDayAs: targetDate)
-        let hasData = summary != nil && (summary?.footprintCount ?? 0) > 0
+        let hasData = summary != nil && ((summary?.footprintCount ?? 0) > 0 || !(summary?.timelineIcons.isEmpty ?? true))
         
-        HStack(spacing: 12) {
-            // Mon/Tue
-            Text(date.formatted(.dateTime.weekday(.abbreviated)))
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .frame(width: 28, alignment: .leading)
-                .opacity(hasData ? 1.0 : 0.4)
+        HStack(alignment: .top, spacing: 18) {
+            // 左侧：星期和日期上下排列，确保文字不换行
+            VStack(alignment: .leading, spacing: 4) {
+                Text(date.formatted(.dateTime.weekday()))
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                
+                Text(date.formatted(.dateTime.month().day()))
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundColor(hasData ? .primary : .secondary.opacity(0.5))
+                    .lineLimit(1)
+            }
+            .frame(width: 60, alignment: .leading) // 设置足够宽的固定宽度，确保对齐
+            .opacity(hasData ? 1.0 : 0.4)
             
-            // 4月3日
-            Text(date.formatted(.dateTime.month().day()))
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundColor(hasData ? .primary : .secondary.opacity(0.5))
-                .layoutPriority(1)
-                .fixedSize()
+            // 右侧：统计数据和图标上下排列
+            VStack(alignment: .leading, spacing: 6) {
+                if let summary = summary, hasData {
+                    DayStatsView(
+                        trajectoryCount: summary.trajectoryCount,
+                        footprintCount: summary.footprintCount,
+                        mileage: summary.mileage
+                    )
+                    
+                    TimelineIconsView(icons: summary.timelineIcons)
+                } else {
+                    Text("暂无记录")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary.opacity(0.3))
+                        .padding(.top, 14)
+                }
+            }
             
-            // Activity Bar
-            ActivityBar(
-                activeHours: summary?.activeHours ?? [],
-                favoriteHours: summary?.favoriteHours ?? []
-            )
-            .opacity(hasData ? 1.0 : 0.2)
+            Spacer()
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 16)
         .background(
             ZStack {
                 if isToday {
-                    RoundedRectangle(cornerRadius: 12)
+                    RoundedRectangle(cornerRadius: 16)
                         .fill(Color.dfkAccent.opacity(0.06))
                 } else if isTarget {
-                    RoundedRectangle(cornerRadius: 12)
+                    RoundedRectangle(cornerRadius: 16)
                         .fill(Color.gray.opacity(0.12))
+                } else {
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(Color(uiColor: .secondarySystemGroupedBackground).opacity(0.5))
                 }
             }
         )
@@ -460,25 +511,57 @@ struct DayCell: View {
     }
 }
 
-struct ActivityBar: View {
-    let activeHours: Set<Int>
-    let favoriteHours: Set<Int>
+struct TimelineIconsView: View {
+    let icons: [DaySummary.TimelineIcon]
     
     var body: some View {
-        HStack(spacing: 1.5) {
-            ForEach(0..<24, id: \.self) { h in
-                let color: Color = {
-                    if favoriteHours.contains(h) { return .dfkHighlight }
-                    if activeHours.contains(h) { return .dfkAccent }
-                    return .secondary.opacity(0.1)
-                }()
-                
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(color)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 6)
+        HStack(spacing: 6) {
+            ForEach(icons.prefix(10)) { item in
+                Image(systemName: item.icon)
+                    .font(.system(size: 13))
+                    .foregroundColor(Color(hex: item.colorHex) ?? .secondary)
+            }
+            if icons.count > 10 {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary.opacity(0.5))
             }
         }
+    }
+}
+
+struct DayStatsView: View {
+    let trajectoryCount: Int
+    let footprintCount: Int
+    let mileage: Double
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            if trajectoryCount > 0 {
+                statItem(icon: "dot.radiowaves.left.and.right", value: "\(trajectoryCount)")
+            }
+            if footprintCount > 0 {
+                statItem(icon: "mappin.and.ellipse", value: "\(footprintCount)")
+            }
+            if mileage > 0 {
+                statItem(icon: "figure.walk", value: formatMileage(mileage))
+            }
+        }
+    }
+    
+    private func statItem(icon: String, value: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 8))
+            Text(value)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+        }
+        .foregroundColor(.secondary)
+    }
+    
+    private func formatMileage(_ m: Double) -> String {
+        if m < 1000 { return "\(Int(m))m" }
+        return String(format: "%.1fkm", m/1000)
     }
 }
 
@@ -689,6 +772,7 @@ extension Date {
 
 // MARK: - View Modifiers to simplify HistoryListView body
 struct ImportSheetsModifier: ViewModifier {
+    @Environment(LocationManager.self) private var locationManager
     @Binding var showingPhotoImportRange: Bool
     @Binding var isShowingResults: Bool
     @Binding var scannedResults: [Footprint]
@@ -705,6 +789,7 @@ struct ImportSheetsModifier: ViewModifier {
             }
             .sheet(isPresented: $isShowingResults) {
                 PhotoImportResultsView(results: scannedResults, onConfirm: onConfirmImport)
+                    .environment(locationManager)
             }
     }
 }
@@ -893,6 +978,7 @@ struct PhotoImportRangePicker: View {
 
 // MARK: - Photo Import Results View
 struct PhotoImportResultsView: View {
+    @Environment(LocationManager.self) private var locationManager
     let results: [Footprint]
     let onConfirm: ([Footprint]) -> Void
     @Environment(\.dismiss) var dismiss
@@ -969,6 +1055,7 @@ struct PhotoImportResultsView: View {
             .listStyle(.plain)
             .sheet(item: $editingFootprint) { footprint in
                 FootprintModalView(footprint: footprint, autoFocus: false)
+                    .environment(locationManager)
             }
             .navigationTitle("寻回的记忆")
             .navigationBarTitleDisplayMode(.inline)
@@ -992,6 +1079,9 @@ struct PhotoImportResultsView: View {
 
 // MARK: - History Favorites View
 struct HistoryFavoritesView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(LocationManager.self) private var locationManager
+    
     @Query(filter: #Predicate<Footprint> { $0.isHighlight == true && $0.statusValue != "ignored" }, sort: \Footprint.startTime, order: .reverse) 
     private var favoriteFootprints: [Footprint]
     
@@ -1044,6 +1134,7 @@ struct HistoryFavoritesView: View {
         .background(Color.dfkBackground)
         .sheet(item: $selectedFootprint) { footprint in
             FootprintModalView(footprint: footprint, autoFocus: false)
+                .environment(locationManager)
                 .onDisappear { onUpdate() }
         }
     }
