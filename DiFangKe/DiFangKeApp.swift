@@ -34,7 +34,8 @@ struct DiFangKeApp: App {
         let schema = Schema([
             Footprint.self,
             Place.self,
-            TransportManualSelection.self
+            TransportManualSelection.self,
+            ActivityType.self
         ])
         
         // 提升存储版本号以解决之前的 Schema 冲突导致的死锁闪退
@@ -46,10 +47,14 @@ struct DiFangKeApp: App {
         )
         
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            let container = try ModelContainer(for: schema, configurations: [modelConfiguration])
+            print("[\(Date())] SwiftData: Persistent store initialized successfully at: \(modelConfiguration.url)")
+            return container
         } catch {
+            print("[\(Date())] SwiftData CRITICAL ERROR: Failed to create persistent container: \(error)")
             // 如果初始化失败（可能是因为本地老数据 Schema 完全不兼容），尝试回退到内存模式以保证 App 启动
             do {
+                print("[\(Date())] SwiftData: Falling back to IN-MEMORY mode. ALL DATA WILL BE LOST ON RESTART.")
                 return try ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
             } catch {
                 fatalError("Complete failure creating ModelContainer: \(error)")
@@ -70,6 +75,7 @@ struct DiFangKeApp: App {
                     ContentView()
                         .environment(locationManager)
                         .onAppear {
+                            CloudSettingsManager.shared.startSyncing()
                             let context = Self.sharedModelContainer.mainContext
                             locationManager.modelContext = context
                             PhotoService.shared.modelContext = context
@@ -115,22 +121,33 @@ struct DiFangKeApp: App {
     }
     
     private func setupDefaultData(context: ModelContext) {
+        // 先检查数据库是否为空。如果用户自建过活动或已经同步过预设，则不再自动补充，允许用户删除。
+        let descriptor = FetchDescriptor<ActivityType>()
+        guard let count = try? context.fetchCount(descriptor), count == 0 else { return }
+        
+        print("[Setup] Database is empty, seeding initial presets...")
+        for preset in ActivityType.presets {
+            context.insert(preset)
+        }
         
         try? context.save()
+        CloudSettingsManager.shared.startSyncing()
     }
     
     private func resumeUnfinishedAIAnalysis(context: ModelContext) {
-        // 查找所有尚未进行过 AI 分析（isHighlight 为 nil）的足迹
-        let descriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate<Footprint> { $0.isHighlight == nil },
+        // 查找最近 100 个尚未进行过 AI 分析的足迹
+        var descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate<Footprint> { $0.aiAnalyzed == false },
             sortBy: [SortDescriptor(\.startTime, order: .reverse)]
         )
+        descriptor.fetchLimit = 100
         
-        Task {
-            if let unanalyzed = try? context.fetch(descriptor), !unanalyzed.isEmpty {
-                // 将首批 50 个待分析项加入队列，避免冷启动压力过大
-                let targetBatch = Array(unanalyzed.prefix(50))
-                OpenAIService.shared.enqueueFootprintsForAnalysis(targetBatch)
+        let container = context.container
+        Task.detached(priority: .background) {
+            let backgroundContext = ModelContext(container)
+            if let unanalyzed = try? backgroundContext.fetch(descriptor), !unanalyzed.isEmpty {
+                // 将待分析项加入队列
+                OpenAIService.shared.enqueueFootprintsForAnalysis(unanalyzed)
             }
         }
     }

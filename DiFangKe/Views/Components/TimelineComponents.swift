@@ -10,6 +10,8 @@ struct DaySummaryCard: View {
     let footprintCount: Int
     let transportMileage: Double
     let points: [CLLocationCoordinate2D]
+    var timelineItems: [TimelineItem] = []
+    var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
@@ -55,7 +57,9 @@ struct DaySummaryCard: View {
                         cameraPosition: $cameraPosition,
                         isInteractive: false,
                         showsUserLocation: false,
-                        points: points
+                        points: points,
+                        timelineItems: timelineItems,
+                        onTimelineItemTap: onTimelineItemTap
                     )
                     .frame(height: 140)
                     .cornerRadius(12)
@@ -98,6 +102,8 @@ struct DaySummaryCard: View {
             FullFrameTrajectoryMapView(
                 title: date.formatted(.dateTime.month().day()) + " 轨迹",
                 points: points,
+                timelineItems: timelineItems,
+                onTimelineItemTap: onTimelineItemTap,
                 showsUserLocation: false
             )
         }
@@ -140,9 +146,13 @@ struct DayStatSeparator: View {
 struct FullFrameTrajectoryMapView: View {
     let title: String
     let points: [CLLocationCoordinate2D]
+    var timelineItems: [TimelineItem] = []
+    var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     var showsUserLocation: Bool = false
     @Environment(\.dismiss) private var dismiss
     @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var selectedFootprint: Footprint?
+    @State private var selectedTransport: Transport?
     
     var body: some View {
         NavigationStack {
@@ -150,8 +160,29 @@ struct FullFrameTrajectoryMapView: View {
                 cameraPosition: $cameraPosition,
                 isInteractive: true,
                 showsUserLocation: showsUserLocation,
-                points: points
+                points: points,
+                timelineItems: timelineItems,
+                onTimelineItemTap: { item in
+                    switch item {
+                    case .footprint(let footprint):
+                        self.selectedFootprint = footprint
+                    case .transport(let transport):
+                        self.selectedTransport = transport
+                    }
+                    onTimelineItemTap?(item) // Still notify parent if needed
+                }
             )
+            .sheet(item: $selectedFootprint) { footprint in
+                FootprintModalView(footprint: footprint)
+            }
+            .sheet(item: $selectedTransport) { transport in
+                TransportModalView(transport: transport) { _ in
+                    // In-map updates will reflect on reappear if needed, 
+                    // but usually parents handle building the list.
+                } onLocationUpdate: {
+                    // Location update handled by parent via callbacks
+                }
+            }
             .ignoresSafeArea(edges: .bottom)
             .onAppear {
                 if let region = points.boundingRegion() {
@@ -173,6 +204,8 @@ struct FullFrameTrajectoryMapView: View {
 struct RecordingStatusCard: View {
     let locationManager: LocationManager
     let footprintCount: Int
+    var timelineItems: [TimelineItem] = []
+    var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
     
@@ -285,7 +318,9 @@ struct RecordingStatusCard: View {
                     cameraPosition: $cameraPosition,
                     isInteractive: false,
                     showsUserLocation: true,
-                    points: locationManager.allTodayPoints.map { $0.coordinate }
+                    points: locationManager.allTodayPoints.map { $0.coordinate },
+                    timelineItems: timelineItems,
+                    onTimelineItemTap: onTimelineItemTap
                 )
                 .frame(height: 160)
                 .cornerRadius(12)
@@ -332,6 +367,8 @@ struct RecordingStatusCard: View {
             FullFrameTrajectoryMapView(
                 title: "今日轨迹",
                 points: locationManager.allTodayPoints.map { $0.coordinate },
+                timelineItems: timelineItems,
+                onTimelineItemTap: onTimelineItemTap,
                 showsUserLocation: true
             )
         }
@@ -351,6 +388,8 @@ struct FootprintCardView: View {
     var fixedWidth: CGFloat? = nil
     let onTap: (Footprint, Bool) -> Void
     
+    @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
+    
     @Environment(\.modelContext) private var modelContext
     @Environment(LocationManager.self) private var locationManager
     @State private var highlightVisible: Bool = false
@@ -366,8 +405,16 @@ struct FootprintCardView: View {
                  if showTimeline {
                      timelineIndicator
                  }
-                 ZStack(alignment: .bottomTrailing) {
-                    VStack(alignment: .leading, spacing: 4) {
+                 ZStack(alignment: .topTrailing) {
+                     if let activity = footprint.getActivityType(from: allActivities) {
+                         Image(systemName: activity.icon)
+                             .font(.system(size: 18, weight: .bold))
+                             .foregroundColor(activity.color)
+                             .padding(.top, 14)
+                             .padding(.trailing, 14)
+                     }
+                     
+                     VStack(alignment: .leading, spacing: 4) {
                         if showDateAboveTitle && (contextDate == nil || !Calendar.current.isDate(footprint.date, inSameDayAs: contextDate!)) {
                             Text(footprint.date.formatted(.dateTime.year().month().day()))
                                 .font(.system(size: 10, weight: .bold))
@@ -431,37 +478,40 @@ struct FootprintCardView: View {
                     }
                     .padding(.vertical, 14)
                     .padding(.leading, showTimeline ? 0 : 16)
-                    .padding(.trailing, 16)
+                    .padding(.trailing, footprint.photoAssetIDs.isEmpty ? 16 : 60) // Add space for photo if present
                     .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
                     
                     if let firstID = footprint.photoAssetIDs.first {
-                        ZStack(alignment: .topTrailing) {
-                            AssetThumbnailView(assetID: firstID, onAssetMissing: {
-                                withAnimation {
-                                    var ids = footprint.photoAssetIDs
-                                    ids.removeAll { $0 == firstID }
-                                    footprint.photoAssetIDs = ids
-                                    try? modelContext.save()
-                                }
-                            })
-                                .id(firstID)
-                                .frame(width: 48, height: 48)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        ZStack(alignment: .bottomTrailing) {
+                            Color.clear // Expand to fill parent
                             
-                            if footprint.photoAssetIDs.count > 1 {
-                                Text("\(footprint.photoAssetIDs.count)")
-                                    .font(.system(size: 8, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 2)
-                                    .background(Color.black.opacity(0.6))
-                                    .clipShape(Capsule())
-                                    .offset(x: -4, y: 4)
+                            ZStack(alignment: .topTrailing) {
+                                AssetThumbnailView(assetID: firstID, onAssetMissing: {
+                                    withAnimation {
+                                        var ids = footprint.photoAssetIDs
+                                        ids.removeAll { $0 == firstID }
+                                        footprint.photoAssetIDs = ids
+                                        try? modelContext.save()
+                                    }
+                                })
+                                    .id(firstID)
+                                    .frame(width: 48, height: 48)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                
+                                if footprint.photoAssetIDs.count > 1 {
+                                    Text("\(footprint.photoAssetIDs.count)")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 2)
+                                        .background(Color.black.opacity(0.6))
+                                        .clipShape(Capsule())
+                                        .offset(x: -4, y: 4)
+                                }
                             }
+                            .padding(.bottom, 12)
+                            .padding(.trailing, 12)
                         }
-                        .padding(.bottom, 14)
-                        .padding(.trailing, 12)
-                        .padding(.leading, 8)
                         .transition(.opacity.combined(with: .scale(scale: 0.9)))
                         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: footprint.photoAssetIDs)
                     }
@@ -651,7 +701,7 @@ struct PlaceholderFootprintCard: View {
             let now = timeline.date.timeIntervalSinceReferenceDate
             let phase = (now.truncatingRemainder(dividingBy: 3.5)) / 3.5
             let sinValue = sin(phase * .pi * 2)
-            let opacity = 0.3 + (sinValue + 1.0) / 2.0 * 0.3
+            let opacity = 0.3 + (sinValue + 1.0) / 2.0 * 0.5
             
             HStack(alignment: .top, spacing: 0) {
                 VStack(spacing: 0) {

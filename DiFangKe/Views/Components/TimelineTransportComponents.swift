@@ -241,6 +241,7 @@ struct TransportModalView: View {
             }
             .navigationTitle("交通详情")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }.fontWeight(.bold)

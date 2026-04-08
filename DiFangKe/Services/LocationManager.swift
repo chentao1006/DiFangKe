@@ -5,6 +5,7 @@ import Combine
 import SwiftUI
 import MapKit
 import CloudKit
+import Photos
 
 // MARK: - 位置建议结构体
 struct LocationSuggestion: Identifiable, Equatable {
@@ -424,6 +425,13 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     /// 缓存有原始轨迹文件的日期，避免频繁遍历文件系统
     var availableRawDates: Set<Date> = []
     
+    /// 用于通知 UI 原始轨迹数据已更新（例如多设备同步完成）
+    var lastRawDataUpdateTrigger: Date = Date()
+    
+    // 同步状态属性
+    var isSyncingInitialData: Bool = false
+    var syncStatusMessage: String = ""
+    
     // 从 View 同步过来的参数
     var allPlaces: [Place] = []
     var modelContext: ModelContext? {
@@ -506,12 +514,13 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     private var lastLocationChangeSift: Date = .distantPast
     
     private func setupTimers() {
-        // Hourly sift
+        // Hourly maintenance and sync
         refreshTimer = Timer.publish(every: 3600, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 self?.triggerTimelineSift()
                 self?.checkMidnightSift()
+                self?.performRawDataSync()
             }
         
         // Initial check on launch
@@ -710,7 +719,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         var seen = Set<String>()
         for fp in all {
             // 删除时长过短的记录
-            if fp.duration < minKeepDuration {
+            // 保护用户手动编辑过、有备注或有照片的足迹，即使时长很短也不删除
+            let hasUserEdits = fp.isTitleEditedByHand || !(fp.reason ?? "").isEmpty || !fp.photoAssetIDs.isEmpty || (fp.isHighlight ?? false)
+            if fp.duration < minKeepDuration && !hasUserEdits {
                 context.delete(fp)
                 continue
             }
@@ -1165,8 +1176,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         let targetEnd = targetStart.addingTimeInterval(86400)
         
         var fetchDescriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate { $0.date >= targetStart && $0.date < targetEnd },
-            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+            predicate: #Predicate { $0.startTime >= targetStart && $0.startTime < targetEnd },
+            sortBy: [SortDescriptor(\.startTime, order: .reverse)]
         )
         fetchDescriptor.fetchLimit = 1
         
@@ -1253,13 +1264,49 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         analyzeFootprint(footprint, context: context)
     }
 
+    func linkPhotos(to footprint: Footprint, context: ModelContext) {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return }
+        
+        // 关键：如果已经关联过照片，且数量不少，说明已经稳定，不再重复抓取
+        if !footprint.photoAssetIDs.isEmpty { return }
+        
+        let id = footprint.persistentModelID
+        let startTime = footprint.startTime
+        let endTime = footprint.endTime
+        let coordinate = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+        
+        PhotoService.shared.fetchAssets(
+            startTime: startTime,
+            endTime: endTime,
+            near: coordinate
+        ) { assets in
+            guard !assets.isEmpty else { return }
+            let ids = assets.map { $0.localIdentifier }
+            
+            // 使用 Task 在主线程执行更新，确保持久化生效且不卡顿
+            Task { @MainActor in
+                if let fp = context.model(for: id) as? Footprint {
+                    fp.photoAssetIDs = ids
+                    try? context.save()
+                    print("[\(Date())] PhotoLinker: Successfully linked \(ids.count) photos to footprint \(id)")
+                }
+            }
+        }
+    }
+
     private func analyzeFootprint(_ footprint: Footprint, context: ModelContext) {
         if footprint.status == .ignored { return }
         
         // 核心检查：使用显式标识判断是否已分析
         if footprint.aiAnalyzed {
+            // 即便 AI 分析过了，也顺便检查下照片，确保重启或漏掉的照片能关联上
+            linkPhotos(to: footprint, context: context)
             return
         }
+        
+        // 关联照片
+        linkPhotos(to: footprint, context: context)
 
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
         if !isAiEnabled {
@@ -1461,17 +1508,20 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     }
 
     func loadPointsFromStore() {
-        // 从本地存储恢复今日点，用于 UI 流水显示
-        let todayPoints = RawLocationStore.shared.loadLocations(for: Date())
+        let now = Date()
+        let today = Calendar.current.startOfDay(for: now)
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: today)!
+        
+        // 从本地存储恢复今日点，用于 UI 流水显示 (包含所有同步过来的设备)
+        let todayPoints = RawLocationStore.shared.loadAllDevicesLocations(for: today)
         self.allTodayPoints = todayPoints
         self.todayTotalPointsCount = todayPoints.count
         
-        // 从本地存储恢复滑动窗口，用于足迹识别。强制回溯至 24 小时前，以确保发现并恢复超长夜间停留。
-        let now = Date()
-        let startBound = now.addingTimeInterval(-24 * 3600)
-        // 核心修正：无论当前有没有停留，回溯范围都至少应覆盖 24 小时，以便自愈逻辑能向前追溯到更早的起始点
-        let lookbackStart = startBound 
-        let recent = RawLocationStore.shared.loadRecentLocations(lookbackHours: 24.0, since: lookbackStart)
+        // 从本地存储恢复滑动窗口，用于足迹识别。包含昨日 24h 前的点 (跨设备同步)
+        let yesterdayPoints = RawLocationStore.shared.loadAllDevicesLocations(for: yesterday)
+        let lookbackStart = now.addingTimeInterval(-24 * 3600)
+        
+        let recent = (yesterdayPoints + todayPoints).filter { $0.timestamp >= lookbackStart }
         self.trackingPoints = recent
         
         if let last = recent.last {
@@ -1918,6 +1968,57 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             newPlace.isPriority = true
             modelContext?.insert(newPlace)
             return newPlace
+        }
+    }
+    
+    /// 执行原始轨迹数据的 iCloud 同步
+    func performRawDataSync(showOverlay: Bool = false) {
+        guard UserDefaults.standard.bool(forKey: "isICloudSyncEnabled") || showOverlay else { return }
+        
+        Task {
+            if showOverlay {
+                await MainActor.run {
+                    isSyncingInitialData = true
+                    syncStatusMessage = "正在同步云端数据..."
+                }
+            }
+            
+            do {
+                let count = try await RawLocationStore.shared.syncToiCloud()
+                if count > 0 {
+                    await MainActor.run {
+                        self.refreshAvailableRawDates()
+                        self.loadPointsFromStore() // 重新从同步后的本地文件评估当前停留时长
+                        self.lastRawDataUpdateTrigger = Date()
+                    }
+                }
+                
+                if showOverlay {
+                    await MainActor.run {
+                        syncStatusMessage = "同步完成"
+                        // 延迟消失
+                        Task {
+                            try? await Task.sleep(nanoseconds: 1 * 1_000_000_000)
+                            await MainActor.run {
+                                isSyncingInitialData = false
+                            }
+                        }
+                    }
+                }
+            } catch {
+                print("Raw location sync failed: \(error)")
+                if showOverlay {
+                    await MainActor.run {
+                        syncStatusMessage = "同步失败: \(error.localizedDescription)"
+                        Task {
+                            try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
+                            await MainActor.run {
+                                isSyncingInitialData = false
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

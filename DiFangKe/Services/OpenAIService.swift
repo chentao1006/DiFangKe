@@ -525,4 +525,36 @@ class OpenAIService {
             }
         }.resume()
     }
+    
+    func testConnection(completion: @escaping (Bool, String) -> Void) {
+        let body: [String: Any] = [
+            "messages": [
+                ["role": "user", "content": "Ping"]
+            ],
+            "max_tokens": 5
+        ]
+        
+        guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
+            completion(false, "无效的 URL 配置")
+            return
+        }
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                DispatchQueue.main.async { completion(false, "连接失败: \(error.localizedDescription)") }
+                return
+            }
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                if (200...299).contains(httpResponse.statusCode) {
+                    DispatchQueue.main.async { completion(true, "连接成功") }
+                } else {
+                    let msg = httpResponse.statusCode == 401 ? "认证失败，请检查 API Key" : "服务器返回错误: \(httpResponse.statusCode)"
+                    DispatchQueue.main.async { completion(false, msg) }
+                }
+            } else {
+                DispatchQueue.main.async { completion(false, "未知响应") }
+            }
+        }.resume()
+    }
 }

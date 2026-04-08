@@ -48,6 +48,7 @@ struct FootprintLite {
     let reason: String?
     let isHighlight: Bool?
     let aiAnalyzed: Bool
+    let activityTypeValue: String?
 }
 
 struct PlaceLite {
@@ -91,7 +92,8 @@ class TimelineBuilder {
             photoAssetIDs: fp.photoAssetIDs,
             reason: fp.reason,
             isHighlight: fp.isHighlight,
-            aiAnalyzed: fp.aiAnalyzed
+            aiAnalyzed: fp.aiAnalyzed,
+            activityTypeValue: fp.activityTypeValue
         )
     }
 
@@ -157,7 +159,8 @@ class TimelineBuilder {
                     photoAssetIDs: Array(Set(last.photoAssetIDs + fp.photoAssetIDs)),
                     reason: last.reason ?? fp.reason,
                     isHighlight: (last.isHighlight == true || fp.isHighlight == true),
-                    aiAnalyzed: last.aiAnalyzed || fp.aiAnalyzed
+                    aiAnalyzed: last.aiAnalyzed || fp.aiAnalyzed,
+                    activityTypeValue: last.activityTypeValue ?? fp.activityTypeValue
                 )
                 finalizedSortedFootprints[finalizedSortedFootprints.count - 1] = combined
             } else {
@@ -191,7 +194,8 @@ class TimelineBuilder {
                 isHighlight: fp.isHighlight,
                 photoAssetIDs: fp.photoAssetIDs,
                 address: fp.address,
-                aiAnalyzed: fp.aiAnalyzed
+                aiAnalyzed: fp.aiAnalyzed,
+                activityTypeValue: fp.activityTypeValue
             )
             model.placeID = fp.placeID
             model.isTitleEditedByHand = fp.isTitleEditedByHand
@@ -212,27 +216,27 @@ class TimelineBuilder {
 
     private static func shouldPerformUiMerge(_ f1: FootprintLite, _ f2: FootprintLite) -> Bool {
         return checkMergeCondition(
-            start1: f1.startTime, end1: f1.endTime, lat1: f1.latitude, lon1: f1.longitude, title1: f1.title, place1: f1.placeID,
-            start2: f2.startTime, end2: f2.endTime, lat2: f2.latitude, lon2: f2.longitude, title2: f2.title, place2: f2.placeID
+            start1: f1.startTime, end1: f1.endTime, lat1: f1.latitude, lon1: f1.longitude, title1: f1.title, place1: f1.placeID, activity1: f1.activityTypeValue,
+            start2: f2.startTime, end2: f2.endTime, lat2: f2.latitude, lon2: f2.longitude, title2: f2.title, place2: f2.placeID, activity2: f2.activityTypeValue
         )
     }
 
     private static func shouldPerformUiMerge(_ f1: Footprint, _ f2: Footprint) -> Bool {
         return checkMergeCondition(
-            start1: f1.startTime, end1: f1.endTime, lat1: f1.latitude, lon1: f1.longitude, title1: f1.title, place1: f1.placeID,
-            start2: f2.startTime, end2: f2.endTime, lat2: f2.latitude, lon2: f2.longitude, title2: f2.title, place2: f2.placeID
+            start1: f1.startTime, end1: f1.endTime, lat1: f1.latitude, lon1: f1.longitude, title1: f1.title, place1: f1.placeID, activity1: f1.activityTypeValue,
+            start2: f2.startTime, end2: f2.endTime, lat2: f2.latitude, lon2: f2.longitude, title2: f2.title, place2: f2.placeID, activity2: f2.activityTypeValue
         )
     }
 
     private static func checkMergeCondition(
-        start1: Date, end1: Date, lat1: Double, lon1: Double, title1: String, place1: UUID?,
-        start2: Date, end2: Date, lat2: Double, lon2: Double, title2: String, place2: UUID?
+        start1: Date, end1: Date, lat1: Double, lon1: Double, title1: String, place1: UUID?, activity1: String?,
+        start2: Date, end2: Date, lat2: Double, lon2: Double, title2: String, place2: UUID?, activity2: String?
     ) -> Bool {
         if start2.timeIntervalSince(end1) > 300 { return false }
-        if let p1 = place1, let p2 = place2, p1 == p2 { return true }
+        if let p1 = place1, let p2 = place2, p1 == p2 && activity1 == activity2 { return true }
         let loc1 = CLLocation(latitude: lat1, longitude: lon1)
         let loc2 = CLLocation(latitude: lat2, longitude: lon2)
-        if loc1.distance(from: loc2) < 80 && title1 == title2 { return true }
+        if loc1.distance(from: loc2) < 80 && title1 == title2 && activity1 == activity2 { return true }
         return false
     }
 
@@ -252,7 +256,8 @@ class TimelineBuilder {
                             duration: max(f1.endTime, f2.endTime).timeIntervalSince(f1.startTime),
                             title: f1.title,
                             status: f1.status,
-                            address: f1.address
+                            address: f1.address,
+                            activityTypeValue: f1.activityTypeValue
                         )
                         combined.placeID = f1.placeID
                         merged[merged.count - 1] = .footprint(combined)

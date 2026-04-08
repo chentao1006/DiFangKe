@@ -16,6 +16,7 @@ struct FootprintModalView: View {
     var allPlaces: [Place] = []
     
     @Query private var savedPlaces: [Place]
+    @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
     
     @State private var showMap = false
     @State private var showAI = false
@@ -38,6 +39,7 @@ struct FootprintModalView: View {
     @State private var showingPhotoDeleteAlert = false
     @State private var photoToDelete: String? = nil
     @State private var showingSearchSheet = false
+    @State private var showingActivityTypeEditor = false
     
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @State private var isGeneratingAI = false
@@ -112,6 +114,9 @@ struct FootprintModalView: View {
                 Button("取消", role: .cancel) { }
             } message: {
                 Text("删除后，该足迹将不再出现在时间轴上。")
+            }
+            .sheet(isPresented: $showingActivityTypeEditor) {
+                ActivityTypeEditorView()
             }
             .onAppear {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { withAnimation(.easeOut(duration: 0.25)) { showMap = true } }
@@ -372,24 +377,51 @@ struct FootprintModalView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(titleFocused ? Color.dfkAccent.opacity(0.3) : Color.clear, lineWidth: 1))
                 .onTapGesture { titleFocused = true }
                 
-                Button {
-                    regenerateAIContent()
+                Menu {
+                    Button {
+                        withAnimation {
+                            ensureFootprintManaged()
+                            footprint.activityTypeValue = nil
+                            try? modelContext.save()
+                        }
+                    } label: {
+                        Label("无", systemImage: "circle.slash")
+                    }
+                    ForEach(allActivities) { type in
+                        Button {
+                            withAnimation {
+                                ensureFootprintManaged()
+                                footprint.activityTypeValue = type.id.uuidString
+                                try? modelContext.save()
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            }
+                        } label: {
+                            Label(type.name, systemImage: type.icon)
+                        }
+                    }
+                    
+                    Divider()
+                    
+                    Button {
+                        showingActivityTypeEditor = true
+                    } label: {
+                        Label("添加活动类型", systemImage: "plus")
+                    }
                 } label: {
                     ZStack {
                         if isGeneratingAI {
                             ProgressView()
                                 .scaleEffect(0.8)
                         } else {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundStyle(
-                                    LinearGradient(
-                                        colors: [.purple, .blue, .cyan],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                                .symbolEffect(.bounce, value: isGeneratingAI)
+                            if let activity = footprint.getActivityType(from: allActivities) {
+                                Image(systemName: activity.icon)
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(activity.color)
+                            } else {
+                                Image(systemName: "hand.tap.fill")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(.secondary.opacity(0.7))
+                            }
                         }
                     }
                     .frame(width: 40, height: 40)
@@ -560,6 +592,7 @@ struct FootprintModalView: View {
             timeSection.padding(.horizontal, 24).padding(.top, 12)
         }
     }
+    
     
     private var footerContent: some View {
         Group {
@@ -997,7 +1030,7 @@ private struct MiniMapView: View {
     
     var body: some View {
         Map(position: $cameraPosition) {
-            Marker(title, coordinate: coordinate).tint(Color.orange)
+            Marker("", coordinate: coordinate).tint(Color.orange)
             MapCircle(center: coordinate, radius: radius)
                 .foregroundStyle(Color.orange.opacity(0.15))
                 .stroke(Color.orange.opacity(0.6), lineWidth: 1.5)
@@ -1244,8 +1277,7 @@ struct FootprintDetailMapView: View {
             isInteractive: isInteractive,
             showsUserLocation: true,
             points: footprint.coordinates,
-            mainAnnotationCoordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude),
-            mainAnnotationTitle: footprint.title
+            timelineItems: [.footprint(footprint)]
         )
         .onAppear {
             if let region = footprint.region {

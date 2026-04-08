@@ -7,6 +7,8 @@ struct RawLogsManagerView: View {
     @State private var isSyncing = false
     @State private var syncStatus: String?
     
+    @Environment(LocationManager.self) private var locationManager
+    
     var body: some View {
         List {
             Section(header: Text("iCloud 同步")) {
@@ -69,9 +71,11 @@ struct RawLogsManagerView: View {
             }
         }
         .navigationTitle("轨迹文件")
+        .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: loadFiles)
     }
     
+    @MainActor
     private func loadFiles() {
         let fileManager = FileManager.default
         let documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -102,11 +106,13 @@ struct RawLogsManagerView: View {
     
     private func startSync() async {
         isSyncing = true
-        syncStatus = "正在上传文件..."
+        syncStatus = "正在同步文件..."
         
         do {
             let count = try await RawLocationStore.shared.syncToiCloud()
-            syncStatus = "同步成功：共上传 \(count) 个文件"
+            syncStatus = "同步成功：共同步 \(count) 个文件"
+            loadFiles()
+            locationManager.refreshAvailableRawDates()
         } catch {
             syncStatus = "同步失败：\(error.localizedDescription)"
         }

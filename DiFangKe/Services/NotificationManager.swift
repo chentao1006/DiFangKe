@@ -25,6 +25,14 @@ class NotificationManager {
         }
     }
     
+    func refreshSettings() {
+        let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
+        let hour = UserDefaults.standard.integer(forKey: "dailyNotificationHour")
+        let minute = UserDefaults.standard.integer(forKey: "dailyNotificationMinute")
+        let finalHour = UserDefaults.standard.object(forKey: "dailyNotificationHour") != nil ? hour : 21
+        self.updateDailySummary(isEnabled: isEnabled, hour: finalHour, minute: minute)
+    }
+    
     func getAuthorizationStatus(completion: @escaping (UNAuthorizationStatus) -> Void) {
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             DispatchQueue.main.async {

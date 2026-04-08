@@ -5,6 +5,7 @@ struct SettingsView: View {
     @Environment(LocationManager.self) private var locationManager
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
     @Query(sort: \Place.name) private var allPlaces: [Place]
+    @Query(sort: [SortDescriptor(\ActivityType.sortOrder)]) private var allActivities: [ActivityType]
     @AppStorage("isICloudSyncEnabled") private var isICloudSyncEnabled = true
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @AppStorage("dailyNotificationHour") private var notificationHour: Int = 21
@@ -29,7 +30,7 @@ struct SettingsView: View {
     
     var body: some View {
         Form {
-            Section(header: Text("隐私与记录"), footer: Text("修改 iCloud 同步设置需要完全重启 App 才能生效。")) {
+            Section(header: Text("隐私与记录")) {
                 Toggle("开启定位记录", isOn: $isTrackingEnabled)
                     .onChange(of: isTrackingEnabled) { oldValue, newValue in
                         if newValue {
@@ -58,6 +59,21 @@ struct SettingsView: View {
                             .foregroundColor(.secondary)
                     }
                 }
+                NavigationLink(destination: SavedPlacesView()) {
+                    HStack {
+                        Label {
+                            Text("已保存地点").foregroundColor(.primary)
+                        } icon: {
+                            Image(systemName: "clock.arrow.circlepath").foregroundColor(.blue)
+                        }
+                        Spacer()
+                        let savedCount = allPlaces.filter { !$0.isUserDefined && !$0.isIgnored }.count
+                        Text("\(savedCount)")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
                 NavigationLink(destination: IgnoredPlacesView()) {
                     HStack {
                         Label {
@@ -68,6 +84,20 @@ struct SettingsView: View {
                         Spacer()
                         let ignoredCount = allPlaces.filter { $0.isIgnored && !$0.isUserDefined }.count
                         Text("\(ignoredCount)")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                NavigationLink(destination: ActivityTypeSettingsView()) {
+                    HStack {
+                        Label {
+                            Text("活动类型").foregroundColor(.primary)
+                        } icon: {
+                            Image(systemName: "tag.circle").foregroundColor(.purple)
+                        }
+                        Spacer()
+                        Text("\(allActivities.count)")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
@@ -120,7 +150,7 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("设置")
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(.inline)
         .tint(.dfkAccent)
     }
     

@@ -22,25 +22,19 @@ struct PlacesManagerView: View {
 
     var body: some View {
         List {
-            Section {
-                Text("重要地点用于识别您的常用位置。您可以设置“忽略足迹”，系统将不再自动记录发生在该地点的琐迹。")
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-            }
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
-
-            ForEach(places) { place in
-                placeRow(place)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) {
-                            placeToDelete = place
-                            showDeleteConfirm = true
-                        } label: {
-                            Label("删除", systemImage: "trash")
+            Section(header: Text("个性化设置“重要地点”能让系统更好地理解您的生活重心（如家、办公室），助您更高效、有序地管理和筛选每日足迹。")) {
+                ForEach(places) { place in
+                    placeRow(place)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                placeToDelete = place
+                                showDeleteConfirm = true
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                            .tint(.red)
                         }
-                        .tint(.red)
-                    }
+                }
             }
 
             if places.isEmpty {
@@ -48,7 +42,7 @@ struct PlacesManagerView: View {
             }
         }
         .navigationTitle("重要地点")
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(.inline)
         .tint(.dfkAccent)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -56,8 +50,6 @@ struct PlacesManagerView: View {
                     showingAddPlace = true
                 } label: {
                     Image(systemName: "plus")
-                        .font(.title3)
-                        .foregroundColor(.dfkAccent)
                 }
             }
         }
@@ -65,14 +57,17 @@ struct PlacesManagerView: View {
             AddPlaceSheet { newPlace in
                 modelContext.insert(newPlace)
                 try? modelContext.save()
+                CloudSettingsManager.shared.triggerDataSyncPulse()
             }
         }
         .sheet(item: $editingPlace) { place in
             EditPlaceSheet(place: place) {
                 try? modelContext.save()
+                CloudSettingsManager.shared.triggerDataSyncPulse()
             } onDelete: {
                 modelContext.delete(place)
                 try? modelContext.save()
+                CloudSettingsManager.shared.triggerDataSyncPulse()
                 editingPlace = nil
             }
         }
@@ -81,6 +76,7 @@ struct PlacesManagerView: View {
                 if let place = placeToDelete {
                     modelContext.delete(place)
                     try? modelContext.save()
+                    CloudSettingsManager.shared.triggerDataSyncPulse()
                 }
                 placeToDelete = nil
             }

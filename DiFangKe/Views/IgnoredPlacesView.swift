@@ -16,24 +16,26 @@ struct IgnoredPlacesView: View {
 
     var body: some View {
         List {
-            ForEach(ignoredPlaces) { place in
-                ignoredPlaceRow(place)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) {
-                            placeToDelete = place
-                            showDeleteConfirm = true
-                        } label: {
-                            Label("彻底删除", systemImage: "trash")
+            Section(header: Text("这里列出了您选择忽略的所有地点。系统将不再自动记录发生在该地点的足迹。")) {
+                ForEach(ignoredPlaces) { place in
+                    ignoredPlaceRow(place)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                placeToDelete = place
+                                showDeleteConfirm = true
+                            } label: {
+                                Label("彻底删除", systemImage: "trash")
+                            }
+                            .tint(.red)
+                            
+                            Button {
+                                restorePlace(place)
+                            } label: {
+                                Label("恢复", systemImage: "arrow.uturn.backward")
+                            }
+                            .tint(.dfkAccent)
                         }
-                        .tint(.red)
-                        
-                        Button {
-                            restorePlace(place)
-                        } label: {
-                            Label("恢复", systemImage: "arrow.uturn.backward")
-                        }
-                        .tint(.dfkAccent)
-                    }
+                }
             }
 
             if ignoredPlaces.isEmpty {

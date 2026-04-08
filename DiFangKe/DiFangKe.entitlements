@@ -17,5 +17,7 @@
 		<string>CloudKit</string>
 		<string>iCloud.com.apple.ubiquity</string>
 	</array>
+	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
+	<string>$(TeamIdentifierPrefix)$(CFBundleIdentifier)</string>
 </dict>
 </plist>

@@ -34,10 +34,16 @@ final class Footprint {
     var isPlaceSuggestionIgnored: Bool = false
     var aiAnalyzed: Bool = false
     var isTitleEditedByHand: Bool = false
+    var activityTypeValue: String?
     
     var status: FootprintStatus {
         get { FootprintStatus(rawValue: statusValue) ?? .candidate }
         set { statusValue = newValue.rawValue }
+    }
+    
+    func getActivityType(from allActivities: [ActivityType]) -> ActivityType? {
+        guard let val = activityTypeValue else { return nil }
+        return allActivities.first { $0.id.uuidString == val || $0.name == val }
     }
     
     // Computed property to reconstruct CLLocationCoordinate2D
@@ -96,7 +102,9 @@ final class Footprint {
          address: String? = nil,
          isPlaceSuggestionIgnored: Bool = false,
          aiAnalyzed: Bool = false,
-         isTitleEditedByHand: Bool = false) {
+         isTitleEditedByHand: Bool = false,
+         activityType: ActivityType? = nil,
+         activityTypeValue: String? = nil) {
         
         self.footprintID = footprintID
         self.date = date
@@ -113,6 +121,7 @@ final class Footprint {
         self.isPlaceSuggestionIgnored = isPlaceSuggestionIgnored
         self.aiAnalyzed = aiAnalyzed
         self.isTitleEditedByHand = isTitleEditedByHand
+        self.activityTypeValue = activityTypeValue ?? activityType?.id.uuidString
         
         // Use provided title, or address, or default to generic poetic title
         if let title = title, !title.isEmpty {

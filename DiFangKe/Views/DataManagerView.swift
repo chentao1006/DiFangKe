@@ -143,6 +143,7 @@ struct DataManagerView: View {
             try modelContext.delete(model: Footprint.self)
             try modelContext.delete(model: Place.self)
             try modelContext.save()
+            CloudSettingsManager.shared.triggerDataSyncPulse()
             locationManager.allTodayPoints = []
             
             self.alertTitle = "数据清空"
@@ -303,6 +304,7 @@ final class BackupService {
         }
         
         try context.save()
+        CloudSettingsManager.shared.triggerDataSyncPulse()
         return RestoreReport(
             total: backup.footprints.count, 
             new: newFootprints, 

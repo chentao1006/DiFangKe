@@ -45,9 +45,19 @@ struct TimelinePageView: View {
         self.locationManager = locationManager
         self.pastLimitOffset = pastLimitOffset
         
-        let cached = TimelineBuilder.timelineCache[date]
-        self._timelineItems = State(initialValue: cached ?? [])
-        self._isLoadingTimeline = State(initialValue: cached == nil)
+        let cached = TimelineBuilder.timelineCache[date] ?? []
+        // 初始化时立即执行重链接，确保首次渲染就是数据库真实模型
+        let linkedItems = cached.map { item -> TimelineItem in
+            if case .footprint(let tempFp) = item {
+                if let realFp = footprints.first(where: { $0.footprintID == tempFp.footprintID }) {
+                    return .footprint(realFp)
+                }
+            }
+            return item
+        }
+        
+        self._timelineItems = State(initialValue: linkedItems)
+        self._isLoadingTimeline = State(initialValue: cached.isEmpty)
     }
     
     var body: some View {
@@ -62,8 +72,13 @@ struct TimelinePageView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 0) {
                         if isToday {
-                            RecordingStatusCard(locationManager: locationManager, footprintCount: footprints.count)
-                                .padding(.horizontal, 16)
+                            RecordingStatusCard(
+                                locationManager: locationManager, 
+                                footprintCount: footprints.count,
+                                timelineItems: timelineItems,
+                                onTimelineItemTap: handleTimelineItemTap
+                            )
+                            .padding(.horizontal, 16)
                         } else {
                             DaySummaryCard(
                                 date: date,
@@ -73,7 +88,9 @@ struct TimelinePageView: View {
                                     if case .transport(let t) = item { return sum + t.distance }
                                     return sum
                                 },
-                                points: trajectoryPoints
+                                points: trajectoryPoints,
+                                timelineItems: timelineItems,
+                                onTimelineItemTap: handleTimelineItemTap
                             )
                             .padding(.horizontal, 16)
                         }
@@ -175,6 +192,7 @@ struct TimelinePageView: View {
         }
         .onChange(of: footprints) { _, _ in refreshTimeline() }
         .onChange(of: manualSelections) { _, _ in refreshTimeline() }
+        .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in refreshTimeline() }
         .sheet(item: $selectedFootprint) { footprint in
             FootprintModalView(footprint: footprint, autoFocus: autoFocusOnOpen)
                 .onDisappear { autoFocusOnOpen = false }
@@ -184,6 +202,7 @@ struct TimelinePageView: View {
                           initialName: locationManager.currentAddress) { newPlace in
                 modelContext.insert(newPlace)
                 try? modelContext.save()
+                CloudSettingsManager.shared.triggerDataSyncPulse()
             }
         }
         .sheet(item: $selectedTransport) { transport in
@@ -200,6 +219,15 @@ struct TimelinePageView: View {
             } onLocationUpdate: {
                 refreshTimeline()
             }
+        }
+    }
+    
+    private func handleTimelineItemTap(_ item: TimelineItem) {
+        switch item {
+        case .footprint(let footprint):
+            self.selectedFootprint = footprint
+        case .transport(let transport):
+            self.selectedTransport = transport
         }
     }
     
@@ -268,8 +296,19 @@ struct TimelinePageView: View {
             
             if Task.isCancelled { return }
             
+            // --- 核心修复：将 TimelineBuilder 返回的临时克隆对象映射回数据库中的实时模型 ---
+            // 否则 UI 中的所有修改（收藏、编辑名称、换照片）都只会作用在内存克隆体上而无法持久化
+            let finalizedItems = items.map { item -> TimelineItem in
+                if case .footprint(let tempFp) = item {
+                    if let realFp = currentFootprints.first(where: { $0.footprintID == tempFp.footprintID }) {
+                        return .footprint(realFp)
+                    }
+                }
+                return item
+            }
+
             if !self.timelineItems.isEmpty {
-                var mergedItems = items
+                var mergedItems = finalizedItems
                 for i in 0..<mergedItems.count {
                     if i < self.timelineItems.count {
                         let old = self.timelineItems[i]
@@ -290,7 +329,7 @@ struct TimelinePageView: View {
                 }
                 self.timelineItems = mergedItems
             } else {
-                self.timelineItems = items
+                self.timelineItems = finalizedItems
             }
             
             TimelineBuilder.timelineCache[targetDate] = self.timelineItems
@@ -317,6 +356,12 @@ struct TimelinePageView: View {
                     }
                 }
             case .footprint(let footprint):
+                // 1. 自动关联缺失的照片（防止后台漏扫或由于权限延迟导致的初期无照片）
+                if footprint.photoAssetIDs.isEmpty {
+                    locationManager.linkPhotos(to: footprint, context: modelContext)
+                }
+                
+                // 2. 解析缺失的地址/标题
                 let needsResolution = (footprint.title == "地点记录" || footprint.title == "正在获取位置..." || footprint.title == "在某地停留") 
                     && (footprint.address == nil || footprint.address!.isEmpty || footprint.address == "正在解析位置...")
                 

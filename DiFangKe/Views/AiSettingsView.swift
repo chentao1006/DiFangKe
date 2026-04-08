@@ -18,6 +18,8 @@ struct AiSettingsView: View {
             }
         }
     }
+    @State private var isTesting = false
+    @State private var testResult: (success: Bool, message: String)?
     
     var body: some View {
         Form {
@@ -65,16 +67,40 @@ struct AiSettingsView: View {
             }
             
             Section {
-                Button("重置为默认值") {
-                    customAiUrl = "https://api.openai.com/v1"
-                    customAiModel = "gpt-4o-mini"
-                    // We don't reset API Key for safety
+                Button(action: testConnection) {
+                    HStack {
+                        Text("测试连接")
+                        if isTesting {
+                            Spacer()
+                            ProgressView()
+                        }
+                    }
                 }
-                .foregroundColor(.red)
+                .disabled(isTesting)
+                
+                if let result = testResult {
+                    HStack {
+                        Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundColor(result.success ? .green : .red)
+                        Text(result.message)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
         }
         .navigationTitle("AI 设置")
         .navigationBarTitleDisplayMode(.inline)
+    }
+    
+    private func testConnection() {
+        isTesting = true
+        testResult = nil
+        
+        OpenAIService.shared.testConnection { success, message in
+            isTesting = false
+            testResult = (success, message)
+        }
     }
 }
 

@@ -121,6 +121,40 @@ struct DayTimelineView: View {
                 }
                 locationManager.refreshAvailableRawDates()
                 updateData()
+                
+                // 探测重装/首次同步
+                if !UserDefaults.standard.bool(forKey: "didInitialSyncAfterInstall") {
+                    locationManager.performRawDataSync(showOverlay: true)
+                    UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
+                }
+            }
+            .overlay {
+                if locationManager.isSyncingInitialData {
+                    ZStack {
+                        Color.black.opacity(0.3)
+                            .ignoresSafeArea()
+                        
+                        VStack(spacing: 20) {
+                            ProgressView()
+                                .scaleEffect(1.5)
+                                .tint(.white)
+                            
+                            Text(locationManager.syncStatusMessage)
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            
+                            Text("正在为您恢复历史足迹数据\n这可能需要一点时间")
+                                .font(.caption)
+                                .multilineTextAlignment(.center)
+                                .foregroundColor(.white.opacity(0.8))
+                        }
+                        .padding(30)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(24)
+                        .shadow(radius: 20)
+                    }
+                    .transition(.opacity.combined(with: .scale))
+                }
             }
             .onDisappear {
                 stopRepeatTimer()
@@ -153,37 +187,40 @@ struct DayTimelineView: View {
         let today = Calendar.current.startOfDay(for: Date())
         
         updateTask = Task { @MainActor in
-            // Wait for 100ms debounce before starting expensive grouping
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            // 增加防抖时长，给 CloudKit 同步大批量入库留出喘息空间
+            try? await Task.sleep(nanoseconds: 500_000_000)
             if Task.isCancelled { return }
 
             let calendar = Calendar.current
             
-            // 1. Group footprints - Optimize by doing only once
+            // 1. 分类足迹 - 优化循环效率，减少不必要的计算
             var newGrouped: [Date: [Footprint]] = [:]
-            let footprintSnapshots = footprints // Capture snapshot to iterate
-            for fp in footprintSnapshots {
-                // If a footprint spans multiple days, we add it to each
-                var datePtr = calendar.startOfDay(for: fp.startTime)
-                let lastDate = calendar.startOfDay(for: fp.endTime)
+            // 使用局部快照避免在循环中重复读取
+            let snapshot = footprints
+            
+            for fp in snapshot {
+                let startDay = calendar.startOfDay(for: fp.startTime)
+                // Subtract a tiny amount to handle exact midnight boundary cases
+                let effectiveEndTime = fp.endTime.addingTimeInterval(-0.001)
+                let endDay = calendar.startOfDay(for: max(fp.startTime, effectiveEndTime))
                 
-                while datePtr <= lastDate {
+                var datePtr = startDay
+                while datePtr <= endDay {
                     newGrouped[datePtr, default: []].append(fp)
                     guard let nextDate = calendar.date(byAdding: .day, value: 1, to: datePtr) else { break }
                     datePtr = nextDate
                 }
             }
             
-            // 2. Group manual selections
+            // 2. 分类手工选择
             var newManualGrouped: [Date: [TransportManualSelection]] = [:]
-            let selectionSnapshots = manualSelections
-            for selection in selectionSnapshots {
+            for selection in manualSelections {
                 let day = calendar.startOfDay(for: selection.startTime)
                 newManualGrouped[day, default: []].append(selection)
             }
             
             var limitOffset = -1
-            if let earliestFootprint = footprints.last {
+            if let earliestFootprint = snapshot.last {
                 let earliestDataDate = calendar.startOfDay(for: earliestFootprint.startTime)
                 if let limitDate = calendar.date(byAdding: .day, value: -1, to: earliestDataDate) {
                     let diff = calendar.dateComponents([.day], from: today, to: limitDate).day ?? 0
@@ -191,12 +228,10 @@ struct DayTimelineView: View {
                 }
             }
             
-            // 3. Generate dates (Filtered to only show dates with data, plus context: today, tomorrow, and start date)
-            let allOffsets = Array(limitOffset...1)
-            var finalDates: [Date] = []
-            
+            // 3. 生成日期列表
             let validDatesWithData = Set(newGrouped.keys).union(rawDates)
-            finalDates = allOffsets.compactMap { offset in
+            let allOffsets = Array(limitOffset...1)
+            let finalDates = allOffsets.compactMap { offset in
                 if offset == 1 || offset == 0 || offset == limitOffset {
                     return calendar.date(byAdding: .day, value: offset, to: today)
                 }
@@ -208,7 +243,7 @@ struct DayTimelineView: View {
             
             if Task.isCancelled { return }
             
-            // Only update if structural changes occurred to preserve scroll performance
+            // 结构变化检查，减少 UI 刷新频率
             let structureChanged = self.cachedDates.count != finalDates.count || self.cachedDates.first != finalDates.first || self.pastLimitOffset != limitOffset
             
             if structureChanged {

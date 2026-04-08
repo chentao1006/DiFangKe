@@ -112,7 +112,7 @@ struct HistoryListView: View {
             contentArea
         }
         .navigationTitle("往昔足迹")
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(.inline)
         .background(Color.dfkBackground)
         .onAppear { 
             updateSummaries() 
