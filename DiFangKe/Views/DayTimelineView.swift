@@ -25,7 +25,10 @@ struct DayTimelineView: View {
     @State private var pastLimitOffset: Int = -1
     @State private var groupedFootprints: [Date: [Footprint]] = [:]
     @State private var groupedManualSelections: [Date: [TransportManualSelection]] = [:]
+    @Query private var allInsights: [DailyInsight]
+    @State private var groupedInsights: [Date: DailyInsight] = [:]
     @State private var showingResetAlert = false
+    @State private var showingCalendar = false
     @State private var updateTask: Task<Void, Never>?
     @State private var preLoadTask: Task<Void, Never>?
 
@@ -43,12 +46,7 @@ struct DayTimelineView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 0) {
                         ForEach(cachedDates, id: \.self) { date in
-                            let offset = latestOffsetIn(date: date)
-                            let dayFootprints = groupedFootprints[date] ?? []
-                            let dayManualSelections = groupedManualSelections[date] ?? []
-                            TimelinePageView(date: date, footprints: dayFootprints, manualSelections: dayManualSelections, allPlaces: allPlaces, offset: offset, locationManager: locationManager, pastLimitOffset: pastLimitOffset)
-                                .frame(width: UIScreen.main.bounds.width)
-                                .id(date)
+                            timelinePage(for: date)
                         }
                     }
                     .scrollTargetLayout()
@@ -104,12 +102,27 @@ struct DayTimelineView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     NavigationLink(destination: HistoryListView(initialDate: selectedDate)) {
-                        Image(systemName: "calendar")
+                        Image(systemName: "calendar.badge.clock")
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink(destination: SettingsView()) {
                         Image(systemName: "gearshape")
+                    }
+                }
+                
+                // AI 活动指示器
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 8) {
+                        Text("地方客")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                        
+                        if OpenAIService.shared.isNetworkRequesting {
+                            ProgressView()
+                                .controlSize(.small)
+                                .transition(.opacity.combined(with: .scale))
+                        }
                     }
                 }
             }
@@ -166,6 +179,9 @@ struct DayTimelineView: View {
             .onChange(of: manualSelections) { _, _ in
                 updateData()
             }
+            .onChange(of: allInsights) { _, _ in
+                updateInsights()
+            }
 
             .onChange(of: allPlaces) { _, newValue in
                 locationManager.allPlaces = newValue
@@ -180,83 +196,171 @@ struct DayTimelineView: View {
                 Text("这将删除已保存的足迹记录和交通纠错，并从原始轨迹重新生成。")
             }
             } // VStack
+            .alert("AI 服务提示", isPresented: Binding(
+                get: { OpenAIService.shared.lastError != nil },
+                set: { if !$0 { OpenAIService.shared.lastError = nil } }
+            )) {
+                Button("确定", role: .cancel) { }
+            } message: {
+                if let error = OpenAIService.shared.lastError {
+                    Text(error)
+                }
+            }
         } // NavigationStack
     } // body
+
+    @ViewBuilder
+    private func timelinePage(for date: Date) -> some View {
+        let offset = latestOffsetIn(date: date)
+        let dayFootprints = groupedFootprints[date] ?? []
+        let dayManualSelections = groupedManualSelections[date] ?? []
+        let daySummary = groupedInsights[date]?.content
+        
+        TimelinePageView(
+            date: date, 
+            footprints: dayFootprints, 
+            manualSelections: dayManualSelections, 
+            allPlaces: allPlaces, 
+            offset: offset, 
+            locationManager: locationManager, 
+            pastLimitOffset: pastLimitOffset,
+            summaryContent: daySummary
+        )
+        .frame(width: UIScreen.main.bounds.width)
+        .id(date)
+    }
 
     private func updateData() {
         updateTask?.cancel()
         
         let rawDates = locationManager.availableRawDates
-        let today = Calendar.current.startOfDay(for: Date())
+        let todayVal = Calendar.current.startOfDay(for: Date())
+        let footprintIDs = footprints.map { $0.persistentModelID }
+        let manualIDs = manualSelections.map { $0.persistentModelID }
+        let container = modelContext.container
         
-        updateTask = Task { @MainActor in
-            // 增加防抖时长，给 CloudKit 同步大批量入库留出喘息空间
-            try? await Task.sleep(nanoseconds: 500_000_000)
+        updateTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)
             if Task.isCancelled { return }
 
             let calendar = Calendar.current
+            let capturedToday = todayVal
+            let capturedRawDates = rawDates
             
-            // 1. 分类足迹 - 优化循环效率，减少不必要的计算
-            var newGrouped: [Date: [Footprint]] = [:]
-            // 使用局部快照避免在循环中重复读取
-            let snapshot = footprints
-            
-            for fp in snapshot {
-                let startDay = calendar.startOfDay(for: fp.startTime)
-                // Subtract a tiny amount to handle exact midnight boundary cases
-                let effectiveEndTime = fp.endTime.addingTimeInterval(-0.001)
-                let endDay = calendar.startOfDay(for: max(fp.startTime, effectiveEndTime))
+            // 1. 分类足迹 - Move grouping logic to background safely
+            let results = await Task.detached(priority: .userInitiated) {
+                let context = ModelContext(container)
+                var newGroupedIDs: [Date: [PersistentIdentifier]] = [:]
                 
-                var datePtr = startDay
-                while datePtr <= endDay {
-                    newGrouped[datePtr, default: []].append(fp)
-                    guard let nextDate = calendar.date(byAdding: .day, value: 1, to: datePtr) else { break }
-                    datePtr = nextDate
+                // Fetch only needed properties or use lite conversion in background
+                for id in footprintIDs {
+                    guard let fp = context.model(for: id) as? Footprint else { continue }
+                    
+                    let startDay = calendar.startOfDay(for: fp.startTime)
+                    let effectiveEndTime = fp.endTime.addingTimeInterval(-0.001)
+                    let endDay = calendar.startOfDay(for: max(fp.startTime, effectiveEndTime))
+                    
+                    var datePtr = startDay
+                    while datePtr <= endDay {
+                        newGroupedIDs[datePtr, default: []].append(id)
+                        guard let nextDate = calendar.date(byAdding: .day, value: 1, to: datePtr) else { break }
+                        datePtr = nextDate
+                    }
                 }
-            }
-            
-            // 2. 分类手工选择
-            var newManualGrouped: [Date: [TransportManualSelection]] = [:]
-            for selection in manualSelections {
-                let day = calendar.startOfDay(for: selection.startTime)
-                newManualGrouped[day, default: []].append(selection)
-            }
-            
-            var limitOffset = -1
-            if let earliestFootprint = snapshot.last {
-                let earliestDataDate = calendar.startOfDay(for: earliestFootprint.startTime)
-                if let limitDate = calendar.date(byAdding: .day, value: -1, to: earliestDataDate) {
-                    let diff = calendar.dateComponents([.day], from: today, to: limitDate).day ?? 0
-                    limitOffset = min(-1, diff)
+                
+                // 2. 分类手工选择
+                var newManualGroupedIDs: [Date: [PersistentIdentifier]] = [:]
+                for id in manualIDs {
+                    guard let selection = context.model(for: id) as? TransportManualSelection else { continue }
+                    let day = calendar.startOfDay(for: selection.startTime)
+                    newManualGroupedIDs[day, default: []].append(id)
                 }
-            }
-            
-            // 3. 生成日期列表
-            let validDatesWithData = Set(newGrouped.keys).union(rawDates)
-            let allOffsets = Array(limitOffset...1)
-            let finalDates = allOffsets.compactMap { offset in
-                if offset == 1 || offset == 0 || offset == limitOffset {
-                    return calendar.date(byAdding: .day, value: offset, to: today)
+                
+                // Calculate limitOffset in background
+                let sortedIDs = footprintIDs // They were already sorted by startTime reverse
+                var limitOffset = -1
+                if let earliestID = sortedIDs.last, let earliest = context.model(for: earliestID) as? Footprint {
+                    let earliestDataDate = calendar.startOfDay(for: earliest.startTime)
+                    if let limitDate = calendar.date(byAdding: .day, value: -1, to: earliestDataDate) {
+                        let diff = calendar.dateComponents([.day], from: capturedToday, to: limitDate).day ?? 0
+                        limitOffset = min(-1, diff)
+                    }
                 }
-                if let date = calendar.date(byAdding: .day, value: offset, to: today) {
-                    return validDatesWithData.contains(date) ? date : nil
+                
+                // 3. 生成日期列表
+                let validDatesWithData = Set(newGroupedIDs.keys).union(capturedRawDates)
+                let allOffsets = Array(limitOffset...1)
+                let finalDates = allOffsets.compactMap { offset in
+                    if offset == 1 || offset == 0 || offset == limitOffset {
+                        return calendar.date(byAdding: .day, value: offset, to: capturedToday)
+                    }
+                    if let date = calendar.date(byAdding: .day, value: offset, to: capturedToday) {
+                        return validDatesWithData.contains(date) ? date : nil
+                    }
+                    return nil
                 }
-                return nil
-            }
+                
+                // 4. 生成总结缓存映射 (New: handle insights in background too)
+                var newGroupedInsights: [Date: PersistentIdentifier] = [:]
+                let insightDescriptor = FetchDescriptor<DailyInsight>()
+                if let insights = try? context.fetch(insightDescriptor) {
+                    for insight in insights {
+                        if let d = insight.date {
+                            let day = calendar.startOfDay(for: d)
+                            newGroupedInsights[day] = insight.persistentModelID
+                        }
+                    }
+                }
+                
+                return (newGroupedIDs, newManualGroupedIDs, limitOffset, finalDates, newGroupedInsights)
+            }.value
             
             if Task.isCancelled { return }
             
-            // 结构变化检查，减少 UI 刷新频率
-            let structureChanged = self.cachedDates.count != finalDates.count || self.cachedDates.first != finalDates.first || self.pastLimitOffset != limitOffset
-            
-            if structureChanged {
-                self.cachedDates = finalDates
-                self.pastLimitOffset = limitOffset
+            await MainActor.run {
+                let (newGroupedIDs, newManualIDs, limitOffset, finalDates, newGroupedInsightIDs) = results
+                
+                // Re-bind to Main Context objects
+                let footprintMap = Dictionary(footprints.map { ($0.persistentModelID, $0) }, uniquingKeysWith: { first, _ in first })
+                let manualMap = Dictionary(manualSelections.map { ($0.persistentModelID, $0) }, uniquingKeysWith: { first, _ in first })
+                let insightMap = Dictionary(allInsights.map { ($0.persistentModelID, $0) }, uniquingKeysWith: { first, _ in first })
+                
+                let newGrouped = newGroupedIDs.mapValues { ids in
+                    ids.compactMap { footprintMap[$0] }
+                }
+                let newManualGrouped = newManualIDs.mapValues { ids in
+                    ids.compactMap { manualMap[$0] }
+                }
+                let newGroupedInsights = newGroupedInsightIDs.compactMapValues { id in
+                    insightMap[id]
+                }
+                
+                let structureChanged = self.cachedDates.count != finalDates.count || self.cachedDates.first != finalDates.first || self.pastLimitOffset != limitOffset
+                
+                if structureChanged {
+                    self.cachedDates = finalDates
+                    self.pastLimitOffset = limitOffset
+                }
+                
+                self.groupedFootprints = newGrouped
+                self.groupedManualSelections = newManualGrouped
+                self.groupedInsights = newGroupedInsights
             }
-            
-            self.groupedFootprints = newGrouped
-            self.groupedManualSelections = newManualGrouped
         }
+    }
+
+    private func updateInsights() {
+        // Now handled inside updateData background task to avoid main thread work
+        // but kept for immediate changes to allInsights
+        let calendar = Calendar.current
+        var newGrouped: [Date: DailyInsight] = [:]
+        for insight in allInsights {
+            if let d = insight.date {
+                let day = calendar.startOfDay(for: d)
+                newGrouped[day] = insight
+            }
+        }
+        self.groupedInsights = newGrouped
     }
 
 
@@ -313,12 +417,8 @@ struct DayTimelineView: View {
             navigationArrow(direction: -1)
             
             Spacer()
-            Menu {
-                Button(role: .destructive) {
-                    showingResetAlert = true
-                } label: {
-                    Label("重置本日数据", systemImage: "arrow.counterclockwise")
-                }
+            Button {
+                showingCalendar = true
             } label: {
                 VStack(spacing: 2) {
                     HStack(spacing: 4) {
@@ -331,6 +431,24 @@ struct DayTimelineView: View {
                 }
                 .foregroundColor(.primary)
             }
+            .popover(isPresented: $showingCalendar) {
+                let today = Calendar.current.startOfDay(for: Date())
+                let activeDates = Set(cachedDates.filter { $0 <= today })
+                
+                MiniCalendarView(selectedDate: $selectedDate, availableDates: activeDates) { date in
+                    showingCalendar = false
+                    scrollID = date
+                }
+                .presentationCompactAdaptation(.popover)
+            }
+            .contextMenu {
+                Button(role: .destructive) {
+                    showingResetAlert = true
+                } label: {
+                    Label("重置本日数据", systemImage: "arrow.counterclockwise")
+                }
+            }
+            
             Spacer()
             
             navigationArrow(direction: 1)
@@ -350,13 +468,15 @@ struct DayTimelineView: View {
     @ViewBuilder
     private func navigationArrow(direction: Int) -> some View {
         let isDisabled = (direction == -1) ? isAtStart : isAtEnd
-        let icon = (direction == -1) ? "arrow.left" : rightArrowIcon
+        let icon = (direction == -1) ? "chevron.left" : rightArrowIcon
         
         Image(systemName: icon)
-            .foregroundColor(isDisabled ? Color.secondary.opacity(0.3) : Color.dfkAccent)
-            .padding(8)
-            .contentShape(Rectangle())
-            .opacity(isDisabled ? 0.5 : (isPressingArrow && currentPressDirection == direction ? 0.6 : 1.0))
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundColor(isDisabled ? .secondary.opacity(0.2) : .secondary)
+            .frame(width: 32, height: 32)
+            .background(Circle().fill(Color.secondary.opacity(0.1)))
+            .contentShape(Circle())
+            .opacity(isDisabled ? 0.5 : (isPressingArrow && currentPressDirection == direction ? 0.7 : 1.0))
             .onLongPressGesture(minimumDuration: 0.3, perform: {}) { pressing in
                 self.isPressingArrow = pressing
                 self.currentPressDirection = pressing ? direction : 0
@@ -378,7 +498,7 @@ struct DayTimelineView: View {
     }
     
     private var rightArrowIcon: String {
-        isFarFromToday ? "arrow.right.to.line" : "arrow.right"
+        isFarFromToday ? "chevron.right.to.line" : "chevron.right"
     }
     
     private let sharedCalendar = Calendar.current
@@ -494,7 +614,7 @@ struct DayTimelineView: View {
         // 基准 0.5s，每增加 1 天约增加 0.01s，上限 1.2s (约 70 天时达到上限)
         let response = min(1.2, 0.5 + Double(days) * 0.01)
         
-        withAnimation(.spring(response: response, dampingFraction: 0.85)) {
+        withAnimation(.spring(response: response, dampingFraction: 0.95)) {
             selectedDate = today
             scrollID = today
         }

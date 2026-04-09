@@ -286,54 +286,10 @@ struct FootprintModalView: View {
             return
         }
         
-        guard !isGeneratingAI else { return }
-        
-        isGeneratingAI = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         
-        // Find matched place name for background context
-        let matchedPlace = savedPlaces.first(where: { $0.placeID == footprint.placeID })
-        
-        OpenAIService.shared.analyzeFootprint(
-            locations: zip(footprint.latitudeArray, footprint.longitudeArray).map { ($0, $1) },
-            duration: footprint.duration,
-            startTime: footprint.startTime,
-            endTime: footprint.endTime,
-            placeName: matchedPlace?.name,
-            address: footprint.address,
-            isOngoing: false
-        ) { title, reason, score, success in
-            DispatchQueue.main.async {
-                if success {
-                    self.isAIPerformingUpdate = true 
-                    withAnimation {
-                        // 如果是手动触发（forcePrompt为true），或者从未手动修改过标题，则更新标题
-                        if forcePrompt || !footprint.isTitleEditedByHand {
-                            footprint.title = title
-                            // 如果是手动点击 AI 按钮，重置手动修改标记（因为它现在又是 AI 生成的了）
-                            if forcePrompt {
-                                footprint.isTitleEditedByHand = false
-                            }
-                        }
-                        footprint.reason = reason
-                        footprint.aiScore = score
-                        footprint.aiAnalyzed = true
-                    }
-                    // 稍微延迟重置标志，确保 onChange 已经触发
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        self.isAIPerformingUpdate = false
-                    }
-                } else if forcePrompt {
-                    self.aiErrorMessage = reason
-                    self.showingAIErrorAlert = true
-                }
-                isGeneratingAI = false
-                if success {
-                    ensureFootprintManaged()
-                    try? modelContext.save()
-                }
-            }
-        }
+        // 加入分析队列，遵守统一的请求频率限制
+        OpenAIService.shared.analyzeFootprint(footprint)
     }
     
     private var titleSection: some View {

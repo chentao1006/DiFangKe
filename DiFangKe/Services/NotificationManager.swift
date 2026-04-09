@@ -87,8 +87,10 @@ class NotificationManager {
         
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
         if isAiEnabled && !footprintTitles.isEmpty {
-            OpenAIService.shared.generateDailySummary(footprintDescriptions: footprintTitles) { aiTitle in
-                self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: aiTitle, body: statsBody)
+            Task { @MainActor in
+                OpenAIService.shared.enqueueNotificationSummary(footprintTitles: footprintTitles) { aiTitle in
+                    self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: aiTitle, body: statsBody)
+                }
             }
         } else {
             // Default catchy title when AI is disabled

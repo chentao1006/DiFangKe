@@ -14,6 +14,7 @@ struct TimelinePageView: View {
     let locationManager: LocationManager
     let pastLimitOffset: Int
     let isFromHistory: Bool
+    let summaryContent: String?
     
     @State private var selectedFootprint: Footprint?
     @State private var selectedTransport: Transport?
@@ -31,18 +32,18 @@ struct TimelinePageView: View {
     @State private var animateHint = false
     @State private var notificationAuthStatus: UNAuthorizationStatus = .notDetermined
     
-    @Query private var summaries: [DailyInsight]
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     
     @State private var timelineItems: [TimelineItem]
     @State private var isLoadingTimeline: Bool
     @State private var refreshTask: Task<Void, Never>?
+    @State private var appearanceTask: Task<Void, Never>?
     
     @State private var totalPointsCount: Int = 0
     @State private var trajectoryPoints: [CLLocationCoordinate2D] = []
     @State private var dayPhotoAssets: [PHAsset] = []
     
-    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isFromHistory: Bool = false) {
+    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isFromHistory: Bool = false, summaryContent: String? = nil) {
         self.date = date
         self.footprints = footprints
         self.manualSelections = manualSelections
@@ -51,6 +52,7 @@ struct TimelinePageView: View {
         self.locationManager = locationManager
         self.pastLimitOffset = pastLimitOffset
         self.isFromHistory = isFromHistory
+        self.summaryContent = summaryContent
         
         let cached = TimelineBuilder.timelineCache[date] ?? []
         // 初始化时立即执行重链接，确保首次渲染就是数据库真实模型
@@ -89,34 +91,38 @@ struct TimelinePageView: View {
             }
         }
         .onAppear {
-            NotificationManager.shared.getAuthorizationStatus { status in
-                self.notificationAuthStatus = status
-            }
-            
-            let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
-            let notInCache = TimelineBuilder.timelineCache[date] == nil
-            
-            if timelineItems.isEmpty || (notInCache && isToday) || trajectoryPoints.isEmpty {
-                refreshTimeline()
-            }
-            
-            // AI 每日摘要检查
-            if isAiAssistantEnabled && !footprints.isEmpty {
-                let startOfDay = Calendar.current.startOfDay(for: date)
-                if !summaries.contains(where: { 
-                    guard let d = $0.date else { return false }
-                    return Calendar.current.isDate(d, inSameDayAs: startOfDay) 
-                }) {
-                    // 只为过去日期生成
-                    let isPast = Calendar.current.startOfDay(for: date) < Calendar.current.startOfDay(for: Date())
-                    
-                    if isPast {
-                        OpenAIService.shared.generateAndSaveDailySummary(for: date, footprints: footprints, modelContext: modelContext)
+            appearanceTask?.cancel()
+            appearanceTask = Task { @MainActor in
+                // 只有停留超过 400ms 才开始业务逻辑，防止快速划过时的卡顿
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                if Task.isCancelled { return }
+                
+                NotificationManager.shared.getAuthorizationStatus { status in
+                    self.notificationAuthStatus = status
+                }
+                
+                let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
+                let notInCache = TimelineBuilder.timelineCache[date] == nil
+                
+                if timelineItems.isEmpty || (notInCache && isToday) || trajectoryPoints.isEmpty {
+                    refreshTimeline()
+                }
+                
+                // AI 每日摘要检查
+                if isAiAssistantEnabled && !footprints.isEmpty {
+                    if summaryContent == nil {
+                        // 只为过去日期生成
+                        let isPast = Calendar.current.startOfDay(for: date) < Calendar.current.startOfDay(for: Date())
+                        
+                        if isPast {
+                            OpenAIService.shared.enqueueDailySummary(for: date, footprints: footprints)
+                        }
                     }
                 }
             }
         }
         .onDisappear {
+            appearanceTask?.cancel()
             refreshTask?.cancel()
         }
         .onChange(of: footprints) { _, _ in refreshTimeline(force: true) }
@@ -194,10 +200,7 @@ struct TimelinePageView: View {
                     timelineItems: timelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
                     photoAssets: dayPhotoAssets,
-                    summary: summaries.first(where: { 
-                        guard let d = $0.date else { return false }
-                        return Calendar.current.isDate(d, inSameDayAs: date) 
-                    })?.content
+                    summary: summaryContent
                 )
                 .padding(.horizontal, 16)
             } else {
@@ -213,10 +216,7 @@ struct TimelinePageView: View {
                     timelineItems: timelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
                     photoAssets: dayPhotoAssets,
-                    summary: summaries.first(where: { 
-                        guard let d = $0.date else { return false }
-                        return Calendar.current.isDate(d, inSameDayAs: date) 
-                    })?.content
+                    summary: summaryContent
                 )
                 .padding(.horizontal, 16)
             }
@@ -309,18 +309,15 @@ struct TimelinePageView: View {
 
     @MainActor
     private func refreshTimelineAsync(force: Bool = false) async {
-        let currentFootprints = footprints
-        let currentOverrides = manualSelections
-        let currentPlaces = allPlaces
+        let footprintIDs = footprints.map { $0.persistentModelID }
+        let placeIDs = allPlaces.map { $0.persistentModelID }
+        let overrideIDs = manualSelections.map { $0.persistentModelID }
         let targetDate = date
+        let container = modelContext.container
         let availableRawDates = locationManager.availableRawDates
-        
-        let fpsLite = currentFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
-        let placesLite = currentPlaces.map { TimelineBuilder.convertToPlaceLite($0) }
-        let overridesLite = currentOverrides.map { TimelineBuilder.convertToOverrideLite($0) }
 
         let isToday = Calendar.current.isDateInToday(targetDate)
-        let hasExistingFootprints = !currentFootprints.isEmpty
+        let hasExistingFootprints = !footprintIDs.isEmpty
         let hasRawData = availableRawDates.contains(Calendar.current.startOfDay(for: targetDate))
         
         if !isToday && !hasExistingFootprints && !hasRawData {
@@ -344,13 +341,30 @@ struct TimelinePageView: View {
         }
         
         if Task.isCancelled { return }
-        
         let cachedItems = TimelineBuilder.timelineCache[targetDate]
         let result = await Task.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            
+            // Perform Lite conversions in background
+            let fpsLite = footprintIDs.compactMap { id -> FootprintLite? in
+                guard let fp = context.model(for: id) as? Footprint else { return nil }
+                return TimelineBuilder.convertToFootprintLite(fp)
+            }
+            let placesLite = placeIDs.compactMap { id -> PlaceLite? in
+                guard let p = context.model(for: id) as? Place else { return nil }
+                return TimelineBuilder.convertToPlaceLite(p)
+            }
+            let overridesLite = overrideIDs.compactMap { id -> OverrideLite? in
+                guard let o = context.model(for: id) as? TransportManualSelection else { return nil }
+                return TimelineBuilder.convertToOverrideLite(o)
+            }
+            
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
+            let rawCoords = rawPoints.map { $0.coordinate }
+            let simplified = LocationManager.simplifyCoordinates(rawCoords, tolerance: 0.00005)
             
             if !force, let cached = cachedItems, !isToday, !cached.isEmpty {
-                return (cached, rawPoints.map { $0.coordinate }, rawPoints.count)
+                return (cached, simplified, rawPoints.count)
             }
             
             let items = TimelineBuilder.buildTimeline(
@@ -360,7 +374,7 @@ struct TimelinePageView: View {
                 allPlaces: placesLite, 
                 overrides: overridesLite
             )
-            return (items, rawPoints.map { $0.coordinate }, rawPoints.count)
+            return (items, simplified, rawPoints.count)
         }.value
         
         let items = result.0
@@ -373,7 +387,7 @@ struct TimelinePageView: View {
         // 否则 UI 中的所有修改（收藏、编辑名称、换照片）都只会作用在内存克隆体上而无法持久化
         let finalizedItems = items.map { item -> TimelineItem in
             if case .footprint(let tempFp) = item {
-                if let realFp = currentFootprints.first(where: { $0.footprintID == tempFp.footprintID }) {
+                if let realFp = footprints.first(where: { $0.footprintID == tempFp.footprintID }) {
                     return .footprint(realFp)
                 }
             }
@@ -538,7 +552,7 @@ struct TimelinePageView: View {
         }
         .onAppear {
             if offset == 1 {
-                OpenAIService.shared.generateTomorrowQuote { title, sub in
+                OpenAIService.shared.enqueueTomorrowQuote { title, sub in
                     self.tomorrowQuoteTitle = title
                     self.tomorrowQuoteSubtitle = sub
                 }
@@ -572,7 +586,7 @@ struct TimelinePageView: View {
             Spacer()
         }
         .onAppear {
-            OpenAIService.shared.generatePastQuote { title, sub in
+            OpenAIService.shared.enqueuePastQuote { title, sub in
                 self.pastQuoteTitle = title
                 self.pastQuoteSubtitle = sub
             }

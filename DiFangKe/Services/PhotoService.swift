@@ -151,24 +151,30 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         options.predicate = NSPredicate(format: "creationDate > %@ AND creationDate < %@", bufferStart as NSDate, bufferEnd as NSDate)
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         
+        // 1. 先进行高效的基础查询
         let result = PHAsset.fetchAssets(with: .image, options: options)
-        var assets: [PHAsset] = []
         
-        result.enumerateObjects { asset, _, _ in
-            if let nearLocation = location, let assetLocation = asset.location {
-                let dist = CLLocation(latitude: nearLocation.latitude, longitude: nearLocation.longitude)
-                    .distance(from: assetLocation)
-                // 适当放宽距离限制，特别是照片地理位置精度可能不如轨迹点的情况下
-                if dist <= maxDistance {
+        // 2. 在后台进行耗时的 enumerate 和地理过滤
+        DispatchQueue.global(qos: .userInitiated).async {
+            var assets: [PHAsset] = []
+            
+            result.enumerateObjects { asset, _, _ in
+                if let nearLocation = location, let assetLocation = asset.location {
+                    let dist = CLLocation(latitude: nearLocation.latitude, longitude: nearLocation.longitude)
+                        .distance(from: assetLocation)
+                    // 适当放宽距离限制，特别是照片地理位置精度可能不如轨迹点的情况下
+                    if dist <= maxDistance {
+                        assets.append(asset)
+                    }
+                } else {
                     assets.append(asset)
                 }
-            } else {
-                assets.append(asset)
             }
-        }
-        
-        DispatchQueue.main.async {
-            completion(assets)
+            
+            // 3. 返回主线程
+            DispatchQueue.main.async {
+                completion(assets)
+            }
         }
     }
     
@@ -265,13 +271,9 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             // 缓存地理位置解析结果，避免同地点重复解析
             var geocodeCache: [String: (String, String?)] = [:]
             
-            @MainActor var finalFootprints: [Footprint] = []
+            var finalFootprints: [Footprint] = []
             let group = DispatchGroup()
             let geocoder = CLGeocoder()
-            
-            let sortedClusters = clusters.sorted(by: { $0.count > $1.count })
-            // 缓存地理位置解析结果，避免同地点重复解析
-            var geocodeCache: [String: (String, String?)] = [:]
             
             var processedPhotosCount = 0
             let totalPhotosCount = assetsWithLocation.count

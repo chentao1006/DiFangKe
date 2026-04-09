@@ -103,17 +103,16 @@ struct DiFangKeApp: App {
                             
                             setupDefaultData(context: context)
                             
-                            // 启动后恢复未完成的 AI 分析
-                            if UserDefaults.standard.bool(forKey: "isAiAssistantEnabled") {
-                                resumeUnfinishedAIAnalysis(context: context)
-                            }
+                            // Project Rule: Do not persist AI queue across restarts
+                            // resumeUnfinishedAIAnalysis(context: context)
                         }
                         .transition(.opacity)
                 }
             }
             .animation(.easeInOut(duration: 0.5), value: showSplash)
             .task {
-                // 做必要的极简初始化检查，完成后立即消失
+                // 给初始化一点缓冲时间，让首页数据在后台能加载出一部分，避免首屏瞬间白屏或卡顿
+                try? await Task.sleep(nanoseconds: 800_000_000) // 0.8s 缓冲
                 withAnimation {
                     showSplash = false
                 }
@@ -161,7 +160,7 @@ struct DiFangKeApp: App {
             if let unanalyzed = try? backgroundContext.fetch(descriptor), !unanalyzed.isEmpty {
                 // 将待分析项的 ID 加入队列，由 OpenAIService 自行 fetch，避免 context 失效
                 let identifiers = unanalyzed.map { $0.persistentModelID }
-                OpenAIService.shared.enqueueFootprintsForAnalysis(identifiers)
+                await OpenAIService.shared.enqueueFootprintsForAnalysis(identifiers)
             }
         }
     }

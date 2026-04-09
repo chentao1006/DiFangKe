@@ -96,7 +96,7 @@ struct DaySummaryCard: View {
                         .fill(Color.secondary.opacity(0.05))
                         .frame(height: 140)
                         .overlay(
-                            Text("暂无轨迹信息")
+                            Text("地图加载中...")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         )
@@ -360,7 +360,7 @@ struct RecordingStatusCard: View {
                     cameraPosition: $cameraPosition,
                     isInteractive: false,
                     showsUserLocation: true,
-                    points: locationManager.allTodayPoints.map { $0.coordinate },
+                    points: locationManager.allTodayCoordinates,
                     timelineItems: timelineItems,
                     photoAssets: photoAssets,
                     onTimelineItemTap: onTimelineItemTap,
@@ -375,8 +375,7 @@ struct RecordingStatusCard: View {
                     showFullscreenMap = true
                 }
                 .onAppear {
-                    let todayPoints = locationManager.allTodayPoints.map { $0.coordinate }
-                    if let region = todayPoints.boundingRegion() {
+                    if let region = locationManager.allTodayCoordinates.boundingRegion() {
                         cameraPosition = .region(region)
                     } else if !photoAssets.isEmpty {
                         let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
@@ -387,10 +386,9 @@ struct RecordingStatusCard: View {
                         cameraPosition = .region(MKCoordinateRegion(center: newLoc.coordinate, latitudinalMeters: 500, longitudinalMeters: 500))
                     }
                 }
-                .onChange(of: locationManager.allTodayPoints.count) { _, count in
+                .onChange(of: locationManager.allTodayCoordinates.count) { _, count in
                     // Only auto-adjust if the trajectory is growing and not already focused by user manual
-                    let todayPoints = locationManager.allTodayPoints.map { $0.coordinate }
-                    if let region = todayPoints.boundingRegion() {
+                    if let region = locationManager.allTodayCoordinates.boundingRegion() {
                         withAnimation {
                             cameraPosition = .region(region)
                         }
@@ -418,7 +416,7 @@ struct RecordingStatusCard: View {
         .sheet(isPresented: $showFullscreenMap) {
             FullFrameTrajectoryMapView(
                 title: "今日轨迹",
-                points: locationManager.allTodayPoints.map { $0.coordinate },
+                points: locationManager.allTodayCoordinates,
                 timelineItems: timelineItems,
                 onTimelineItemTap: onTimelineItemTap,
                 photoAssets: photoAssets,
@@ -768,7 +766,7 @@ struct PlaceholderFootprintCard: View {
             let now = timeline.date.timeIntervalSinceReferenceDate
             let phase = (now.truncatingRemainder(dividingBy: 3.5)) / 3.5
             let sinValue = sin(phase * .pi * 2)
-            let opacity = 0.3 + (sinValue + 1.0) / 2.0 * 0.5
+            let opacity = 0.5 + (sinValue + 1.0) / 2.0 * 1
             
             HStack(alignment: .top, spacing: 0) {
                 VStack(spacing: 0) {

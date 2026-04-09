@@ -59,19 +59,47 @@ final class Footprint {
         longitudeArray.first ?? 0
     }
     
+    @Transient private var _cachedLatitudes: [Double]?
+    @Transient private var _cachedLongitudes: [Double]?
+    @Transient private var _cachedPhotoIDs: [String]?
+
     var latitudeArray: [Double] {
-        get { (try? JSONDecoder().decode([Double].self, from: latitudeData)) ?? [] }
-        set { latitudeData = (try? JSONEncoder().encode(newValue)) ?? Data() }
+        get { 
+            if let cached = _cachedLatitudes { return cached }
+            let decoded = (try? JSONDecoder().decode([Double].self, from: latitudeData)) ?? []
+            _cachedLatitudes = decoded
+            return decoded
+        }
+        set { 
+            _cachedLatitudes = newValue
+            latitudeData = (try? JSONEncoder().encode(newValue)) ?? Data() 
+        }
     }
 
     var longitudeArray: [Double] {
-        get { (try? JSONDecoder().decode([Double].self, from: longitudeData)) ?? [] }
-        set { longitudeData = (try? JSONEncoder().encode(newValue)) ?? Data() }
+        get { 
+            if let cached = _cachedLongitudes { return cached }
+            let decoded = (try? JSONDecoder().decode([Double].self, from: longitudeData)) ?? []
+            _cachedLongitudes = decoded
+            return decoded
+        }
+        set { 
+            _cachedLongitudes = newValue
+            longitudeData = (try? JSONEncoder().encode(newValue)) ?? Data() 
+        }
     }
 
     var photoAssetIDs: [String] {
-        get { (try? JSONDecoder().decode([String].self, from: photoAssetIDsData)) ?? [] }
-        set { photoAssetIDsData = (try? JSONEncoder().encode(newValue)) ?? Data() }
+        get { 
+            if let cached = _cachedPhotoIDs { return cached }
+            let decoded = (try? JSONDecoder().decode([String].self, from: photoAssetIDsData)) ?? []
+            _cachedPhotoIDs = decoded
+            return decoded
+        }
+        set { 
+            _cachedPhotoIDs = newValue
+            photoAssetIDsData = (try? JSONEncoder().encode(newValue)) ?? Data() 
+        }
     }
 
     

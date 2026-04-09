@@ -84,13 +84,14 @@ final class RawLocationStore {
     /// 读取指定日期的所有坐标点
     func loadLocations(for date: Date) -> [CLLocation] {
         let url = getFileURL(for: date)
-        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return [] }
+        guard let content = String(data: data, encoding: .utf8) else { return [] }
         
         var locations: [CLLocation] = []
-        let lines = content.components(separatedBy: .newlines)
-        
-        for line in lines where !line.isEmpty {
-            let parts = line.components(separatedBy: ",")
+        // 使用 enumerateLines 避免一次性创建巨大的字符串数组
+        content.enumerateLines { line, _ in
+            if line.isEmpty { return }
+            let parts = line.split(separator: ",", maxSplits: 4, omittingEmptySubsequences: true)
             if parts.count >= 3,
                let ts = Double(parts[0]),
                let lat = Double(parts[1]),
@@ -150,33 +151,41 @@ final class RawLocationStore {
         let relevantFiles = files.filter { $0.lastPathComponent.hasPrefix(datePrefix) && $0.pathExtension == "csv" }
         
         for fileURL in relevantFiles {
-            if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
-                let lines = content.components(separatedBy: .newlines)
-                for line in lines where !line.isEmpty {
-                    let parts = line.components(separatedBy: ",")
-                    if parts.count >= 3,
-                       let ts = Double(parts[0]),
-                       let lat = Double(parts[1]),
-                       let lon = Double(parts[2]) {
-                        
-                        let accuracy = parts.count > 3 ? (Double(parts[3]) ?? 0) : 0
-                        let speed = parts.count > 4 ? (Double(parts[4]) ?? 0) : 0
-                        
-                        let loc = CLLocation(
-                            coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
-                            altitude: 0,
-                            horizontalAccuracy: accuracy,
-                            verticalAccuracy: 0,
-                            course: 0,
-                            speed: speed,
-                            timestamp: Date(timeIntervalSince1970: ts)
-                        )
-                        allPoints.append(loc)
-                    }
-                }
-            }
+            let dayPoints = loadLocations(fromURL: fileURL)
+            allPoints.append(contentsOf: dayPoints)
         }
         return allPoints.sorted { $0.timestamp < $1.timestamp }
+    }
+    
+    private func loadLocations(fromURL url: URL) -> [CLLocation] {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              let content = String(data: data, encoding: .utf8) else { return [] }
+        
+        var locations: [CLLocation] = []
+        content.enumerateLines { line, _ in
+            if line.isEmpty { return }
+            let parts = line.split(separator: ",", maxSplits: 4, omittingEmptySubsequences: true)
+            if parts.count >= 3,
+               let ts = Double(parts[0]),
+               let lat = Double(parts[1]),
+               let lon = Double(parts[2]) {
+                
+                let accuracy = parts.count > 3 ? (Double(parts[3]) ?? 0) : 0
+                let speed = parts.count > 4 ? (Double(parts[4]) ?? 0) : 0
+                
+                let loc = CLLocation(
+                    coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                    altitude: 0,
+                    horizontalAccuracy: accuracy,
+                    verticalAccuracy: 0,
+                    course: 0,
+                    speed: speed,
+                    timestamp: Date(timeIntervalSince1970: ts)
+                )
+                locations.append(loc)
+            }
+        }
+        return locations
     }
     
     /// 高效获取指定日期的总点数（统计行数，不解析对象）
@@ -422,8 +431,9 @@ final class FootprintProcessor {
 }
 
 // MARK: - LocationManager
+@MainActor
 @Observable
-class LocationManager: NSObject, CLLocationManagerDelegate {
+class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private let locationManager = CLLocationManager()
     
     var isAuthorized: Bool = false
@@ -436,7 +446,20 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     var accuracy: CLLocationAccuracy?
     var currentAddress: String = "正在解析位置..."
     var trackingPoints: [CLLocation] = [] // 用于足迹识别的内存滑动窗口
-    var allTodayPoints: [CLLocation] = [] // 本日流水缓存，从 RawLocationStore 加载
+    var allTodayPoints: [CLLocation] = [] { // 本日流水缓存，从 RawLocationStore 加载
+        didSet {
+            // 当流水更新时，异步计算缓存坐标系，并进行抽稀以保证 UI 流畅
+            let points = allTodayPoints
+            Task.detached(priority: .background) {
+                let coords = points.map { $0.coordinate }
+                let simplified = LocationManager.simplifyCoordinates(coords, tolerance: 0.00005) // 约 5 米精度抽稀
+                await MainActor.run {
+                    self.allTodayCoordinates = simplified
+                }
+            }
+        }
+    }
+    var allTodayCoordinates: [CLLocationCoordinate2D] = []
     var todayTotalPointsCount: Int = 0    // 全天流水点数，基于本地文件统计
     var ongoingTitle: String?
     private var lastAIAnalysisTime: Date?
@@ -468,7 +491,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     var modelContext: ModelContext? {
         didSet {
             if modelContext != nil {
-                loadPointsFromStore() // 获得数据库后，重新加载点并同步最后处理时间
+                Task {
+                    await loadPointsFromStore() // 获得数据库后，后台加载点并同步最后处理时间
+                }
             }
         }
     }
@@ -510,14 +535,18 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         self.locationManager.showsBackgroundLocationIndicator = false
         self.locationManager.activityType = .other
         
-        // Initialize stored properties
+        // Initialize basic status
         updateAuthStatus()
         loadPotentialStop()
-        loadTodayTotalPoints()
-        loadPointsFromStore() // 从本地文件恢复内存队列，防止因杀死进程导致的记录丢失
         
         setupTimers()
-        refreshAvailableRawDates()
+        
+        // Move heavy disk I/O to background to avoid blocking app launch
+        Task(priority: .userInitiated) { [weak self] in
+            self?.loadTodayTotalPoints()
+            await self?.loadPointsFromStore() 
+            self?.refreshAvailableRawDates()
+        }
         
         // Listen for remote data change signals (from iCloud KVS) to trigger immediate raw data sync
         NotificationCenter.default.addObserver(
@@ -525,7 +554,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.performRawDataSync()
+            Task { @MainActor in
+                self?.performRawDataSync()
+            }
         }
         
         // Listen for "Live Status" changes to sync ongoing stay duration across devices
@@ -534,7 +565,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.syncOngoingStayFromCloud()
+            Task { @MainActor in
+                self?.syncOngoingStayFromCloud()
+            }
         }
     }
     
@@ -557,7 +590,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                 dates.insert(Calendar.current.startOfDay(for: date))
             }
         }
-        self.availableRawDates = dates
+        Task { @MainActor in
+            self.availableRawDates = dates
+        }
     }
     
     private var lastLocationChangeSift: Date = .distantPast
@@ -1142,7 +1177,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                             for loc in rawPoints {
                                 // 历史轨迹处理中，我们不再需要频繁 save，由最后的单次 save 保证原子性与 UI 流畅
                                 if let candidate = FootprintProcessor.shared.processNewLocation(loc, queue: &tempQueue, isHistorical: true) {
-                                    self.handleNewCandidateFootprint(candidate, isHistorical: true, context: context)
+                                    await self.handleNewCandidateFootprint(candidate, isHistorical: true, context: context)
                                     // 核心修复：识别出一个足迹后，从队列中移除已归档的点，避免下个点触发重复识别
                                     let lastProcessedTime = candidate.endTime
                                     tempQueue.removeAll { $0.timestamp <= lastProcessedTime }
@@ -1160,7 +1195,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             
             // 3. UI 状态刷新
             self.lastProcessedTimestamp = Calendar.current.startOfDay(for: date)
-            self.loadPointsFromStore()
+            await self.loadPointsFromStore()
         }
     }
 
@@ -1192,22 +1227,19 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             }
         }
         
-        openAIService.analyzeFootprint(
-            locations: [(location.coordinate.latitude, location.coordinate.longitude)],
-            duration: duration,
-            startTime: startTs,
-            endTime: now,
-            placeName: place?.address ?? place?.name, // Use original name for title
-            address: currentAddress,
-            activityName: activityName,
-            isOngoing: true
-) { [weak self] title, _, _, success in
-            DispatchQueue.main.async {
-                self?.isAnalyzingOngoing = false
-                if success {
-                    self?.ongoingTitle = title
-                    self?.saveOngoingTitle()
-                }
+        Task { @MainActor in
+            OpenAIService.shared.enqueueOngoingAnalysis(
+                locations: [(location.coordinate.latitude, location.coordinate.longitude)],
+                duration: duration,
+                startTime: startTs,
+                endTime: now,
+                placeName: place?.address ?? place?.name, // Use original name for title
+                address: currentAddress,
+                activityName: activityName
+            ) { title in
+                self.isAnalyzingOngoing = false
+                self.ongoingTitle = title
+                self.saveOngoingTitle()
             }
         }
     }
@@ -1466,86 +1498,12 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
             return
         }
         
-        let locations = footprint.footprintLocations.map { ($0.latitude, $0.longitude) }
-        
-        // 提前获取必要信息，避免在闭包中直接访问 Model 可能导致的问题（虽然当前闭包是在主线程）
-        let fpLat = footprint.latitude
-        let fpLon = footprint.longitude
-        let fpDuration = footprint.duration
-        let fpStart = footprint.startTime
-        let fpEnd = footprint.endTime
-        let fpAddress = footprint.address
-        let id = footprint.persistentModelID
-
-        // 匹配已知地点，给 AI 提供背景信息 (应用「最近优先」原则)
-        let mPlace = allPlaces.filter { place in
-            let pLoc = CLLocation(latitude: place.latitude, longitude: place.longitude)
-            let fLoc = CLLocation(latitude: fpLat, longitude: fpLon)
-            return fLoc.distance(from: pLoc) <= Double(place.radius) + 100.0
-        }.min { p1, p2 in
-            // 优先级 1: 用户定义的地点优先级最高
-            if p1.isUserDefined != p2.isUserDefined {
-                return p1.isUserDefined
-            }
-            // 优先级 2: 显式标记为优先的 (手动修正过的优先于普通 POI)
-            if p1.isPriority != p2.isPriority {
-                return p1.isPriority
-            }
-            
-            let fLoc = CLLocation(latitude: fpLat, longitude: fpLon)
-            let d1 = fLoc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude))
-            let d2 = fLoc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
-            return d1 < d2
-        }
-        
-        // 尝试获取当前关联或历史关联的活动名称，供 AI 参考
-        let activityID = footprint.activityTypeValue
-        var activityName: String? = nil
-        if let aid = activityID {
-            let activityFetch = FetchDescriptor<ActivityType>()
-            activityName = (try? context.fetch(activityFetch))?.first(where: { $0.id.uuidString == aid || $0.name == aid })?.name
-        }
-        
-        openAIService.analyzeFootprint(
-            locations: locations,
-            duration: fpDuration,
-            startTime: fpStart,
-            endTime: fpEnd,
-            placeName: mPlace?.address ?? mPlace?.name, // Use original address/name for title generation
-            address: fpAddress,
-            activityName: activityName
-        ) { [weak self] title, reason, score, success in
-            Task { @MainActor [weak self] in
-                guard let self = self, let context = self.modelContext,
-                      let fp = context.model(for: id) as? Footprint else { return }
-                
-                if success {
-                    if !fp.isTitleEditedByHand {
-                        fp.title = title
-                    }
-                    fp.reason = reason
-                    fp.aiScore = score
-                    fp.aiAnalyzed = true
-                    
-                    try? context.save()
-                    
-                    // 如果判定为“精彩”足迹（0.7 分以上），仅发送通知，不再自动收藏
-                    if score >= 0.7 {
-                        NotificationManager.shared.sendHighlightNotification(
-                            title: title,
-                            body: reason
-                        )
-                    }
-                }
-                
-                // If it's evening, refresh the daily summary push notification content
-                let hour = Calendar.current.component(.hour, from: Date())
-                if hour >= 18 {
-                    self.triggerNotificationSummaryRefresh()
-                }
-            }
+        // 使用统一队列进行异步分析，不再直接发起实时请求
+        Task { @MainActor in
+            openAIService.analyzeFootprint(footprint)
         }
     }
+
     
     func triggerNotificationSummaryRefresh() {
         guard let context = modelContext else { return }
@@ -1679,9 +1637,14 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         let lastDate = UserDefaults.standard.string(forKey: "points_total_date") ?? ""
         let today = Date().formatted(date: .numeric, time: .omitted)
         if lastDate == today {
-            todayTotalPointsCount = UserDefaults.standard.integer(forKey: "points_total_count")
+            let count = UserDefaults.standard.integer(forKey: "points_total_count")
+            Task { @MainActor in
+                self.todayTotalPointsCount = count
+            }
         } else {
-            todayTotalPointsCount = 0
+            Task { @MainActor in
+                self.todayTotalPointsCount = 0
+            }
             UserDefaults.standard.set(today, forKey: "points_total_date")
             UserDefaults.standard.set(0, forKey: "points_total_count")
         }
@@ -1700,60 +1663,97 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         UserDefaults.standard.set(todayTotalPointsCount, forKey: "points_total_count")
     }
 
-    func loadPointsFromStore() {
+    func loadPointsFromStore() async {
         let now = Date()
         let today = Calendar.current.startOfDay(for: now)
         let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: today)!
         
-        // 从本地存储恢复今日点，用于 UI 流水显示 (包含所有同步过来的设备)
-        let todayPoints = RawLocationStore.shared.loadAllDevicesLocations(for: today)
-        self.allTodayPoints = todayPoints
-        self.todayTotalPointsCount = todayPoints.count
-        
-        // 从本地存储恢复滑动窗口，用于足迹识别。包含昨日 24h 前的点 (跨设备同步)
-        let yesterdayPoints = RawLocationStore.shared.loadAllDevicesLocations(for: yesterday)
-        let lookbackStart = now.addingTimeInterval(-24 * 3600)
-        
-        let recent = (yesterdayPoints + todayPoints).filter { $0.timestamp >= lookbackStart }
-        self.trackingPoints = recent
-        
-        if let last = recent.last {
-            self.lastUpdateTime = last.timestamp
-            self.lastLocation = last
+        // 1. 在后台加载数据
+        let result = await Task.detached(priority: .userInitiated) {
+            // 从本地存储恢复今日点，用于 UI 流水显示 (包含所有同步过来的设备)
+            let todayPoints = RawLocationStore.shared.loadAllDevicesLocations(for: today)
             
-            // --- 停留自动恢复 (Self-Healing) ---
-            // 我们从 recent 点位中自后向前寻找最近的一个连续停留段，回溯出更真实的起始点。
-            var foundStart = last
-            for i in (0..<recent.count).reversed() {
-                let p = recent[i]
-                if p.distance(from: last) < 200.0 { // 放宽到 200m 以应对更大范围的停留点偏差（如果是家/写字楼）
-                    foundStart = p
-                } else {
-                    break
+            // 从本地存储恢复滑动窗口，用于足迹识别。包含昨日 24h 前的点 (跨设备同步)
+            let yesterdayPoints = RawLocationStore.shared.loadAllDevicesLocations(for: yesterday)
+            let lookbackStart = now.addingTimeInterval(-24 * 3600)
+            
+            let recent = (yesterdayPoints + todayPoints).filter { $0.timestamp >= lookbackStart }
+            
+            // 预处理 healing 逻辑
+            var healingPotentialStop: CLLocation? = nil
+            if let last = recent.last {
+                var foundStart = last
+                for i in (0..<recent.count).reversed() {
+                    let p = recent[i]
+                    if p.distance(from: last) < 200.0 {
+                        foundStart = p
+                    } else {
+                        break
+                    }
+                }
+                
+                let fileDuration = last.timestamp.timeIntervalSince(foundStart.timestamp)
+                // 注意：这里无法直接访问 potentialStopStartLocation，通过返回值带回
+                healingPotentialStop = foundStart
+                return (todayPoints, recent, healingPotentialStop, fileDuration)
+            }
+            return (todayPoints, recent, nil, 0.0)
+        }.value
+        
+        let todayPoints = result.0
+        let recent = result.1
+        let lastLocInFile = recent.last
+        
+        // 2. 回到主线程更新 UI 状态
+        await MainActor.run {
+            self.allTodayPoints = todayPoints
+            self.todayTotalPointsCount = todayPoints.count
+            self.trackingPoints = recent
+            
+            if let last = lastLocInFile {
+                self.lastUpdateTime = last.timestamp
+                self.lastLocation = last
+                
+                // 仅当文件中的停留时长明显长于当前内存中的时长时才执行 healing
+                let currentDuration = potentialStopStartLocation.map { last.timestamp.timeIntervalSince($0.timestamp) } ?? 0
+                if let healing = result.2, result.3 > currentDuration + 300 {
+                    self.potentialStopStartLocation = healing
+                    savePotentialStop()
                 }
             }
             
-            let fileDuration = last.timestamp.timeIntervalSince(foundStart.timestamp)
-            let currentDuration = potentialStopStartLocation.map { last.timestamp.timeIntervalSince($0.timestamp) } ?? 0
-            
-            // 如果文件里发现的连续停留时间明显长于当前内存中的停留时间，则以文件为准
-            if fileDuration > currentDuration + 300 {
-                self.potentialStopStartLocation = foundStart
-                savePotentialStop()
+            // 重要：模型上下文访问必须在主线程执行，否则会闪退
+            if let context = self.modelContext {
+                var fetchDescriptor = FetchDescriptor<Footprint>(
+                    sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+                )
+                fetchDescriptor.fetchLimit = 1
+                if let lastFp = try? context.fetch(fetchDescriptor).first {
+                    self.lastProcessedTimestamp = lastFp.endTime
+                }
             }
         }
-
-        // 重要：重新设置 lastProcessedTimestamp 为最近的一个足迹截止时间
-        // 这将防止重新加载的旧数据被二次识别生成重复足迹 (此处仅为补丁逻辑)
-        if let context = modelContext {
-            var fetchDescriptor = FetchDescriptor<Footprint>(
-                sortBy: [SortDescriptor(\.endTime, order: .reverse)]
-            )
-            fetchDescriptor.fetchLimit = 1
-            if let lastFp = try? context.fetch(fetchDescriptor).first {
-                self.lastProcessedTimestamp = lastFp.endTime
+    }
+    
+    /// 简单的点抽稀逻辑 (Douglas-Peucker 简化版或采样)
+    nonisolated public static func simplifyCoordinates(_ coords: [CLLocationCoordinate2D], tolerance: Double) -> [CLLocationCoordinate2D] {
+        guard coords.count > 2000 else { return coords } // 2000 点以下不抽稀，保证精度
+        
+        var simplified: [CLLocationCoordinate2D] = []
+        simplified.append(coords.first!)
+        
+        var lastAdded = coords.first!
+        for i in 1..<coords.count - 1 {
+            let curr = coords[i]
+            let dist = abs(curr.latitude - lastAdded.latitude) + abs(curr.longitude - lastAdded.longitude)
+            if dist > tolerance {
+                simplified.append(curr)
+                lastAdded = curr
             }
         }
+        
+        simplified.append(coords.last!)
+        return simplified
     }
     
     /// 补对并持久化历史间隙中的足迹 (Gap Filling -> Persistence)
@@ -2191,9 +2191,9 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
                 if count > 0 {
                     await MainActor.run {
                         self.refreshAvailableRawDates()
-                        self.loadPointsFromStore() // 重新从同步后的本地文件评估当前停留时长
                         self.lastRawDataUpdateTrigger = Date()
                     }
+                    await self.loadPointsFromStore() // 重新从同步后的本地文件评估当前停留时长
                 }
                 
                 if showOverlay {
