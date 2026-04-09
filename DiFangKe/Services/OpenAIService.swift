@@ -348,13 +348,16 @@ class OpenAIService {
     private func processDailySummaryTask(date: Date, ids: [PersistentIdentifier], context: ModelContext, force: Bool = false) async {
         let startOfDate = Calendar.current.startOfDay(for: date)
         
-        // 只有非强制模式下才检查是否已存在
+        // 提前预加载已有的 Insight 以便比对 Fingerprint
+        let descriptor = FetchDescriptor<DailyInsight>()
+        let existing = (try? context.fetch(descriptor))?.first(where: { 
+            guard let d = $0.date else { return false }
+            return Calendar.current.isDate(d, inSameDayAs: startOfDate) 
+        })
+
+        // 只有非强制模式下才检查是否已存在（常规自动生成）
         if !force {
-            let checkDescriptor = FetchDescriptor<DailyInsight>()
-            if let _ = (try? context.fetch(checkDescriptor))?.first(where: { 
-                guard let d = $0.date else { return false }
-                return Calendar.current.isDate(d, inSameDayAs: startOfDate) && $0.aiGenerated == true 
-            }) { 
+            if existing?.aiGenerated == true {
                 dailySummaryDateSet.remove(startOfDate)
                 return 
             }
@@ -389,6 +392,14 @@ class OpenAIService {
         
         guard !deduplicated.isEmpty else { return }
         
+        // 核心改动：比较本次数据的 Fingerprint 与数据库中已有的记录
+        // 如果内容完全一致，即便 force 为 true 也可以跳过 AI 生成，从而避免因修改备注（不参与摘要）导致的频繁刷新
+        let currentFingerprint = deduplicated.joined(separator: "\n")
+        if force && existing?.dataFingerprint == currentFingerprint {
+            dailySummaryDateSet.remove(startOfDate)
+            return
+        }
+
         let summaryResult = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
             self.generateDailySummary(date: startOfDate, footprintDescriptions: deduplicated) { res in
                 continuation.resume(returning: res)
@@ -400,15 +411,13 @@ class OpenAIService {
             return 
         }
         
-        let descriptor = FetchDescriptor<DailyInsight>()
-        if let existing = (try? context.fetch(descriptor))?.first(where: { 
-            guard let d = $0.date else { return false }
-            return Calendar.current.isDate(d, inSameDayAs: startOfDate) 
-        }) {
+        if let existing = existing {
             existing.content = summary
             existing.aiGenerated = true
+            existing.dataFingerprint = currentFingerprint
         } else {
             let newSummary = DailyInsight(date: startOfDate, content: summary, aiGenerated: true)
+            newSummary.dataFingerprint = currentFingerprint
             context.insert(newSummary)
         }
         try? context.save()

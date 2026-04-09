@@ -7,6 +7,7 @@ final class DailyInsight {
     var date: Date? = Date()
     var content: String? = ""
     var aiGenerated: Bool? = false
+    var dataFingerprint: String? = ""
     var createdAt: Date? = Date()
     
     init(date: Date, content: String = "", aiGenerated: Bool = false) {

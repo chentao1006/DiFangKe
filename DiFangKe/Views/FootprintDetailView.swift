@@ -522,7 +522,8 @@ struct FootprintModalView: View {
         
         // 4. Pattern-based Keywords
         let patterns: [(String, [String])] = [
-            ("居家", ["家", "居", "屋", "外婆", "奶奶", "爷爷", "公寓", "住宅", "苑", "府", "园", "里", "家庭", "亲戚", "父母", "老家"]),
+            ("家庭", ["妈妈", "爸爸", "外婆", "奶奶", "爷爷", "亲戚", "父母", "老家", "儿子", "女儿", "父", "母"]),
+            ("居家", ["家", "居", "屋", "公寓", "住宅", "苑", "府", "园", "里"]),
             ("工作", ["公司", "工作", "办公", "大厦", "写字楼", "研制", "软件", "厂", "局", "馆", "office"]),
             ("旅游", ["景点", "景区", "公园", "博物馆", "火车站", "机场", "酒店", "客栈", "游", "trip"]),
             ("美食", ["餐厅", "餐饮", "饭店", "面馆", "火锅", "咖啡", "饮品", "食堂", "美味", "吃", "food", "eat"]),
@@ -660,7 +661,7 @@ struct FootprintModalView: View {
     }
     
     private var matchedPlace: Place? {
-        savedPlaces.first(where: { $0.placeID == footprint.placeID })
+        savedPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })
     }
     
     private func enrichPlaceIfNeeded() {
