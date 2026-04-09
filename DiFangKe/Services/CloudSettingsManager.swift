@@ -22,7 +22,9 @@ class CloudSettingsManager: ObservableObject {
         "dataSyncPulse",
         "customAiUrl",
         "customAiKey",
-        "customAiModel"
+        "customAiModel",
+        "liveStayStatus",
+        "hasSeededDefaultData"
     ]
     
     private init() {
@@ -124,7 +126,12 @@ class CloudSettingsManager: ObservableObject {
         let now = Date().timeIntervalSince1970
         print("[CloudSettings] Triggering data sync pulse: \(now)")
         UserDefaults.standard.set(now, forKey: "dataSyncPulse")
-        // 注意：kvs 也要设，这样本地 syncLocalToCloud 也会被触发一次双保险
+        // Set it in KVS to notify other devices
+        kvs.set(now, forKey: "dataSyncPulse")
+        kvs.synchronize()
+        
+        // Also post locally so the current device can perform immediate raw data sync if needed
+        NotificationCenter.default.post(name: NSNotification.Name("RemoteDataChanged"), object: nil)
     }
     
     private func isEqual(_ a: Any?, _ b: Any?) -> Bool {

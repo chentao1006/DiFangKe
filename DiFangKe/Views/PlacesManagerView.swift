@@ -169,6 +169,4 @@ struct PlacesManagerView: View {
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
     }
-
-
 }

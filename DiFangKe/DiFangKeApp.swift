@@ -35,12 +35,13 @@ struct DiFangKeApp: App {
             Footprint.self,
             Place.self,
             TransportManualSelection.self,
-            ActivityType.self
+            ActivityType.self,
+            DailyInsight.self
         ])
         
         // 提升存储版本号以解决之前的 Schema 冲突导致的死锁闪退
         let modelConfiguration = ModelConfiguration(
-            "dfk_v4_stable",
+            "dfk_v5_stable",
             schema: schema, 
             isStoredInMemoryOnly: false,
             cloudKitDatabase: .automatic
@@ -122,17 +123,28 @@ struct DiFangKeApp: App {
     }
     
     private func setupDefaultData(context: ModelContext) {
-        // 先检查数据库是否为空。如果用户自建过活动或已经同步过预设，则不再自动补充，允许用户删除。
-        let descriptor = FetchDescriptor<ActivityType>()
-        guard let count = try? context.fetchCount(descriptor), count == 0 else { return }
-        
-        print("[Setup] Database is empty, seeding initial presets...")
-        for preset in ActivityType.presets {
-            context.insert(preset)
+        // First check if we've already performed seeding on this or another synced device
+        if UserDefaults.standard.bool(forKey: "hasSeededDefaultData") {
+            return
         }
         
-        try? context.save()
-        CloudSettingsManager.shared.startSyncing()
+        let descriptor = FetchDescriptor<ActivityType>()
+        guard let count = try? context.fetchCount(descriptor) else { return }
+        
+        // Only seed if empty. If it's not empty, it's either already seeded or synced from cloud.
+        if count == 0 {
+            print("[Setup] Database is empty and seeding flag is false, seeding initial presets...")
+            for preset in ActivityType.presets {
+                context.insert(preset)
+            }
+            try? context.save()
+            // Notify other devices about new data
+            CloudSettingsManager.shared.triggerDataSyncPulse()
+        }
+        
+        // After seeding (or confirming data exists), set flag permanently
+        UserDefaults.standard.set(true, forKey: "hasSeededDefaultData")
+        print("[Setup] Seeding marked as complete.")
     }
     
     private func resumeUnfinishedAIAnalysis(context: ModelContext) {

@@ -51,7 +51,8 @@ struct SimpleDayTimelineView: View {
                 allPlaces: allPlaces,
                 offset: Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: Date()), to: date).day ?? 0,
                 locationManager: locationManager,
-                pastLimitOffset: -3650
+                pastLimitOffset: -3650,
+                isFromHistory: true
             )
             .navigationTitle(date.formatted(.dateTime.year().month().day()))
             .navigationBarTitleDisplayMode(.inline)
@@ -80,6 +81,7 @@ struct HistoryListView: View {
     @State private var showingPhotoImportRange = false
     @State private var selectedRange: (Date, Date)? = nil
     @State private var isScanning = false
+    @State private var isImporting = false
     @State private var scannedResults: [Footprint] = []
     @State private var isShowingResults = false
     @State private var showingNoResultsAlert = false
@@ -101,6 +103,7 @@ struct HistoryListView: View {
         case week = "周"
         case month = "月"
         case favorites = "收藏"
+        case statistics = "统计"
     }
 
     @State private var hasScrolledWeek = false
@@ -138,44 +141,81 @@ struct HistoryListView: View {
             scannedResults: $scannedResults,
             onStartScan: startScanning,
             onConfirmImport: { selectedFootprints in
-                for fp in selectedFootprints {
-                    modelContext.insert(fp)
-                }
-                try? modelContext.save()
-                let identifiers = selectedFootprints.map { $0.persistentModelID }
-                OpenAIService.shared.enqueueFootprintsForAnalysis(identifiers)
+                isImporting = true
                 isShowingResults = false
-                scannedResults = []
-                updateSummaries()
-                self.successCount = selectedFootprints.count
-                self.showingImportSuccessAlert = true
+                
+                // 为了避免主线程卡顿，我们将保存和后续处理移入异步任务
+                // 虽然 Footprint 已在 MainActor 创建，但 yield 允许 UI 保持响应
+                Task {
+                    for fp in selectedFootprints {
+                        modelContext.insert(fp)
+                    }
+                    
+                    // 尝试在后台进行保存（SwiftData 支持在异步上下文中调用 save）
+                    try? modelContext.save()
+                    
+                    // 获取 ID 列表用于后续 AI 分析（在 save 后获取 ID 更稳定）
+                    let identifiers = selectedFootprints.map { $0.persistentModelID }
+                    
+                    await MainActor.run {
+                        OpenAIService.shared.enqueueFootprintsForAnalysis(identifiers)
+                        scannedResults = []
+                        updateSummaries()
+                        self.successCount = selectedFootprints.count
+                        self.isImporting = false
+                        self.showingImportSuccessAlert = true
+                    }
+                }
             }
         ))
         .modifier(ImportOverlaysModifier(
             isScanning: isScanning,
+            isImporting: isImporting,
             scanProgress: scanProgress,
             scanTotal: scanTotal,
             showingNoResultsAlert: $showingNoResultsAlert,
             showingImportSuccessAlert: $showingImportSuccessAlert,
             showingPermissionAlert: $showingPermissionAlert,
-            successCount: successCount
+            successCount: successCount,
+            onCancelScan: { stopScanning() }
         ))
         .modifier(ImportToolbarModifier(onTapAction: checkPhotoPermission))
     }
     
+    @Namespace private var modeNamespace
+    
     private var pickerSection: some View {
-        HStack {
-            Picker("视图", selection: $viewMode) {
-                ForEach(ViewMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
+        HStack(spacing: 0) {
+            ForEach(ViewMode.allCases, id: \.self) { mode in
+                Text(mode.rawValue)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(viewMode == mode ? .white : .secondary)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity)
+                    .background(
+                        ZStack {
+                            if viewMode == mode {
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(Color.dfkAccent)
+                                    .matchedGeometryEffect(id: "mode_bg", in: modeNamespace)
+                            }
+                        }
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            viewMode = mode
+                        }
+                    }
             }
-            .pickerSegmented()
-            .padding(.horizontal)
-            .padding(.top, 10)
-            .padding(.bottom, 12)
-            .background(Color.dfkBackground)
         }
+        .padding(4)
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(12)
+        .padding(.horizontal, 20)
+        .padding(.top, 10)
+        .padding(.bottom, 15)
+        .background(Color.dfkBackground)
     }
     
     private var contentArea: some View {
@@ -193,6 +233,9 @@ struct HistoryListView: View {
             HistoryFavoritesView(onUpdate: updateSummaries)
                 .environment(locationManager)
                 .tag(ViewMode.favorites)
+            
+            HistoryStatisticsView()
+                .tag(ViewMode.statistics)
             
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
@@ -305,11 +348,13 @@ struct HistoryListView: View {
     private func startScanning(start: Date, end: Date) {
         self.scanProgress = 0
         self.scanTotal = 0
+        photoService.isScanCancelled = false
         isScanning = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             let finalEnd = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: end) ?? end
             let existingIDs = Set(self.allFootprints.flatMap { $0.photoAssetIDs })
-            PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: allPlacesForScan, excludedAssetIDs: existingIDs, onProgress: { current, total in
+            let existingBriefs = self.allFootprints.map { ($0.startTime, $0.endTime, $0.latitude, $0.longitude) }
+            PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: allPlacesForScan, excludedAssetIDs: existingIDs, existingFootprints: existingBriefs, onProgress: { current, total in
                 self.scanProgress = current
                 self.scanTotal = total
             }) { results in
@@ -322,6 +367,11 @@ struct HistoryListView: View {
                 }
             }
         }
+    }
+    
+    private func stopScanning() {
+        photoService.isScanCancelled = true
+        isScanning = false
     }
 }
 
@@ -405,13 +455,12 @@ struct HistoryWeekView: View {
         
         return HStack {
             Text("\(String(format: "%d", year))年 第\(week)周")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(Color.dfkBackground.opacity(0.95))
-            Spacer()
+                .font(.system(size: 18, weight: .bold))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.dfkBackground.opacity(0.95))
     }
 }
 
@@ -686,26 +735,59 @@ struct ImportSheetsModifier: ViewModifier {
     let onConfirmImport: ([Footprint]) -> Void
     func body(content: Content) -> some View {
         content
-            .sheet(isPresented: $showingPhotoImportRange) { PhotoImportRangePicker { s, e in showingPhotoImportRange = false; onStartScan(s, e) } }
-            .sheet(isPresented: $isShowingResults) { PhotoImportResultsView(results: scannedResults, onConfirm: onConfirmImport).environment(locationManager) }
+            .sheet(isPresented: $showingPhotoImportRange) { 
+                PhotoImportRangePicker { s, e in showingPhotoImportRange = false; onStartScan(s, e) }
+                    .presentationDetents([.medium])
+            }
+            .sheet(isPresented: $isShowingResults) { 
+                PhotoImportResultsView(results: scannedResults, onConfirm: onConfirmImport)
+                    .environment(locationManager)
+            }
     }
 }
 
 struct ImportOverlaysModifier: ViewModifier {
-    let isScanning: Bool; let scanProgress: Int; let scanTotal: Int
+    let isScanning: Bool; let isImporting: Bool
+    let scanProgress: Int; let scanTotal: Int
     @Binding var showingNoResultsAlert: Bool; @Binding var showingImportSuccessAlert: Bool; @Binding var showingPermissionAlert: Bool
     let successCount: Int
+    let onCancelScan: () -> Void
     func body(content: Content) -> some View {
         content
-            .alert("未发现足迹", isPresented: $showingNoResultsAlert) { Button("好", role: .cancel) { } } message: { Text("未发现包含位置信息的照片。") }
+            .alert("未发现足迹", isPresented: $showingNoResultsAlert) { Button("好", role: .cancel) { } } message: { Text("未发现包含位置信息的照片或者都已导入过。") }
             .alert("同步成功", isPresented: $showingImportSuccessAlert) { Button("太棒了", role: .cancel) { } } message: { Text("成功寻回 \(successCount) 个足迹！") }
             .overlay { if isScanning {
                 ZStack {
                     Color.black.opacity(0.2).ignoresSafeArea()
                     VStack(spacing: 20) {
                         ProgressView(value: Double(scanProgress), total: max(1, Double(scanTotal))).tint(.white).frame(width: 200)
-                        Text("正在穿越时空...").foregroundColor(.white).font(.headline)
-                    }.padding(40).background(RoundedRectangle(cornerRadius: 20).fill(Color.black.opacity(0.7)))
+                        VStack(spacing: 8) {
+                            Text("正在穿越时空...").foregroundColor(.white).font(.headline)
+                            Text("\(scanProgress) / \(scanTotal)").foregroundColor(.white.opacity(0.7)).font(.caption.monospacedDigit())
+                        }
+                        
+                        Button(role: .cancel) {
+                            onCancelScan()
+                        } label: {
+                            Text("取消同步")
+                                .font(.subheadline.bold())
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 8)
+                                .background(Capsule().stroke(.white.opacity(0.5), lineWidth: 1))
+                        }
+                    }.padding(40).background(RoundedRectangle(cornerRadius: 24).fill(Color.black.opacity(0.8)))
+                }
+            }}
+            .overlay { if isImporting {
+                ZStack {
+                    Color.black.opacity(0.3).ignoresSafeArea()
+                    VStack(spacing: 16) {
+                        ProgressView().tint(.white).controlSize(.large)
+                        Text("正在存入时光足迹...").foregroundColor(.white).font(.headline)
+                    }
+                    .padding(30)
+                    .background(RoundedRectangle(cornerRadius: 20).fill(Color.black.opacity(0.7)))
                 }
             }}
     }
@@ -743,18 +825,99 @@ struct PhotoImportResultsView: View {
     @Environment(LocationManager.self) private var locationManager
     let results: [Footprint]; let onConfirm: ([Footprint]) -> Void
     @Environment(\.dismiss) var dismiss; @Query private var allPlaces: [Place]; @State private var selectedIDs: Set<UUID> = []
-    init(results: [Footprint], onConfirm: @escaping ([Footprint]) -> Void) { self.results = results; self.onConfirm = onConfirm; self._selectedIDs = State(initialValue: Set(results.map { $0.footprintID })) }
+    
+    init(results: [Footprint], onConfirm: @escaping ([Footprint]) -> Void) { 
+        self.results = results
+        self.onConfirm = onConfirm
+        self._selectedIDs = State(initialValue: Set(results.map { $0.footprintID })) 
+    }
+    
+    private var isAllSelected: Bool {
+        selectedIDs.count == results.count && !results.isEmpty
+    }
+    
     var body: some View {
         NavigationStack {
-            List(results, id: \.footprintID) { fp in
-                HStack {
-                    Image(systemName: selectedIDs.contains(fp.footprintID) ? "checkmark.circle.fill" : "circle")
-                        .onTapGesture { if selectedIDs.contains(fp.footprintID) { selectedIDs.remove(fp.footprintID) } else { selectedIDs.insert(fp.footprintID) } }
-                    FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false) { _, _ in }
+            VStack(spacing: 0) {
+                // Select All Header
+                HStack(spacing: 0) {
+                    Image(systemName: isAllSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 20))
+                        .foregroundColor(isAllSelected ? .dfkAccent : .secondary.opacity(0.3))
+                        .frame(width: 40)
+                    
+                    Text(isAllSelected ? "取消全选" : "全选")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.secondary)
+                    
+                    Text(" (\(results.count))")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary.opacity(0.5))
+                    
+                    Spacer()
                 }
-            }.navigationTitle("寻回的记忆").toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("导入") { onConfirm(results.filter { selectedIDs.contains($0.footprintID) }) } }
+                .padding(.leading, 12)
+                .padding(.vertical, 12)
+                .background(Color.dfkBackground)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    withAnimation(.spring(response: 0.2, dampingFraction: 0.8)) {
+                        if isAllSelected {
+                            selectedIDs.removeAll()
+                        } else {
+                            selectedIDs = Set(results.map { $0.footprintID })
+                        }
+                    }
+                }
+                
+                Divider().padding(.horizontal, 16).opacity(0.5)
+
+                List(results, id: \.footprintID) { fp in
+                    HStack(spacing: 0) {
+                        Image(systemName: selectedIDs.contains(fp.footprintID) ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 20))
+                            .foregroundColor(selectedIDs.contains(fp.footprintID) ? .dfkAccent : .secondary.opacity(0.3))
+                            .frame(width: 40)
+                        
+                        FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false, disableContextMenu: true) { _, _ in 
+                            toggleSelection(fp.footprintID)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 16))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        toggleSelection(fp.footprintID)
+                    }
+                }
+                .listStyle(.plain)
+            }
+            .background(Color.dfkBackground)
+            .navigationTitle("寻回的记忆")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("导入") { 
+                        onConfirm(results.filter { selectedIDs.contains($0.footprintID) }) 
+                    }
+                    .fontWeight(.bold)
+                    .disabled(selectedIDs.isEmpty)
+                }
+            }
+        }
+    }
+    
+    private func toggleSelection(_ id: UUID) {
+        withAnimation(.spring(response: 0.2, dampingFraction: 0.8)) {
+            if selectedIDs.contains(id) {
+                selectedIDs.remove(id)
+            } else {
+                selectedIDs.insert(id)
             }
         }
     }
@@ -802,10 +965,9 @@ struct HistoryFavoritesView: View {
     private func favoriteHeader(for date: Date) -> some View {
         HStack {
             Text(date.formatted(.dateTime.year().month().day()))
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .font(.system(size: 18, weight: .bold))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
             Spacer()
         }
         .background(Color.dfkBackground.opacity(0.95))

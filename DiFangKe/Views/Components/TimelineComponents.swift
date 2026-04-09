@@ -14,6 +14,7 @@ struct DaySummaryCard: View {
     var timelineItems: [TimelineItem] = []
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     var photoAssets: [PHAsset] = []
+    var summary: String? = nil
     
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
@@ -34,9 +35,11 @@ struct DaySummaryCard: View {
                 // Top Section: Info
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("当日概览")
+                        Text(summary ?? "当日概览")
                             .font(.system(.headline, design: .rounded))
                             .foregroundColor(Color.dfkMainText)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                         
                         HStack(spacing: 12) {
                             DayStatItem(value: "\(totalPoints)", label: "轨迹点")
@@ -242,6 +245,7 @@ struct RecordingStatusCard: View {
     var timelineItems: [TimelineItem] = []
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     var photoAssets: [PHAsset] = []
+    var summary: String? = nil
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
     
@@ -304,9 +308,11 @@ struct RecordingStatusCard: View {
                 // Top Section: Info
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(displayTitle)
+                        Text(summary ?? displayTitle)
                             .font(.system(.headline, design: .rounded))
-                            .foregroundColor(!locationManager.isTracking ? .secondary : Color.dfkMainText)
+                            .foregroundColor(!locationManager.isTracking && summary == nil ? .secondary : Color.dfkMainText)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                         
                         // 地址与地点行
                         HStack(spacing: 6) {
@@ -433,6 +439,7 @@ struct FootprintCardView: View {
     var showTimeline: Bool = true
     var showDateAboveTitle: Bool = false
     var fixedWidth: CGFloat? = nil
+    var disableContextMenu: Bool = false
     let onTap: (Footprint, Bool) -> Void
     
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
@@ -573,7 +580,9 @@ struct FootprintCardView: View {
             .frame(width: fixedWidth)
             .contentShape(Rectangle())
             .onTapGesture { onTap(footprint, false) }
-            .contextMenu { longPressMenu }
+            .if(!disableContextMenu) { view in
+                view.contextMenu { longPressMenu }
+            }
             .alert("确认删除足迹？", isPresented: $showingDeleteConfirm) {
                 Button("删除", role: .destructive) { ignoreFootprint() }
                 Button("取消", role: .cancel) { }
@@ -594,10 +603,8 @@ struct FootprintCardView: View {
                 }
                 geocodeAddress()
                 
-                // 自动关联缺失的照片（针对首次入场或后台漏扫的情况）
-                if footprint.photoAssetIDs.isEmpty {
-                    locationManager.linkPhotos(to: footprint, context: modelContext)
-                }
+                // 自动关联缺失或无效的照片（针对首次入场或跨设备同步的情况）
+                locationManager.linkPhotos(to: footprint, context: modelContext)
             }
         }
     }
@@ -916,5 +923,15 @@ struct NotificationGuide: View {
         .padding(.vertical, 12)
         .background(RoundedRectangle(cornerRadius: 16).fill(Color.dfkHighlight.opacity(0.06)))
         .padding(.horizontal, 16)
+    }
+}
+
+extension View {
+    @ViewBuilder func `if`<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
+        if condition {
+            transform(self)
+        } else {
+            self
+        }
     }
 }

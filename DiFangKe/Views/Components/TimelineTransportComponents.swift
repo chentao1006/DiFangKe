@@ -231,9 +231,13 @@ struct TransportModalView: View {
                         }
                     }
                     
-                    // Route Polyline
+                    // Route Polyline Background Border
                     MapPolyline(coordinates: transport.points)
-                        .stroke(Color.dfkAccent, lineWidth: 5)
+                        .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: 7.5, lineCap: .round, lineJoin: .round))
+                    
+                    // Route Polyline Main
+                    MapPolyline(coordinates: transport.points)
+                        .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
                     
                     // Photos along the route
                     ForEach(mapPhotos, id: \.localIdentifier) { asset in
@@ -444,6 +448,7 @@ struct TransportModalView: View {
         selection.vehicleType = (localManualType ?? transport.manualType ?? transport.type).rawValue
         
         try? modelContext.save()
+        CloudSettingsManager.shared.triggerDataSyncPulse()
         onLocationUpdate?()
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
@@ -467,6 +472,7 @@ struct TransportModalView: View {
         selection.vehicleType = type.rawValue
         
         try? modelContext.save()
+        CloudSettingsManager.shared.triggerDataSyncPulse()
         
         // 3. Notify parent to update UI
         onUpdate?(type)

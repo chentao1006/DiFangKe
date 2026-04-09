@@ -450,6 +450,15 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     /// 用于通知 UI 原始轨迹数据已更新（例如多设备同步完成）
     var lastRawDataUpdateTrigger: Date = Date()
     
+    private var deviceID: String {
+        if let id = UserDefaults.standard.string(forKey: "raw_location_device_id") {
+            return id
+        }
+        let id = UIDevice.current.identifierForVendor?.uuidString ?? UUID().uuidString
+        UserDefaults.standard.set(id, forKey: "raw_location_device_id")
+        return id
+    }
+    
     // 同步状态属性
     var isSyncingInitialData: Bool = false
     var syncStatusMessage: String = ""
@@ -509,6 +518,24 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         
         setupTimers()
         refreshAvailableRawDates()
+        
+        // Listen for remote data change signals (from iCloud KVS) to trigger immediate raw data sync
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("RemoteDataChanged"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.performRawDataSync()
+        }
+        
+        // Listen for "Live Status" changes to sync ongoing stay duration across devices
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.syncOngoingStayFromCloud()
+        }
     }
     
     /// 遍历原始轨迹存储目录，找出所有有记录的日期并缓存
@@ -571,7 +598,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         }
     }
     
-    private func triggerTimelineSift() {
+    func triggerTimelineSift() {
         // This is called on triggers: position change, app start, hourly
         // Since TimelineBuilder works on the footprints in DB, we mainly need to ensure 
         // the footprints are consolidated and analyzed.
@@ -608,15 +635,30 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     }
 
     var stayDuration: String? {
-        guard let startLocation = potentialStopStartLocation,
-              let currentLoc = lastLocation else { return nil }
+        guard let startLocation = potentialStopStartLocation else { return nil }
         
-        // 核心逻辑：如果当前位置距离停留点的中心已经超过 200 米，说明已经“离开”，不再显示停留时长
-        let distance = currentLoc.distance(from: startLocation)
-        guard distance < 200 else { return nil }
-        
+        let now = Date()
         let start = startLocation.timestamp
-        let duration = Date().timeIntervalSince(start)
+        
+        // 核心逻辑：如果本设备正在记录，则通过位移判断是否离开
+        if isTracking, let currentLoc = lastLocation {
+            let distance = currentLoc.distance(from: startLocation)
+            if distance > 300 { return nil }
+        }
+        
+        // 跨设备逻辑：如果该状态来自云端同步，检查其“鲜活度”
+        if let status = UserDefaults.standard.dictionary(forKey: "liveStayStatus"),
+           let updateTS = status["update"] as? Double,
+           let device = status["device"] as? String,
+           device != deviceID {
+            let updateDate = Date(timeIntervalSince1970: updateTS)
+            // 如果远程设备超过 30 分钟未更新状态，我们认为该停留可能已结束或数据断联，不再显示“正在停留”
+            if now.timeIntervalSince(updateDate) > 30 * 60 {
+                return nil
+            }
+        }
+        
+        let duration = now.timeIntervalSince(start)
         let totalMinutes = Int(duration / 60)
         
         // 如果停留时间还在 1 分钟内，可能刚开始记录，此时不显示时长
@@ -1354,8 +1396,11 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return }
         
-        // 关键：如果已经关联过照片，且数量不少，说明已经稳定，不再重复抓取
-        if !footprint.photoAssetIDs.isEmpty { return }
+        // 如果已经关联过照片，且这些照片在本地是有效的，说明已经稳定，不再重复抓取。
+        // 对于多设备同步过来的足迹，其 photoAssetIDs 在本地通常是无效的，此时需要重新触发关联。
+        if !footprint.photoAssetIDs.isEmpty && PhotoService.shared.validateAssetIDs(footprint.photoAssetIDs) { 
+            return 
+        }
         
         // 核心修复：必须有 context 才能访问 persistentModelID 并在主线程恢复，否则说明是 UI Lite 对象
         guard footprint.modelContext != nil else { return }
@@ -1368,7 +1413,8 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         PhotoService.shared.fetchAssets(
             startTime: startTime,
             endTime: endTime,
-            near: coordinate
+            near: coordinate,
+            maxDistance: 1500 // 放宽关联半径至 1.5km，确保更大概率能根据时间线寻回照片
         ) { assets in
             guard !assets.isEmpty else { return }
             let ids = assets.map { $0.localIdentifier }
@@ -1555,9 +1601,51 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
 
     private func savePotentialStop() {
         if let loc = potentialStopStartLocation {
+            let ts = loc.timestamp.timeIntervalSince1970
             UserDefaults.standard.set(loc.coordinate.latitude, forKey: "pending_lat")
             UserDefaults.standard.set(loc.coordinate.longitude, forKey: "pending_lng")
-            UserDefaults.standard.set(loc.timestamp.timeIntervalSince1970, forKey: "pending_time")
+            UserDefaults.standard.set(ts, forKey: "pending_time")
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "pending_time_local_updated")
+            
+            // 同步至 KVS 以便多设备即时看到“正在停留”状态
+            let status: [String: Any] = [
+                "lat": loc.coordinate.latitude,
+                "lng": loc.coordinate.longitude,
+                "start": ts,
+                "update": Date().timeIntervalSince1970,
+                "device": deviceID
+            ]
+            UserDefaults.standard.set(status, forKey: "liveStayStatus")
+        }
+    }
+
+    /// 从云端 KVS 恢复其他设备的实时停留状态
+    private func syncOngoingStayFromCloud() {
+        guard let status = UserDefaults.standard.dictionary(forKey: "liveStayStatus"),
+              let lat = status["lat"] as? Double,
+              let lng = status["lng"] as? Double,
+              let startTS = status["start"] as? Double,
+              let updateTS = status["update"] as? Double,
+              let device = status["device"] as? String else { return }
+        
+        // 只同步来自其他设备的信息
+        if device != deviceID {
+            let localUpdate = UserDefaults.standard.double(forKey: "pending_time_local_updated")
+            // 只有当云端状态比本地已知的更新时间更晚时才进行覆盖
+            if updateTS > localUpdate {
+                let loc = CLLocation(
+                    coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lng),
+                    altitude: 0, horizontalAccuracy: 50, verticalAccuracy: 50,
+                    timestamp: Date(timeIntervalSince1970: startTS)
+                )
+                
+                DispatchQueue.main.async {
+                    // 只有当本设备当前没有处于正在记录的活跃状态时，才显示其他设备的活跃状态
+                    if !self.isTracking || self.potentialStopStartLocation == nil {
+                         self.potentialStopStartLocation = loc
+                    }
+                }
+            }
         }
     }
 

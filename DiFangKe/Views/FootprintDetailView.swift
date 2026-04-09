@@ -123,18 +123,8 @@ struct FootprintModalView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { withAnimation(.easeOut(duration: 0.25)) { showMap = true } }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { withAnimation(.easeOut(duration: 0.3)) { showAI = true } }
                 
-                if isAutoPhotoLinkEnabled && footprint.photoAssetIDs.isEmpty {
-                    if PhotoService.shared.authorizationStatus == .authorized || PhotoService.shared.authorizationStatus == .limited {
-                        PhotoService.shared.fetchAssets(startTime: footprint.startTime, endTime: footprint.endTime, near: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)) { assets in
-                            if !assets.isEmpty {
-                                withAnimation {
-                                    ensureFootprintManaged()
-                                    footprint.photoAssetIDs = assets.map { $0.localIdentifier }
-                                    try? modelContext.save()
-                                }
-                            }
-                        }
-                    }
+                if isAutoPhotoLinkEnabled {
+                    locationManager.linkPhotos(to: footprint, context: modelContext)
                 }
                 
                 if autoFocus {

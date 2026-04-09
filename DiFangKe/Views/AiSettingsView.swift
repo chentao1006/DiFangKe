@@ -20,18 +20,31 @@ struct AiSettingsView: View {
     }
     @State private var isTesting = false
     @State private var testResult: (success: Bool, message: String)?
+    @Namespace private var aiModeNamespace
     
     var body: some View {
         Form {
             Section {
-                Picker("服务类型", selection: $aiServiceType) {
+                HStack(spacing: 0) {
                     ForEach(AiServiceType.allCases) { type in
-                        Text(type.displayName).tag(type)
+                        AiServiceTypeTab(
+                            type: type,
+                            isSelected: aiServiceType == type,
+                            namespace: aiModeNamespace
+                        ) {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                aiServiceType = type
+                            }
+                        }
                     }
                 }
-                .pickerStyle(.segmented)
+                .padding(4)
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(10)
                 .listRowBackground(Color.clear)
                 .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+            } header: {
+                Text("服务类型")
             } footer: {
                 if aiServiceType == .public {
                     Text("公共服务由开发者提供，受每日总额和请求速率限制。")
@@ -101,6 +114,32 @@ struct AiSettingsView: View {
             isTesting = false
             testResult = (success, message)
         }
+    }
+}
+
+struct AiServiceTypeTab: View {
+    let type: AiSettingsView.AiServiceType
+    let isSelected: Bool
+    let namespace: Namespace.ID
+    let action: () -> Void
+    
+    var body: some View {
+        Text(type.displayName)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundColor(isSelected ? .white : .secondary)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(
+                ZStack {
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.dfkAccent)
+                            .matchedGeometryEffect(id: "ai_mode_bg", in: namespace)
+                    }
+                }
+            )
+            .contentShape(Rectangle())
+            .onTapGesture(perform: action)
     }
 }
 

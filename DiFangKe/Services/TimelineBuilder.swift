@@ -324,7 +324,14 @@ class TimelineBuilder {
     private static func fillGap(from start: Date, to end: Date, items: inout [TimelineItem], gapPoints: [CLLocation], sortedFootprints: [FootprintLite], currentIndex: Int, allPlaces: [PlaceLite], overrides: [OverrideLite]) {
         let duration = end.timeIntervalSince(start)
         guard duration > 60 else { return } // Ignore gaps < 1 min
-        guard !gapPoints.isEmpty else { return }
+        
+        if gapPoints.isEmpty {
+            // Check for "Phantom Transports": user has manually defined segments on another device, 
+            // but this device hasn't synced the raw trajectory points yet.
+            // In this case, we synthesis a basic transport item to keep UI in sync.
+            handlePhantomTransports(from: start, to: end, items: &items, sortedFootprints: sortedFootprints, currentIndex: currentIndex, allPlaces: allPlaces, overrides: overrides)
+            return
+        }
         
         let transports = extractTransports(gapPoints)
         let isTodayView = Calendar.current.isDateInToday(start)
@@ -396,6 +403,54 @@ class TimelineBuilder {
             if !isOngoing {
                 addStationaryStay(from: start, to: end, gapPoints: gapPoints, items: &items, allPlaces: allPlaces)
             }
+        }
+    }
+
+    /// Handles overrides that exist for a period where raw trajectory data is missing.
+    private static func handlePhantomTransports(from start: Date, to end: Date, items: inout [TimelineItem], sortedFootprints: [FootprintLite], currentIndex: Int, allPlaces: [PlaceLite], overrides: [OverrideLite]) {
+        // Find overrides where the midpoint falls within our gap
+        let rangeOverrides = overrides.filter { ov in
+            if ov.isDeleted { return false }
+            let mid = ov.startTime.addingTimeInterval(ov.endTime.timeIntervalSince(ov.startTime) / 2)
+            return mid >= start && mid <= end
+        }
+        
+        for ov in rangeOverrides {
+            // Synthesize basics
+            var path: [CLLocationCoordinate2D] = []
+            var dist: Double = 0
+            
+            // Try to connect the previous and next footprints for a map line
+            if currentIndex > 0 && currentIndex < sortedFootprints.count {
+                let prev = sortedFootprints[currentIndex - 1]
+                let next = sortedFootprints[currentIndex]
+                path = [
+                    CLLocationCoordinate2D(latitude: prev.latitude, longitude: prev.longitude),
+                    CLLocationCoordinate2D(latitude: next.latitude, longitude: next.longitude)
+                ]
+                dist = CLLocation(latitude: prev.latitude, longitude: prev.longitude)
+                         .distance(from: CLLocation(latitude: next.latitude, longitude: next.longitude))
+            } else if currentIndex > 0 {
+                let prev = sortedFootprints[currentIndex - 1]
+                path = [CLLocationCoordinate2D(latitude: prev.latitude, longitude: prev.longitude)]
+            } else if currentIndex < sortedFootprints.count {
+                let next = sortedFootprints[currentIndex]
+                path = [CLLocationCoordinate2D(latitude: next.latitude, longitude: next.longitude)]
+            }
+            
+            let type = TransportType(rawValue: ov.vehicleType) ?? .car
+            let t = Transport(
+                startTime: ov.startTime,
+                endTime: ov.endTime,
+                startLocation: ov.startLocationOverride ?? "正在同步轨迹...",
+                endLocation: ov.endLocationOverride ?? "正在同步轨迹...",
+                type: type,
+                distance: dist,
+                averageSpeed: dist / max(1, ov.endTime.timeIntervalSince(ov.startTime)),
+                points: path,
+                manualType: type
+            )
+            items.append(.transport(t))
         }
     }
 

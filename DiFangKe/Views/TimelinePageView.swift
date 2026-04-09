@@ -13,6 +13,7 @@ struct TimelinePageView: View {
     let offset: Int
     let locationManager: LocationManager
     let pastLimitOffset: Int
+    let isFromHistory: Bool
     
     @State private var selectedFootprint: Footprint?
     @State private var selectedTransport: Transport?
@@ -30,6 +31,9 @@ struct TimelinePageView: View {
     @State private var animateHint = false
     @State private var notificationAuthStatus: UNAuthorizationStatus = .notDetermined
     
+    @Query private var summaries: [DailyInsight]
+    @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
+    
     @State private var timelineItems: [TimelineItem]
     @State private var isLoadingTimeline: Bool
     @State private var refreshTask: Task<Void, Never>?
@@ -38,7 +42,7 @@ struct TimelinePageView: View {
     @State private var trajectoryPoints: [CLLocationCoordinate2D] = []
     @State private var dayPhotoAssets: [PHAsset] = []
     
-    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int) {
+    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isFromHistory: Bool = false) {
         self.date = date
         self.footprints = footprints
         self.manualSelections = manualSelections
@@ -46,6 +50,7 @@ struct TimelinePageView: View {
         self.offset = offset
         self.locationManager = locationManager
         self.pastLimitOffset = pastLimitOffset
+        self.isFromHistory = isFromHistory
         
         let cached = TimelineBuilder.timelineCache[date] ?? []
         // 初始化时立即执行重链接，确保首次渲染就是数据库真实模型
@@ -63,32 +68,25 @@ struct TimelinePageView: View {
     }
     
     var body: some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
-                
-                if offset > 0 {
-                    futurePlaceholderView
-                } else if offset == pastLimitOffset {
-                    pastPlaceholderView
-                } else {
-                    summaryCardSection(isToday: isToday)
-                    timelineListSection(isToday: isToday)
-                    
-                    if offset <= 0 && !hasSwiped {
-                        swipeHintFooter
-                            .padding(.top, 40)
-                            .padding(.bottom, 60)
-                            .onAppear {
-                                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
-                                    animateHint = true
-                                }
-                            }
+        Group {
+            if !isFromHistory && Calendar.current.isDateInToday(date) {
+                timelineScrollView
+                    .refreshable {
+                        // 1. 同步远程原始轨迹
+                        locationManager.performRawDataSync()
+                        
+                        // 2. 触发位置碎片合并计算
+                        locationManager.triggerTimelineSift()
+                        
+                        // 3. 强制异步刷新当前页面的时间线显示
+                        await refreshTimelineAsync(force: true)
+                        
+                        // 4. 触感反馈
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     }
-                }
+            } else {
+                timelineScrollView
             }
-            .padding(.top, 16)
-            .padding(.bottom, 10)
         }
         .onAppear {
             NotificationManager.shared.getAuthorizationStatus { status in
@@ -100,6 +98,22 @@ struct TimelinePageView: View {
             
             if timelineItems.isEmpty || (notInCache && isToday) || trajectoryPoints.isEmpty {
                 refreshTimeline()
+            }
+            
+            // AI 每日摘要检查
+            if isAiAssistantEnabled && !footprints.isEmpty {
+                let startOfDay = Calendar.current.startOfDay(for: date)
+                if !summaries.contains(where: { 
+                    guard let d = $0.date else { return false }
+                    return Calendar.current.isDate(d, inSameDayAs: startOfDay) 
+                }) {
+                    // 只为过去日期生成
+                    let isPast = Calendar.current.startOfDay(for: date) < Calendar.current.startOfDay(for: Date())
+                    
+                    if isPast {
+                        OpenAIService.shared.generateAndSaveDailySummary(for: date, footprints: footprints, modelContext: modelContext)
+                    }
+                }
             }
         }
         .onDisappear {
@@ -139,6 +153,37 @@ struct TimelinePageView: View {
         }
     }
     
+    private var timelineScrollView: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
+                
+                if offset > 0 {
+                    futurePlaceholderView
+                } else if offset == pastLimitOffset {
+                    pastPlaceholderView
+                } else {
+                    summaryCardSection(isToday: isToday)
+                    timelineListSection(isToday: isToday)
+                    
+                    if offset <= 0 && !hasSwiped {
+                        swipeHintFooter
+                            .padding(.top, 40)
+                            .padding(.bottom, 60)
+                            .onAppear {
+                                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                                    animateHint = true
+                                }
+                            }
+                    }
+                }
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 10)
+        }
+    }
+
+    
     @ViewBuilder
     private func summaryCardSection(isToday: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -148,7 +193,11 @@ struct TimelinePageView: View {
                     footprintCount: footprints.count,
                     timelineItems: timelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
-                    photoAssets: dayPhotoAssets
+                    photoAssets: dayPhotoAssets,
+                    summary: summaries.first(where: { 
+                        guard let d = $0.date else { return false }
+                        return Calendar.current.isDate(d, inSameDayAs: date) 
+                    })?.content
                 )
                 .padding(.horizontal, 16)
             } else {
@@ -163,7 +212,11 @@ struct TimelinePageView: View {
                     points: trajectoryPoints,
                     timelineItems: timelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
-                    photoAssets: dayPhotoAssets
+                    photoAssets: dayPhotoAssets,
+                    summary: summaries.first(where: { 
+                        guard let d = $0.date else { return false }
+                        return Calendar.current.isDate(d, inSameDayAs: date) 
+                    })?.content
                 )
                 .padding(.horizontal, 16)
             }
@@ -249,7 +302,13 @@ struct TimelinePageView: View {
     @MainActor
     private func refreshTimeline(force: Bool = false) {
         refreshTask?.cancel()
-        
+        refreshTask = Task { @MainActor in
+            await refreshTimelineAsync(force: force)
+        }
+    }
+
+    @MainActor
+    private func refreshTimelineAsync(force: Bool = false) async {
         let currentFootprints = footprints
         let currentOverrides = manualSelections
         let currentPlaces = allPlaces
@@ -260,136 +319,134 @@ struct TimelinePageView: View {
         let placesLite = currentPlaces.map { TimelineBuilder.convertToPlaceLite($0) }
         let overridesLite = currentOverrides.map { TimelineBuilder.convertToOverrideLite($0) }
 
-        refreshTask = Task { @MainActor in
-            let isToday = Calendar.current.isDateInToday(targetDate)
-            let hasExistingFootprints = !currentFootprints.isEmpty
-            let hasRawData = availableRawDates.contains(Calendar.current.startOfDay(for: targetDate))
-            
-            if !isToday && !hasExistingFootprints && !hasRawData {
-                self.timelineItems = []
-                self.isLoadingTimeline = false
-                TimelineBuilder.timelineCache[targetDate] = []
-                return
-            }
-
-            if self.timelineItems.isEmpty {
-                if let cached = TimelineBuilder.timelineCache[targetDate] {
-                    self.timelineItems = cached 
-                    self.isLoadingTimeline = false
-                } else {
-                    self.isLoadingTimeline = true
-                }
-            }
-            
-            if !self.timelineItems.isEmpty || TimelineBuilder.timelineCache[targetDate] != nil {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-            
-            if Task.isCancelled { return }
-            
-            let cachedItems = TimelineBuilder.timelineCache[targetDate]
-            let result = await Task.detached(priority: .userInitiated) {
-                let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
-                
-                if !force, let cached = cachedItems, !isToday, !cached.isEmpty {
-                    return (cached, rawPoints.map { $0.coordinate }, rawPoints.count)
-                }
-                
-                let items = TimelineBuilder.buildTimeline(
-                    for: targetDate, 
-                    footprints: fpsLite, 
-                    allRawPoints: rawPoints, 
-                    allPlaces: placesLite, 
-                    overrides: overridesLite
-                )
-                return (items, rawPoints.map { $0.coordinate }, rawPoints.count)
-            }.value
-            
-            let items = result.0
-            self.trajectoryPoints = result.1
-            self.totalPointsCount = result.2
-            
-            if Task.isCancelled { return }
-            
-            // --- 核心修复：将 TimelineBuilder 返回的临时克隆对象映射回数据库中的实时模型 ---
-            // 否则 UI 中的所有修改（收藏、编辑名称、换照片）都只会作用在内存克隆体上而无法持久化
-            let finalizedItems = items.map { item -> TimelineItem in
-                if case .footprint(let tempFp) = item {
-                    if let realFp = currentFootprints.first(where: { $0.footprintID == tempFp.footprintID }) {
-                        return .footprint(realFp)
-                    }
-                }
-                return item
-            }
-
-            if !self.timelineItems.isEmpty {
-                var mergedItems = finalizedItems
-                for i in 0..<mergedItems.count {
-                    if i < self.timelineItems.count {
-                        let old = self.timelineItems[i]
-                        let new = mergedItems[i]
-                        
-                        if case .footprint(let oldF) = old, case .footprint(let newF) = new {
-                            let oldTitle = oldF.title.trimmingCharacters(in: .whitespaces)
-                            let newTitle = newF.title.trimmingCharacters(in: .whitespaces)
-                            
-                            let isOldValid = !oldTitle.isEmpty && !["地点记录", "正在获取位置...", "在某地停留", ""].contains(oldTitle)
-                            let isNewPlaceholder = newTitle.isEmpty || ["地点记录", "正在获取位置...", "在某地停留", ""].contains(newTitle)
-                            
-                            if isOldValid && isNewPlaceholder && abs(oldF.startTime.timeIntervalSince(newF.startTime)) < 300 {
-                                mergedItems[i] = old
-                            }
-                        }
-                    }
-                }
-                self.timelineItems = mergedItems
-            } else {
-                self.timelineItems = finalizedItems
-            }
-            
-            TimelineBuilder.timelineCache[targetDate] = self.timelineItems
+        let isToday = Calendar.current.isDateInToday(targetDate)
+        let hasExistingFootprints = !currentFootprints.isEmpty
+        let hasRawData = availableRawDates.contains(Calendar.current.startOfDay(for: targetDate))
+        
+        if !isToday && !hasExistingFootprints && !hasRawData {
+            self.timelineItems = []
             self.isLoadingTimeline = false
+            TimelineBuilder.timelineCache[targetDate] = []
+            return
+        }
+
+        if self.timelineItems.isEmpty {
+            if let cached = TimelineBuilder.timelineCache[targetDate] {
+                self.timelineItems = cached 
+                self.isLoadingTimeline = false
+            } else {
+                self.isLoadingTimeline = true
+            }
+        }
+        
+        if !self.timelineItems.isEmpty || TimelineBuilder.timelineCache[targetDate] != nil {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        
+        if Task.isCancelled { return }
+        
+        let cachedItems = TimelineBuilder.timelineCache[targetDate]
+        let result = await Task.detached(priority: .userInitiated) {
+            let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
             
-            // 异步加载当天的照片用于地图显示
-            let start = Calendar.current.startOfDay(for: targetDate)
-            let end = Calendar.current.date(byAdding: .day, value: 1, to: start)!
-            PhotoService.shared.fetchAssets(startTime: start, endTime: end) { assets in
-                let filtered = assets.filter { $0.location != nil }
-                var finalAssets: [PHAsset] = []
-                
-                // 策略调整：不再全局限制 10 张，而是每个足迹/交通段最多显示 10 张最接近终点的照片
-                // 这样可以避免单个停留点产生上百个图标，同时保证全天的地理标记都能显示出来
-                if items.isEmpty {
-                    // 如果还没有生成时间线（比如刚进入），先取全局前 10 作为占位
-                    finalAssets = Array(filtered.suffix(10))
-                } else {
-                    for item in items {
-                        let itemStart = item.startTime
-                        let itemEnd = item.endTime
+            if !force, let cached = cachedItems, !isToday, !cached.isEmpty {
+                return (cached, rawPoints.map { $0.coordinate }, rawPoints.count)
+            }
+            
+            let items = TimelineBuilder.buildTimeline(
+                for: targetDate, 
+                footprints: fpsLite, 
+                allRawPoints: rawPoints, 
+                allPlaces: placesLite, 
+                overrides: overridesLite
+            )
+            return (items, rawPoints.map { $0.coordinate }, rawPoints.count)
+        }.value
+        
+        let items = result.0
+        self.trajectoryPoints = result.1
+        self.totalPointsCount = result.2
+        
+        if Task.isCancelled { return }
+        
+        // --- 核心修复：将 TimelineBuilder 返回的临时克隆对象映射回数据库中的实时模型 ---
+        // 否则 UI 中的所有修改（收藏、编辑名称、换照片）都只会作用在内存克隆体上而无法持久化
+        let finalizedItems = items.map { item -> TimelineItem in
+            if case .footprint(let tempFp) = item {
+                if let realFp = currentFootprints.first(where: { $0.footprintID == tempFp.footprintID }) {
+                    return .footprint(realFp)
+                }
+            }
+            return item
+        }
+
+        if !self.timelineItems.isEmpty {
+            var mergedItems = finalizedItems
+            for i in 0..<mergedItems.count {
+                if i < self.timelineItems.count {
+                    let old = self.timelineItems[i]
+                    let new = mergedItems[i]
+                    
+                    if case .footprint(let oldF) = old, case .footprint(let newF) = new {
+                        let oldTitle = oldF.title.trimmingCharacters(in: .whitespaces)
+                        let newTitle = newF.title.trimmingCharacters(in: .whitespaces)
                         
-                        let cluster = filtered.filter { asset in
-                            guard let creation = asset.creationDate else { return false }
-                            return creation >= itemStart && creation <= itemEnd
+                        let isOldValid = !oldTitle.isEmpty && !["地点记录", "正在获取位置...", "在某地停留", ""].contains(oldTitle)
+                        let isNewPlaceholder = newTitle.isEmpty || ["地点记录", "正在获取位置...", "在某地停留", ""].contains(newTitle)
+                        
+                        if isOldValid && isNewPlaceholder && abs(oldF.startTime.timeIntervalSince(newF.startTime)) < 300 {
+                            mergedItems[i] = old
                         }
-                        
-                        // 每个段取最新的 10 张
-                        finalAssets.append(contentsOf: cluster.suffix(10))
+                    }
+                }
+            }
+            self.timelineItems = mergedItems
+        } else {
+            self.timelineItems = finalizedItems
+        }
+        
+        TimelineBuilder.timelineCache[targetDate] = self.timelineItems
+        self.isLoadingTimeline = false
+        
+        // 异步加载当天的照片用于地图显示
+        let start = Calendar.current.startOfDay(for: targetDate)
+        let end = Calendar.current.date(byAdding: .day, value: 1, to: start)!
+        PhotoService.shared.fetchAssets(startTime: start, endTime: end) { assets in
+            let filtered = assets.filter { $0.location != nil }
+            var finalAssets: [PHAsset] = []
+            
+            // 策略调整：不再全局限制 10 张，而是每个足迹/交通段最多显示 10 张最接近终点的照片
+            // 这样可以避免单个停留点产生上百个图标，同时保证全天的地理标记都能显示出来
+            if items.isEmpty {
+                // 如果还没有生成时间线（比如刚进入），先取全局前 10 作为占位
+                finalAssets = Array(filtered.suffix(10))
+            } else {
+                for item in items {
+                    let itemStart = item.startTime
+                    let itemEnd = item.endTime
+                    
+                    let cluster = filtered.filter { asset in
+                        guard let creation = asset.creationDate else { return false }
+                        return creation >= itemStart && creation <= itemEnd
                     }
                     
-                    // 补充那些不在任何段里的零散照片（比如段与段之间的间隙），也限制 10 张
-                    let orphans = filtered.filter { asset in
-                        guard let creation = asset.creationDate else { return false }
-                        return !items.contains { creation >= $0.startTime && creation <= $0.endTime }
-                    }
-                    finalAssets.append(contentsOf: orphans.suffix(10))
+                    // 每个段取最新的 10 张
+                    finalAssets.append(contentsOf: cluster.suffix(10))
                 }
                 
-                self.dayPhotoAssets = finalAssets
+                // 补充那些不在任何段里的零散照片（比如段与段之间的间隙），也限制 10 张
+                let orphans = filtered.filter { asset in
+                    guard let creation = asset.creationDate else { return false }
+                    return !items.contains { creation >= $0.startTime && creation <= $0.endTime }
+                }
+                finalAssets.append(contentsOf: orphans.suffix(10))
             }
             
-            locationManager.backfillGaps(for: targetDate)
-            resolveTimelineAddresses(for: self.timelineItems)
+            self.dayPhotoAssets = finalAssets
         }
+        
+        locationManager.backfillGaps(for: targetDate)
+        resolveTimelineAddresses(for: self.timelineItems)
     }
     
     private func resolveTimelineAddresses(for items: [TimelineItem]) {
@@ -408,8 +465,8 @@ struct TimelinePageView: View {
                     }
                 }
             case .footprint(let footprint):
-                // 1. 自动关联缺失的照片（仅对已持久化的真实模型）
-                if footprint.photoAssetIDs.isEmpty && footprint.modelContext != nil {
+                // 1. 自动关联缺失或无效的照片（仅对已持久化的真实模型）
+                if footprint.modelContext != nil {
                     locationManager.linkPhotos(to: footprint, context: modelContext)
                 }
                 

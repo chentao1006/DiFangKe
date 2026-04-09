@@ -26,8 +26,13 @@ struct DFKMapView: View {
             }
             
             if !points.isEmpty {
+                // 背景边框: 稍微粗一点，使用系统背景色
                 MapPolyline(coordinates: points)
-                    .stroke(Color.dfkAccent, lineWidth: isInteractive ? 5 : 3)
+                    .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: (isInteractive ? 5 : 3) + 2.5, lineCap: .round, lineJoin: .round))
+                
+                // 主轨迹线
+                MapPolyline(coordinates: points)
+                    .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: isInteractive ? 5 : 3, lineCap: .round, lineJoin: .round))
             }
             
             if let mainCoord = mainAnnotationCoordinate {

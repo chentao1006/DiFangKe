@@ -546,7 +546,7 @@ class OpenAIService {
         
         let footprintList = footprintDescriptions.enumerated().map { "\($0 + 1). \($1)" }.joined(separator: "\n")
         let prompt = """
-        请根据以下用户今天的足迹列表，写一段极简的晚间回顾文案（20字以内）。
+        请根据以下用户今天的足迹列表，写一段极简的晚间回顾文案（15字以内）。
         
         要求：
         1. 必须结合足迹列表中的具体地点名称或活动内容进行创作，不可仅使用空洞的通用语。
@@ -568,14 +568,14 @@ class OpenAIService {
         ]
         
         guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
-            completion("那些路过的街头巷尾，都藏着今天的独家记忆。")
+            completion("路过的街头，藏着今天的独家记忆。")
             return
         }
         
         URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 print("Summary Error: \(error.localizedDescription)")
-                DispatchQueue.main.async { completion("那些路过的街头巷尾，都藏着今天的独家记忆。") }
+                DispatchQueue.main.async { completion("路过的街头，藏着今天的独家记忆。") }
                 return
             }
             
@@ -583,7 +583,71 @@ class OpenAIService {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let choices = json["choices"] as? [[String: Any]],
                   let content = (choices.first?["message"] as? [String: Any])?["content"] as? String else {
-                DispatchQueue.main.async { completion("那些路过的街头巷尾，都藏着今天的独家记忆。") }
+                DispatchQueue.main.async { completion("路过的街头，藏着今天的独家记忆。") }
+                return
+            }
+            
+            DispatchQueue.main.async {
+                completion(content.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }.resume()
+    }
+    
+    func generateAndSaveDailySummary(for date: Date, footprints: [Footprint], modelContext: ModelContext) {
+        guard !footprints.isEmpty else { return }
+        
+        let sorted = footprints.sorted { $0.startTime < $1.startTime }
+        let descriptions = sorted.compactMap { fp -> String? in
+            let title = fp.title.isEmpty ? "点位记录" : fp.title
+            if title == "正在获取位置..." || title == "点位记录" { return nil }
+            let time = fp.startTime.formatted(.dateTime.hour().minute())
+            return "[\(time)] \(title)"
+        }
+        
+        guard !descriptions.isEmpty else { return }
+        
+        generateDailySummary(footprintDescriptions: descriptions) { summary in
+            Task { @MainActor in
+                let startOfDay = Calendar.current.startOfDay(for: date)
+                let descriptor = FetchDescriptor<DailyInsight>()
+                let allSummaries = (try? modelContext.fetch(descriptor)) ?? []
+                
+                if let existing = allSummaries.first(where: { 
+                    guard let d = $0.date else { return false }
+                    return Calendar.current.isDate(d, inSameDayAs: startOfDay) 
+                }) {
+                    existing.content = summary
+                    existing.aiGenerated = true
+                    try? modelContext.save()
+                } else {
+                    let newSummary = DailyInsight(date: startOfDay, content: summary, aiGenerated: true)
+                    modelContext.insert(newSummary)
+                    try? modelContext.save()
+                }
+            }
+        }
+    }
+    
+    func getCustomSummary(prompt: String, completion: @escaping (String?) -> Void) {
+        let body: [String: Any] = [
+            "messages": [
+                ["role": "system", "content": "You are a warm, poetic life companion. You summarize data into a short, touching sentence in Chinese."],
+                ["role": "user", "content": prompt]
+            ],
+            "temperature": 0.7
+        ]
+        
+        guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
+            completion(nil)
+            return
+        }
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let content = (choices.first?["message"] as? [String: Any])?["content"] as? String else {
+                DispatchQueue.main.async { completion(nil) }
                 return
             }
             
