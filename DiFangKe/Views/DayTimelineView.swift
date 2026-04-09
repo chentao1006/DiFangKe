@@ -474,7 +474,7 @@ struct DayTimelineView: View {
         
         Image(systemName: icon)
             .font(.system(size: 14, weight: .semibold))
-            .foregroundColor(isDisabled ? .secondary.opacity(0.2) : .secondary)
+            .foregroundColor(isDisabled ? .secondary.opacity(0.5) : .primary)
             .frame(width: 32, height: 32)
             .background(Circle().fill(Color.secondary.opacity(0.1)))
             .contentShape(Circle())

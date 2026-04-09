@@ -529,7 +529,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         super.init()
         self.locationManager.delegate = self
         self.locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters // 恢复平衡精度
-        self.locationManager.distanceFilter = 20.0 // 恢复常规频率
+        self.locationManager.distanceFilter = 10.0 // 提高记录频率，从 20m 减至 10m
         self.locationManager.allowsBackgroundLocationUpdates = true
         self.locationManager.pausesLocationUpdatesAutomatically = true // 允许自动暂停以省电
         self.locationManager.showsBackgroundLocationIndicator = false
@@ -1046,24 +1046,24 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 manager.activityType = .other
             }
         } else if speed > 25.0 {
-            // 超高速移动中 (时速 > 90km/h)：公里精度，极大省电
+            // 超高速移动中 (时速 > 90km/h)：公里精度，提高采样频率以优化轨迹曲线
             if manager.desiredAccuracy != kCLLocationAccuracyKilometer {
                 manager.desiredAccuracy = kCLLocationAccuracyKilometer
-                manager.distanceFilter = 500.0
+                manager.distanceFilter = 250.0 // 从 500m 降低到 250m
                 manager.activityType = .automotiveNavigation
             }
-        } else if speed > 10.0 {
-            // 高速移动中 (时速 > 36km/h)：中等精度
+        } else if speed > 12.0 {
+            // 高速移动中 (时速 > 43km/h)：中等精度，显著提高采样频率
             if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters {
                 manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-                manager.distanceFilter = 200.0
+                manager.distanceFilter = 60.0 // 从 200m 降低到 60m，确保城市快速路轨迹连贯
                 manager.activityType = .automotiveNavigation
             }
         } else {
             // 移动中 (步行、骑行或刚到达)：恢复高精度录入以确保轨迹准确
             if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
                 manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-                manager.distanceFilter = 20.0
+                manager.distanceFilter = 10.0 // 从 20m 降低到 10m
                 manager.activityType = .fitness
             }
         }
