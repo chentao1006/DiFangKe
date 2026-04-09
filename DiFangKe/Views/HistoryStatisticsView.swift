@@ -273,7 +273,7 @@ struct HistoryStatisticsView: View {
     // MARK: - Heatmap Section (Thermal Style)
     private var heatmapSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("常去地点回响", icon: "map.fill")
+            sectionHeader("常去地点", icon: "map.fill")
             
             let topLocations = getTopLocations()
             
@@ -306,18 +306,18 @@ struct HistoryStatisticsView: View {
             
             ZStack {
                 // Outer glow
-                let size = CGFloat(max(30, min(140, intensity * 10)))
+                let size = CGFloat(max(25, min(120, intensity * 8)))
                 Circle()
-                    .fill(RadialGradient(colors: [color.opacity(0.4), .clear], center: .center, startRadius: 0, endRadius: size/2))
+                    .fill(RadialGradient(colors: [color.opacity(0.3), .clear], center: .center, startRadius: 0, endRadius: size/2))
                     .frame(width: size, height: size)
-                    .blur(radius: size/8) // Reduced from size/4
+                    .blur(radius: size/12)
                 
                 // Core
-                let coreSize = CGFloat(max(10, min(50, intensity * 4)))
+                let coreSize = CGFloat(max(8, min(40, intensity * 3)))
                 Circle()
-                    .fill(RadialGradient(colors: [color, color.opacity(0.3), .clear], center: .center, startRadius: 0, endRadius: coreSize/2))
+                    .fill(RadialGradient(colors: [color, color.opacity(0.25), .clear], center: .center, startRadius: 0, endRadius: coreSize/2))
                     .frame(width: coreSize, height: coreSize)
-                    .blur(radius: coreSize/10) // Reduced from coreSize/6
+                    .blur(radius: coreSize/15)
             }
         }
     }
@@ -325,7 +325,7 @@ struct HistoryStatisticsView: View {
     // MARK: - Activity Rank Section
     private var activityRankSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            sectionHeader("活动偏好排行", icon: "chart.bar.fill")
+            sectionHeader("活动偏好排行", icon: "medal.fill")
             
             let data = getActivityRankData()
             let maxCount = data.first?.count ?? 1
@@ -370,7 +370,7 @@ struct HistoryStatisticsView: View {
     // MARK: - Trend Section
     private var trendSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("成长轨迹总览", icon: "waveform.path.ecg")
+            sectionHeader("生活活跃趋势", icon: "chart.line.uptrend.xyaxis")
             
             let data = getTrendData()
             
@@ -403,16 +403,38 @@ struct HistoryStatisticsView: View {
                         }
                     }
                     .chartXAxis {
-                        AxisMarks(values: .stride(by: .day, count: selectedRange == .last7Days ? 1 : 7)) { value in
-                            AxisValueLabel(format: .dateTime.month().day())
-                                .font(.system(size: 9))
+                        switch selectedRange {
+                        case .last7Days:
+                            AxisMarks(values: .stride(by: .day, count: 1)) { _ in
+                                AxisTick()
+                                AxisValueLabel(format: .dateTime.month().day())
+                                    .font(.system(size: 9))
+                            }
+                        case .last30Days:
+                            AxisMarks(values: .stride(by: .day, count: 7)) { _ in
+                                AxisTick()
+                                AxisValueLabel(format: .dateTime.month().day())
+                                    .font(.system(size: 9))
+                            }
+                        case .last90Days:
+                            AxisMarks(values: .stride(by: .day, count: 15)) { _ in
+                                AxisTick()
+                                AxisValueLabel(format: .dateTime.month().day())
+                                    .font(.system(size: 9))
+                            }
+                        case .lastYear, .all:
+                            AxisMarks(values: .stride(by: .month, count: 2)) { _ in
+                                AxisTick()
+                                AxisValueLabel(format: .dateTime.month())
+                                    .font(.system(size: 9))
+                            }
                         }
                     }
                     .chartYAxis(.hidden)
                     .frame(height: 180)
                     .padding(.horizontal, 8)
                     
-                    Text("综合统计：涵盖足迹密度、探索点位及视觉留存的多维生命力指数")
+                    Text("数据说明：综合了你的出行频率、去过的地方和拍下的照片")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary.opacity(0.6))
                         .padding(.leading, 12)
@@ -533,7 +555,19 @@ struct HistoryStatisticsView: View {
     private func getTrendData() -> [TrendItem] {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
-        let days = selectedRange.days ?? 90
+        
+        let days: Int
+        if let rangeDays = selectedRange.days {
+            days = rangeDays
+        } else {
+            // "全部" 模式：计算最早足迹到今天的天数
+            if let earliest = filteredFootprints.last?.startTime {
+                let diff = calendar.dateComponents([.day], from: calendar.startOfDay(for: earliest), to: today).day ?? 0
+                days = max(1, diff + 1)
+            } else {
+                days = 90
+            }
+        }
         
         var points: [TrendItem] = []
         let grouped = Dictionary(grouping: filteredFootprints) { calendar.startOfDay(for: $0.startTime) }

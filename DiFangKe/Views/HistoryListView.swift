@@ -220,12 +220,12 @@ struct HistoryListView: View {
     
     private var contentArea: some View {
         TabView(selection: $viewMode) {
-            HistoryWeekView(summaries: cachedSummaries, targetDate: initialDate, hasScrolled: $hasScrolledWeek, requestSummary: ensureSummary) { date in
+            HistoryWeekView(summaries: cachedSummaries, targetDate: initialDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledWeek, requestSummary: ensureSummary) { date in
                 showingDate = IdentifiableDate(date: date)
             }
             .tag(ViewMode.week)
             
-            HistoryMonthView(summaries: cachedSummaries, targetDate: initialDate, hasScrolled: $hasScrolledMonth, requestSummary: ensureSummary) { date in
+            HistoryMonthView(summaries: cachedSummaries, targetDate: initialDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledMonth, requestSummary: ensureSummary) { date in
                 showingDate = IdentifiableDate(date: date)
             }
             .tag(ViewMode.month)
@@ -239,6 +239,10 @@ struct HistoryListView: View {
             
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
+    }
+    
+    private var earliestFootprintDate: Date {
+        allFootprints.last?.startTime ?? Calendar.current.startOfDay(for: Date())
     }
     
     private func updateSummaries() {
@@ -379,20 +383,29 @@ struct HistoryListView: View {
 struct HistoryWeekView: View {
     let summaries: [Date: DaySummary]
     let targetDate: Date
+    let earliestDate: Date
     @Binding var hasScrolled: Bool
     let requestSummary: (Date) -> Void
     let onDayTap: (Date) -> Void
+    
+    @State private var weeksLimit: Int = 15 // 每页预加载多一些周
+    
+    var weeksCount: Int {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let startOfTodayWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today))!
+        let startOfEarliestWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: earliestDate))!
+        return calendar.dateComponents([.weekOfYear], from: startOfEarliestWeek, to: startOfTodayWeek).weekOfYear ?? 0
+    }
     
     var weeks: [[Date]] {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
         let startOfTodayWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today))!
-        // Default to a long history, summaries are loaded lazily
-        let startDate = calendar.date(byAdding: .year, value: -3, to: today)!
-        let startOfEarliestWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: startDate))!
-        let weekCount = calendar.dateComponents([.weekOfYear], from: startOfEarliestWeek, to: startOfTodayWeek).weekOfYear ?? 0
         
-        return (0...weekCount).map { weekOffset in
+        let count = min(weeksLimit, weeksCount)
+        
+        return (0...count).map { weekOffset in
             let startOfWeek = calendar.date(byAdding: .weekOfYear, value: -weekOffset, to: startOfTodayWeek)!
             return (0..<7).compactMap { dayOffset in
                 calendar.date(byAdding: .day, value: 6 - dayOffset, to: startOfWeek)
@@ -424,15 +437,39 @@ struct HistoryWeekView: View {
                             .id("week-" + monday.dayID)
                         }
                     }
+                    
+                    if weeksLimit < weeksCount {
+                        ProgressView()
+                            .padding()
+                            .onAppear {
+                                // 滚动到底部时自动加载更多
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    weeksLimit += 15
+                                }
+                            }
+                    }
                 }
                 .padding(.top)
             }
+            .onAppear {
+                adjustLimitForTarget()
+            }
             .task(id: targetDate) {
                 if !hasScrolled {
+                    adjustLimitForTarget()
                     try? await Task.sleep(nanoseconds: 500_000_000)
                     scrollToTarget(proxy: proxy)
                 }
             }
+        }
+    }
+    
+    private func adjustLimitForTarget() {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let weeksToTarget = calendar.dateComponents([.weekOfYear], from: targetDate, to: today).weekOfYear ?? 0
+        if weeksToTarget >= weeksLimit {
+            weeksLimit = weeksToTarget + 5
         }
     }
     
@@ -563,14 +600,25 @@ struct DayStatsView: View {
 struct HistoryMonthView: View {
     let summaries: [Date: DaySummary]
     let targetDate: Date
+    let earliestDate: Date
     @Binding var hasScrolled: Bool
     let requestSummary: (Date) -> Void
     let onDayTap: (Date) -> Void
     
+    @State private var monthsLimit: Int = 12 // 每页预加载多一些月
+    
+    var monthsCount: Int {
+        let calendar = Calendar.current
+        let today = Date().startOfMonth ?? Date()
+        let startOfEarliestMonth = earliestDate.startOfMonth ?? earliestDate
+        return (calendar.dateComponents([.month], from: startOfEarliestMonth, to: today).month ?? 0)
+    }
+    
     var months: [Date] {
         let calendar = Calendar.current
         let today = Date().startOfMonth ?? Date()
-        return (0...36).compactMap { calendar.date(byAdding: .month, value: -$0, to: today) }
+        let count = min(monthsLimit, monthsCount)
+        return (0...count).compactMap { calendar.date(byAdding: .month, value: -$0, to: today) }
     }
     
     var body: some View {
@@ -583,16 +631,39 @@ struct HistoryMonthView: View {
                         }
                         .id("month-" + month.dayID)
                     }
+                    
+                    if monthsLimit < monthsCount {
+                        ProgressView()
+                            .padding()
+                            .onAppear {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    monthsLimit += 12
+                                }
+                            }
+                    }
                 }
                 .padding(.bottom, 30)
             }
             .background(Color.dfkBackground)
+            .onAppear {
+                adjustLimitForTarget()
+            }
             .task(id: targetDate) {
                 if !hasScrolled {
+                    adjustLimitForTarget()
                     try? await Task.sleep(nanoseconds: 100_000_000)
                     scrollToTarget(proxy: proxy)
                 }
             }
+        }
+    }
+    
+    private func adjustLimitForTarget() {
+        let calendar = Calendar.current
+        let today = Date().startOfMonth ?? Date()
+        let monthsToTarget = calendar.dateComponents([.month], from: targetDate.startOfMonth ?? targetDate, to: today).month ?? 0
+        if monthsToTarget >= monthsLimit {
+            monthsLimit = monthsToTarget + 3
         }
     }
     
