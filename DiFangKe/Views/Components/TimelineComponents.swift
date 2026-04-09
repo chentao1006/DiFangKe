@@ -759,14 +759,48 @@ struct PlaceholderFootprintCard: View {
         "第一段记忆正在慢慢发酵..."
     ]
     
+    @Environment(LocationManager.self) private var locationManager
     @State private var phrase: String = ""
+    
+    private var contextTip: String? {
+        let now = Date()
+        let calendar = Calendar.current
+        let hour = calendar.component(.hour, from: now)
+        
+        // 1. 深度停留提示 (User's request)
+        if let startLoc = locationManager.potentialStopStartLocation {
+            let duration = now.timeIntervalSince(startLoc.timestamp)
+            if duration > 8 * 3600 {
+                return "要不出去走走？世界那么大，去记录一下吧 🌲"
+            } else if duration > 4 * 3600 {
+                return "你已经在这里停留好久了，想去探索新地方吗？☕️"
+            }
+        }
+        
+        // 2. 移动状态提示
+        if let location = locationManager.lastLocation, location.speed > 1.0 {
+            let speedKmh = location.speed * 3.6
+            if speedKmh > 20 {
+                return "正在飞驰中，今日的故事正在加速落笔 🚄"
+            }
+        }
+        
+        // 3. 时间维度提示
+        if hour >= 23 || hour <= 4 {
+            return "夜深了，今日的记忆正在做最后的收纳... 🌙"
+        } else if hour >= 5 && hour <= 8 {
+            return "早安！新的旅程正在为您捕捉第一段足迹 ☀️"
+        }
+        
+        return nil
+    }
     
     var body: some View {
         TimelineView(.animation) { timeline in
             let now = timeline.date.timeIntervalSinceReferenceDate
             let phase = (now.truncatingRemainder(dividingBy: 3.5)) / 3.5
             let sinValue = sin(phase * .pi * 2)
-            let opacity = 0.5 + (sinValue + 1.0) / 2.0 * 1
+            let opacity = 0.7 + (sinValue + 1.0) * 0.15
             
             HStack(alignment: .top, spacing: 0) {
                 VStack(spacing: 0) {
@@ -783,11 +817,19 @@ struct PlaceholderFootprintCard: View {
                 }
                 .frame(width: 40)
                 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(phrase)
-                        .font(.system(.headline, design: .rounded))
-                        .foregroundColor(.secondary.opacity(0.4))
-                        .lineLimit(2)
+                VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(phrase)
+                            .font(.system(.headline, design: .rounded))
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                        
+                        if let tip = contextTip {
+                            Text(tip)
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .foregroundColor(.secondary.opacity(0.6))
+                        }
+                    }
                     
                     VStack(alignment: .leading, spacing: 8) {
                         RoundedRectangle(cornerRadius: 2)

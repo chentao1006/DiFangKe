@@ -166,8 +166,10 @@ struct TimelinePageView: View {
                 
                 if offset > 0 {
                     futurePlaceholderView
+                        .padding(.horizontal, 24)
                 } else if offset == pastLimitOffset {
                     pastPlaceholderView
+                        .padding(.horizontal, 24)
                 } else {
                     summaryCardSection(isToday: isToday)
                     timelineListSection(isToday: isToday)

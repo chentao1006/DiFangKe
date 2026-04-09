@@ -11,6 +11,28 @@ import UIKit
 class OpenAIService {
     static let shared = OpenAIService()
     
+    private init() {
+        NotificationCenter.default.addObserver(forName: UIApplication.significantTimeChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshQuotesIfDayChanged()
+            }
+        }
+    }
+    
+    private func refreshQuotesIfDayChanged() {
+        // 如果发现缓存的日期不是今天了，说明已经跨天
+        if let date = cacheDate, !Calendar.current.isDateInToday(date) {
+            // 直接重新进入队列获取最新的明天寄语
+            self.taskQueue.append(.tomorrowQuote)
+            self.processQueue()
+        }
+        
+        if let date = pastCacheDate, !Calendar.current.isDateInToday(date) {
+            self.taskQueue.append(.pastQuote)
+            self.processQueue()
+        }
+    }
+    
     enum AITask {
         case footprint(PersistentIdentifier)
         case dailySummary(Date, [PersistentIdentifier])
@@ -131,12 +153,40 @@ class OpenAIService {
         return request
     }
 
-    // MARK: - Task Cache
-    private var cachedTomorrowQuote: (String, String)?
-    private var cacheDate: Date?
+    // MARK: - Task Cache (Persistent)
+    private var cachedTomorrowQuote: (String, String)? {
+        get {
+            guard let title = UserDefaults.standard.string(forKey: "cachedTomorrowQuoteTitle"),
+                  let sub = UserDefaults.standard.string(forKey: "cachedTomorrowQuoteSub") else { return nil }
+            return (title, sub)
+        }
+        set {
+            UserDefaults.standard.set(newValue?.0, forKey: "cachedTomorrowQuoteTitle")
+            UserDefaults.standard.set(newValue?.1, forKey: "cachedTomorrowQuoteSub")
+        }
+    }
     
-    private var cachedPastQuote: (String, String)?
-    private var pastCacheDate: Date?
+    private var cacheDate: Date? {
+        get { UserDefaults.standard.object(forKey: "cacheDate") as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: "cacheDate") }
+    }
+    
+    private var cachedPastQuote: (String, String)? {
+        get {
+            guard let title = UserDefaults.standard.string(forKey: "cachedPastQuoteTitle"),
+                  let sub = UserDefaults.standard.string(forKey: "cachedPastQuoteSub") else { return nil }
+            return (title, sub)
+        }
+        set {
+            UserDefaults.standard.set(newValue?.0, forKey: "cachedPastQuoteTitle")
+            UserDefaults.standard.set(newValue?.1, forKey: "cachedPastQuoteSub")
+        }
+    }
+    
+    private var pastCacheDate: Date? {
+        get { UserDefaults.standard.object(forKey: "pastCacheDate") as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: "pastCacheDate") }
+    }
 
     // MARK: - Queue Management
     
@@ -165,6 +215,12 @@ class OpenAIService {
     }
     
     func enqueueTomorrowQuote(completion: @escaping (String, String) -> Void) {
+        // 优先检查持久化缓存，确保持续可用
+        if let cache = cachedTomorrowQuote, let date = cacheDate, Calendar.current.isDateInToday(date) {
+            completion(cache.0, cache.1)
+            return
+        }
+        
         self.tomorrowQuoteCompletions.append(completion)
         if !self.taskQueue.contains(where: { if case .tomorrowQuote = $0 { return true }; return false }) {
             self.taskQueue.append(.tomorrowQuote)
@@ -173,6 +229,12 @@ class OpenAIService {
     }
     
     func enqueuePastQuote(completion: @escaping (String, String) -> Void) {
+        // 优先检查持久化缓存
+        if let cache = cachedPastQuote, let date = pastCacheDate, Calendar.current.isDateInToday(date) {
+            completion(cache.0, cache.1)
+            return
+        }
+        
         self.pastQuoteCompletions.append(completion)
         if !self.taskQueue.contains(where: { if case .pastQuote = $0 { return true }; return false }) {
             self.taskQueue.append(.pastQuote)
