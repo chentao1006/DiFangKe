@@ -75,10 +75,10 @@ struct TimelinePageView: View {
                 timelineScrollView
                     .refreshable {
                         // 1. 同步远程原始轨迹
-                        locationManager.performRawDataSync()
+                        await locationManager.performRawDataSync()
                         
                         // 2. 触发位置碎片合并计算
-                        locationManager.triggerTimelineSift()
+                        await locationManager.triggerTimelineSift()
                         
                         // 3. 强制异步刷新当前页面的时间线显示
                         await refreshTimelineAsync(force: true)

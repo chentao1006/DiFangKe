@@ -555,7 +555,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.performRawDataSync()
+                await self?.performRawDataSync()
             }
         }
         
@@ -602,9 +602,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         refreshTimer = Timer.publish(every: 3600, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                self?.triggerTimelineSift()
-                self?.checkMidnightSift()
-                self?.performRawDataSync()
+                Task {
+                    await self?.triggerTimelineSift()
+                    self?.checkMidnightSift()
+                    await self?.performRawDataSync()
+                }
             }
         
         // Initial check on launch
@@ -629,20 +631,20 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // Debounce to max once every 15 mins for location changes
         if abs(lastLocationChangeSift.timeIntervalSinceNow) > 15 * 60 {
             lastLocationChangeSift = Date()
-            triggerTimelineSift()
+            Task {
+                await triggerTimelineSift()
+            }
         }
     }
     
-    func triggerTimelineSift() {
+    func triggerTimelineSift() async {
         // This is called on triggers: position change, app start, hourly
         // Since TimelineBuilder works on the footprints in DB, we mainly need to ensure 
         // the footprints are consolidated and analyzed.
         let container = modelContext?.container
-        Task.detached(priority: .background) { [weak self] in
-            guard let self = self, let container = container else { return }
-            let context = ModelContext(container)
-            await self.consolidateFootprints(in: context)
-        }
+        guard let container = container else { return }
+        let context = ModelContext(container)
+        await self.consolidateFootprints(in: context)
     }
     
     private func siftYesterday() {
@@ -767,7 +769,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // On app open, force a fresh high-accuracy location fix
         locationManager.requestLocation() // This will trigger a one-time precise update
         
-        triggerTimelineSift()
+        Task {
+            await triggerTimelineSift()
+        }
         
         // 后台异步执行维护任务，避免卡启动画面
         let container = modelContext?.container
@@ -2175,49 +2179,47 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     /// 执行原始轨迹数据的 iCloud 同步
-    func performRawDataSync(showOverlay: Bool = false) {
+    func performRawDataSync(showOverlay: Bool = false) async {
         guard UserDefaults.standard.bool(forKey: "isICloudSyncEnabled") || showOverlay else { return }
         
-        Task {
-            if showOverlay {
+        if showOverlay {
+            await MainActor.run {
+                isSyncingInitialData = true
+                syncStatusMessage = "正在同步云端数据..."
+            }
+        }
+        
+        do {
+            let count = try await RawLocationStore.shared.syncToiCloud()
+            if count > 0 {
                 await MainActor.run {
-                    isSyncingInitialData = true
-                    syncStatusMessage = "正在同步云端数据..."
+                    self.refreshAvailableRawDates()
+                    self.lastRawDataUpdateTrigger = Date()
                 }
+                await self.loadPointsFromStore() // 重新从同步后的本地文件评估当前停留时长
             }
             
-            do {
-                let count = try await RawLocationStore.shared.syncToiCloud()
-                if count > 0 {
-                    await MainActor.run {
-                        self.refreshAvailableRawDates()
-                        self.lastRawDataUpdateTrigger = Date()
-                    }
-                    await self.loadPointsFromStore() // 重新从同步后的本地文件评估当前停留时长
-                }
-                
-                if showOverlay {
-                    await MainActor.run {
-                        syncStatusMessage = "同步完成"
-                        // 延迟消失
-                        Task {
-                            try? await Task.sleep(nanoseconds: 1 * 1_000_000_000)
-                            await MainActor.run {
-                                isSyncingInitialData = false
-                            }
+            if showOverlay {
+                await MainActor.run {
+                    syncStatusMessage = "同步完成"
+                    // 延迟消失
+                    Task {
+                        try? await Task.sleep(nanoseconds: 1 * 1_000_000_000)
+                        await MainActor.run {
+                            isSyncingInitialData = false
                         }
                     }
                 }
-            } catch {
-                print("Raw location sync failed: \(error)")
-                if showOverlay {
-                    await MainActor.run {
-                        syncStatusMessage = "同步失败: \(error.localizedDescription)"
-                        Task {
-                            try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
-                            await MainActor.run {
-                                isSyncingInitialData = false
-                            }
+            }
+        } catch {
+            print("Raw location sync failed: \(error)")
+            if showOverlay {
+                await MainActor.run {
+                    syncStatusMessage = "同步失败: \(error.localizedDescription)"
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
+                        await MainActor.run {
+                            isSyncingInitialData = false
                         }
                     }
                 }

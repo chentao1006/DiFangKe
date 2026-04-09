@@ -137,7 +137,9 @@ struct DayTimelineView: View {
                 
                 // 探测重装/首次同步
                 if !UserDefaults.standard.bool(forKey: "didInitialSyncAfterInstall") {
-                    locationManager.performRawDataSync(showOverlay: true)
+                    Task {
+                        await locationManager.performRawDataSync(showOverlay: true)
+                    }
                     UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
                 }
             }
