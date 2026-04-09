@@ -14,10 +14,12 @@ struct FootprintModalView: View {
     @ObservedObject var photoService = PhotoService.shared
     @Bindable var footprint: Footprint
     var allPlaces: [Place] = []
+    var onDismiss: ((Bool) -> Void)? = nil
     
     @Query private var savedPlaces: [Place]
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
     
+    @State private var hasChanged = false
     @State private var showMap = false
     @State private var showAI = false
     @FocusState private var titleFocused: Bool
@@ -42,6 +44,13 @@ struct FootprintModalView: View {
     @State private var showingSearchSheet = false
     @State private var showingActivityTypeEditor = false
     
+    init(footprint: Footprint, allPlaces: [Place] = [], autoFocus: Bool = false, onDismiss: ((Bool) -> Void)? = nil) {
+        self._footprint = Bindable(footprint)
+        self.allPlaces = allPlaces
+        self.autoFocus = autoFocus
+        self.onDismiss = onDismiss
+    }
+    
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @State private var isGeneratingAI = false
     @State private var showingAINotEnabledAlert = false
@@ -51,13 +60,21 @@ struct FootprintModalView: View {
     
     private func ensureFootprintManaged() {
         if footprint.modelContext == nil {
-            // 对于 fillGap 产生的“幻影”足迹 (locationHash == "GAP_STAY")，
-            // 必须先插入 Context 才能持久化。
+            // 核心修复：防止因编辑“幻影”克隆体导致数据库产生重复记录
+            let uuid = footprint.footprintID
+            let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == uuid })
+            let count = (try? modelContext.fetchCount(descriptor)) ?? 0
+            if count > 0 {
+                // 如果数据库里已经有这个 UUID 的记录了，说明这一支是克隆出来的，不应重复插入
+                return
+            }
+            
             modelContext.insert(footprint)
-            // 一旦插入，就不再仅仅是瞬时的 gap
-            if footprint.locationHash == "GAP_STAY" {
+            // 注意：幻影足迹的 hash 是带时间戳后缀的 (如 GAP_STAY_12345)，所以必须用 hasPrefix
+            if footprint.locationHash.hasPrefix("GAP_STAY") {
                 footprint.locationHash = "MANUAL_STAY"
             }
+            try? modelContext.save()
         }
     }
     
@@ -95,6 +112,7 @@ struct FootprintModalView: View {
                         withAnimation(.spring(response: 0.3)) {
                             ensureFootprintManaged()
                             footprint.isHighlight = !(footprint.isHighlight ?? false)
+                            hasChanged = true
                             try? modelContext.save()
                         }
                     } label: {
@@ -107,6 +125,7 @@ struct FootprintModalView: View {
                     Button("完成") { 
                         checkAndGenerateAIContent()
                         try? modelContext.save()
+                        onDismiss?(hasChanged)
                         dismiss() 
                     }.fontWeight(.bold)
                 }
@@ -144,6 +163,8 @@ struct FootprintModalView: View {
                     refreshAddress()
                 }
                 
+                enrichPlaceIfNeeded()
+                
                 // 为地图获取照片，并应用每个足迹最多 10 张的显示策略
                 PhotoService.shared.fetchAssets(startTime: footprint.startTime, endTime: footprint.endTime) { assets in
                     let filtered = assets.filter { $0.location != nil }
@@ -176,6 +197,7 @@ struct FootprintModalView: View {
                                         var ids = footprint.photoAssetIDs
                                         ids.append(id)
                                         footprint.photoAssetIDs = ids
+                                        hasChanged = true
                                     }
                                     try? modelContext.save()
                                 }
@@ -205,6 +227,7 @@ struct FootprintModalView: View {
                                     var ids = footprint.photoAssetIDs
                                     ids.append(id)
                                     footprint.photoAssetIDs = ids
+                                    hasChanged = true
                                 }
                                 try? modelContext.save()
                             }
@@ -265,6 +288,7 @@ struct FootprintModalView: View {
             var ids = footprint.photoAssetIDs
             ids.removeAll(where: { $0 == assetID })
             footprint.photoAssetIDs = ids
+            hasChanged = true
             try? modelContext.save()
         }
         photoToDelete = nil
@@ -311,11 +335,13 @@ struct FootprintModalView: View {
                                 titleFocused = false
                                 ensureFootprintManaged()
                                 footprint.aiAnalyzed = true
+                                hasChanged = true
                                 try? modelContext.save() 
                             }
                             .onChange(of: footprint.title) { _, _ in 
                                 if !isAIPerformingUpdate {
                                     footprint.isTitleEditedByHand = true
+                                    hasChanged = true
                                 }
                                 footprint.aiAnalyzed = true 
                             }
@@ -334,104 +360,270 @@ struct FootprintModalView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(titleFocused ? Color.dfkAccent.opacity(0.3) : Color.clear, lineWidth: 1))
                 .onTapGesture { titleFocused = true }
                 
-                Menu {
-                    Button {
-                        withAnimation {
-                            ensureFootprintManaged()
-                            footprint.activityTypeValue = nil
-                            try? modelContext.save()
-                        }
-                    } label: {
-                        Label("无", systemImage: "circle.slash")
-                    }
-                    ForEach(allActivities) { type in
+                VStack(alignment: .trailing, spacing: 0) {
+                    Menu {
                         Button {
                             withAnimation {
                                 ensureFootprintManaged()
-                                footprint.activityTypeValue = type.id.uuidString
+                                footprint.activityTypeValue = nil
+                                hasChanged = true
                                 try? modelContext.save()
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             }
                         } label: {
-                            Label(type.name, systemImage: type.icon)
+                            Label("无", systemImage: "circle.slash")
                         }
-                    }
-                    
-                    Divider()
-                    
-                    Button {
-                        showingActivityTypeEditor = true
-                    } label: {
-                        Label("添加活动类型", systemImage: "plus")
-                    }
-                } label: {
-                    ZStack {
-                        if isGeneratingAI {
-                            ProgressView()
-                                .scaleEffect(0.8)
-                        } else {
-                            if let activity = footprint.getActivityType(from: allActivities) {
-                                Image(systemName: activity.icon)
-                                    .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(activity.color)
-                            } else {
-                                Image(systemName: "hand.tap.fill")
-                                    .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(.secondary.opacity(0.7))
+                        ForEach(allActivities) { type in
+                            Button {
+                                withAnimation {
+                                    ensureFootprintManaged()
+                                    footprint.activityTypeValue = type.id.uuidString
+                                    hasChanged = true
+                                    try? modelContext.save()
+                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                }
+                            } label: {
+                                Label(type.name, systemImage: type.icon)
                             }
                         }
+                        
+                        Divider()
+                        
+                        Button {
+                            showingActivityTypeEditor = true
+                        } label: {
+                            Label("添加活动类型", systemImage: "plus")
+                        }
+                    } label: {
+                        ZStack {
+                            if isGeneratingAI {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                            } else {
+                                if let activity = footprint.getActivityType(from: allActivities) {
+                                    Image(systemName: activity.icon)
+                                        .font(.system(size: 18, weight: .semibold))
+                                        .foregroundColor(activity.color)
+                                } else {
+                                    Image(systemName: "questionmark.circle.dashed")
+                                        .font(.system(size: 18, weight: .semibold))
+                                        .foregroundColor(.secondary.opacity(0.7))
+                                }
+                            }
+                        }
+                        .frame(width: 40, height: 40)
+                        .background(Circle().fill(Color.secondary.opacity(0.05)))
+                        .contentShape(Circle())
                     }
-                    .frame(width: 40, height: 40)
-                    .background(Circle().fill(Color.secondary.opacity(0.05)))
+                    .buttonStyle(.plain)
+                    
+                    if footprint.activityTypeValue == nil {
+                        Image(systemName: "arrowtriangle.up.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(Color.secondary.opacity(0.04)) // Match bubble bg
+                            .padding(.trailing, 15)
+                            .offset(y: 5) // Move down to touch the bubble
+                            .zIndex(1)
+                    }
                 }
-                .buttonStyle(.plain)
+            }
+            
+            if footprint.activityTypeValue == nil {
+                activitySuggestionsRow
+                    .padding(.top, -4) // Reduce gap to touch triangle
             }
         }
     }
     
+    private var activitySuggestionsRow: some View {
+        let suggestions = getSuggestedActivities()
+        return HStack(spacing: 0) {
+            Text("可能的活动")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary.opacity(0.6))
+                .padding(.leading, 12)
+                .padding(.trailing, 2)
+            
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(suggestions) { activity in
+                        Button {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                ensureFootprintManaged()
+                                footprint.activityTypeValue = activity.id.uuidString
+                                hasChanged = true
+                                try? modelContext.save()
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: activity.icon)
+                                    .font(.system(size: 11))
+                                Text(activity.name)
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule()
+                                    .fill(activity.color.opacity(0.08))
+                                    .overlay(Capsule().stroke(activity.color.opacity(0.15), lineWidth: 0.5))
+                            )
+                            .foregroundColor(activity.color)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 8)
+                .padding(.trailing, 12)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.secondary.opacity(0.04))
+        )
+        .transition(.asymmetric(
+            insertion: .move(edge: .top).combined(with: .opacity),
+            removal: .opacity.combined(with: .scale(scale: 0.95))
+        ))
+    }
+    
+    private func getSuggestedActivities() -> [ActivityType] {
+        var suggested: [ActivityType] = []
+        let hour = Calendar.current.component(.hour, from: footprint.startTime)
+        let weekday = Calendar.current.component(.weekday, from: footprint.startTime)
+        let isWeekend = (weekday == 1 || weekday == 7)
+        let durationHours = footprint.duration / 3600.0
+        
+        // 1. Unified Context (Title + Address + Place Name)
+        let contextText = (footprint.title + (footprint.address ?? "") + (matchedPlace?.name ?? "")).lowercased()
+        
+        // 2. Category-based Mapping (High precision POI)
+        if let category = matchedPlace?.category {
+            let catMap: [String: String] = [
+                "MKPOICategoryRestaurant": "美食", "MKPOICategoryCafe": "美食", "MKPOICategoryFoodMarket": "美食",
+                "MKPOICategorySchool": "学习", "MKPOICategoryUniversity": "学习", "MKPOICategoryLibrary": "学习",
+                "MKPOICategoryHospital": "医疗", "MKPOICategoryPharmacy": "医疗",
+                "MKPOICategoryPark": "运动", "MKPOICategoryFitnessCenter": "运动",
+                "MKPOICategoryMuseum": "旅游", "MKPOICategoryNationalPark": "旅游",
+                "MKPOICategoryMovieTheater": "娱乐", "MKPOICategoryAmusementPark": "娱乐",
+                "MKPOICategoryStore": "购物", "MKPOICategoryMall": "购物", "MKPOICategoryDepartmentStore": "购物"
+            ]
+            if let actName = catMap[category], let a = allActivities.first(where: { $0.name == actName }) {
+                suggested.append(a)
+            }
+        }
+
+        // 3. Dynamic Name Matching (Match any activity by its name)
+        for activity in allActivities where activity.name.count >= 2 {
+            if contextText.contains(activity.name.lowercased()) && !suggested.contains(where: { $0.id == activity.id }) {
+                suggested.append(activity)
+            }
+        }
+        
+        // 4. Pattern-based Keywords
+        let patterns: [(String, [String])] = [
+            ("居家", ["家", "居", "屋", "外婆", "奶奶", "爷爷", "公寓", "住宅", "苑", "府", "园", "里", "家庭", "亲戚", "父母", "老家"]),
+            ("工作", ["公司", "工作", "办公", "大厦", "写字楼", "研制", "软件", "厂", "局", "馆", "office"]),
+            ("旅游", ["景点", "景区", "公园", "博物馆", "火车站", "机场", "酒店", "客栈", "游", "trip"]),
+            ("美食", ["餐厅", "餐饮", "饭店", "面馆", "火锅", "咖啡", "饮品", "食堂", "美味", "吃", "food", "eat"]),
+            ("购物", ["商场", "购物", "超市", "中心", "广场", "便利店", "店", "城", "mall", "shop", "百货", "奥莱", "批发", "商业"]),
+            ("运动", ["体育", "健身", "场馆", "跑道", "馆", "羽毛球", "篮球", "游泳", "操场", "gym", "run"]),
+            ("娱乐", ["电影", "KTV", "游戏", "乐园", "影院", "游乐", "网吧", "play"]),
+            ("学习", ["学校", "大学", "中学", "图书馆", "学院", "课堂", "教育", "校区", "study", "learn"]),
+            ("医疗", ["医院", "门诊", "诊所", "药店", "大药房", "卫生院", "hospital", "clinic"])
+        ]
+        
+        for (name, keywords) in patterns {
+            if keywords.contains(where: { contextText.contains($0) }) {
+                if let a = allActivities.first(where: { $0.name == name }), !suggested.contains(where: { $0.id == a.id }) {
+                    suggested.append(a)
+                }
+            }
+        }
+        
+        // 5. Time & Duration-based logic
+        if durationHours > 3 && (hour >= 21 || hour <= 4) {
+            if let a = allActivities.first(where: { $0.name == "睡眠" }), !suggested.contains(where: { $0.id == a.id }) { suggested.append(a) }
+        }
+        if (hour >= 11 && hour <= 13) || (hour >= 18 && hour <= 21) {
+            if let a = allActivities.first(where: { $0.name == "美食" }), !suggested.contains(where: { $0.id == a.id }) { suggested.append(a) }
+        }
+        if !isWeekend && hour >= 9 && hour <= 17 && durationHours > 1.5 {
+            if let a = allActivities.first(where: { $0.name == "工作" }), !suggested.contains(where: { $0.id == a.id }) { suggested.append(a) }
+        }
+        
+        // 6. Stable Fallback
+        if suggested.count < 4 {
+            let existingIds = Set(suggested.map { $0.id })
+            let others = allActivities.filter { !existingIds.contains($0.id) }.sorted { $0.id.uuidString < $1.id.uuidString }
+            if !others.isEmpty {
+                let seed = abs(footprint.footprintID.uuidString.hashValue)
+                for i in 0..<(4 - suggested.count) {
+                    let candidate = others[(seed + i) % others.count]
+                    if !suggested.contains(where: { $0.id == candidate.id }) { suggested.append(candidate) }
+                    if suggested.count >= 4 { break }
+                }
+            }
+        }
+        return Array(suggested.prefix(5))
+    }
+    
     private var timeSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Menu {
-                SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint) {
-                    showingSearchSheet = true
-                }
-            } label: {
-                HStack(alignment: .center, spacing: 6) { 
-                    Image(systemName: isUpdatingAddress ? "arrow.triangle.2.circlepath" : "mappin.and.ellipse")
-                        .font(.caption)
-                        .foregroundColor(Color.dfkAccent)
-                        .symbolEffect(.bounce, value: isUpdatingAddress)
-                    
-                    if isUpdatingAddress {
-                        Text("正在重新获取地址...")
-                            .font(.subheadline)
-                            .foregroundColor(Color.dfkMainText.opacity(0.5))
-                    } else {
-                        HStack(spacing: 6) {
-                            Text(footprint.address ?? (matchedPlace?.address ?? "未记录位置"))
-                                .font(.system(size: 16, design: .rounded))
-                                .foregroundColor(Color.dfkMainText)
-                                .lineLimit(2)
-                            
-                            if let place = matchedPlace {
-                                Text(place.name)
-                                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.orange.opacity(0.12))
-                                    .foregroundColor(.orange)
-                                    .clipShape(Capsule())
-                                    .fixedSize()
+            HStack(alignment: .center, spacing: 6) {
+                Menu {
+                    SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint) {
+                        showingSearchSheet = true
+                    }
+                } label: {
+                    HStack(alignment: .center, spacing: 6) { 
+                        Image(systemName: isUpdatingAddress ? "arrow.triangle.2.circlepath" : "mappin.and.ellipse")
+                            .font(.caption)
+                            .foregroundColor(Color.dfkAccent)
+                            .symbolEffect(.bounce, value: isUpdatingAddress)
+                        
+                        if isUpdatingAddress {
+                            Text("正在重新获取地址...")
+                                .font(.subheadline)
+                                .foregroundColor(Color.dfkMainText.opacity(0.5))
+                        } else {
+                            HStack(spacing: 6) {
+                                Text(footprint.address ?? (matchedPlace?.address ?? "未记录位置"))
+                                    .font(.system(size: 16, design: .rounded))
+                                    .foregroundColor(Color.dfkMainText)
+                                    .lineLimit(2)
+                                
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(Color.dfkSecondaryText.opacity(0.5))
                             }
-                            
-                            Image(systemName: "pencil")
-                                .font(.system(size: 12))
-                                .foregroundColor(Color.dfkSecondaryText.opacity(0.5))
                         }
                     }
                 }
+                .buttonStyle(.plain)
+                
+                Spacer()
+                
+                if let place = matchedPlace {
+                        Text(place.name)
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.12))
+                    .foregroundColor(.orange)
+                    .clipShape(Capsule())
+                    .fixedSize()
+                } else {
+                    Button {
+                        showAddPlaceModal = true
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundColor(.orange.opacity(0.7))
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .buttonStyle(.plain)
             
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) { 
@@ -468,7 +660,30 @@ struct FootprintModalView: View {
     }
     
     private var matchedPlace: Place? {
-        savedPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })
+        savedPlaces.first(where: { $0.placeID == footprint.placeID })
+    }
+    
+    private func enrichPlaceIfNeeded() {
+        guard let place = matchedPlace, place.category == nil else { return }
+        let name = place.name
+        let coordinate = place.coordinate
+        
+        Task {
+            let request = MKLocalSearch.Request()
+            request.naturalLanguageQuery = name
+            request.region = MKCoordinateRegion(center: coordinate, 
+                                               latitudinalMeters: 200, 
+                                               longitudinalMeters: 200)
+            let search = MKLocalSearch(request: request)
+            if let response = try? await search.start() {
+                if let item = response.mapItems.first(where: { 
+                    $0.name?.contains(name) == true || name.contains($0.name ?? "")
+                }) ?? response.mapItems.first {
+                    place.category = item.pointOfInterestCategory?.rawValue
+                    try? modelContext.save()
+                }
+            }
+        }
     }
     
 
@@ -535,6 +750,7 @@ struct FootprintModalView: View {
                         withAnimation {
                             ensureFootprintManaged()
                             footprint.address = result
+                            hasChanged = true
                             try? modelContext.save()
                         }
                     }
@@ -553,7 +769,6 @@ struct FootprintModalView: View {
     
     private var footerContent: some View {
         Group {
-            addToPlacesSection.padding(.horizontal, 24).padding(.top, 12)
             aiContent
             photoSection.padding(.horizontal, 24).padding(.top, 16)
         }
@@ -597,7 +812,7 @@ struct FootprintModalView: View {
             HStack(alignment: .top, spacing: 6) {
                 TextField("输入感悟...", text: Binding(
                     get: { footprint.reason ?? "" },
-                    set: { footprint.reason = $0; footprint.aiAnalyzed = true }
+                    set: { footprint.reason = $0; footprint.aiAnalyzed = true; hasChanged = true }
                 ), axis: Axis.vertical)
                 .font(.body)
                 .foregroundColor(Color.dfkMainText.opacity(0.85))
@@ -622,52 +837,6 @@ struct FootprintModalView: View {
         }
     }
     
-    @ViewBuilder
-    private var addToPlacesSection: some View {
-        let alreadySaved = footprint.placeID.map { id in savedPlaces.contains(where: { $0.placeID == id }) } ?? false
-        if !alreadySaved && !footprint.isPlaceSuggestionIgnored {
-            HStack(spacing: 0) {
-                Button {
-                    showAddPlaceModal = true
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "mappin.circle.fill")
-                            .font(.system(size: 16))
-                        Text("添加到重要地点")
-                            .font(.subheadline.bold())
-                        Spacer()
-                    }
-                    .foregroundColor(.orange)
-                    .padding(.leading, 16)
-                    .padding(.vertical, 12)
-                }
-                .buttonStyle(SpringButtonStyle())
-                
-                Rectangle()
-                    .fill(Color.orange.opacity(0.2))
-                    .frame(width: 1, height: 16)
-                    .padding(.horizontal, 4)
-                
-                Button {
-                    withAnimation {
-                        ensureFootprintManaged()
-                        footprint.isPlaceSuggestionIgnored = true
-                        try? modelContext.save()
-                    }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.secondary)
-                        .padding(12)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(SpringButtonStyle())
-                .padding(.trailing, 2)
-            }
-            .background(Color.orange.opacity(0.12))
-            .cornerRadius(12)
-        }
-    }
     
     private var photoSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -700,6 +869,7 @@ struct FootprintModalView: View {
                                     if !assets.isEmpty {
                                         withAnimation {
                                             footprint.photoAssetIDs = assets.map { $0.localIdentifier }
+                                            hasChanged = true
                                             try? modelContext.save()
                                         }
                                     }
@@ -756,6 +926,7 @@ struct FootprintModalView: View {
                                 var ids = footprint.photoAssetIDs
                                 ids.removeAll { $0 == assetID }
                                 footprint.photoAssetIDs = ids
+                                hasChanged = true
                                 try? modelContext.save()
                             }
                         })
@@ -776,7 +947,15 @@ struct FootprintModalView: View {
         }
     }
     
-    private func ignoreFootprint() { withAnimation { footprint.status = .ignored }; try? modelContext.save(); dismiss() }
+    private func ignoreFootprint() { 
+        withAnimation { 
+            footprint.status = .ignored 
+            hasChanged = true
+        }
+        try? modelContext.save()
+        onDismiss?(hasChanged)
+        dismiss() 
+    }
 }
 
 struct FullFrameMapView: View {

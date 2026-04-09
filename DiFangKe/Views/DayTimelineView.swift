@@ -176,6 +176,7 @@ struct DayTimelineView: View {
                 updateTask?.cancel()
             }
             .onChange(of: footprints) { _, _ in
+                TimelineBuilder.timelineCache.removeAll()
                 updateData()
             }
             .onChange(of: manualSelections) { _, _ in
@@ -236,8 +237,16 @@ struct DayTimelineView: View {
         updateTask?.cancel()
         
         let rawDates = locationManager.availableRawDates
+        // 1. 获取所有足迹并合并重复 UUID（防止脏数据导致时间轴重叠显示两个一模一样的）
+        var seenUUIDs = Set<UUID>()
+        let uniqueFootprints = footprints.filter { fp in
+            if seenUUIDs.contains(fp.footprintID) { return false }
+            seenUUIDs.insert(fp.footprintID)
+            return true
+        }
+        
         let todayVal = Calendar.current.startOfDay(for: Date())
-        let footprintIDs = footprints.map { $0.persistentModelID }
+        let footprintIDs = uniqueFootprints.map { $0.persistentModelID }
         let manualIDs = manualSelections.map { $0.persistentModelID }
         let container = modelContext.container
         

@@ -161,7 +161,12 @@ struct LocationSearchSheet: View {
             guard let response = response, error == nil else { return }
             self.searchResults = response.mapItems.map { item in
                 let addr = [item.placemark.thoroughfare, item.placemark.subThoroughfare, item.placemark.locality, item.placemark.administrativeArea].compactMap { $0 }.joined(separator: " ")
-                return LocationSuggestion(name: item.name ?? "位置", address: addr, coordinate: item.placemark.coordinate)
+                return LocationSuggestion(
+                    name: item.name ?? "位置", 
+                    address: addr, 
+                    coordinate: item.placemark.coordinate,
+                    category: item.pointOfInterestCategory?.rawValue
+                )
             }
         }
     }

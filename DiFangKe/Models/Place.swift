@@ -13,6 +13,7 @@ final class Place {
     var isIgnored: Bool = false
     var isUserDefined: Bool = true
     var isPriority: Bool = false
+    var category: String?
     
     var coordinate: CLLocationCoordinate2D {
         get { CLLocationCoordinate2D(latitude: latitude, longitude: longitude) }
@@ -27,7 +28,8 @@ final class Place {
          coordinate: CLLocationCoordinate2D, 
          radius: Float = 50.0,
          address: String? = nil,
-         isUserDefined: Bool = true) {
+         isUserDefined: Bool = true,
+         category: String? = nil) {
         self.placeID = placeID
         self.name = name
         self.latitude = coordinate.latitude
@@ -35,6 +37,7 @@ final class Place {
         self.radius = radius
         self.address = address
         self.isUserDefined = isUserDefined
+        self.category = category
     }
 }
 

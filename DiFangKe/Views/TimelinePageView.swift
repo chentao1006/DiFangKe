@@ -74,17 +74,7 @@ struct TimelinePageView: View {
             if !isFromHistory && Calendar.current.isDateInToday(date) {
                 timelineScrollView
                     .refreshable {
-                        // 1. 同步远程原始轨迹
-                        await locationManager.performRawDataSync()
-                        
-                        // 2. 触发位置碎片合并计算
-                        await locationManager.triggerTimelineSift()
-                        
-                        // 3. 强制异步刷新当前页面的时间线显示
-                        await refreshTimelineAsync(force: true)
-                        
-                        // 4. 触感反馈
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        await handlePullToRefresh()
                     }
             } else {
                 timelineScrollView
@@ -129,12 +119,15 @@ struct TimelinePageView: View {
         .onChange(of: manualSelections) { _, _ in refreshTimeline(force: true) }
         .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in refreshTimeline(force: true) }
         .sheet(item: $selectedFootprint) { footprint in
-            FootprintModalView(footprint: footprint, autoFocus: autoFocusOnOpen)
-                .environment(locationManager)
-                .onDisappear { 
+            FootprintModalView(
+                footprint: footprint, 
+                autoFocus: autoFocusOnOpen,
+                onDismiss: { didChange in
                     autoFocusOnOpen = false
-                    refreshTimeline(force: true)
+                    refreshTimeline(force: didChange)
                 }
+            )
+            .environment(locationManager)
         }
         .sheet(isPresented: $showingAddPlaceSheet) {
             AddPlaceSheet(initialCoordinate: locationManager.lastLocation?.coordinate, 
@@ -618,5 +611,20 @@ struct TimelinePageView: View {
         }
         .foregroundColor(.secondary.opacity(0.6))
         .frame(maxWidth: .infinity)
+    }
+    
+    @MainActor
+    private func handlePullToRefresh() async {
+        // 1. 同步远程原始轨迹
+        await locationManager.performRawDataSync()
+        
+        // 2. 触发位置碎片合并计算
+        await locationManager.triggerTimelineSift()
+        
+        // 3. 强制异步刷新当前页面的时间线显示
+        await refreshTimelineAsync(force: true)
+        
+        // 4. 触感反馈
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 }

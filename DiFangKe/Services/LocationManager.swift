@@ -15,6 +15,7 @@ struct LocationSuggestion: Identifiable, Equatable {
     var coordinate: CLLocationCoordinate2D
     var isExistingPlace: Bool = false
     var placeID: UUID?
+    var category: String?
     
     static func == (lhs: LocationSuggestion, rhs: LocationSuggestion) -> Bool {
         lhs.id == rhs.id
@@ -1386,15 +1387,26 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // Title uses the custom name (User preference: "Title uses name")
                 newFootprint.title = Footprint.generateRandomTitle(for: mPlace.name, seed: Int(newFootprint.startTime.timeIntervalSince1970))
                 
+                // --- 自动补充地点分类 ---
+                if mPlace.category == nil {
+                    Task { [mPlace] in
+                        let request = MKLocalSearch.Request()
+                        request.naturalLanguageQuery = mPlace.name
+                        request.region = MKCoordinateRegion(center: mPlace.coordinate, latitudinalMeters: 200, longitudinalMeters: 200)
+                        let search = MKLocalSearch(request: request)
+                        if let resp = try? await search.start(), let item = resp.mapItems.first {
+                            mPlace.category = item.pointOfInterestCategory?.rawValue
+                        }
+                    }
+                }
+                
                 // --- 标记忽略地点 ---
                 if mPlace.isIgnored {
                     newFootprint.status = .ignored
                 }
             }
             
-            
             context.insert(newFootprint)
-            // 必须先保存，确保获得永久 ID，否则后续异步分析（AI/照片）可能会因为 ID 失效而闪退
             try? context.save()
             
             if !isHistorical {
@@ -1989,7 +2001,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 address: place.address ?? "",
                 coordinate: place.coordinate,
                 isExistingPlace: true,
-                placeID: place.placeID
+                placeID: place.placeID,
+                category: place.category
             ), dist)
         }
         allFound.append(contentsOf: saved.map { $0.0 })
@@ -2099,7 +2112,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let search = MKLocalSearch(request: req)
         guard let response = try? await search.start() else { return [] }
         return response.mapItems.map { item in
-            LocationSuggestion(id: UUID(), name: item.name ?? "未知地点", address: item.placemark.title ?? "", coordinate: item.placemark.coordinate, isExistingPlace: false, placeID: nil)
+            LocationSuggestion(
+                id: UUID(), 
+                name: item.name ?? "未知地点", 
+                address: item.placemark.title ?? "", 
+                coordinate: item.placemark.coordinate, 
+                isExistingPlace: false, 
+                placeID: nil,
+                category: item.pointOfInterestCategory?.rawValue
+            )
         }
     }
     
@@ -2110,7 +2131,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let search = MKLocalSearch(request: req)
         guard let response = try? await search.start() else { return [] }
         return response.mapItems.map { item in
-            LocationSuggestion(id: UUID(), name: item.name ?? "未知地点", address: item.placemark.title ?? "", coordinate: item.placemark.coordinate, isExistingPlace: false, placeID: nil)
+            LocationSuggestion(
+                id: UUID(), 
+                name: item.name ?? "未知地点", 
+                address: item.placemark.title ?? "", 
+                coordinate: item.placemark.coordinate, 
+                isExistingPlace: false, 
+                placeID: nil,
+                category: item.pointOfInterestCategory?.rawValue
+            )
         }
     }
     
@@ -2170,7 +2199,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 coordinate: suggestion.coordinate,
                 radius: 100,
                 address: suggestion.address,
-                isUserDefined: false // 修正行为不应自动创建“重要地点”，以免干扰管理列表
+                isUserDefined: false,
+                category: suggestion.category
             )
             newPlace.isPriority = true
             modelContext?.insert(newPlace)

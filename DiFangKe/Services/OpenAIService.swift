@@ -366,16 +366,25 @@ class OpenAIService {
         }
         guard !footprintsUnderlying.isEmpty else { return }
         
+        // 获取所有活动类型以便解析名称
+        let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+        
         let sorted = footprintsUnderlying.sorted { $0.startTime < $1.startTime }
         var deduplicated: [String] = []
-        var lastTitle: String? = nil
+        var lastDescription: String? = nil
         
         for fp in sorted {
             let title = fp.title.isEmpty ? "点位记录" : fp.title
             if title == "正在获取位置..." || title == "点位记录" || title == "在某地停留" { continue }
-            if title == lastTitle { continue }
-            deduplicated.append("[\(fp.startTime.formatted(.dateTime.hour().minute()))] \(title)")
-            lastTitle = title
+            
+            // 解析活动类型名称
+            let activityName = fp.getActivityType(from: allActivities)?.name
+            let description = activityName != nil ? "\(title)(\(activityName!))" : title
+            
+            if description == lastDescription { continue }
+            
+            deduplicated.append("[\(fp.startTime.formatted(.dateTime.hour().minute()))] \(description)")
+            lastDescription = description
         }
         
         guard !deduplicated.isEmpty else { return }

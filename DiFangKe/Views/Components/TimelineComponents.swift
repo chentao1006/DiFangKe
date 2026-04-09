@@ -464,6 +464,12 @@ struct FootprintCardView: View {
                              .foregroundColor(activity.color)
                              .padding(.top, 14)
                              .padding(.trailing, 14)
+                     } else {
+                         Image(systemName: "questionmark.circle.dashed")
+                             .font(.system(size: 18, weight: .bold))
+                             .foregroundColor(.secondary.opacity(0.4))
+                             .padding(.top, 14)
+                             .padding(.trailing, 14)
                      }
                      
                      VStack(alignment: .leading, spacing: 4) {
