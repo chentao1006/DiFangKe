@@ -35,7 +35,7 @@ class OpenAIService {
     
     enum AITask {
         case footprint(PersistentIdentifier)
-        case dailySummary(Date, [PersistentIdentifier])
+        case dailySummary(Date, [PersistentIdentifier], Bool)
         case tomorrowQuote
         case pastQuote
         case notificationSummary([String])
@@ -202,15 +202,15 @@ class OpenAIService {
         self.processQueue()
     }
 
-    func enqueueDailySummary(for date: Date, footprints: [Footprint]) {
+    func enqueueDailySummary(for date: Date, footprints: [Footprint], force: Bool = false) {
         let startOfDate = Calendar.current.startOfDay(for: date)
-        if dailySummaryDateSet.contains(startOfDate) { return }
+        if !force && dailySummaryDateSet.contains(startOfDate) { return }
         
         // 离线获取 ID，避免主线程持有对象
         let ids = footprints.map { $0.persistentModelID }
         
         dailySummaryDateSet.insert(startOfDate)
-        self.taskQueue.append(.dailySummary(startOfDate, ids))
+        self.taskQueue.append(.dailySummary(startOfDate, ids, force))
         self.processQueue()
     }
     
@@ -285,8 +285,8 @@ class OpenAIService {
             case .footprint(let identifier):
                 await self.processFootprintTask(identifier: identifier, context: context)
                 // 任务处理完后，不一定要从 Set 移除，因为 footprint 本身有 aiAnalyzed 标记
-            case .dailySummary(let date, let ids):
-                await self.processDailySummaryTask(date: date, ids: ids, context: context)
+            case .dailySummary(let date, let ids, let force):
+                await self.processDailySummaryTask(date: date, ids: ids, context: context, force: force)
             case .tomorrowQuote:
                 await self.processTomorrowQuoteTask()
             case .pastQuote:
@@ -345,13 +345,20 @@ class OpenAIService {
         }
     }
     
-    private func processDailySummaryTask(date: Date, ids: [PersistentIdentifier], context: ModelContext) async {
-        let startOfDay = Calendar.current.startOfDay(for: date)
-        let checkDescriptor = FetchDescriptor<DailyInsight>()
-        if let _ = (try? context.fetch(checkDescriptor))?.first(where: { 
-            guard let d = $0.date else { return false }
-            return Calendar.current.isDate(d, inSameDayAs: startOfDay) && $0.aiGenerated == true 
-        }) { return }
+    private func processDailySummaryTask(date: Date, ids: [PersistentIdentifier], context: ModelContext, force: Bool = false) async {
+        let startOfDate = Calendar.current.startOfDay(for: date)
+        
+        // 只有非强制模式下才检查是否已存在
+        if !force {
+            let checkDescriptor = FetchDescriptor<DailyInsight>()
+            if let _ = (try? context.fetch(checkDescriptor))?.first(where: { 
+                guard let d = $0.date else { return false }
+                return Calendar.current.isDate(d, inSameDayAs: startOfDate) && $0.aiGenerated == true 
+            }) { 
+                dailySummaryDateSet.remove(startOfDate)
+                return 
+            }
+        }
 
         var footprintsUnderlying: [Footprint] = []
         for id in ids {
@@ -374,28 +381,29 @@ class OpenAIService {
         guard !deduplicated.isEmpty else { return }
         
         let summaryResult = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            self.generateDailySummary(date: startOfDay, footprintDescriptions: deduplicated) { res in
+            self.generateDailySummary(date: startOfDate, footprintDescriptions: deduplicated) { res in
                 continuation.resume(returning: res)
             }
         }
         
         guard let summary = summaryResult else { 
-            dailySummaryDateSet.remove(startOfDay)
+            dailySummaryDateSet.remove(startOfDate)
             return 
         }
         
         let descriptor = FetchDescriptor<DailyInsight>()
         if let existing = (try? context.fetch(descriptor))?.first(where: { 
             guard let d = $0.date else { return false }
-            return Calendar.current.isDate(d, inSameDayAs: startOfDay) 
+            return Calendar.current.isDate(d, inSameDayAs: startOfDate) 
         }) {
             existing.content = summary
             existing.aiGenerated = true
         } else {
-            let newSummary = DailyInsight(date: startOfDay, content: summary, aiGenerated: true)
+            let newSummary = DailyInsight(date: startOfDate, content: summary, aiGenerated: true)
             context.insert(newSummary)
         }
         try? context.save()
+        dailySummaryDateSet.remove(startOfDate)
     }
 
     private func processTomorrowQuoteTask() async {

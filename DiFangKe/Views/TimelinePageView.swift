@@ -131,7 +131,10 @@ struct TimelinePageView: View {
         .sheet(item: $selectedFootprint) { footprint in
             FootprintModalView(footprint: footprint, autoFocus: autoFocusOnOpen)
                 .environment(locationManager)
-                .onDisappear { autoFocusOnOpen = false }
+                .onDisappear { 
+                    autoFocusOnOpen = false
+                    refreshTimeline(force: true)
+                }
         }
         .sheet(isPresented: $showingAddPlaceSheet) {
             AddPlaceSheet(initialCoordinate: locationManager.lastLocation?.coordinate, 
@@ -152,6 +155,7 @@ struct TimelinePageView: View {
                         timelineItems[index] = .transport(updated)
                     }
                 }
+                refreshTimeline(force: true)
             } onLocationUpdate: {
                 refreshTimeline(force: true)
             }
@@ -463,6 +467,14 @@ struct TimelinePageView: View {
         
         locationManager.backfillGaps(for: targetDate)
         resolveTimelineAddresses(for: self.timelineItems)
+        
+        // 触发摘要重新生成：如果是由足迹/交通修改引发的强制刷新，且启用了 AI，则强制重新生成当日概览
+        if force && isAiAssistantEnabled && !footprints.isEmpty {
+            let isPast = Calendar.current.startOfDay(for: targetDate) < Calendar.current.startOfDay(for: Date())
+            if isPast {
+                OpenAIService.shared.enqueueDailySummary(for: targetDate, footprints: footprints, force: true)
+            }
+        }
     }
     
     private func resolveTimelineAddresses(for items: [TimelineItem]) {

@@ -106,6 +106,7 @@ struct FootprintModalView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { 
                         checkAndGenerateAIContent()
+                        try? modelContext.save()
                         dismiss() 
                     }.fontWeight(.bold)
                 }
@@ -251,6 +252,9 @@ struct FootprintModalView: View {
             } message: {
                 Text(aiErrorMessage)
             }
+        }
+        .onDisappear {
+            try? modelContext.save()
         }
     }
     

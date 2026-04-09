@@ -875,19 +875,28 @@ struct ImportToolbarModifier: ViewModifier {
 struct PhotoImportRangePicker: View {
     @Environment(\.dismiss) var dismiss
     @State private var selectedYear = Calendar.current.component(.year, from: Date())
+    @State private var earliestYear = 2010
     var onSelect: (Date, Date) -> Void
     var body: some View {
         NavigationStack {
             VStack {
                 Picker("年份", selection: $selectedYear) {
-                    ForEach((2010...Calendar.current.component(.year, from: Date())), id: \.self) { Text("\(String(format: "%d", $0))年").tag($0) }
+                    ForEach((min(earliestYear, selectedYear)...Calendar.current.component(.year, from: Date())), id: \.self) { Text("\(String(format: "%d", $0))年").tag($0) }
                 }.pickerStyle(.wheel)
                 Button("开启穿越") {
                     let s = Calendar.current.date(from: DateComponents(year: selectedYear, month: 1, day: 1))!
                     let e = Calendar.current.date(from: DateComponents(year: selectedYear, month: 12, day: 31, hour: 23, minute: 59))!
                     onSelect(s, e)
                 }.buttonStyle(.borderedProminent).padding()
-            }.navigationTitle("寻回那年的记忆").toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
+            }
+            .navigationTitle("寻回那年的记忆")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
+            .onAppear {
+                if let earliestDate = PhotoService.shared.getEarliestAssetDate() {
+                    let year = Calendar.current.component(.year, from: earliestDate)
+                    earliestYear = year
+                }
+            }
         }
     }
 }

@@ -3,12 +3,24 @@ import SwiftData
 import Charts
 import MapKit
 
-enum StatisticsRange: String, CaseIterable {
-    case last7Days = "7天"
-    case last30Days = "30天"
-    case last90Days = "90天"
-    case lastYear = "1年"
-    case all = "全部"
+enum StatisticsRange: Hashable {
+    case last7Days
+    case last30Days
+    case last90Days
+    case lastYear
+    case customYear(Int)
+    case all
+    
+    var rawValue: String {
+        switch self {
+        case .last7Days: return "7天"
+        case .last30Days: return "30天"
+        case .last90Days: return "90天"
+        case .lastYear: return "1年"
+        case .customYear(let y): return String(y)
+        case .all: return "全部"
+        }
+    }
     
     var days: Int? {
         switch self {
@@ -16,7 +28,7 @@ enum StatisticsRange: String, CaseIterable {
         case .last30Days: return 30
         case .last90Days: return 90
         case .lastYear: return 365
-        case .all: return nil
+        default: return nil
         }
     }
 }
@@ -31,6 +43,8 @@ struct HistoryStatisticsView: View {
     @State private var selectedRange: StatisticsRange = .last30Days
     @State private var appearanceTrigger = false
     @State private var mapPosition: MapCameraPosition = .automatic
+    @State private var mapDelta: Double = 0.1
+    @State private var heatmapPoints: [LocationPoint] = []
     
     // AI Summary State
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
@@ -43,9 +57,30 @@ struct HistoryStatisticsView: View {
     
     // Filtered footprints based on range
     private var filteredFootprints: [Footprint] {
-        guard let days = selectedRange.days else { return allFootprints }
-        let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: Date())!
-        return allFootprints.filter { $0.startTime >= cutoff }
+        let calendar = Calendar.current
+        switch selectedRange {
+        case .last7Days:
+            let cutoff = calendar.date(byAdding: .day, value: -7, to: Date())!
+            return allFootprints.filter { $0.startTime >= cutoff }
+        case .last30Days:
+            let cutoff = calendar.date(byAdding: .day, value: -30, to: Date())!
+            return allFootprints.filter { $0.startTime >= cutoff }
+        case .last90Days:
+            let cutoff = calendar.date(byAdding: .day, value: -90, to: Date())!
+            return allFootprints.filter { $0.startTime >= cutoff }
+        case .lastYear:
+            let cutoff = calendar.date(byAdding: .day, value: -365, to: Date())!
+            return allFootprints.filter { $0.startTime >= cutoff }
+        case .customYear(let year):
+            return allFootprints.filter { calendar.component(.year, from: $0.startTime) == year }
+        case .all:
+            return allFootprints
+        }
+    }
+    
+    private var availableYears: [Int] {
+        let years = Set(allFootprints.map { Calendar.current.component(.year, from: $0.startTime) })
+        return years.sorted(by: >)
     }
     
     var body: some View {
@@ -133,11 +168,11 @@ struct HistoryStatisticsView: View {
         let day: TimeInterval = 24 * hour
         
         switch range {
-        case .last7Days: return 1 * day // 7天 -> 1天过期
-        case .last30Days: return 3 * day // 30天 -> 3天过期
-        case .last90Days: return 7 * day // 90天 -> 7天过期
-        case .lastYear: return 30 * day // 11年 -> 30天过期
-        case .all: return 90 * day     // 全部 -> 90天过期
+        case .last7Days: return 1 * day
+        case .last30Days: return 3 * day
+        case .last90Days: return 7 * day
+        case .lastYear, .customYear: return 30 * day
+        case .all: return 90 * day
         }
     }
     
@@ -155,21 +190,38 @@ struct HistoryStatisticsView: View {
         // Prepare data for AI
         let rangeStr = selectedRange.rawValue
         let rankData = getActivityRankData().prefix(3).map { "\($0.name)(\($0.count)次)" }.joined(separator: ", ")
-        let topPlaces = getTopLocations().prefix(3).map { loc in
-            "核心区域"
-        }.count
+        let topPlacesCount = getTopLocations(delta: 0.01).prefix(3).count
+        
+        // 增补更丰富的信息维度
+        let totalDuration = footprintsInScope.reduce(0) { $0 + $1.duration }
+        let durationHours = Int(totalDuration / 3600)
+        let totalPhotos = footprintsInScope.reduce(0) { $0 + $1.photoAssetIDs.count }
+        
+        let calendar = Calendar.current
+        let weekdayCounts = Dictionary(grouping: footprintsInScope) { calendar.component(.weekday, from: $0.startTime) }
+            .mapValues { $0.count }
+        let busiestWeekdayNum = weekdayCounts.max(by: { $0.value < $1.value })?.key ?? 1
+        let weekdayNames = ["", "周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+        let peakDay = weekdayNames[busiestWeekdayNum]
+        
+        let hourCounts = Dictionary(grouping: footprintsInScope) { calendar.component(.hour, from: $0.startTime) }
+            .mapValues { $0.count }
+        let peakHour = hourCounts.max(by: { $0.value < $1.value })?.key ?? 12
+        let timePeriod = peakHour < 6 ? "凌晨/深夜" : (peakHour < 12 ? "早晨/上午" : (peakHour < 18 ? "下午" : "傍晚/夜间"))
         
         let prompt = """
         请作为一位睿智的生活观察者，对用户在过去“\(rangeStr)”的足迹数据进行一次有深度且清晰的总结。
         
         数据概览：
-        - 记录密度：\(footprintsInScope.count)个生活片段
+        - 记录密度：\(footprintsInScope.count)个生活片段，累计活跃时长约\(durationHours)小时
         - 活动重心：\(rankData)
-        - 探索版图：在\(topPlaces)个核心片区留下了足迹
+        - 探索版图：在\(topPlacesCount)个核心区域留下了深度印记
+        - 行为习惯：最活跃于\(peakDay)，活动高峰出现在\(timePeriod)
+        - 记忆留存：期间共通过照片记录了\(totalPhotos)个瞬间
         
         要求：
         1. 语气：客观睿智、理感平衡。不要过于文艺或晦涩，要让用户感到“你精准地捕捉到了他的生活规律”。
-        2. 内容维度：通过活动分布推断生活重心（例如：是在专心事业、还是由于多样的尝试而充满活力），通过空间分布感知生活节奏（是在熟悉的半径内规律生活，还是跨度巨大的积极探索）。
+        2. 内容维度：通过活动分布推断生活重心，通过空间分布感知生活节奏。
         3. 洞察：总结出这段时间潜藏的“生活逻辑”或“情感底色”。
         4. 篇幅：80字左右，表达清晰且具有现代感。
         5. 杜绝数字罗列，将枯燥的统计转化为对生活步调的敏锐观察。
@@ -211,6 +263,16 @@ struct HistoryStatisticsView: View {
         withAnimation(.easeInOut(duration: 1.0)) {
             let region = getRegion(for: coords)
             mapPosition = .region(region)
+            mapDelta = region.span.latitudeDelta
+            updateHeatmapPoints(delta: region.span.latitudeDelta)
+        }
+    }
+    
+    private func updateHeatmapPoints(delta: Double) {
+        let newPoints = getTopLocations(delta: delta)
+        // 只有当聚类点发生较大变化或首次加载时才更新
+        if heatmapPoints.count != newPoints.count || heatmapPoints.first?.hash != newPoints.first?.hash {
+            heatmapPoints = newPoints
         }
     }
     
@@ -241,27 +303,35 @@ struct HistoryStatisticsView: View {
     
     private var rangePicker: some View {
         HStack(spacing: 0) {
-            ForEach(StatisticsRange.allCases, id: \.self) { range in
-                Text(range.rawValue)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(selectedRange == range ? .white : .secondary)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity)
-                    .background(
-                        ZStack {
-                            if selectedRange == range {
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(Color.dfkAccent)
-                                    .matchedGeometryEffect(id: "range_bg", in: rangeNamespace)
-                            }
-                        }
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture {
+            // 前四个固定选项
+            ForEach([StatisticsRange.last7Days, .last30Days, .last90Days, .lastYear], id: \.self) { range in
+                rangeButton(for: range)
+            }
+            
+            // 年份下拉选择（替代原“全部”）
+            Menu {
+                Button("全部时间") {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                        selectedRange = .all
+                    }
+                }
+                Divider()
+                ForEach(availableYears, id: \.self) { year in
+                    Button(String(year)) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                            selectedRange = range
+                            selectedRange = .customYear(year)
                         }
                     }
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Text(isYearOrAllSelected ? selectedRange.rawValue : "年份")
+                        .font(.system(size: 13, weight: .medium))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                }
+                .frame(maxWidth: .infinity)
+                .rangeButtonStyle(isSelected: isYearOrAllSelected, namespace: rangeNamespace)
             }
         }
         .padding(4)
@@ -270,23 +340,42 @@ struct HistoryStatisticsView: View {
         .padding(.horizontal, 20)
     }
     
+    private var isYearOrAllSelected: Bool {
+        if case .customYear = selectedRange { return true }
+        if selectedRange == .all { return true }
+        return false
+    }
+    
+    private func rangeButton(for range: StatisticsRange) -> some View {
+        Text(range.rawValue)
+            .font(.system(size: 13, weight: .medium))
+            .rangeButtonStyle(isSelected: selectedRange == range, namespace: rangeNamespace)
+            .onTapGesture {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                    selectedRange = range
+                }
+            }
+    }
+    
     // MARK: - Heatmap Section (Thermal Style)
     private var heatmapSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionHeader("常去地点", icon: "map.fill")
             
-            let topLocations = getTopLocations()
-            
-            if topLocations.isEmpty {
+            if heatmapPoints.isEmpty {
                 placeholderView("暂无地点数据")
             } else {
-                let maxIntensity = topLocations.map { $0.count }.max() ?? 1
+                let maxIntensity = heatmapPoints.map { $0.count }.max() ?? 1
                 Map(position: $mapPosition) {
-                    ForEach(topLocations, id: \.hash) { loc in
+                    ForEach(heatmapPoints, id: \.hash) { loc in
                         Annotation("", coordinate: loc.coord) {
                             ThermalBlipView(intensity: loc.count, maxIntensity: maxIntensity)
                         }
                     }
+                }
+                .onMapCameraChange { context in
+                    // 地图缩放变化时，动态重新聚类
+                    updateHeatmapPoints(delta: context.region.span.latitudeDelta)
                 }
                 .frame(height: 280)
                 .cornerRadius(24)
@@ -301,24 +390,14 @@ struct HistoryStatisticsView: View {
         
         var body: some View {
             let ratio = Double(intensity) / Double(max(1, maxIntensity))
-            // Orange (Low) -> Red (Medium) -> Purple (High)
             let color: Color = ratio < 0.3 ? .orange : (ratio < 0.7 ? .red : .purple)
             
-            ZStack {
-                // Outer glow
-                let size = CGFloat(max(25, min(120, intensity * 8)))
-                Circle()
-                    .fill(RadialGradient(colors: [color.opacity(0.3), .clear], center: .center, startRadius: 0, endRadius: size/2))
-                    .frame(width: size, height: size)
-                    .blur(radius: size/12)
-                
-                // Core
-                let coreSize = CGFloat(max(8, min(40, intensity * 3)))
-                Circle()
-                    .fill(RadialGradient(colors: [color, color.opacity(0.25), .clear], center: .center, startRadius: 0, endRadius: coreSize/2))
-                    .frame(width: coreSize, height: coreSize)
-                    .blur(radius: coreSize/15)
-            }
+            let size = CGFloat(max(14, min(30, intensity * 3)))
+            
+            Circle()
+                .fill(color.opacity(0.7).gradient)
+                .frame(width: size, height: size)
+                .blur(radius: size * 0.1) // 增加微量的晕染效果
         }
     }
     
@@ -422,7 +501,7 @@ struct HistoryStatisticsView: View {
                                 AxisValueLabel(format: .dateTime.month().day())
                                     .font(.system(size: 9))
                             }
-                        case .lastYear, .all:
+                        case .lastYear, .all, .customYear:
                             AxisMarks(values: .stride(by: .month, count: 2)) { _ in
                                 AxisTick()
                                 AxisValueLabel(format: .dateTime.month())
@@ -484,24 +563,35 @@ struct HistoryStatisticsView: View {
         let count: Int
     }
     
-    private func getTopLocations() -> [LocationPoint] {
-        var groups: [String: (CLLocationCoordinate2D, Int)] = [:]
+    private func getTopLocations(delta: Double) -> [LocationPoint] {
+        var groups: [String: (Double, Double, Int)] = [:]
+        
+        // 根据地图缩放程度（delta）动态调整聚合精度
+        // 越缩小（delta 越大），聚合范围越广
+        let precision: Int
+        if delta < 0.05 { precision = 3 }      // 约 110m 精度
+        else if delta < 0.5 { precision = 2 }   // 约 1.1km 精度
+        else if delta < 5.0 { precision = 1 }   // 约 11km 精度
+        else { precision = 0 }                  // 约 110km 精度
+        
+        let factor = pow(10.0, Double(precision))
         
         for fp in filteredFootprints {
-            // Round to ~200m precision to create better "heat" clusters
-            let lat = Double(String(format: "%.3f", fp.latitude))!
-            let lon = Double(String(format: "%.3f", fp.longitude))!
+            // 使用舍入计算网格点，而非字符串格式化，性能更优
+            let lat = (fp.latitude * factor).rounded() / factor
+            let lon = (fp.longitude * factor).rounded() / factor
             let key = "\(lat),\(lon)"
+            
             if let existing = groups[key] {
-                groups[key] = (existing.0, existing.1 + 1)
+                groups[key] = (lat, lon, existing.2 + 1)
             } else {
-                groups[key] = (CLLocationCoordinate2D(latitude: lat, longitude: lon), 1)
+                groups[key] = (lat, lon, 1)
             }
         }
         
-        return groups.map { LocationPoint(hash: $0.key, coord: $0.value.0, count: $0.value.1) }
+        return groups.map { LocationPoint(hash: $0.key, coord: CLLocationCoordinate2D(latitude: $0.value.0, longitude: $0.value.1), count: $0.value.2) }
             .sorted { $0.count > $1.count }
-            .prefix(30)
+            .prefix(200) // 聚合后点数减少，可以适当放宽显示上限
             .map { $0 }
     }
     
@@ -584,5 +674,29 @@ struct HistoryStatisticsView: View {
         }
         
         return points
+    }
+}
+
+struct HistoryStatisticsView_Previews: PreviewProvider {
+    static var previews: some View {
+        HistoryStatisticsView()
+    }
+}
+
+extension View {
+    func rangeButtonStyle(isSelected: Bool, namespace: Namespace.ID) -> some View {
+        self
+            .foregroundColor(isSelected ? .white : .secondary)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(
+                ZStack {
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color.dfkAccent)
+                            .matchedGeometryEffect(id: "range_bg", in: namespace)
+                    }
+                }
+            )
     }
 }
