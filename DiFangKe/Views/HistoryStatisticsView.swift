@@ -37,6 +37,9 @@ struct HistoryStatisticsView: View {
     @Query(filter: #Predicate<Footprint> { $0.statusValue != "ignored" }, sort: \Footprint.startTime, order: .reverse) 
     private var allFootprints: [Footprint]
     
+    @Query(filter: #Predicate<TransportManualSelection> { $0.isDeleted == false }) 
+    private var manualTransports: [TransportManualSelection]
+    
     @Query(sort: \ActivityType.sortOrder) 
     private var activityTypes: [ActivityType]
     
@@ -622,17 +625,56 @@ struct HistoryStatisticsView: View {
     
     private func getActivityRankData() -> [RankItem] {
         var counts: [String: Int] = [:]
+        
+        // 1. 统计驻留活动 (Stays/Footprints)
         for fp in filteredFootprints {
             if let type = fp.getActivityType(from: activityTypes)?.name {
                 counts[type, default: 0] += 1
             }
         }
         
+        // 2. 统计交通活动 (Manual Transports)
+        // 注意：自动识别的交通目前未持久化为单个对象，此处先计入用户手动确认或修改的交通
+        let calendar = Calendar.current
+        let rangeFilteredTransports = manualTransports.filter { transport in
+            switch selectedRange {
+            case .last7Days:
+                let cutoff = calendar.date(byAdding: .day, value: -7, to: Date())!
+                return transport.startTime >= cutoff
+            case .last30Days:
+                let cutoff = calendar.date(byAdding: .day, value: -30, to: Date())!
+                return transport.startTime >= cutoff
+            case .last90Days:
+                let cutoff = calendar.date(byAdding: .day, value: -90, to: Date())!
+                return transport.startTime >= cutoff
+            case .lastYear:
+                let cutoff = calendar.date(byAdding: .day, value: -365, to: Date())!
+                return transport.startTime >= cutoff
+            case .customYear(let year):
+                return calendar.component(.year, from: transport.startTime) == year
+            case .all:
+                return true
+            }
+        }
+        
+        for transport in rangeFilteredTransports {
+            if let type = TransportType(rawValue: transport.vehicleType) {
+                counts[type.localizedName, default: 0] += 1
+            }
+        }
+        
         return counts.map { name, count in
-            let activity = activityTypes.first { $0.name == name }
-            let color = activity?.color ?? .gray
-            let icon = activity?.icon ?? "mappin.and.ellipse"
-            return RankItem(name: name, count: count, color: color, icon: icon)
+            // 优先匹配预定义活动
+            if let activity = activityTypes.first(where: { $0.name == name }) {
+                return RankItem(name: name, count: count, color: activity.color, icon: activity.icon)
+            }
+            
+            // 匹配交通工具类型
+            if let transportType = TransportType.allCases.first(where: { $0.localizedName == name }) {
+                return RankItem(name: name, count: count, color: .dfkAccent, icon: transportType.sfSymbol)
+            }
+            
+            return RankItem(name: name, count: count, color: .gray, icon: "mappin.and.ellipse")
         }.sorted { $0.count > $1.count }
     }
     

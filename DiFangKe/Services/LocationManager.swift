@@ -327,7 +327,7 @@ final class FootprintProcessor {
     private let driftSpeedThreshold: CLLocationSpeed = 45.0 // m/s，异常飘移速度（约162km/h，兼顾高铁环境）
     
     // 1.3 停留点识别参数
-    private let stayRadiusThreshold: Double = 100.0             // 100米半径内视为同一停留
+    private let stayRadiusThreshold: Double = 50.0             // 50米半径内视为同一停留 (进一步降低以抓取 100m 以上位移)
     private let stayDurationThreshold: TimeInterval = 5 * 60    // 持续 >= 5 分钟（对齐时间轴识别逻辑，从 10 分降至 5 分，确保“所见即所得”地存入数据库）
     
     // 1.4 合并参数（更严格：避免跨度过大的地点合并）
@@ -391,9 +391,9 @@ final class FootprintProcessor {
         let center = calculateCenter(locations)
         let centerLoc = CLLocation(latitude: center.latitude, longitude: center.longitude)
         
-        // 核心优化：允许 3% 的离群点（从 10% 降低到 3%，避免吞掉出发头 3km 的位移）
+        // 核心优化：进一步收紧离群点容忍度（从 3% 降低到 1%），防止长达 500m 以上的慢速位移被吞入长停留中
         let distances = locations.map { $0.distance(from: centerLoc) }.sorted()
-        let percentileindex = Int(Double(distances.count) * 0.97)
+        let percentileindex = Int(Double(distances.count) * 0.99)
         if distances[percentileindex] > stayRadiusThreshold {
             return nil
         }
@@ -486,6 +486,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     // 同步状态属性
     var isSyncingInitialData: Bool = false
     var syncStatusMessage: String = ""
+    var isResettingData: Bool = false
     
     // 从 View 同步过来的参数
     var allPlaces: [Place] = []
@@ -884,7 +885,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     if let bestPlace = self.matchedPlaceFor(coordinate: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)) {
                         if fp.placeID != bestPlace.placeID {
                             fp.placeID = bestPlace.placeID
-                            if (fp.address ?? "").isEmpty { fp.address = bestPlace.address }
+                            if (fp.address ?? "").isEmpty { fp.address = bestPlace.name }
                             if fp.title.isEmpty { fp.title = bestPlace.name }
                         }
                     }
@@ -901,7 +902,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     public func splitLargeFootprintByDistance(_ fp: Footprint, in context: ModelContext) {
         let coords = fp.footprintLocations
         // 核心：基于位置聚类寻找多个“停留点”
-        guard coords.count > 10 else { return }
+        // 安全保护：不自动处理用户手动编辑过、有照片、或者是已确认的足迹，避免干扰用户已有工作
+        let hasUserEdits = fp.isTitleEditedByHand || !(fp.reason ?? "").isEmpty || !fp.photoAssetIDs.isEmpty || fp.status == .confirmed
+        if hasUserEdits { return }
+        
+        guard coords.count > 15 else { return } // 略微增加密度要求
         
         var clusters: [(start: Int, end: Int, center: CLLocationCoordinate2D)] = []
         var i = 0
@@ -977,7 +982,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                             footprintLocations: subCoords,
                             locationHash: "SPLIT_FIXED",
                             duration: eTime.timeIntervalSince(sTime),
-                            title: "[自动修复] " + fp.title,
+                            title: fp.title,
                             address: nil
                         )
                         context.insert(newFp)
@@ -1113,11 +1118,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             // 判定是否离开：
             // A: 如果有匹配地点，且地点 ID 变了，判定为离开
-            // B: 如果没有匹配地点，且位移超过 300m，且精度尚可，判定为离开（放宽到 300m 减少因室内飘移导致的停留时刻重置）
+            // B: 如果没有匹配地点，且位移超过 150m，且精度尚可，判定为离开（放宽到 150m 减少因室内飘移导致的停留时刻重置）
             let isSamePlace = (startPlace != nil && startPlace?.placeID == currentPlace?.placeID)
             let distance = location.distance(from: startLoc)
             
-            if !isSamePlace && distance > 300.0 && location.horizontalAccuracy < 100.0 {
+            if !isSamePlace && distance > 150.0 && location.horizontalAccuracy < 100.0 {
                 potentialStopStartLocation = location
                 savePotentialStop()
                 ongoingTitle = nil
@@ -1143,64 +1148,58 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
 
-    /// 重置并重新处理指定日期的所有足迹
     @MainActor
     public func resetToday() {
         guard let container = modelContext?.container else { return }
         let date = Date()
+        self.isResettingData = true
         
-        Task {
-            await withCheckedContinuation { continuation in
-                Task.detached(priority: .userInitiated) {
-                    let context = ModelContext(container)
-                    let targetDate = Calendar.current.startOfDay(for: date)
-                    let nextDay = Calendar.current.date(byAdding: .day, value: 1, to: targetDate)!
-                    
-                    // 1. 彻底清理当天（包括跨天进入当天的）所有足迹与手动修正
-                    let fetchDescriptor = FetchDescriptor<Footprint>(
-                        predicate: #Predicate { 
-                            ($0.date >= targetDate && $0.date < nextDay) ||
-                            ($0.startTime < nextDay && $0.endTime >= targetDate)
+        Task.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            let targetDate = Calendar.current.startOfDay(for: date)
+            let nextDay = Calendar.current.date(byAdding: .day, value: 1, to: targetDate)!
+            
+            // 1. 清理
+            let fetchDescriptor = FetchDescriptor<Footprint>(
+                predicate: #Predicate { 
+                    ($0.date >= targetDate && $0.date < nextDay) ||
+                    ($0.startTime < nextDay && $0.endTime >= targetDate)
+                }
+            )
+            if let existing = try? context.fetch(fetchDescriptor) {
+                for fp in existing { context.delete(fp) }
+            }
+            
+            let transportDescriptor = FetchDescriptor<TransportManualSelection>(
+                predicate: #Predicate { $0.startTime >= targetDate && $0.startTime < nextDay }
+            )
+            if let existingManuals = try? context.fetch(transportDescriptor) {
+                for m in existingManuals { context.delete(m) }
+            }
+            try? context.save()
+            
+            // 2. 重新处理原始点
+            let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
+            if !rawPoints.isEmpty {
+                var tempQueue: [CLLocation] = []
+                for loc in rawPoints {
+                    if let candidate = FootprintProcessor.shared.processNewLocation(loc, queue: &tempQueue, isHistorical: true) {
+                        // 在主线程处理插入逻辑，确保全局状态(potentialStopStartLocation等)同步
+                        let end = candidate.endTime
+                        await MainActor.run {
+                            self.handleNewCandidateFootprint(candidate, isHistorical: true)
                         }
-                    )
-                    if let existing = try? context.fetch(fetchDescriptor) {
-                        for fp in existing { context.delete(fp) }
+                        tempQueue.removeAll { $0.timestamp <= end }
                     }
-                    
-                    let transportDescriptor = FetchDescriptor<TransportManualSelection>(
-                        predicate: #Predicate { $0.startTime >= targetDate && $0.startTime < nextDay }
-                    )
-                    if let existingManuals = try? context.fetch(transportDescriptor) {
-                        for m in existingManuals { context.delete(m) }
-                    }
-                    try? context.save()
-                    
-                        // 2. 重新处理原始点
-                        let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
-                        if !rawPoints.isEmpty {
-                            var tempQueue: [CLLocation] = []
-                            for loc in rawPoints {
-                                // 历史轨迹处理中，我们不再需要频繁 save，由最后的单次 save 保证原子性与 UI 流畅
-                                if let candidate = FootprintProcessor.shared.processNewLocation(loc, queue: &tempQueue, isHistorical: true) {
-                                    await self.handleNewCandidateFootprint(candidate, isHistorical: true, context: context)
-                                    // 核心修复：识别出一个足迹后，从队列中移除已归档的点，避免下个点触发重复识别
-                                    let lastProcessedTime = candidate.endTime
-                                    tempQueue.removeAll { $0.timestamp <= lastProcessedTime }
-                                }
-                            }
-                            
-                            // 关键修复：彻底删除 finalizeCurrentStay。
-                            // 严格遵循“离场结算制”，正在发生的停留不转化为已确认足迹，由状态卡片负责。
-                        }
-                        
-                        try? context.save()
-                    continuation.resume()
                 }
             }
             
-            // 3. UI 状态刷新
-            self.lastProcessedTimestamp = Calendar.current.startOfDay(for: date)
-            await self.loadPointsFromStore()
+            await MainActor.run {
+                self.isResettingData = false
+                self.lastProcessedTimestamp = Calendar.current.startOfDay(for: date)
+                Task { await self.loadPointsFromStore() }
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            }
         }
     }
 
@@ -1368,9 +1367,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 footprintLocations: candidate.rawLocations.map { $0.coordinate },
                 locationHash: "TBD",
                 duration: candidate.duration,
-                title: "", // 保持为空，由模型 init 自动分配随机诗意文案池中的标题
+                title: "", 
                 status: .confirmed,
-                address: currentAddress
+                address: (isHistorical || currentAddress == "正在解析位置..." || currentAddress == "未知位置") ? nil : currentAddress
             )
             
             if let mPlace = self.matchedPlaceFor(coordinate: candidate.centerCoordinate) {
@@ -1381,8 +1380,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // 只有同一地点、同一时间段出现过3次以上才关联
                 newFootprint.activityTypeValue = self.findFrequentActivityType(for: pid, at: candidate.startTime, context: context)
                 
-                // Address uses original raw location context
-                newFootprint.address = mPlace.address ?? mPlace.name
+                // Address 优先使用地点名称，解决“标题对地点(地址)不对”的问题
+                newFootprint.address = mPlace.name
                 
                 // Title uses the custom name (User preference: "Title uses name")
                 newFootprint.title = Footprint.generateRandomTitle(for: mPlace.name, seed: Int(newFootprint.startTime.timeIntervalSince1970))
@@ -1409,9 +1408,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             context.insert(newFootprint)
             try? context.save()
             
-            if !isHistorical {
-                analyzeFootprint(newFootprint, context: context)
-            }
+            // 核心修复：重置或历史回溯时也要触发分析逻辑，以补全地址和标题
+            analyzeFootprint(newFootprint, context: context)
         }
         
         // 处理完一个段后，更新进度
@@ -1494,27 +1492,56 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 关联照片
         linkPhotos(to: footprint, context: context)
 
-        let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
-        if !isAiEnabled {
-            // 如果 AI 关闭，且用户没手动改过，使用生成的优美标题
-            if !footprint.isTitleEditedByHand {
-                // 如果匹配到重要地点，优先使用重要地点的原始名称
-                let baseName = matchedPlace?.address ?? matchedPlace?.name ?? footprint.address ?? "此处"
-                
-                // 只有当标题是空的、通用的、或是基于旧地址自动生成的，我们才更新它
-                if footprint.title.isEmpty || footprint.title == "寻迹此处" || footprint.title == "地点记录" || (matchedPlace != nil && !footprint.title.contains(baseName)) {
+        // --- 逻辑重构：立即进行本地 POI 丰富 ---
+        // 无论 AI 是否开启，都先尝试通过本地已存地点来校准标题和地址
+        if !footprint.isTitleEditedByHand {
+            let fpCoord = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+            if let matchedPOI = matchedPlaceFor(coordinate: fpCoord) {
+                // 1. 优先使用本地已匹配的地点
+                let baseName = matchedPOI.name
+                if footprint.title.isEmpty || footprint.title == "寻迹此处" || footprint.title == "地点记录" || !footprint.title.contains(baseName) {
                     footprint.title = Footprint.generateRandomTitle(for: baseName, seed: Int(footprint.startTime.timeIntervalSince1970))
                 }
+                footprint.address = baseName
+            } else if (footprint.address ?? "").isEmpty || footprint.address == "地点记录" || footprint.address == "正在解析位置..." || footprint.address == "此处" {
+                // 2. 如果没有匹配地点，且地址是通用的，则尝试反地理编码
+                let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
+                let footprintID = footprint.persistentModelID
                 
-                if let mPlace = matchedPlace {
-                    footprint.address = mPlace.address ?? mPlace.name
+                geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
+                    guard let self = self, let placemark = placemarks?.first else { return }
+                    let poiName = placemark.areasOfInterest?.first
+                    let name = [poiName, placemark.name, placemark.thoroughfare, placemark.subLocality]
+                        .compactMap { $0 }
+                        .first ?? "未知位置"
+                    
+                    Task { @MainActor in
+                        // 在主线程重新获取该对象，确保线程安全
+                        if let mainContext = self.modelContext?.container.mainContext,
+                           let mainFp = mainContext.model(for: footprintID) as? Footprint {
+                            mainFp.address = name
+                            if !mainFp.isTitleEditedByHand {
+                                mainFp.title = Footprint.generateRandomTitle(for: name, seed: Int(mainFp.startTime.timeIntervalSince1970))
+                            }
+                            try? mainContext.save()
+                        }
+                    }
+                }
+            } else if let addr = footprint.address {
+                // 3. 兜底逻辑：地址已存在（非通用），确保标题与之对齐
+                if footprint.title.isEmpty || footprint.title == "寻迹此处" || footprint.title == "地点记录" {
+                    footprint.title = Footprint.generateRandomTitle(for: addr, seed: Int(footprint.startTime.timeIntervalSince1970))
                 }
             }
+        }
+
+        let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
+        if !isAiEnabled {
             footprint.aiAnalyzed = true 
             return
         }
         
-        // 使用统一队列进行异步分析，不再直接发起实时请求
+        // 使用统一队列进行异步分析
         Task { @MainActor in
             openAIService.analyzeFootprint(footprint)
         }
@@ -1844,7 +1871,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                                 if let mPlace = self.matchedPlaceFor(coordinate: gap.center) {
                                     let pid = mPlace.placeID
                                     newFp.placeID = pid
-                                    newFp.address = mPlace.address ?? mPlace.name
+                                    newFp.address = mPlace.name
                                     newFp.title = Footprint.generateRandomTitle(for: mPlace.name, seed: Int(gap.start.timeIntervalSince1970))
                                     
                                     // --- 自动关联历史习惯 ---
@@ -1871,7 +1898,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let duration = end.timeIntervalSince(start)
         let diameter = calculateMaxDiameter(gapPoints)
         
-        if diameter < 300 && duration >= 120 {
+        if diameter < 150 && duration >= 120 {
             let avgLat = gapPoints.map { $0.coordinate.latitude }.reduce(0, +) / Double(gapPoints.count)
             let avgLon = gapPoints.map { $0.coordinate.longitude }.reduce(0, +) / Double(gapPoints.count)
             let center = CLLocationCoordinate2D(latitude: avgLat, longitude: avgLon)
@@ -1953,32 +1980,60 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     /// 重置并重新生成指定日期的足迹数据
+    @MainActor
     func resetData(for date: Date) {
-        guard let context = modelContext else { return }
-        let calendar = Calendar.current
-        let startOfDay = calendar.startOfDay(for: date)
-        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+        guard let container = modelContext?.container else { return }
         
-        let fpDescriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate { $0.startTime >= startOfDay && $0.startTime < endOfDay }
-        )
+        isResettingData = true
+        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
         
-        let manualDescriptor = FetchDescriptor<TransportManualSelection>(
-            predicate: #Predicate { $0.startTime >= startOfDay && $0.startTime < endOfDay }
-        )
-        
-        do {
-            if let fps = try? context.fetch(fpDescriptor) {
-                for fp in fps { context.delete(fp) }
+        Task {
+            await withCheckedContinuation { continuation in
+                Task.detached(priority: .userInitiated) {
+                    let context = ModelContext(container)
+                    let calendar = Calendar.current
+                    let targetDate = calendar.startOfDay(for: date)
+                    let nextDay = calendar.date(byAdding: .day, value: 1, to: targetDate)!
+                    
+                    // 1. 清理该日期的所有足迹、交通纠错和 AI 摘要
+                    let fpDescriptor = FetchDescriptor<Footprint>(
+                        predicate: #Predicate { $0.startTime >= targetDate && $0.startTime < nextDay }
+                    )
+                    let manualDescriptor = FetchDescriptor<TransportManualSelection>(
+                        predicate: #Predicate { $0.startTime >= targetDate && $0.startTime < nextDay }
+                    )
+                    let insightDescriptor = FetchDescriptor<DailyInsight>(
+                        predicate: #Predicate { $0.date == targetDate }
+                    )
+                    
+                    if let fps = try? context.fetch(fpDescriptor) { for fp in fps { context.delete(fp) } }
+                    if let manuals = try? context.fetch(manualDescriptor) { for m in manuals { context.delete(m) } }
+                    if let insights = try? context.fetch(insightDescriptor) { for i in insights { context.delete(i) } }
+                    
+                    try? context.save()
+                    
+                    // 2. 重新加载原始点并处理
+                    let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
+                    if !rawPoints.isEmpty {
+                        var tempQueue: [CLLocation] = []
+                        for loc in rawPoints {
+                            if let candidate = FootprintProcessor.shared.processNewLocation(loc, queue: &tempQueue, isHistorical: true) {
+                                await self.handleNewCandidateFootprint(candidate, isHistorical: true, context: context)
+                                let lastProcessedTime = candidate.endTime
+                                tempQueue.removeAll { $0.timestamp <= lastProcessedTime }
+                            }
+                        }
+                    }
+                    
+                    try? context.save()
+                    continuation.resume()
+                }
             }
-            if let manuals = try? context.fetch(manualDescriptor) {
-                for m in manuals { context.delete(m) }
-            }
-            try context.save()
             
-            // 重新触发识别逻辑（如果需要的话，View 层的 Query 会自动刷新）
-        } catch {
-            print("Failed to reset day data: \(error)")
+            // 3. 清理缓存，确保 UI 能够感知到数据的彻底刷新
+            TimelineBuilder.timelineCache.removeAll()
+            self.isResettingData = false
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         }
     }
 
@@ -1998,7 +2053,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             return (LocationSuggestion(
                 id: UUID(),
                 name: place.name,
-                address: place.address ?? "",
+                address: place.name,
                 coordinate: place.coordinate,
                 isExistingPlace: true,
                 placeID: place.placeID,
@@ -2167,7 +2222,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
             
-            fp.address = displayValue
+            fp.address = suggestion.name
             fp.placeID = targetPlace.placeID
             // 重新分析足迹内容
             analyzeFootprint(fp, context: context)

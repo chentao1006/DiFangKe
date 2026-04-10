@@ -481,16 +481,3 @@ struct TransportModalView: View {
     }
 }
 
-extension TransportType {
-    var localizedName: String {
-        switch self {
-        case .slow: return "步行"
-        case .bicycle: return "自行车"
-        case .motorcycle: return "摩托车/电动车"
-        case .bus: return "公交/大巴"
-        case .car: return "汽车"
-        case .train: return "火车/高铁"
-        case .airplane: return "飞机"
-        }
-    }
-}

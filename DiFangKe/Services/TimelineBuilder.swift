@@ -343,8 +343,8 @@ class TimelineBuilder {
             for i in 0..<transports.count {
                 var t = transports[i]
                 
-                // Fill gap before transport with a stay (if > 5 mins)
-                if t.startTime.timeIntervalSince(lastProcessedTime) > 300 {
+                // 停留识别门槛降至 2 分钟 (120s)
+                if t.startTime.timeIntervalSince(lastProcessedTime) > 120 {
                     addStationaryStay(from: lastProcessedTime, to: t.startTime, gapPoints: gapPoints, items: &items, allPlaces: allPlaces)
                 }
                 
@@ -458,9 +458,13 @@ class TimelineBuilder {
         let duration = end.timeIntervalSince(start)
         guard duration > 300 else { return } // Reject stays < 5 mins
         
-        // Use binary search to find relevant points within the already filtered gapPoints
         let subPoints = extractPoints(from: gapPoints, start: start, end: end)
         guard !subPoints.isEmpty else { return }
+        
+        // --- 核心修复：增加最大跨度校验 ---
+        // 如果间隙内的点总跨度超过 150m，不视为单一停留
+        let diameter = calculateMaxDiameter(subPoints)
+        if diameter > 150 { return }
         
         // Use the middle point as representative location
         let midpoint = subPoints[subPoints.count / 2].coordinate
@@ -481,10 +485,12 @@ class TimelineBuilder {
         )
         
         if let place = getPlaceForCoordinate(midpoint, allPlaces: allPlaces) {
-            fp.title = Footprint.generateRandomTitle(for: place.name, seed: Int(start.timeIntervalSince1970))
+            let name = place.name
+            fp.address = name
+            fp.title = Footprint.generateRandomTitle(for: name, seed: Int(start.timeIntervalSince1970))
             fp.placeID = place.placeID
         } else {
-            fp.title = "在某地停留" 
+            fp.title = "寻迹此处" 
         }
         
         items.append(.footprint(fp))
@@ -538,48 +544,62 @@ class TimelineBuilder {
     }
     
     private static func extractTransports(_ points: [CLLocation]) -> [Transport] {
-        guard points.count >= 2 else { return [] }
+        // 先对原始点进行初步过滤，剔除精度极差（>200m）的噪点，避免大幅拉伸段跨度
+        let filteredPoints = points.filter { $0.horizontalAccuracy > 0 && $0.horizontalAccuracy < 200 }
+        guard filteredPoints.count >= 2 else { return [] }
+        
         var transports: [Transport] = []
-        var currentPoints: [CLLocation] = [points[0]]
+        var currentPoints: [CLLocation] = [filteredPoints[0]]
         var currentSegmentType: TransportType? = nil
         
-        for i in 1..<points.count {
-            let p = points[i]
-            let prevP = points[i-1]
+        for i in 1..<filteredPoints.count {
+            let p = filteredPoints[i]
+            let prevP = filteredPoints[i-1]
             let timeGap = p.timestamp.timeIntervalSince(prevP.timestamp)
             
-            if timeGap > 15 * 60 {
+            // 只要时间点间隔超过 10 分钟，强行打断，进入下一段判断
+            if timeGap > 10 * 60 {
                 if let transport = finalizeTransport(currentPoints) { transports.append(transport) }
                 currentPoints = [p]; currentSegmentType = nil; continue
             }
 
-            // Detect inactivity/stillness to split transport (e.g. user stopped moving for > 10 mins)
-            // Increased threshold to 220m to account for GPS drift
-            // Performance: Only check every 5 points to reduce overhead
-            if currentPoints.count > 12 && i % 5 == 0 {
-                let recentWindow = Array(currentPoints[max(0, currentPoints.count-25)...(currentPoints.count-1)])
+            // --- 增强：出发点静止识别 ---
+            // 如果已经在当前段累积了一定时间，且之前一直处于静止状态，而当前点突然拉开了距离
+            if currentPoints.count >= 2 {
+                let segmentDuration = p.timestamp.timeIntervalSince(currentPoints.first!.timestamp)
+                if segmentDuration > 60 { // 进一步降低至 60s
+                    let diameter = calculateMaxDiameter(currentPoints)
+                    let distFromStart = p.distance(from: currentPoints.first!)
+
+                    // 允许更紧凑的停留范围（70m）和更短的跳出距离（120m）
+                    if diameter < 70 && distFromStart > 120 {
+                        if let transport = finalizeTransport(currentPoints) { transports.append(transport) }
+                        currentPoints = [prevP, p]; currentSegmentType = nil; continue
+                    }
+                }
+            }
+
+            // --- 增强：中途或终点静止识别 ---
+            if currentPoints.count > 8 && i % 5 == 0 {
+                let recentWindow = Array(currentPoints[max(0, currentPoints.count-20)...(currentPoints.count-1)])
                 let windowDuration = p.timestamp.timeIntervalSince(recentWindow.first!.timestamp)
-                if windowDuration > 600 { // 10 minutes
+                if windowDuration > 480 { // 8 分钟内
                     let diameter = calculateMaxDiameter(recentWindow + [p])
-                    if diameter < 220 { // Moved less than 220m in 10 mins - likely stationary
-                        if let transport = finalizeTransport(currentPoints) {
-                            transports.append(transport)
-                        }
-                        currentPoints = [p]
-                        currentSegmentType = nil
-                        continue
+                    if diameter < 160 { // 静止半径进一步收紧
+                        if let transport = finalizeTransport(currentPoints) { transports.append(transport) }
+                        // 将触发点 p 保留在下一段的起点
+                        currentPoints = [p]; currentSegmentType = nil; continue
                     }
                 }
             }
             
             if currentPoints.count >= 8 && i % 3 == 0 {
-
                 if currentSegmentType == nil {
                     let d = calculateDistance(currentPoints)
                     let t = currentPoints.last!.timestamp.timeIntervalSince(currentPoints.first!.timestamp)
                     currentSegmentType = TransportType.from(speed: t > 0 ? d / t : 0)
                 }
-                let window = Array(points[max(0, i-10)...i])
+                let window = Array(filteredPoints[max(0, i-10)...i])
                 if window.count >= 6 {
                     let wd = calculateDistance(window)
                     let wt = window.last!.timestamp.timeIntervalSince(window.first!.timestamp)
@@ -599,9 +619,9 @@ class TimelineBuilder {
     private static func isSignificantTypeChange(from t1: TransportType, to t2: TransportType) -> Bool {
         func category(of type: TransportType) -> Int {
             switch type {
-            case .slow: return 1
+            case .slow, .running: return 1
             case .bicycle: return 2
-            case .motorcycle, .car, .bus: return 3
+            case .motorcycle, .ebike, .car, .bus: return 3
             default: return 4
             }
         }
@@ -610,7 +630,7 @@ class TimelineBuilder {
     
     private static func finalizeTransport(_ points: [CLLocation]) -> Transport? {
         let distance = calculateDistance(points)
-        if points.count < 3 && distance < 300 { return nil }
+        if points.count < 3 && distance < 150 { return nil }
         guard points.count >= 2 else { return nil }
         
         let start = points.first!.timestamp
@@ -620,15 +640,16 @@ class TimelineBuilder {
         let kmh = averageSpeed * 3.6
         
         if distance < 50 { return nil }
-        if duration < 300 && distance < 200 { return nil }
+        // 降低短时位移识别门槛：从 150m 降至 100m
+        if duration < 300 && distance < 100 { return nil }
         if duration < 60 && kmh < 3 { return nil } // 保持原有的极短距离高速过滤
         
         let maxDiameter = calculateMaxDiameter(points)
         // 增加对“室内漂移”的过滤：如果最大跨度较小且总路径过长（比值 > 2），判定为原地漂移而非位移
         if maxDiameter < 180 && distance > maxDiameter * 2.0 { return nil }
         
-        if maxDiameter < 45 && duration < 30 * 60 { return nil }
-        if maxDiameter < 100 && kmh < 1.5 { return nil } // 低速短距离位移不视为交通
+        if maxDiameter < 100 && duration < 30 * 60 { return nil }
+        if maxDiameter < 150 && kmh < 2.0 { return nil } // 进一步过滤低速短距离位移
         if kmh < 0.4 || (kmh < 0.6 && distance < 1000) { return nil }
         
         return Transport(

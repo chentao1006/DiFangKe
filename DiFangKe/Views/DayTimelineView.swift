@@ -170,6 +170,33 @@ struct DayTimelineView: View {
                     }
                     .transition(.opacity.combined(with: .scale))
                 }
+                
+                if locationManager.isResettingData {
+                    ZStack {
+                        Color.black.opacity(0.35)
+                            .ignoresSafeArea()
+                        
+                        VStack(spacing: 20) {
+                            ProgressView()
+                                .scaleEffect(1.5)
+                                .tint(.primary)
+                            
+                            Text("正在重置数据...")
+                                .font(.headline)
+                                .foregroundColor(.primary)
+                            
+                            Text("正在重新分析原始轨迹点\n这可能需要几十秒时间")
+                                .font(.caption)
+                                .multilineTextAlignment(.center)
+                                .foregroundColor(.primary.opacity(0.8))
+                        }
+                        .padding(32)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(28)
+                        .shadow(color: .black.opacity(0.2), radius: 20)
+                    }
+                    .transition(.opacity.combined(with: .scale))
+                }
             }
             .onDisappear {
                 stopRepeatTimer()

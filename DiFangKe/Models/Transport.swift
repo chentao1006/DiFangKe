@@ -25,7 +25,9 @@ final class TransportManualSelection {
 
 enum TransportType: String, CaseIterable, Codable {
     case slow = "slow"                 // 步行
+    case running = "running"           // 跑步
     case bicycle = "bicycle"           // 自行车
+    case ebike = "ebike"               // 电动车
     case motorcycle = "motorcycle"     // 摩托车
     case bus = "bus"                   // 公交/大巴
     case car = "car"                   // 汽车
@@ -35,8 +37,10 @@ enum TransportType: String, CaseIterable, Codable {
     var icon: String {
         switch self {
         case .slow: return "figure.walk"
+        case .running: return "figure.run"
         case .bicycle: return "bicycle"
-        case .motorcycle: return "moped.fill"
+        case .ebike: return "moped.fill"
+        case .motorcycle: return "motorcycle.fill"
         case .bus: return "bus.fill"
         case .car: return "car.fill"
         case .train: return "train.side.front.car"
@@ -47,8 +51,10 @@ enum TransportType: String, CaseIterable, Codable {
     var sfSymbol: String {
         switch self {
         case .slow: return "figure.walk"
+        case .running: return "figure.run"
         case .bicycle: return "bicycle"
-        case .motorcycle: return "moped.fill"
+        case .ebike: return "moped.fill"
+        case .motorcycle: return "motorcycle.fill"
         case .bus: return "bus.fill"
         case .car: return "car.fill"
         case .train: return "train.side.front.car"
@@ -58,11 +64,27 @@ enum TransportType: String, CaseIterable, Codable {
     
     static func from(speed: Double) -> TransportType {
         let kmh = speed * 3.6
-        if kmh < 6.5 { return .slow }      // < 6.5 km/h: 步行
-        if kmh < 12 { return .bicycle }    // 6.5 - 12 km/h: 自行车
-        if kmh < 120 { return .car }       // 12 - 120 km/h: 汽车
+        if kmh < 3 { return .slow }      // < 3 km/h: 步行
+        if kmh < 5 { return .running }   // 3 - 5 km/h: 跑步
+        if kmh < 10 { return .bicycle }     // 5 - 10 km/h: 自行车
+        if kmh < 20 { return .ebike }       // 10 - 20 km/h: 电动车
+        if kmh < 120 { return .car }       // 120 - 450 km/h: 汽车
         if kmh < 450 { return .train }     // 120 - 450 km/h: 火车/高铁
         return .airplane                   // > 450 km/h: 飞机
+    }
+    
+    var localizedName: String {
+        switch self {
+        case .slow: return "步行"
+        case .running: return "跑步"
+        case .bicycle: return "自行车"
+        case .ebike: return "电动车"
+        case .motorcycle: return "摩托车"
+        case .bus: return "公交/大巴"
+        case .car: return "汽车"
+        case .train: return "火车/高铁"
+        case .airplane: return "飞机"
+        }
     }
 }
 

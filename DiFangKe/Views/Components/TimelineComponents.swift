@@ -638,6 +638,9 @@ struct FootprintCardView: View {
             if !addressStr.isEmpty {
                 DispatchQueue.main.async {
                     footprint.address = addressStr
+                    if !footprint.isTitleEditedByHand {
+                        footprint.title = Footprint.generateRandomTitle(for: addressStr, seed: Int(footprint.startTime.timeIntervalSince1970))
+                    }
                     try? footprint.modelContext?.save()
                 }
             }
@@ -777,9 +780,9 @@ struct PlaceholderFootprintCard: View {
         if let startLoc = locationManager.potentialStopStartLocation {
             let duration = now.timeIntervalSince(startLoc.timestamp)
             if duration > 8 * 3600 {
-                return "要不出去走走？世界那么大，去记录一下吧 🌲"
+                return "要不出去走走？世界那么大，去看看"
             } else if duration > 4 * 3600 {
-                return "你已经在这里停留好久了，想去探索新地方吗？☕️"
+                return "你已经在这里停留好久了，想去探索新地方吗？"
             }
         }
         
@@ -787,15 +790,15 @@ struct PlaceholderFootprintCard: View {
         if let location = locationManager.lastLocation, location.speed > 1.0 {
             let speedKmh = location.speed * 3.6
             if speedKmh > 20 {
-                return "正在飞驰中，今日的故事正在加速落笔 🚄"
+                return "正在飞驰中，注意安全"
             }
         }
         
         // 3. 时间维度提示
         if hour >= 23 || hour <= 4 {
-            return "夜深了，今日的记忆正在做最后的收纳... 🌙"
+            return "夜深了，早点休息"
         } else if hour >= 5 && hour <= 8 {
-            return "早安！新的旅程正在为您捕捉第一段足迹 ☀️"
+            return "早安！又是活力满满的一天"
         }
         
         return nil
