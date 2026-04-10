@@ -13,6 +13,16 @@ struct DFKMapView: View {
     var mainAnnotationTitle: String? = nil
     var timelineItems: [TimelineItem] = []
     var photoAssets: [PHAsset] = []
+    
+    // 热力图支持 (用于统计视图)
+    struct HeatmapPoint: Identifiable {
+        let id = UUID()
+        let coordinate: CLLocationCoordinate2D
+        let intensity: Int
+        let maxIntensity: Int
+    }
+    var heatmapPoints: [HeatmapPoint] = []
+    
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     var onPhotoTap: ((PHAsset) -> Void)? = nil
     
@@ -127,6 +137,25 @@ struct DFKMapView: View {
                             }
                         }
                     }
+                }
+            }
+            
+            // 统计热力图点
+            ForEach(heatmapPoints) { point in
+                Annotation("", coordinate: point.coordinate) {
+                    let ratio = Double(point.intensity) / Double(max(1, point.maxIntensity))
+                    let color: Color = ratio < 0.3 ? .orange : (ratio < 0.7 ? .red : .purple)
+                    
+                    // 大地图模式下圆圈变大
+                    let baseSize: CGFloat = isInteractive ? 24 : 14
+                    let multiplier: CGFloat = isInteractive ? 6 : 3
+                    let maxSize: CGFloat = isInteractive ? 60 : 30
+                    let size = CGFloat(max(baseSize, min(maxSize, CGFloat(point.intensity) * multiplier)))
+                    
+                    Circle()
+                        .fill(color.opacity(0.7).gradient)
+                        .frame(width: size, height: size)
+                        .blur(radius: size * 0.1)
                 }
             }
         }

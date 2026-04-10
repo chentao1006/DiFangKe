@@ -56,6 +56,8 @@ struct HistoryStatisticsView: View {
     // Cache structure: [RangeRawValue: (text: String, timestamp: Double)]
     @State private var summaryCache: [String: [String: Any]] = (UserDefaults.standard.dictionary(forKey: "statistics_ai_cache") as? [String: [String: Any]]) ?? [:]
     
+    @State private var showingFullMap = false
+    
     @Namespace private var rangeNamespace
     
     // Filtered footprints based on range
@@ -115,6 +117,9 @@ struct HistoryStatisticsView: View {
             withAnimation(.easeIn(duration: 0.6)) {
                 appearanceTrigger = true
             }
+        }
+        .fullScreenCover(isPresented: $showingFullMap) {
+            FullHeatmapView(heatmapPoints: heatmapPoints, initialPosition: mapPosition)
         }
     }
     
@@ -363,19 +368,18 @@ struct HistoryStatisticsView: View {
     // MARK: - Heatmap Section (Thermal Style)
     private var heatmapSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("常去地点", icon: "map.fill")
+            sectionHeader("热点地区", icon: "map.fill")
             
             if heatmapPoints.isEmpty {
                 placeholderView("暂无地点数据")
             } else {
                 let maxIntensity = heatmapPoints.map { $0.count }.max() ?? 1
-                Map(position: $mapPosition) {
-                    ForEach(heatmapPoints, id: \.hash) { loc in
-                        Annotation("", coordinate: loc.coord) {
-                            ThermalBlipView(intensity: loc.count, maxIntensity: maxIntensity)
-                        }
-                    }
-                }
+                DFKMapView(
+                    cameraPosition: $mapPosition,
+                    isInteractive: false,
+                    showsUserLocation: false,
+                    heatmapPoints: heatmapPoints.map { DFKMapView.HeatmapPoint(coordinate: $0.coord, intensity: $0.count, maxIntensity: maxIntensity) }
+                )
                 .onMapCameraChange { context in
                     // 地图缩放变化时，动态重新聚类
                     updateHeatmapPoints(delta: context.region.span.latitudeDelta)
@@ -383,24 +387,10 @@ struct HistoryStatisticsView: View {
                 .frame(height: 280)
                 .cornerRadius(24)
                 .padding(.horizontal, 16)
+                .onTapGesture {
+                    showingFullMap = true
+                }
             }
-        }
-    }
-    
-    struct ThermalBlipView: View {
-        let intensity: Int
-        let maxIntensity: Int
-        
-        var body: some View {
-            let ratio = Double(intensity) / Double(max(1, maxIntensity))
-            let color: Color = ratio < 0.3 ? .orange : (ratio < 0.7 ? .red : .purple)
-            
-            let size = CGFloat(max(14, min(30, intensity * 3)))
-            
-            Circle()
-                .fill(color.opacity(0.7).gradient)
-                .frame(width: size, height: size)
-                .blur(radius: size * 0.1) // 增加微量的晕染效果
         }
     }
     
@@ -598,22 +588,6 @@ struct HistoryStatisticsView: View {
             .map { $0 }
     }
     
-    private func getRegion(for points: [LocationPoint]) -> MKCoordinateRegion {
-        if points.isEmpty { return MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 39.9, longitude: 116.4), span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)) }
-        
-        let lats = points.map { $0.coord.latitude }
-        let lons = points.map { $0.coord.longitude }
-        
-        let center = CLLocationCoordinate2D(
-            latitude: (lats.min()! + lats.max()!) / 2,
-            longitude: (lons.min()! + lons.max()!) / 2
-        )
-        
-        let delta = max(0.015, (lats.max()! - lats.min()!) * 1.8)
-        let deltaLon = max(0.015, (lons.max()! - lons.min()!) * 1.8)
-        
-        return MKCoordinateRegion(center: center, span: MKCoordinateSpan(latitudeDelta: delta, longitudeDelta: deltaLon))
-    }
     
     struct RankItem: Identifiable {
         let id = UUID()
@@ -716,6 +690,42 @@ struct HistoryStatisticsView: View {
         }
         
         return points
+    }
+}
+
+struct FullHeatmapView: View {
+    @Environment(\.dismiss) private var dismiss
+    let heatmapPoints: [HistoryStatisticsView.LocationPoint]
+    let initialPosition: MapCameraPosition
+    
+    @State private var position: MapCameraPosition
+    @State private var maxIntensity: Int
+    
+    init(heatmapPoints: [HistoryStatisticsView.LocationPoint], initialPosition: MapCameraPosition) {
+        self.heatmapPoints = heatmapPoints
+        self.initialPosition = initialPosition
+        self._position = State(initialValue: initialPosition)
+        self._maxIntensity = State(initialValue: heatmapPoints.map { $0.count }.max() ?? 1)
+    }
+    
+    var body: some View {
+        NavigationStack {
+            DFKMapView(
+                cameraPosition: $position,
+                isInteractive: true,
+                showsUserLocation: true,
+                heatmapPoints: heatmapPoints.map { DFKMapView.HeatmapPoint(coordinate: $0.coord, intensity: $0.count, maxIntensity: maxIntensity) }
+            )
+            .ignoresSafeArea(edges: .bottom)
+            .navigationTitle("热点地区")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { dismiss() }
+                        .fontWeight(.bold)
+                }
+            }
+        }
     }
 }
 

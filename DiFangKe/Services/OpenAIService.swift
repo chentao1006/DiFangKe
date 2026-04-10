@@ -512,10 +512,11 @@ class OpenAIService {
         时长：\(Int(duration / 60))分钟
         地点与活动信息：\(promptSnippet)
 
-        请输出：
-        1. 简短标题（10字以内，反映地点或活动，禁用通用词）
-        2. 精彩程度评分（0.0 ~ 1.0）
-        3. 简短原因（20字以内）
+        请根据以上信息进行分析并输出：
+        1. 简短标题：10字以内，反映地点内涵或活动属性，严禁使用“地点记录”、“停留”、“发现足迹”等通用废话。
+        2. 精彩程度：0.0 ~ 1.0。
+        3. 足迹备注：20字以内，要求富有生活气息、温情且具有洞察力。
+           【注意】：即便信息极少（如长时间居家），也要尝试从时间段、居家氛围提取美感或描述一种宁静感，绝对禁止出现“缺乏描述”、“没有详情”、“具体活动不明”等生硬死板的表述。
 
         返回格式（严格JSON）：
         { "title": "...", "score": 0.85, "reason": "..." }
@@ -523,10 +524,10 @@ class OpenAIService {
         
         let body: [String: Any] = [
             "messages": [
-                ["role": "system", "content": "You are a professional life style analyst. Always respond in direct JSON format."],
+                ["role": "system", "content": "你是一位拥有敏锐洞察力的生活美学专家，擅长从平凡的日常足迹中捕捉闪光点。你的回应必须是直接的 JSON 格式，文字风格温暖、精炼且富有感染力。"],
                 ["role": "user", "content": prompt]
             ],
-            "temperature": 0.8,
+            "temperature": 0.85,
             "response_format": ["type": "json_object"]
         ]
         
@@ -578,14 +579,14 @@ class OpenAIService {
         
         let dateStr = date.formatted(.dateTime.year().month().day())
         let list = footprintDescriptions.joined(separator: "\n")
-        let prompt = "今天是 \(dateStr)。请根据以下足迹编写一段极简晚间回顾（15字以内）。要求：语气温暖，富有洞察力，且绝对不要重复相同的内容：\n\(list)"
+        let prompt = "今天是 \(dateStr)。请根据以下足迹编写一段极简晚间回顾（15字以内）。要求：作为一位善于发现生活之美的观察者，语气温润且富有洞察力，将碎片化的记录串联成有温度的文字，绝对不要使用生硬的模板：\n\(list)"
         
         let body: [String: Any] = [
             "messages": [
-                ["role": "system", "content": "You are a warm writer. Respond in plain text Chinese. Be creative and avoid repetitive templates."],
+                ["role": "system", "content": "你是一位文字优美、情感细腻的散文作家。请用中文回答，保持简洁、深远且充满创意的风格，避免重复和套路。"],
                 ["role": "user", "content": prompt]
             ],
-            "temperature": 0.8
+            "temperature": 0.85
         ]
         
         guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
