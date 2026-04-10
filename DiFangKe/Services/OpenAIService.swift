@@ -339,8 +339,13 @@ class OpenAIService {
             footprint.aiAnalyzed = true
             try? context.save()
             
-            if result.2 >= 0.7 {
-                NotificationManager.shared.sendHighlightNotification(title: result.0, body: result.1)
+            if result.2 >= 0.3 {
+                NotificationManager.shared.sendHighlightNotification(
+                    title: result.0, 
+                    body: result.1, 
+                    footprintID: footprint.footprintID,
+                    date: footprint.startTime
+                )
             }
         }
     }

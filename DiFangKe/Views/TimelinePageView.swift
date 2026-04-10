@@ -109,6 +109,8 @@ struct TimelinePageView: View {
                         }
                     }
                 }
+                
+                checkDeepLink(targetID: locationManager.deepLinkFootprintID)
             }
         }
         .onDisappear {
@@ -153,6 +155,9 @@ struct TimelinePageView: View {
                 refreshTimeline(force: true)
             }
             .environment(locationManager)
+        }
+        .onChange(of: locationManager.deepLinkFootprintID) { _, newValue in
+            checkDeepLink(targetID: newValue)
         }
     }
     
@@ -611,6 +616,15 @@ struct TimelinePageView: View {
         }
         .foregroundColor(.secondary.opacity(0.6))
         .frame(maxWidth: .infinity)
+    }
+    
+    private func checkDeepLink(targetID: UUID?) {
+        guard let targetID = targetID else { return }
+        if let fp = footprints.first(where: { $0.footprintID == targetID }) {
+            self.selectedFootprint = fp
+            // 消耗掉这个 ID，防止重复触发
+            locationManager.deepLinkFootprintID = nil
+        }
     }
     
     @MainActor

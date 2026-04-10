@@ -14,11 +14,36 @@ extension Color {
     static let dfkSecondaryText = Color(uiColor: .secondaryLabel)
 }
 
-class AppDelegate: NSObject, UIApplicationDelegate {
+class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
         // 注册远程通知是激活 iCloud 实时同步的关键，它能让设备及时收到云端的变更推送
         application.registerForRemoteNotifications()
+        
+        // 设置通知代理以响应通知点击
+        UNUserNotificationCenter.current().delegate = self
         return true
+    }
+    
+    // 处理用户点击通知进入 App 的行为
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        let userInfo = response.notification.request.content.userInfo
+        
+        if let type = userInfo["type"] as? String, type == "highlight_footprint",
+           let idString = userInfo["footprintID"] as? String,
+           let footprintID = UUID(uuidString: idString),
+           let timestamp = userInfo["date"] as? Double {
+            
+            let date = Date(timeIntervalSince1970: timestamp)
+            
+            // 使用 NotificationCenter 发送内部跳转通知
+            NotificationCenter.default.post(
+                name: NSNotification.Name("DFKDeepLinkNotification"),
+                object: nil,
+                userInfo: ["footprintID": footprintID, "date": date]
+            )
+        }
+        
+        completionHandler()
     }
 }
 

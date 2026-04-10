@@ -441,6 +441,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var isAlwaysAuthorized: Bool = false
     var authStatus: CLAuthorizationStatus = .notDetermined
     
+    // Deep Linking State
+    var deepLinkFootprintID: UUID?
+    var deepLinkDate: Date?
+    
     var isTracking: Bool = false
     var lastUpdateTime: Date?
     var lastLocation: CLLocation?
@@ -530,12 +534,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     override init() {
         super.init()
         self.locationManager.delegate = self
-        self.locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters // 恢复平衡精度
-        self.locationManager.distanceFilter = 10.0 // 提高记录频率，从 20m 减至 10m
+        self.locationManager.desiredAccuracy = kCLLocationAccuracyBest // 初次启动使用最高精度，确保冷启动位置快速锁定
+        self.locationManager.distanceFilter = 5.0 // 初始高频记录 (5米)
         self.locationManager.allowsBackgroundLocationUpdates = true
-        self.locationManager.pausesLocationUpdatesAutomatically = true // 允许自动暂停以省电
+        self.locationManager.pausesLocationUpdatesAutomatically = false // 核心修复：禁止自动暂停，防止丢点
         self.locationManager.showsBackgroundLocationIndicator = false
-        self.locationManager.activityType = .other
+        self.locationManager.activityType = .fitness // 默认为健身/步行模式
         
         // Initialize basic status
         updateAuthStatus()
@@ -1045,31 +1049,31 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 manager.activityType = .other // 切换为非活跃类，促进系统休眠
             }
         } else if isStationary {
-            // 普通地点但已停留：进入节能模式
-            if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters {
-                manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-                manager.distanceFilter = 50.0
+            // 普通地点但已停留：进入节能模式，但保持 10m 灵敏度以便触发“起步”
+            if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
+                manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+                manager.distanceFilter = 25.0 // 从 50m 降低到 25m，增加起步灵敏度
                 manager.activityType = .other
             }
         } else if speed > 25.0 {
-            // 超高速移动中 (时速 > 90km/h)：公里精度，提高采样频率以优化轨迹曲线
-            if manager.desiredAccuracy != kCLLocationAccuracyKilometer {
-                manager.desiredAccuracy = kCLLocationAccuracyKilometer
-                manager.distanceFilter = 250.0 // 从 500m 降低到 250m
-                manager.activityType = .automotiveNavigation
-            }
-        } else if speed > 12.0 {
-            // 高速移动中 (时速 > 43km/h)：中等精度，显著提高采样频率
+            // 超高速移动中 (时速 > 90km/h)：提高位置采样密度，记录更平直的曲线
             if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters {
                 manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-                manager.distanceFilter = 60.0 // 从 200m 降低到 60m，确保城市快速路轨迹连贯
+                manager.distanceFilter = 100.0 // 从 250m 降低到 100m，解决高速轨迹严重“拉直线”的问题
+                manager.activityType = .automotiveNavigation
+            }
+        } else if speed > 10.0 {
+            // 高速移动中 (时速 > 36km/h)：
+            if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
+                manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+                manager.distanceFilter = 40.0 // 从 60m 降低到 40m
                 manager.activityType = .automotiveNavigation
             }
         } else {
-            // 移动中 (步行、骑行或刚到达)：恢复高精度录入以确保轨迹准确
-            if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
-                manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-                manager.distanceFilter = 10.0 // 从 20m 降低到 10m
+            // 移动中 (步行、骑行或刚到达)：开启最高频采集
+            if manager.desiredAccuracy != kCLLocationAccuracyBest {
+                manager.desiredAccuracy = kCLLocationAccuracyBest
+                manager.distanceFilter = kCLDistanceFilterNone // 步行模式开启全量采集，确保不漏点
                 manager.activityType = .fitness
             }
         }
@@ -1244,6 +1248,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 self.isAnalyzingOngoing = false
                 self.ongoingTitle = title
                 self.saveOngoingTitle()
+                self.triggerNotificationSummaryRefresh()
             }
         }
     }
@@ -1430,6 +1435,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
         
         try? context.save()
+        triggerNotificationSummaryRefresh()
     }
 
     func analyzeFootprintByID(_ id: PersistentIdentifier) {
@@ -1555,31 +1561,29 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let tomorrowStart = targetDate.addingTimeInterval(86400)
         
         let fetchDescriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate { $0.date >= targetDate && $0.date < tomorrowStart },
+            predicate: #Predicate { $0.startTime < tomorrowStart && $0.endTime >= targetDate },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]
         )
         
         guard let todayFootprints = try? context.fetch(fetchDescriptor) else { return }
         
-        let footprintCount = todayFootprints.count
-        let footprintTitles = todayFootprints.compactMap { $0.title }
+        // Filter out ignored footprints and include ongoing stay
+        let validFootprints = todayFootprints.filter { $0.status != .ignored }
+        let footprintCount = validFootprints.count
+        let footprintTitles = validFootprints.map { $0.title }
+            .filter { !["地点记录", "正在获取位置...", "在某地停留", "发现足迹", "寻迹此处", ""].contains($0) }
+        
         let fpsLite = todayFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
         
         // Calculate points and mileage using TimelineBuilder logic
         Task.detached(priority: .background) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
             
-            // Fetch places and overrides on a background context instead of main actor objects
-            // Actually, we can fetch them here if we have a way to generate a new context,
-            // or we could have captured them as Lite objects too.
-            // For now, let's just pass empty or captured ones to avoid more capture issues.
-            // Simplified: we only really need the footprints for basic notification.
-            
             let timelineItems = TimelineBuilder.buildTimeline(
                 for: targetDate,
                 footprints: fpsLite,
                 allRawPoints: rawPoints,
-                allPlaces: [], // Optional: can be empty for quick mileage
+                allPlaces: [], 
                 overrides: []
             )
             
@@ -1818,7 +1822,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 guard let currentContext = self.modelContext else { return [] }
                 
                 let fetchDescriptor = FetchDescriptor<Footprint>(
-                    predicate: #Predicate { $0.date >= startOfDay && $0.date < endOfDay },
+                    predicate: #Predicate { $0.startTime < endOfDay && $0.endTime >= startOfDay },
                     sortBy: [SortDescriptor(\.startTime)]
                 )
                 

@@ -143,6 +143,23 @@ struct DayTimelineView: View {
                     UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
                 }
             }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DFKDeepLinkNotification"))) { notification in
+                if let footprintID = notification.userInfo?["footprintID"] as? UUID,
+                   let date = notification.userInfo?["date"] as? Date {
+                    
+                    let dayStart = Calendar.current.startOfDay(for: date)
+                    
+                    // 1. 设置 deepLink 目标
+                    locationManager.deepLinkFootprintID = footprintID
+                    locationManager.deepLinkDate = dayStart
+                    
+                    // 2. 尝试让滚动容器直接跳转到目标日期
+                    withAnimation(.spring()) {
+                        self.selectedDate = dayStart
+                        self.scrollID = dayStart
+                    }
+                }
+            }
             .overlay {
                 if locationManager.isSyncingInitialData {
                     ZStack {
