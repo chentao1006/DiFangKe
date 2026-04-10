@@ -8,20 +8,62 @@
     <style>
         :root {
             --accent-color: #4FB3A5; /* 呼应截图中的薄荷绿 */
+            --accent-soft: rgba(79, 179, 165, 0.1);
             --text-main: #1D1D1F;
-            --text-sub: #86868B;
-            --bg-gradient: linear-gradient(135deg, #F5F7FA 0%, #E4EFE9 100%);
-            --card-shadow: 0 20px 40px rgba(0,0,0,0.08);
+            --text-sub: #424245;
+            --bg-gradient: linear-gradient(-45deg, #fdfbfb 0%, #ebedee 100%);
+            --card-shadow: 0 20px 40px rgba(0,0,0,0.06);
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Outfit', 'Noto Sans SC', sans-serif;
-            background: var(--bg-gradient);
+            background: #fdfbfb;
             color: var(--text-main);
             line-height: 1.6;
             overflow-x: hidden;
-            padding-top: 80px; /* 为置顶 header 留出空间 */
+            padding-top: 80px;
+            position: relative;
+        }
+
+        /* Dynamic Map Background */
+        body::before {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: 
+                radial-gradient(circle at 20% 30%, rgba(79, 179, 165, 0.05) 0%, transparent 40%),
+                radial-gradient(circle at 80% 70%, rgba(79, 179, 165, 0.08) 0%, transparent 40%),
+                linear-gradient(135deg, #ffffff 0%, #f0f9f7 100%);
+            background-size: 200% 200%;
+            animation: gradientMove 15s ease infinite;
+            z-index: -2;
+        }
+
+        /* Map Grid/Element Overlay */
+        body::after {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(rgba(79, 179, 165, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(79, 179, 165, 0.03) 1px, transparent 1px);
+            background-size: 40px 40px;
+            z-index: -1;
+            mask-image: radial-gradient(circle at center, black, transparent 80%);
+            -webkit-mask-image: radial-gradient(circle at center, black, transparent 80%);
+        }
+
+        @keyframes gradientMove {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
         }
 
         html {
@@ -103,6 +145,7 @@
             padding: 0 10%;
             text-align: left;
             position: relative;
+            gap: 80px; /* 增加间距以容纳箭头 */
         }
 
         .hero-content { flex: 1; z-index: 2; }
@@ -161,30 +204,57 @@
             height: 100%;
             object-fit: cover;
             opacity: 0;
-            animation: slideshow 27s infinite; /* 9张图 * 3秒 */
+            transition: opacity 0.8s ease;
         }
 
-        /* 动画逻辑：每张图显示 3 秒，包含淡入淡出 */
-        .phone-screen img:nth-child(1) { animation-delay: 0s; }
-        .phone-screen img:nth-child(2) { animation-delay: 3s; }
-        .phone-screen img:nth-child(3) { animation-delay: 6s; }
-        .phone-screen img:nth-child(4) { animation-delay: 9s; }
-        .phone-screen img:nth-child(5) { animation-delay: 12s; }
-        .phone-screen img:nth-child(6) { animation-delay: 15s; }
-        .phone-screen img:nth-child(7) { animation-delay: 18s; }
-        .phone-screen img:nth-child(8) { animation-delay: 21s; }
-        .phone-screen img:nth-child(9) { animation-delay: 24s; }
+        .phone-screen img.active {
+            opacity: 1;
+        }
 
-        @keyframes slideshow {
-            0% { opacity: 0; }
-            5% { opacity: 1; }   /* 淡入 */
-            11% { opacity: 1; }  /* 保持 */
-            16% { opacity: 0; }  /* 淡出 */
-            100% { opacity: 0; }
+        /* Slider Arrows */
+        .slider-arrow {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 44px;
+            height: 44px;
+            background: rgba(255, 255, 255, 0.6);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            border-radius: 50%;
+            color: var(--text-main);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            z-index: 10;
+            transition: all 0.3s ease;
+            opacity: 0.6; /* 保持可见 */
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        
+        .phone-mockup:hover .slider-arrow {
+            opacity: 1;
+            background: rgba(255, 255, 255, 0.9);
+        }
+
+        .slider-arrow:hover {
+            transform: translateY(-50%) scale(1.15);
+            box-shadow: 0 6px 16px rgba(0,0,0,0.15);
+        }
+
+        .arrow-left { left: -30px; }
+        .arrow-right { right: -30px; }
+
+        @media (max-width: 1024px) {
+            .arrow-left { left: -20px; }
+            .arrow-right { right: -20px; }
+            .slider-arrow { opacity: 0.8; width: 36px; height: 36px; }
         }
 
         /* Features */
-        .section { padding: 100px 10%; background: #FFF; }
+        .section { padding: 100px 10%; background: transparent; }
         .section-title {
             font-size: 2.5rem;
             text-align: center;
@@ -200,14 +270,17 @@
         .card {
             padding: 40px;
             border-radius: 24px;
-            background: #F5F5F7;
+            background: rgba(255, 255, 255, 0.6);
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
             transition: all 0.3s ease;
         }
-        .card:hover { transform: translateY(-10px); background: #FFF; box-shadow: var(--card-shadow); }
+        .card:hover { transform: translateY(-10px); background: rgba(255, 255, 255, 0.9); box-shadow: var(--card-shadow); }
         .card h3 { margin-bottom: 15px; color: var(--accent-color); font-size: 1.5rem; }
 
         /* Philosophy & People */
-        .philosophy { background: #F5F5F7; padding: 100px 10%; text-align: center; }
+        .philosophy { background: rgba(79, 179, 165, 0.05); padding: 100px 10%; text-align: center; }
         .philosophy-item { margin: 40px 0; }
         .philosophy-item h4 { font-size: 1.8rem; margin-bottom: 10px; }
 
@@ -220,9 +293,10 @@
         }
         .tag {
             padding: 12px 25px;
-            background: #FFF;
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(5px);
             border-radius: 50px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.05);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.03);
             font-weight: 600;
         }
 
@@ -241,11 +315,53 @@
             .logo { font-size: 1.2rem; }
             .logo img { width: 30px; height: 30px; }
             nav { gap: 15px; }
-            nav a:not(.btn-download-nav) { display: none; } /* 移动端只保留下载按钮或重要链接 */
-            .hero { flex-direction: column; text-align: center; padding-top: 50px; }
-            .hero-title { font-size: 2.5rem; }
-            .phone-mockup { margin-top: 50px; transform: none; height: 520px; }
-            .phone-container { width: 260px; height: 530px; border: none; padding: 0; box-shadow: 0 20px 40px rgba(0,0,0,0.1); }
+            nav a:not(.btn-download-nav) { display: none; }
+            .hero { 
+                flex-direction: column; 
+                text-align: center; 
+                padding-top: 100px; 
+                height: auto; 
+                gap: 40px; 
+                padding-bottom: 60px;
+            }
+            .hero-title { font-size: 2.2rem; }
+            .hero-subtitle { font-size: 1.1rem; margin-bottom: 20px; }
+            .phone-mockup { margin-top: 20px; transform: none; height: auto; display: inline-flex; width: 100%; justify-content: center; }
+            .phone-container { width: 240px; height: 500px; border: none; padding: 0; box-shadow: 0 20px 40px rgba(0,0,0,0.1); }
+            
+            .slider-arrow { width: 40px; height: 40px; opacity: 0.9; }
+            .arrow-left { left: 10px; } /* 移动端放里面点 */
+            .arrow-right { right: 10px; }
+        }
+
+        /* Toast Styles */
+        #toast {
+            visibility: hidden;
+            min-width: 280px;
+            background-color: rgba(29, 29, 31, 0.85);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            color: #fff;
+            text-align: center;
+            border-radius: 12px;
+            padding: 16px 24px;
+            position: fixed;
+            z-index: 2000;
+            left: 50%;
+            bottom: 50px;
+            transform: translateX(-50%) translateY(20px);
+            opacity: 0;
+            transition: opacity 0.4s, transform 0.4s, visibility 0.4s;
+            font-weight: 500;
+            font-size: 0.95rem;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        #toast.show {
+            visibility: visible;
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
         }
     </style>
 </head>
@@ -261,7 +377,7 @@
             <a href="#philosophy">理念</a>
             <a href="#people">人群</a>
             <a href="privacy.html">隐私</a>
-            <a href="#" class="btn-download-nav">下载应用</a>
+            <a href="javascript:void(0);" class="btn-download-nav" onclick="showToast()">下载应用</a>
         </nav>
     </header>
 
@@ -272,13 +388,17 @@
                 地方客是一款轻量的日常记录工具，帮你把生活留下来。它不强调复杂的统计，而是关注“人”与“活动”。
             </p>
             <div style="margin-top: 30px;">
-                <img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/zh-cn?size=250x83&amp;releaseDate=1276560000&h=7914488fd5b3e64803716a5035e4e790" alt="Download on the App Store" style="height: 60px; cursor: pointer;">
+                <img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/zh-cn?size=250x83&amp;releaseDate=1276560000&h=7914488fd5b3e64803716a5035e4e790" 
+                     alt="Download on the App Store" 
+                     style="height: 60px; cursor: pointer;" 
+                     onclick="showToast()">
             </div>
         </div>
         <div class="phone-mockup">
+            <div class="slider-arrow arrow-left" onclick="changeSlide(-1)">&#10094;</div>
             <div class="phone-container">
-                <div class="phone-screen">
-                    <img src="./screenshots/1.jpg" alt="Screenshot 1">
+                <div class="phone-screen" id="screenshot-slider">
+                    <img src="./screenshots/1.jpg" alt="Screenshot 1" class="active">
                     <img src="./screenshots/2.jpg" alt="Screenshot 2">
                     <img src="./screenshots/3.jpg" alt="Screenshot 3">
                     <img src="./screenshots/4.jpg" alt="Screenshot 4">
@@ -289,6 +409,7 @@
                     <img src="./screenshots/9.jpg" alt="Screenshot 9">
                 </div>
             </div>
+            <div class="slider-arrow arrow-right" onclick="changeSlide(1)">&#10095;</div>
         </div>
     </section>
 
@@ -326,7 +447,7 @@
         </div>
     </section>
 
-    <section class="section" style="background: #FFF;" id="people">
+    <section class="section" style="background: transparent;" id="people">
         <h2 class="section-title">适合什么人</h2>
         <div class="tag-container">
             <div class="tag">想记录生活但不写长日记</div>
@@ -336,15 +457,64 @@
         </div>
     </section>
 
+    <section class="section" style="text-align: center; padding: 80px 10%; background: rgba(79, 179, 165, 0.05);">
+        <h2 style="margin-bottom: 20px;">开始你的足迹之旅</h2>
+        <p style="color: var(--text-sub); margin-bottom: 40px;">记录生活，发现节奏，理解每一个走过的地方。</p>
+        <div style="display: flex; justify-content: center; gap: 20px; flex-wrap: wrap;">
+            <img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/zh-cn?size=250x83&amp;releaseDate=1276560000&h=7914488fd5b3e64803716a5035e4e790" 
+                 alt="Download on the App Store" 
+                 style="height: 60px; cursor: pointer;" 
+                 onclick="showToast()">
+        </div>
+    </section>
+
     <footer>
         <p style="font-size: 1.2rem; margin-bottom: 20px;">地方客 </p>
         <p style="color: #86868B; margin-bottom: 30px;">理解自己生活的记录方式。</p>
         <div class="footer-links">
             <a href="privacy.html">隐私政策</a>
-            <a href="mailto:support@example.com">联系支持</a>
+            <a href="https://github.com/chentao1006/DiFangKe">GitHub / 联系支持</a>
         </div>
         <p style="margin-top: 40px; font-size: 0.8rem; color: #444;">&copy; 2026 地方客开发团队. All rights reserved.</p>
     </footer>
+
+    <div id="toast">应用正在上架审核中，请稍后再来看看吧</div>
+
+    <script>
+        // Toast logic
+        function showToast() {
+            var x = document.getElementById("toast");
+            x.className = "show";
+            setTimeout(function(){ x.className = x.className.replace("show", ""); }, 3000);
+        }
+
+        // Slider logic
+        let currentSlide = 0;
+        const slides = document.querySelectorAll('#screenshot-slider img');
+        const totalSlides = slides.length;
+        let slideInterval;
+
+        function showSlide(index) {
+            slides.forEach(slide => slide.classList.remove('active'));
+            currentSlide = (index + totalSlides) % totalSlides;
+            slides[currentSlide].classList.add('active');
+        }
+
+        function changeSlide(direction) {
+            clearInterval(slideInterval); // 手动点击时停止自动轮播或重置
+            showSlide(currentSlide + direction);
+            startAutoSlide();
+        }
+
+        function startAutoSlide() {
+            slideInterval = setInterval(() => {
+                showSlide(currentSlide + 1);
+            }, 4000);
+        }
+
+        // Initialize
+        startAutoSlide();
+    </script>
 
 </body>
 </html>
