@@ -9,6 +9,8 @@
 		<string>en</string>
 		<string>zh_CN</string>
 	</array>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.ct106.difangke.summary</string>

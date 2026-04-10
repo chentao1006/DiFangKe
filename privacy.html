@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>隐私政策 - 地方客 DiFangKe</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=Noto+Sans+SC:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary-color: #4FB3A5;
+            --text-color: #1D1D1F;
+            --bg-color: #F8F9FA;
+            --card-bg: #FFFFFF;
+        }
+        body {
+            font-family: 'Outfit', 'Noto Sans SC', sans-serif;
+            line-height: 1.8;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 800px;
+            margin: 60px auto;
+            padding: 60px;
+            background: var(--card-bg);
+            border-radius: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.05);
+        }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 30px;
+            color: var(--primary-color);
+            text-decoration: none;
+            font-weight: 600;
+        }
+        h1 {
+            font-size: 2.8rem;
+            font-weight: 700;
+            margin-bottom: 40px;
+            color: var(--text-color);
+            letter-spacing: -1px;
+        }
+        h2 {
+            font-size: 1.6rem;
+            margin-top: 50px;
+            margin-bottom: 20px;
+            color: var(--text-color);
+            border-left: 4px solid var(--primary-color);
+            padding-left: 15px;
+        }
+        p, ul {
+            margin-bottom: 25px;
+            color: #444;
+            font-weight: 300;
+        }
+        li {
+            margin-bottom: 10px;
+            list-style-type: none;
+            position: relative;
+            padding-left: 20px;
+        }
+        li::before {
+            content: "•";
+            color: var(--primary-color);
+            position: absolute;
+            left: 0;
+            font-weight: bold;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 80px;
+            padding-top: 40px;
+            border-top: 1px solid #EEE;
+            font-size: 0.9rem;
+            color: #888;
+        }
+        @media (max-width: 768px) {
+            .container { margin: 20px; padding: 30px; border-radius: 20px; }
+            h1 { font-size: 2rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="index.html" class="back-link">← 返回首页</a>
+        <h1>隐私政策</h1>
+        <p>更新日期：2026年4月10日</p>
+        
+        <p>“地方客 (DiFangKe)”（以下简称“我们”）非常重视用户的隐私保护。本政策旨在说明我们如何收集、使用和保护您的地理位置及相关数据。</p>
+
+        <h2>1. 信息收集</h2>
+        <p>为了核心功能——记录您的足迹和生成活动摘要，我们需要收集：</p>
+        <ul>
+            <li><strong>地理位置信息：</strong> 我们在后台收集您的位置坐标，以便准确绘制您的轨迹。</li>
+            <li><strong>活动数据：</strong> 结合传感器数据判断您的运动状态（如：步行、运行、停留）。</li>
+        </ul>
+
+        <h2>2. 信息使用</h2>
+        <p>收集的数据仅用于：</p>
+        <ul>
+            <li>在应用内为您展示足迹地图和时间轴。</li>
+            <li>通过 AI 技术为您生成每日活动总结。</li>
+        </ul>
+
+        <h2>3. 数据存储与安全</h2>
+        <p>您的位置数据默认存储在您的本地设备及您的私人 iCloud 空间中。我们不会将您的敏感原始轨迹上传至我们的私有服务器，除非是为了必要的 AI 逻辑处理（且处理后不予保留）。</p>
+
+        <h2>4. 权限说明</h2>
+        <p>应用会请求“始终允许”访问位置权限，这是为了确保在屏幕关闭或应用后台运行期间，依然能为您持续记录足迹。</p>
+
+        <h2>5. 第三方服务</h2>
+        <p>本应用可能接入第三方地图服务（如高德地图或 Apple Maps）以显示地图背景。这些服务可能会根据其自身的隐私政策收集必要的非标识性信息。</p>
+
+        <div class="footer">
+            &copy; 2026 地方客 DiFangKe 开发团队<br>
+            理解自己生活的记录方式。
+        </div>
+    </div>
+</body>
+</html>
