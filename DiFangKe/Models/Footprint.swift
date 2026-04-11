@@ -7,6 +7,7 @@ enum FootprintStatus: String, Codable {
     case candidate
     case confirmed
     case ignored
+    case manual // 人工修改或添加
 }
 
 @Model
@@ -20,7 +21,12 @@ final class Footprint {
     var longitudeData: Data = Data()
     
     var locationHash: String = ""
-    var duration: TimeInterval = 0
+    // Computed property for duration ensures synchronization with startTime and endTime
+    // Marking as non-stored to avoid data drift
+    var duration: TimeInterval {
+        get { max(0, endTime.timeIntervalSince(startTime)) }
+        set { /* No-op: duration is derived from start/end times */ }
+    }
     var title: String = ""
     var reason: String?
     var statusValue: String = "candidate"
@@ -52,11 +58,13 @@ final class Footprint {
     }
     
     var latitude: Double {
-        latitudeArray.first ?? 0
+        guard !latitudeArray.isEmpty else { return 0 }
+        return latitudeArray.reduce(0, +) / Double(latitudeArray.count)
     }
     
     var longitude: Double {
-        longitudeArray.first ?? 0
+        guard !longitudeArray.isEmpty else { return 0 }
+        return longitudeArray.reduce(0, +) / Double(longitudeArray.count)
     }
     
     @Transient private var _cachedLatitudes: [Double]?
@@ -155,9 +163,9 @@ final class Footprint {
         if let title = title, !title.isEmpty {
             self.title = title
         } else if let address = address, !address.isEmpty {
-            self.title = Footprint.generateRandomTitle(for: address)
+            self.title = Footprint.generateRandomTitle(for: address, seed: Int(startTime.timeIntervalSince1970))
         } else {
-            self.title = "寻迹此处"
+            self.title = Footprint.generateRandomTitle(for: "此处", seed: Int(startTime.timeIntervalSince1970))
         }
         
         // Use setters for computed properties
@@ -166,19 +174,35 @@ final class Footprint {
         self.photoAssetIDs = photoAssetIDs
     }
     
+    static let titleTemplates = [
+        "在%@停留",
+        "在%@驻足",
+        "寻迹于%@",
+        "在%@的一段时光"
+    ]
+    
+    /// 判断标题是否为系统生成的通用占位符
+    static func isGenericTitle(_ title: String) -> Bool {
+        let placeholders = ["地点记录", "正在获取位置...", "未知地点", "点位记录", "发现足迹", "寻迹此处", "在某地停留", "此处", "某地", ""]
+        if placeholders.contains(title) { return true }
+        
+        // 核心：检查是否符合随机模板中的“某地”或“此处”
+        for word in ["此处", "某地"] {
+            for template in titleTemplates {
+                if title == String(format: template, word) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     /// 生成随机但确定（基于 seed 或名称）的、带有“地方客”风格的足迹标题
     static func generateRandomTitle(for locationName: String, seed: Int? = nil) -> String {
-        let templates = [
-            "在%@停留",
-            "在%@驻足",
-            "寻迹于%@",
-            "在%@的一段时光"
-        ]
-        
         // Use provided seed (e.g., startTime) or a stable hash of the name to ensure reproducibility
         let stableSeed = seed ?? locationName.utf8.reduce(0) { ($0 &* 31) &+ Int($1) }
-        let index = abs(stableSeed) % templates.count
-        let template = templates[index]
+        let index = abs(stableSeed) % titleTemplates.count
+        let template = titleTemplates[index]
         return String(format: template, locationName)
     }
 }

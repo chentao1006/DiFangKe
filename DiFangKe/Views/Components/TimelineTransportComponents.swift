@@ -405,27 +405,11 @@ struct TransportModalView: View {
         }
     }
     
-    private func findOrCreateSelection() -> TransportManualSelection {
-        let startTime = transport.startTime
-        let endTime = transport.endTime
-        let midTime = startTime.addingTimeInterval(transport.duration / 2)
-        
-        // Always fetch fresh from context to avoid stale snapshots from parent view
-        let descriptor = FetchDescriptor<TransportManualSelection>()
+    private func findRecord() -> TransportRecord? {
+        let tid = transport.id
+        let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == tid })
         let all = (try? modelContext.fetch(descriptor)) ?? []
-        
-        // Use midpoint matching (same logic as TimelineBuilder) to find the relevant override
-        // This is much more robust than exact bound matching, especially if segments shift slightly.
-        if let existing = all.first(where: { midTime >= $0.startTime && midTime <= $0.endTime }) {
-            // Update the existing record's bounds to match the current segment for better future matching
-            existing.startTime = startTime
-            existing.endTime = endTime
-            return existing
-        }
-        
-        let newSelection = TransportManualSelection(startTime: startTime, endTime: endTime)
-        modelContext.insert(newSelection)
-        return newSelection
+        return all.first
     }
     
     private func saveLocationOverride(type: LocationType, name: String) {
@@ -437,19 +421,20 @@ struct TransportModalView: View {
             }
         }
         
-        let selection = findOrCreateSelection()
-        if type == .start {
-            selection.startLocationOverride = name
-        } else {
-            selection.endLocationOverride = name
+        if let record = findRecord() {
+            if type == .start {
+                record.startLocation = name
+            } else {
+                record.endLocation = name
+            }
+            
+            // Preserve current type
+            record.manualTypeRaw = (localManualType ?? transport.manualType ?? transport.type).rawValue
+            
+            try? modelContext.save()
+            CloudSettingsManager.shared.triggerDataSyncPulse()
+            onLocationUpdate?()
         }
-        
-        // Preserve current type
-        selection.vehicleType = (localManualType ?? transport.manualType ?? transport.type).rawValue
-        
-        try? modelContext.save()
-        CloudSettingsManager.shared.triggerDataSyncPulse()
-        onLocationUpdate?()
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
     
@@ -467,15 +452,16 @@ struct TransportModalView: View {
             localManualType = type
         }
         
-        // 2. Find or Create selection
-        let selection = findOrCreateSelection()
-        selection.vehicleType = type.rawValue
-        
-        try? modelContext.save()
-        CloudSettingsManager.shared.triggerDataSyncPulse()
-        
-        // 3. Notify parent to update UI
-        onUpdate?(type)
+        // 2. Find record
+        if let record = findRecord() {
+            record.manualTypeRaw = type.rawValue
+            
+            try? modelContext.save()
+            CloudSettingsManager.shared.triggerDataSyncPulse()
+            
+            // 3. Notify parent to update UI
+            onUpdate?(type)
+        }
         
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }

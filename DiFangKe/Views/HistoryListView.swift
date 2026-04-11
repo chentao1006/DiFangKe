@@ -46,7 +46,7 @@ struct SimpleDayTimelineView: View {
         NavigationStack {
             TimelinePageView(
                 date: date,
-                footprints: allFootprints.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) },
+                footprints: allFootprints.filter { $0.status != .ignored && Calendar.current.isDate($0.startTime, inSameDayAs: date) },
                 manualSelections: allManualSelections.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) },
                 allPlaces: allPlaces,
                 offset: Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: Date()), to: date).day ?? 0,
@@ -155,7 +155,7 @@ struct HistoryListView: View {
                     try? modelContext.save()
                     
                     // 获取 ID 列表用于后续 AI 分析（在 save 后获取 ID 更稳定）
-                    let identifiers = selectedFootprints.map { $0.persistentModelID }
+                    let identifiers = selectedFootprints.map { $0.footprintID }
                     
                     await MainActor.run {
                         OpenAIService.shared.enqueueFootprintsForAnalysis(identifiers)
@@ -256,7 +256,7 @@ struct HistoryListView: View {
         }
         
         // Use a task to fetch single day summary
-        let validFootprints = allFootprints.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) }
+        let validFootprints = allFootprints.filter { $0.status != .ignored && Calendar.current.isDate($0.startTime, inSameDayAs: date) }
         let manualSelectionsForDate = allManualSelections.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) && !$0.isDeleted }
         let activityTypes = allActivityTypes
         
@@ -356,8 +356,9 @@ struct HistoryListView: View {
         isScanning = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             let finalEnd = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: end) ?? end
-            let existingIDs = Set(self.allFootprints.flatMap { $0.photoAssetIDs })
-            let existingBriefs = self.allFootprints.map { ($0.startTime, $0.endTime, $0.latitude, $0.longitude) }
+            let activeFootprints = self.allFootprints.filter { $0.status != .ignored }
+            let existingIDs = Set(activeFootprints.flatMap { $0.photoAssetIDs })
+            let existingBriefs = activeFootprints.map { ($0.startTime, $0.endTime, $0.latitude, $0.longitude) }
             PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: allPlacesForScan, excludedAssetIDs: existingIDs, existingFootprints: existingBriefs, onProgress: { current, total in
                 self.scanProgress = current
                 self.scanTotal = total

@@ -137,10 +137,12 @@ struct DayTimelineView: View {
                 
                 // 探测重装/首次同步
                 if !UserDefaults.standard.bool(forKey: "didInitialSyncAfterInstall") {
-                    Task {
-                        await locationManager.performRawDataSync(showOverlay: true)
+                    if locationManager.hasExistingCloudData() {
+                        locationManager.showSyncInquiry = true
+                    } else {
+                        // 如果云端也没数据，直接标记同步完成
+                        UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
                     }
-                    UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DFKDeepLinkNotification"))) { notification in
@@ -161,28 +163,38 @@ struct DayTimelineView: View {
                 }
             }
             .overlay {
-                if locationManager.isSyncingInitialData {
+                if locationManager.showSyncInquiry {
+                    syncInquiryOverlay
+                } else if locationManager.isSyncingInitialData {
                     ZStack {
-                        Color.black.opacity(0.3)
+                        Color.black.opacity(0.4)
                             .ignoresSafeArea()
                         
-                        VStack(spacing: 20) {
-                            ProgressView()
-                                .scaleEffect(1.5)
-                                .tint(.white)
-                            
+                        VStack(spacing: 24) {
                             Text(locationManager.syncStatusMessage)
                                 .font(.headline)
                                 .foregroundColor(.white)
                             
-                            Text("正在为您恢复历史足迹数据\n这可能需要一点时间")
+                            VStack(spacing: 12) {
+                                ProgressView(value: locationManager.syncProgress, total: 1.0)
+                                    .progressViewStyle(.linear)
+                                    .tint(.white)
+                                    .frame(width: 240)
+                                    .scaleEffect(x: 1, y: 1.5, anchor: .center)
+                                
+                                Text("\(Int(locationManager.syncProgress * 100))%")
+                                    .font(.caption)
+                                    .foregroundColor(.white.opacity(0.7))
+                            }
+                            
+                            Text("正在为您处理数据\n这可能需要一点时间")
                                 .font(.caption)
                                 .multilineTextAlignment(.center)
                                 .foregroundColor(.white.opacity(0.8))
                         }
-                        .padding(30)
+                        .padding(32)
                         .background(.ultraThinMaterial)
-                        .cornerRadius(24)
+                        .cornerRadius(28)
                         .shadow(radius: 20)
                     }
                     .transition(.opacity.combined(with: .scale))
@@ -219,10 +231,6 @@ struct DayTimelineView: View {
                 stopRepeatTimer()
                 updateTask?.cancel()
             }
-            .onChange(of: footprints) { _, _ in
-                TimelineBuilder.timelineCache.removeAll()
-                updateData()
-            }
             .onChange(of: manualSelections) { _, _ in
                 updateData()
             }
@@ -230,6 +238,9 @@ struct DayTimelineView: View {
                 updateInsights()
             }
 
+            .onChange(of: footprints) { _, _ in
+                updateData()
+            }
             .onChange(of: allPlaces) { _, newValue in
                 locationManager.allPlaces = newValue
                 locationManager.forceRefreshOngoingAnalysis()
@@ -284,17 +295,17 @@ struct DayTimelineView: View {
         // 1. 获取所有足迹并合并重复 UUID（防止脏数据导致时间轴重叠显示两个一模一样的）
         var seenUUIDs = Set<UUID>()
         let uniqueFootprints = footprints.filter { fp in
-            if seenUUIDs.contains(fp.footprintID) { return false }
+            if seenUUIDs.contains(fp.footprintID) || fp.status == .ignored { return false }
             seenUUIDs.insert(fp.footprintID)
             return true
         }
         
         let todayVal = Calendar.current.startOfDay(for: Date())
-        let footprintIDs = uniqueFootprints.map { $0.persistentModelID }
-        let manualIDs = manualSelections.map { $0.persistentModelID }
-        let container = modelContext.container
         
         updateTask = Task {
+            // 清理当前选中日期的缓存，确保刷新后能看到最新结果
+            TimelineBuilder.timelineCache.removeValue(forKey: selectedDate)
+            
             try? await Task.sleep(nanoseconds: 300_000_000)
             if Task.isCancelled { return }
 
@@ -302,39 +313,39 @@ struct DayTimelineView: View {
             let capturedToday = todayVal
             let capturedRawDates = rawDates
             
-            // 1. 分类足迹 - Move grouping logic to background safely
+            // 1. Group everything on main thread to avoid PersistentIdentifier crossing context issues
+            var newGrouped: [Date: [Footprint]] = [:]
+            for fp in uniqueFootprints {
+                let startDay = calendar.startOfDay(for: fp.startTime)
+                let effectiveEndTime = fp.endTime.addingTimeInterval(-0.001)
+                let endDay = calendar.startOfDay(for: max(fp.startTime, effectiveEndTime))
+                
+                var datePtr = startDay
+                while datePtr <= endDay {
+                    newGrouped[datePtr, default: []].append(fp)
+                    guard let nextDate = calendar.date(byAdding: .day, value: 1, to: datePtr) else { break }
+                    datePtr = nextDate
+                }
+            }
+            
+            var newManualGrouped: [Date: [TransportManualSelection]] = [:]
+            for selection in manualSelections {
+                let day = calendar.startOfDay(for: selection.startTime)
+                newManualGrouped[day, default: []].append(selection)
+            }
+            
+            var newGroupedInsights: [Date: DailyInsight] = [:]
+            for insight in allInsights {
+                if let d = insight.date {
+                    let day = calendar.startOfDay(for: d)
+                    newGroupedInsights[day] = insight
+                }
+            }
+            
             let results = await Task.detached(priority: .userInitiated) {
-                let context = ModelContext(container)
-                var newGroupedIDs: [Date: [PersistentIdentifier]] = [:]
-                
-                // Fetch only needed properties or use lite conversion in background
-                for id in footprintIDs {
-                    guard let fp = context.model(for: id) as? Footprint else { continue }
-                    
-                    let startDay = calendar.startOfDay(for: fp.startTime)
-                    let effectiveEndTime = fp.endTime.addingTimeInterval(-0.001)
-                    let endDay = calendar.startOfDay(for: max(fp.startTime, effectiveEndTime))
-                    
-                    var datePtr = startDay
-                    while datePtr <= endDay {
-                        newGroupedIDs[datePtr, default: []].append(id)
-                        guard let nextDate = calendar.date(byAdding: .day, value: 1, to: datePtr) else { break }
-                        datePtr = nextDate
-                    }
-                }
-                
-                // 2. 分类手工选择
-                var newManualGroupedIDs: [Date: [PersistentIdentifier]] = [:]
-                for id in manualIDs {
-                    guard let selection = context.model(for: id) as? TransportManualSelection else { continue }
-                    let day = calendar.startOfDay(for: selection.startTime)
-                    newManualGroupedIDs[day, default: []].append(id)
-                }
-                
-                // Calculate limitOffset in background
-                let sortedIDs = footprintIDs // They were already sorted by startTime reverse
+                // Generate date list and limitOffset in background
                 var limitOffset = -1
-                if let earliestID = sortedIDs.last, let earliest = context.model(for: earliestID) as? Footprint {
+                if let earliest = uniqueFootprints.last {
                     let earliestDataDate = calendar.startOfDay(for: earliest.startTime)
                     if let limitDate = calendar.date(byAdding: .day, value: -1, to: earliestDataDate) {
                         let diff = calendar.dateComponents([.day], from: capturedToday, to: limitDate).day ?? 0
@@ -342,8 +353,7 @@ struct DayTimelineView: View {
                     }
                 }
                 
-                // 3. 生成日期列表
-                let validDatesWithData = Set(newGroupedIDs.keys).union(capturedRawDates)
+                let validDatesWithData = Set(newGrouped.keys).union(capturedRawDates)
                 let allOffsets = Array(limitOffset...1)
                 let finalDates = allOffsets.compactMap { offset in
                     if offset == 1 || offset == 0 || offset == limitOffset {
@@ -355,40 +365,13 @@ struct DayTimelineView: View {
                     return nil
                 }
                 
-                // 4. 生成总结缓存映射 (New: handle insights in background too)
-                var newGroupedInsights: [Date: PersistentIdentifier] = [:]
-                let insightDescriptor = FetchDescriptor<DailyInsight>()
-                if let insights = try? context.fetch(insightDescriptor) {
-                    for insight in insights {
-                        if let d = insight.date {
-                            let day = calendar.startOfDay(for: d)
-                            newGroupedInsights[day] = insight.persistentModelID
-                        }
-                    }
-                }
-                
-                return (newGroupedIDs, newManualGroupedIDs, limitOffset, finalDates, newGroupedInsights)
+                return (limitOffset, finalDates)
             }.value
             
             if Task.isCancelled { return }
             
             await MainActor.run {
-                let (newGroupedIDs, newManualIDs, limitOffset, finalDates, newGroupedInsightIDs) = results
-                
-                // Re-bind to Main Context objects
-                let footprintMap = Dictionary(footprints.map { ($0.persistentModelID, $0) }, uniquingKeysWith: { first, _ in first })
-                let manualMap = Dictionary(manualSelections.map { ($0.persistentModelID, $0) }, uniquingKeysWith: { first, _ in first })
-                let insightMap = Dictionary(allInsights.map { ($0.persistentModelID, $0) }, uniquingKeysWith: { first, _ in first })
-                
-                let newGrouped = newGroupedIDs.mapValues { ids in
-                    ids.compactMap { footprintMap[$0] }
-                }
-                let newManualGrouped = newManualIDs.mapValues { ids in
-                    ids.compactMap { manualMap[$0] }
-                }
-                let newGroupedInsights = newGroupedInsightIDs.compactMapValues { id in
-                    insightMap[id]
-                }
+                let (limitOffset, finalDates) = results
                 
                 let structureChanged = self.cachedDates.count != finalDates.count || self.cachedDates.first != finalDates.first || self.pastLimitOffset != limitOffset
                 
@@ -688,6 +671,97 @@ struct DayTimelineView: View {
                 selectedDate = targetDate
                 scrollID = targetDate
             }
+        }
+    }
+    
+    // MARK: - Sync Inquiry Helper
+    @State private var showingPurgeConfirmation = false
+    
+    private var syncInquiryOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+            
+            VStack(spacing: 28) {
+                // Header
+                ZStack {
+                    Circle()
+                        .fill(Color.dfkAccent.opacity(0.1))
+                        .frame(width: 100, height: 100)
+                    
+                    Image(systemName: "icloud.and.arrow.down.fill")
+                        .font(.system(size: 40))
+                        .foregroundColor(.dfkAccent)
+                }
+                
+                VStack(spacing: 12) {
+                    Text("发现云端历史记录")
+                        .font(.title3.bold())
+                    
+                    Text("我们在 iCloud 中发现了您之前的足迹记录，是否需要将它们恢复到此设备？")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 10)
+                }
+                
+                VStack(spacing: 12) {
+                    // Sync Button
+                    Button {
+                        locationManager.showSyncInquiry = false
+                        UserDefaults.standard.set(true, forKey: "isSyncChoiceMade")
+                        UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
+                        
+                        // 通知 App 重新加载带 CloudKit 的 ModelContainer
+                        NotificationCenter.default.post(name: NSNotification.Name("RefreshModelContainer"), object: nil)
+                        
+                        Task {
+                            await locationManager.performRawDataSync(showOverlay: true)
+                        }
+                    } label: {
+                        Text("立即同步")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.dfkAccent)
+                            .cornerRadius(16)
+                    }
+                    
+                    // Purge Button
+                    Button {
+                        showingPurgeConfirmation = true
+                    } label: {
+                        Text("不使用历史记录")
+                            .font(.subheadline.bold())
+                            .foregroundColor(.secondary)
+                            .padding()
+                    }
+                }
+            }
+            .padding(32)
+            .background(Color(uiColor: .systemBackground))
+            .cornerRadius(30)
+            .shadow(radius: 25)
+            .padding(30)
+        }
+        .transition(.opacity.combined(with: .scale))
+        .alert("确定不进行同步吗？", isPresented: $showingPurgeConfirmation) {
+            Button("同步", role: .cancel) { }
+            Button("确定不同步并删除", role: .destructive) {
+                locationManager.showSyncInquiry = false
+                UserDefaults.standard.set(true, forKey: "isSyncChoiceMade")
+                UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
+                
+                // 即使不同步，也要让 Container 恢复正常（虽然云端已被删，但后续需要正常开启 iCloud 备份本地数据）
+                NotificationCenter.default.post(name: NSNotification.Name("RefreshModelContainer"), object: nil)
+                
+                Task {
+                    await locationManager.purgeCloudData()
+                }
+            }
+        } message: {
+            Text("这将会永久删除 iCloud 中的所有记录，且无法恢复。如果您想开启全新的记录体验，请选择确定。")
         }
     }
 }

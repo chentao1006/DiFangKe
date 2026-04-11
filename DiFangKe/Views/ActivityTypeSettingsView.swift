@@ -25,7 +25,7 @@ struct ActivityTypeSettingsView: View {
                                 .fill(activity.color.opacity(0.12))
                                 .frame(width: 38, height: 38)
                             Image(systemName: activity.icon)
-                                .font(.system(size: 16, weight: .bold))
+                                .font(.system(size: 19, weight: .bold))
                                 .foregroundColor(activity.color)
                         }
                         
@@ -186,7 +186,7 @@ struct ActivityTypeEditorView: View {
                                 .fill(color.opacity(0.15))
                                 .frame(width: 52, height: 52)
                             Image(systemName: icon)
-                                .font(.system(size: 24, weight: .bold))
+                                .font(.system(size: 28, weight: .bold))
                                 .foregroundColor(color)
                         }
                         
@@ -231,7 +231,7 @@ struct ActivityTypeEditorView: View {
                                             self.icon = iconName
                                         } label: {
                                             Image(systemName: iconName)
-                                                .font(.system(size: 18))
+                                                .font(.system(size: 21))
                                                 .frame(width: 40, height: 40)
                                                 .background(icon == iconName ? color.opacity(0.15) : Color.clear)
                                                 .foregroundColor(icon == iconName ? color : .secondary.opacity(0.8))

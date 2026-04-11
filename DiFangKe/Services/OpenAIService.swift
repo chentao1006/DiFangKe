@@ -34,8 +34,8 @@ class OpenAIService {
     }
     
     enum AITask {
-        case footprint(PersistentIdentifier)
-        case dailySummary(Date, [PersistentIdentifier], Bool)
+        case footprint(UUID)
+        case dailySummary(Date, [UUID], Bool)
         case tomorrowQuote
         case pastQuote
         case notificationSummary([String])
@@ -49,7 +49,7 @@ class OpenAIService {
     private var ongoingCompletions: [(String) -> Void] = []
     
     // 快速查找集合，避免线性搜索导致卡顿
-    private var footprintTaskSet = Set<PersistentIdentifier>()
+    private var footprintTaskSet = Set<UUID>()
     private var dailySummaryDateSet = Set<Date>()
     
     var taskQueue: [AITask] = []
@@ -69,17 +69,12 @@ class OpenAIService {
         taskQueue.count + (isProcessing ? 1 : 0)
     }
     
-    private var config: [String: String]? {
-        guard let path = Bundle.main.path(forResource: "Config", ofType: "plist"),
-              let xml = FileManager.default.contents(atPath: path),
-              let plist = try? PropertyListSerialization.propertyList(from: xml, options: .mutableContainersAndLeaves, format: nil) as? [String: String] else {
-            return nil
-        }
-        return plist
+    private var config: AppConfig {
+        AppConfig.shared
     }
     
     private var serviceSecret: String {
-        config?["SERVICE_SECRET"] ?? ""
+        config.serviceSecret
     }
     
     // MARK: - New Dynamic Settings
@@ -120,11 +115,11 @@ class OpenAIService {
             model = customModelName
         } else {
             // 严格读取 Config.plist，不使用任何硬编码兜底
-            guard let base = config?["PUBLIC_SERVICE_URL"], !base.isEmpty else {
+            guard let base = config.publicServiceUrl.isEmpty ? nil : config.publicServiceUrl else {
                 self.lastError = "Config.plist 缺失 PUBLIC_SERVICE_URL"
                 return nil
             }
-            guard let secret = config?["SERVICE_SECRET"], !secret.isEmpty else {
+            guard let secret = config.serviceSecret.isEmpty ? nil : config.serviceSecret else {
                 self.lastError = "Config.plist 缺失 SERVICE_SECRET"
                 return nil
             }
@@ -190,7 +185,7 @@ class OpenAIService {
 
     // MARK: - Queue Management
     
-    func enqueueFootprintsForAnalysis(_ identifiers: [PersistentIdentifier]) {
+    func enqueueFootprintsForAnalysis(_ identifiers: [UUID]) {
         // 批量加入，减少重复计算
         let newIds = identifiers.filter { !footprintTaskSet.contains($0) }
         guard !newIds.isEmpty else { return }
@@ -206,8 +201,8 @@ class OpenAIService {
         let startOfDate = Calendar.current.startOfDay(for: date)
         if !force && dailySummaryDateSet.contains(startOfDate) { return }
         
-        // 离线获取 ID，避免主线程持有对象
-        let ids = footprints.map { $0.persistentModelID }
+        // 使用 UUID，避免 PersistentIdentifier 跨线程/跨 Context 的各种坑
+        let ids = footprints.map { $0.footprintID }
         
         dailySummaryDateSet.insert(startOfDate)
         self.taskQueue.append(.dailySummary(startOfDate, ids, force))
@@ -257,7 +252,7 @@ class OpenAIService {
     // 便捷方法
     func analyzeFootprint(_ footprint: Footprint) {
         if footprint.aiAnalyzed { return }
-        self.enqueueFootprintsForAnalysis([footprint.persistentModelID])
+        self.enqueueFootprintsForAnalysis([footprint.footprintID])
     }
     private var currentInterval: TimeInterval {
         return aiServiceType == "custom" ? 15 : 60
@@ -282,8 +277,8 @@ class OpenAIService {
             self.isNetworkRequesting = true
             
             switch nextTask {
-            case .footprint(let identifier):
-                await self.processFootprintTask(identifier: identifier, context: context)
+            case .footprint(let footprintID):
+                await self.processFootprintTask(footprintID: footprintID, context: context)
                 // 任务处理完后，不一定要从 Set 移除，因为 footprint 本身有 aiAnalyzed 标记
             case .dailySummary(let date, let ids, let force):
                 await self.processDailySummaryTask(date: date, ids: ids, context: context, force: force)
@@ -308,8 +303,9 @@ class OpenAIService {
     
     // MARK: - Task Handlers (Async)
 
-    private func processFootprintTask(identifier: PersistentIdentifier, context: ModelContext) async {
-        guard let footprint = context.model(for: identifier) as? Footprint, !footprint.aiAnalyzed else { return }
+    private func processFootprintTask(footprintID: UUID, context: ModelContext) async {
+        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+        guard let footprint = (try? context.fetch(descriptor))?.first, !footprint.aiAnalyzed else { return }
         
         let locations = footprint.footprintLocations.map { ($0.latitude, $0.longitude) }
         var explicitPlaceName: String? = nil
@@ -350,7 +346,7 @@ class OpenAIService {
         }
     }
     
-    private func processDailySummaryTask(date: Date, ids: [PersistentIdentifier], context: ModelContext, force: Bool = false) async {
+    private func processDailySummaryTask(date: Date, ids: [UUID], context: ModelContext, force: Bool = false) async {
         let startOfDate = Calendar.current.startOfDay(for: date)
         
         // 提前预加载已有的 Insight 以便比对 Fingerprint
@@ -370,7 +366,8 @@ class OpenAIService {
 
         var footprintsUnderlying: [Footprint] = []
         for id in ids {
-            if let fp = context.model(for: id) as? Footprint { footprintsUnderlying.append(fp) }
+            let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
+            if let fp = (try? context.fetch(fpDescriptor))?.first { footprintsUnderlying.append(fp) }
         }
         guard !footprintsUnderlying.isEmpty else { return }
         
@@ -383,7 +380,7 @@ class OpenAIService {
         
         for fp in sorted {
             let title = fp.title.isEmpty ? "点位记录" : fp.title
-            if title == "正在获取位置..." || title == "点位记录" || title == "在某地停留" { continue }
+            if Footprint.isGenericTitle(title) { continue }
             
             // 解析活动类型名称
             let activityName = fp.getActivityType(from: allActivities)?.name

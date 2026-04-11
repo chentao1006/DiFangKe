@@ -275,12 +275,18 @@ struct FootprintModalView: View {
             } message: {
                 Text(aiErrorMessage)
             }
-        }
         .onDisappear {
+            if hasChanged {
+                footprint.status = .manual
+            }
             try? modelContext.save()
+            onDismiss?(hasChanged)
         }
     }
-    
+}
+}
+
+extension FootprintModalView {
     private func deletePhoto() {
         guard let assetID = photoToDelete else { return }
         ensureFootprintManaged()
@@ -288,6 +294,7 @@ struct FootprintModalView: View {
             var ids = footprint.photoAssetIDs
             ids.removeAll(where: { $0 == assetID })
             footprint.photoAssetIDs = ids
+            footprint.status = .manual // 标记为人工修改，防止被重置
             hasChanged = true
             try? modelContext.save()
         }
@@ -401,16 +408,16 @@ struct FootprintModalView: View {
                             } else {
                                 if let activity = footprint.getActivityType(from: allActivities) {
                                     Image(systemName: activity.icon)
-                                        .font(.system(size: 18, weight: .semibold))
+                                        .font(.system(size: 24, weight: .semibold))
                                         .foregroundColor(activity.color)
                                 } else {
                                     Image(systemName: "questionmark.circle.dashed")
-                                        .font(.system(size: 18, weight: .semibold))
+                                        .font(.system(size: 24, weight: .semibold))
                                         .foregroundColor(.secondary.opacity(0.7))
                                 }
                             }
                         }
-                        .frame(width: 40, height: 40)
+                        .frame(width: 45, height: 45)
                         .background(Circle().fill(Color.secondary.opacity(0.05)))
                         .contentShape(Circle())
                     }
@@ -457,9 +464,9 @@ struct FootprintModalView: View {
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: activity.icon)
-                                    .font(.system(size: 11))
+                                    .font(.system(size: 13))
                                 Text(activity.name)
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(.system(size: 12, weight: .medium))
                             }
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)

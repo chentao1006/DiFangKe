@@ -315,7 +315,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 let cacheKey = String(format: "%.3f,%.3f", centerLat, centerLon)
                 
                 // 1. 优先匹配已有的重要地点
-                var title = "发现足迹"
+                var title = "此处"
                 var address: String? = nil
                 var matchedPlaceID: UUID? = nil
                 
@@ -370,7 +370,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                             footprintLocations: captureCoords,
                             locationHash: captureHash,
                             duration: captureDuration,
-                            title: t,
+                            title: Footprint.generateRandomTitle(for: t, seed: Int(captureStartTime.timeIntervalSince1970)),
                             status: .candidate,
                             placeID: pID,
                             photoAssetIDs: captureClusterIDs,
@@ -389,7 +389,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     } else {
                         // 串行执行地名反查
                         geocoder.reverseGeocodeLocation(firstLoc) { placemarks, error in
-                            var resolvedTitle = "发现足迹"
+                            var resolvedTitle = "此处"
                             var resolvedAddress: String? = nil
                             
                             if let pm = placemarks?.first {

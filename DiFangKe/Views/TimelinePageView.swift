@@ -91,10 +91,8 @@ struct TimelinePageView: View {
                     self.notificationAuthStatus = status
                 }
                 
-                let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
-                let notInCache = TimelineBuilder.timelineCache[date] == nil
-                
-                if timelineItems.isEmpty || (notInCache && isToday) || trajectoryPoints.isEmpty {
+                // 只有当没有任何数据时，才进行初次同步
+                if timelineItems.isEmpty {
                     refreshTimeline()
                 }
                 
@@ -117,8 +115,11 @@ struct TimelinePageView: View {
             appearanceTask?.cancel()
             refreshTask?.cancel()
         }
-        .onChange(of: footprints) { _, _ in refreshTimeline(force: true) }
-        .onChange(of: manualSelections) { _, _ in refreshTimeline(force: true) }
+        .onChange(of: footprints) { _, _ in
+            // 安全刷新：仅重新获取数据库内容刷新 UI，不触发 syncDay 算法，彻底杜绝死循环
+            let items = PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
+            self.timelineItems = items
+        }
         .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in refreshTimeline(force: true) }
         .sheet(item: $selectedFootprint) { footprint in
             FootprintModalView(
@@ -282,8 +283,11 @@ struct TimelinePageView: View {
                             self.selectedTransport = selected
                         },
                         onDelete: { selected in
-                            let selection = TransportManualSelection(startTime: selected.startTime, endTime: selected.endTime, isDeleted: true)
-                            modelContext.insert(selection)
+                            let targetId = selected.id
+                            let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == targetId })
+                            if let records = try? modelContext.fetch(descriptor), let record = records.first {
+                                record.statusRaw = "ignored"
+                            }
                             try? modelContext.save()
                             refreshTimeline(force: true)
                         }
@@ -313,124 +317,59 @@ struct TimelinePageView: View {
 
     @MainActor
     private func refreshTimelineAsync(force: Bool = false) async {
-        let footprintIDs = footprints.map { $0.persistentModelID }
-        let placeIDs = allPlaces.map { $0.persistentModelID }
-        let overrideIDs = manualSelections.map { $0.persistentModelID }
         let targetDate = date
-        let container = modelContext.container
         let availableRawDates = locationManager.availableRawDates
 
         let isToday = Calendar.current.isDateInToday(targetDate)
-        let hasExistingFootprints = !footprintIDs.isEmpty
+        let hasExistingFootprints = !footprints.isEmpty
         let hasRawData = availableRawDates.contains(Calendar.current.startOfDay(for: targetDate))
         
         if !isToday && !hasExistingFootprints && !hasRawData {
             self.timelineItems = []
             self.isLoadingTimeline = false
-            TimelineBuilder.timelineCache[targetDate] = []
             return
         }
 
-        if self.timelineItems.isEmpty {
-            if let cached = TimelineBuilder.timelineCache[targetDate] {
-                self.timelineItems = cached 
-                self.isLoadingTimeline = false
-            } else {
-                self.isLoadingTimeline = true
-            }
-        }
+        self.isLoadingTimeline = true
         
-        if !self.timelineItems.isEmpty || TimelineBuilder.timelineCache[targetDate] != nil {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        if Task.isCancelled { return }
+        
+        // 执行彻底的持久化时间线同步算法
+        if force || hasRawData || isToday {
+            await PersistentTimelineBuilder.syncDay(date: targetDate, in: modelContext)
         }
         
         if Task.isCancelled { return }
-        let cachedItems = TimelineBuilder.timelineCache[targetDate]
+        
+        let items = PersistentTimelineBuilder.fetchTimeline(for: targetDate, in: modelContext)
+        self.timelineItems = items
+        
         let result = await Task.detached(priority: .userInitiated) {
-            let context = ModelContext(container)
-            
-            // Perform Lite conversions in background
-            let fpsLite = footprintIDs.compactMap { id -> FootprintLite? in
-                guard let fp = context.model(for: id) as? Footprint else { return nil }
-                return TimelineBuilder.convertToFootprintLite(fp)
-            }
-            let placesLite = placeIDs.compactMap { id -> PlaceLite? in
-                guard let p = context.model(for: id) as? Place else { return nil }
-                return TimelineBuilder.convertToPlaceLite(p)
-            }
-            let overridesLite = overrideIDs.compactMap { id -> OverrideLite? in
-                guard let o = context.model(for: id) as? TransportManualSelection else { return nil }
-                return TimelineBuilder.convertToOverrideLite(o)
-            }
-            
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
             let rawCoords = rawPoints.map { $0.coordinate }
             let simplified = LocationManager.simplifyCoordinates(rawCoords, tolerance: 0.00005)
-            
-            if !force, let cached = cachedItems, !isToday, !cached.isEmpty {
-                return (cached, simplified, rawPoints.count)
-            }
-            
-            let items = TimelineBuilder.buildTimeline(
-                for: targetDate, 
-                footprints: fpsLite, 
-                allRawPoints: rawPoints, 
-                allPlaces: placesLite, 
-                overrides: overridesLite
-            )
-            return (items, simplified, rawPoints.count)
+            return (simplified, rawPoints.count)
         }.value
         
-        let items = result.0
-        self.trajectoryPoints = result.1
-        self.totalPointsCount = result.2
+        self.trajectoryPoints = result.0
+        self.totalPointsCount = result.1
         
-        if Task.isCancelled { return }
-        
-        // --- 核心修复：将 TimelineBuilder 返回的临时克隆对象映射回数据库中的实时模型 ---
-        // 否则 UI 中的所有修改（收藏、编辑名称、换照片）都只会作用在内存克隆体上而无法持久化
-        let finalizedItems = items.map { item -> TimelineItem in
-            if case .footprint(let tempFp) = item {
-                if let realFp = footprints.first(where: { $0.footprintID == tempFp.footprintID }) {
-                    return .footprint(realFp)
-                }
-            }
-            return item
-        }
-
-        if !self.timelineItems.isEmpty {
-            var mergedItems = finalizedItems
-            for i in 0..<mergedItems.count {
-                if i < self.timelineItems.count {
-                    let old = self.timelineItems[i]
-                    let new = mergedItems[i]
-                    
-                    if case .footprint(let oldF) = old, case .footprint(let newF) = new {
-                        let oldTitle = oldF.title.trimmingCharacters(in: .whitespaces)
-                        let newTitle = newF.title.trimmingCharacters(in: .whitespaces)
-                        
-                        let isOldValid = !oldTitle.isEmpty && !["地点记录", "正在获取位置...", "在某地停留", ""].contains(oldTitle)
-                        let isNewPlaceholder = newTitle.isEmpty || ["地点记录", "正在获取位置...", "在某地停留", ""].contains(newTitle)
-                        
-                        if isOldValid && isNewPlaceholder && abs(oldF.startTime.timeIntervalSince(newF.startTime)) < 300 {
-                            mergedItems[i] = old
-                        }
-                    }
-                }
-            }
-            self.timelineItems = mergedItems
-        } else {
-            self.timelineItems = finalizedItems
-        }
-        
-        TimelineBuilder.timelineCache[targetDate] = self.timelineItems
         self.isLoadingTimeline = false
         
         // 异步加载当天的照片用于地图显示
         let start = Calendar.current.startOfDay(for: targetDate)
         let end = Calendar.current.date(byAdding: .day, value: 1, to: start)!
+        
+        let ignoredFpDesc = FetchDescriptor<Footprint>(predicate: #Predicate { 
+            $0.startTime >= start && $0.startTime < end && $0.statusValue == "ignored"
+        })
+        let ignoredFps = (try? modelContext.fetch(ignoredFpDesc)) ?? []
+        let blocklist = Set(ignoredFps.flatMap { $0.photoAssetIDs })
+
         PhotoService.shared.fetchAssets(startTime: start, endTime: end) { assets in
-            let filtered = assets.filter { $0.location != nil }
+            let filtered = assets.filter { asset in
+                asset.location != nil && !blocklist.contains(asset.localIdentifier)
+            }
             var finalAssets: [PHAsset] = []
             
             // 策略调整：不再全局限制 10 张，而是每个足迹/交通段最多显示 10 张最接近终点的照片
@@ -497,7 +436,7 @@ struct TimelinePageView: View {
                 }
                 
                 // 2. 解析缺失的地址/标题
-                let needsResolution = (footprint.title == "地点记录" || footprint.title == "正在获取位置..." || footprint.title == "在某地停留") 
+                let needsResolution = Footprint.isGenericTitle(footprint.title) 
                     && (footprint.address == nil || footprint.address!.isEmpty || footprint.address == "正在解析位置...")
                 
                 if needsResolution && !footprint.footprintLocations.isEmpty {
@@ -524,7 +463,7 @@ struct TimelinePageView: View {
                 timelineItems[index] = .transport(updated)
             case .footprint(let footprint):
                 if type == .stay {
-                    footprint.title = name
+                    footprint.title = Footprint.generateRandomTitle(for: name, seed: Int(footprint.startTime.timeIntervalSince1970))
                     footprint.address = name
                     
                     if let context = footprint.modelContext {

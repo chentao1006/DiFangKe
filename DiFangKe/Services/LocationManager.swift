@@ -89,7 +89,8 @@ final class RawLocationStore {
         guard let content = String(data: data, encoding: .utf8) else { return [] }
         
         var locations: [CLLocation] = []
-        // 使用 enumerateLines 避免一次性创建巨大的字符串数组
+        var lastValidPoint: CLLocation? = nil
+
         content.enumerateLines { line, _ in
             if line.isEmpty { return }
             let parts = line.split(separator: ",", maxSplits: 4, omittingEmptySubsequences: true)
@@ -110,7 +111,20 @@ final class RawLocationStore {
                     speed: speed,
                     timestamp: Date(timeIntervalSince1970: ts)
                 )
+                
+                // --- 补救措施：加载时过滤存量的离谱漂移点 ---
+                if let last = lastValidPoint {
+                    let dist = loc.distance(from: last)
+                    let time = loc.timestamp.timeIntervalSince(last.timestamp)
+                    if time > 0 {
+                        let calcSpeed = dist / time
+                        let isRidiculous = (accuracy > 500 && dist > 2000) || (calcSpeed > 100.0 && accuracy > 100)
+                        if isRidiculous { return } // 跳过该点，不加入列表，且不更新 lastValidPoint
+                    }
+                }
+                
                 locations.append(loc)
+                lastValidPoint = loc
             }
         }
         return locations
@@ -163,6 +177,8 @@ final class RawLocationStore {
               let content = String(data: data, encoding: .utf8) else { return [] }
         
         var locations: [CLLocation] = []
+        var lastValidPoint: CLLocation? = nil
+        
         content.enumerateLines { line, _ in
             if line.isEmpty { return }
             let parts = line.split(separator: ",", maxSplits: 4, omittingEmptySubsequences: true)
@@ -183,7 +199,20 @@ final class RawLocationStore {
                     speed: speed,
                     timestamp: Date(timeIntervalSince1970: ts)
                 )
+                
+                // --- 补救措施：加载时过滤存量的离谱漂移点 ---
+                if let last = lastValidPoint {
+                    let dist = loc.distance(from: last)
+                    let time = loc.timestamp.timeIntervalSince(last.timestamp)
+                    if time > 0 {
+                        let calcSpeed = dist / time
+                        let isRidiculous = (accuracy > 500 && dist > 2000) || (calcSpeed > 100.0 && accuracy > 100)
+                        if isRidiculous { return }
+                    }
+                }
+                
                 locations.append(loc)
+                lastValidPoint = loc
             }
         }
         return locations
@@ -323,21 +352,21 @@ final class FootprintProcessor {
     // 1.2 去噪参数
     private let minAccuracy: CLLocationAccuracy = 100.0   // 精度过滤
     private let minTimeInterval: TimeInterval = 5.0       // 时间间隔过滤
-    private let driftDistanceThreshold: CLLocationDistance = 200.0
+    private var driftDistanceThreshold: CLLocationDistance { AppConfig.shared.stayDistanceThreshold }
     private let driftSpeedThreshold: CLLocationSpeed = 45.0 // m/s，异常飘移速度（约162km/h，兼顾高铁环境）
     
     // 1.3 停留点识别参数
-    private let stayRadiusThreshold: Double = 50.0             // 50米半径内视为同一停留 (进一步降低以抓取 100m 以上位移)
-    private let stayDurationThreshold: TimeInterval = 5 * 60    // 持续 >= 5 分钟（对齐时间轴识别逻辑，从 10 分降至 5 分，确保“所见即所得”地存入数据库）
+    private var stayRadiusThreshold: Double { AppConfig.shared.stayDistanceThreshold }
+    private var stayDurationThreshold: TimeInterval { AppConfig.shared.stayDurationThreshold }
     
-    // 1.4 合并参数（更严格：避免跨度过大的地点合并）
-    private let mergeTimeThreshold: TimeInterval = 15 * 60       // 间隔 < 15 分钟
-    private let mergeDistanceThreshold: CLLocationDistance = 100.0 // 降低到 100m
+    // 1.4 合并参数
+    private var mergeTimeThreshold: TimeInterval { AppConfig.shared.stayDurationThreshold }
+    private var mergeDistanceThreshold: CLLocationDistance { AppConfig.shared.mergeDistanceThreshold }
     
     /// 处理新定位点，满足停留条件则返回 CandidateFootprint
     func processNewLocation(_ location: CLLocation, queue: inout [CLLocation], isHistorical: Bool = false) -> CandidateFootprint? {
-        // 过滤精度过差的点（室内环境放宽到 200 米，确保不再丢点）
-        guard location.horizontalAccuracy > 0 && location.horizontalAccuracy < 200 else { return nil }
+        // 过滤精度过差的点（进一步放宽到 300 米，确保极端环境下也不丢点）
+        guard location.horizontalAccuracy > 0 && location.horizontalAccuracy < 300 else { return nil }
               
         // 1.2 时间鲜度过滤：如果是实时点，丢弃 1 分钟前的缓存数据或过时数据
         if !isHistorical {
@@ -349,8 +378,21 @@ final class FootprintProcessor {
             let timeInterval = location.timestamp.timeIntervalSince(lastLoc.timestamp)
             guard timeInterval >= minTimeInterval else { return nil }
             
-            // 漂移过滤：大位移 + 高速
+            // --- 强化漂移过滤 (针对地铁/城市峡谷) ---
             let distance = location.distance(from: lastLoc)
+            let calculatedSpeed = distance / timeInterval // m/s
+            
+            // A: 物理不可能性判断：时速超过 220km/h (约 61m/s) 且精度不佳，判定为漂移数据
+            if calculatedSpeed > 60.0 && location.horizontalAccuracy > 65.0 {
+                return nil
+            }
+            
+            // B: 精度断崖式下降判断：如果位移很大 (>300m) 且当前精度比上一点差很多 (>3倍且绝对值>150m)，判定为漂移
+            if distance > 300 && location.horizontalAccuracy > lastLoc.horizontalAccuracy * 3 && location.horizontalAccuracy > 150 {
+                return nil
+            }
+            
+            // C: 基础漂移判断
             if distance > driftDistanceThreshold && location.speed > driftSpeedThreshold {
                 return nil
             }
@@ -393,7 +435,7 @@ final class FootprintProcessor {
         
         // 核心优化：进一步收紧离群点容忍度（从 3% 降低到 1%），防止长达 500m 以上的慢速位移被吞入长停留中
         let distances = locations.map { $0.distance(from: centerLoc) }.sorted()
-        let percentileindex = Int(Double(distances.count) * 0.99)
+        let percentileindex = Int(Double(distances.count) * 0.85)
         if distances[percentileindex] > stayRadiusThreshold {
             return nil
         }
@@ -489,7 +531,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     // 同步状态属性
     var isSyncingInitialData: Bool = false
+    var showSyncInquiry: Bool = false
     var syncStatusMessage: String = ""
+    var syncProgress: Double = 0.0
     var isResettingData: Bool = false
     
     // 从 View 同步过来的参数
@@ -506,6 +550,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     // 正在记录的临时停留状态
     var potentialStopStartLocation: CLLocation?
+    
+    /// 快速检测云端是否有数据 (通过 KVS)
+    func hasExistingCloudData() -> Bool {
+        let kvs = NSUbiquitousKeyValueStore.default
+        kvs.synchronize()
+        return kvs.bool(forKey: "hasSeededDefaultData")
+    }
     
     /// 根据当前精度/省电模式，提供给 UI 呈现不同频率的“呼吸”动画时长
     var pulseDuration: Double {
@@ -528,6 +579,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     // 标签继承距离阈值：150米
     private let tagInheritanceDistance: CLLocationDistance = 150.0
+    
+    // 习惯匹配参数 (从 Config 加载)
+    private var habitTimeWindow: Int { AppConfig.shared.habitTimeWindow }
+    private var habitFrequencyThreshold: Int { AppConfig.shared.habitFrequencyThreshold }
     
     private var refreshTimer: AnyCancellable?
     
@@ -704,8 +759,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let duration = now.timeIntervalSince(start)
         let totalMinutes = Int(duration / 60)
         
-        // 如果停留时间还在 1 分钟内，可能刚开始记录，此时不显示时长
-        if totalMinutes < 1 { return nil }
+        // --- 核心调整：根据用户要求，10 分钟以下不算停留，因此不显示正在进行的停留时长 ---
+        if totalMinutes < 10 { return nil }
         
         if totalMinutes >= 60 {
             let hours = totalMinutes / 60
@@ -775,10 +830,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // On app open, force a fresh high-accuracy location fix
         locationManager.requestLocation() // This will trigger a one-time precise update
         
-        Task {
-            await triggerTimelineSift()
-        }
-        
         // 后台异步执行维护任务，避免卡启动画面
         let container = modelContext?.container
         Task.detached(priority: .background) { [weak self] in
@@ -812,9 +863,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 第一步：删除时长 < 5分钟的噪点记录
     /// 第二步：合并间隔 < 30分钟 且 距离 < 200m 的相邻记录
     public func consolidateFootprints(in context: ModelContext) async {
-        let mergeTime: TimeInterval = 15 * 60      // 从 30min 降低到 15min，减少误合并
-        let mergeDist: CLLocationDistance = 100.0  // 从 200m 降低到 100m，增加灵敏度
-        let minKeepDuration: TimeInterval = 5 * 60  // 从 10min 降低到 5min，防止丢掉短时停留
+        let mergeTime: TimeInterval = 20 * 60      // 增加至 20min，更好地容忍数据断断续续
+        let mergeDist: CLLocationDistance = 180.0  // 增加至 180m，更好地合并漂移严重的停留点
+        let minKeepDuration: TimeInterval = 4 * 60  // 略微降低至 4min
 
         // 为了性能，自动维护只针对最近 7 天的数据，避免每次全量扫库导致卡顿
         let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? .distantPast
@@ -853,11 +904,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         for (_, dayFootprints) in grouped {
             let sorted = dayFootprints.sorted { $0.startTime < $1.startTime }
-            // ── 第一步：逻辑合并（相邻且近） ──
+            var workingSorted = sorted
             var i = 0
-            while i < sorted.count - 1 {
-                let base = sorted[i]
-                let next = sorted[i + 1]
+            while i < workingSorted.count - 1 {
+                let base = workingSorted[i]
+                let next = workingSorted[i+1]
 
                 // 时间间隔：负数表示重叠，视同可合并
                 let timeGap = next.startTime.timeIntervalSince(base.endTime)
@@ -871,10 +922,22 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     base.endTime = max(base.endTime, next.endTime)
                     base.date = Calendar.current.startOfDay(for: base.startTime)
                     base.duration = base.endTime.timeIntervalSince(base.startTime)
+                    
                     var path = base.footprintLocations
                     path.append(contentsOf: next.footprintLocations)
                     base.footprintLocations = path
+                    
+                    // 合并照片 ID（核心修复：防止照片记录在足迹合并中丢失）
+                    if !next.photoAssetIDs.isEmpty {
+                        var combined = base.photoAssetIDs
+                        for pid in next.photoAssetIDs {
+                            if !combined.contains(pid) { combined.append(pid) }
+                        }
+                        base.photoAssetIDs = combined
+                    }
+                    
                     context.delete(next)
+                    workingSorted.remove(at: i + 1)
                     // i 不递增，继续尝试将后续邻近项合并进来
                 } else {
                     i += 1
@@ -890,7 +953,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                         if fp.placeID != bestPlace.placeID {
                             fp.placeID = bestPlace.placeID
                             if (fp.address ?? "").isEmpty { fp.address = bestPlace.name }
-                            if fp.title.isEmpty { fp.title = bestPlace.name }
+                            if Footprint.isGenericTitle(fp.title) {
+                                fp.title = Footprint.generateRandomTitle(for: bestPlace.name, seed: Int(fp.startTime.timeIntervalSince1970))
+                            }
                         }
                     }
                 }
@@ -1016,6 +1081,21 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         lastUpdateTime = Date()
         accuracy = location.horizontalAccuracy
         
+        // --- 核心改进：预先过滤离谱漂移点，防止污染原始轨迹 CSV ---
+        if let last = trackingPoints.last {
+            let dist = location.distance(from: last)
+            let time = abs(location.timestamp.timeIntervalSince(last.timestamp))
+            if time > 0 {
+                let calcSpeed = dist / time
+                // 地铁/隧道环境常见的离谱漂移：精度骤降 (>500m) 且 瞬间位移巨大 (>2km) 且 速度不合理 (>80m/s)
+                let isRidiculous = (location.horizontalAccuracy > 500 && dist > 2000) || (calcSpeed > 80.0 && location.horizontalAccuracy > 100)
+                if isRidiculous {
+                    print("Detected ridiculous drift, skipping point. Dist: \(dist), Acc: \(location.horizontalAccuracy)")
+                    return 
+                }
+            }
+        }
+        
         // --- Trigger Sift on location change ---
         triggerTimelineSiftDebounced()
         
@@ -1030,8 +1110,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             let duration = Date().timeIntervalSince(startLoc.timestamp)
             let distance = location.distance(from: startLoc)
             
-            // A: 通用逻辑 - 5分钟以上且位移在 150m 内 (应对室内漂移)
-            if duration > 300 && distance < 150.0 { return true }
+            // A: 通用逻辑 - 5分钟以上且位移在 300m 内 (宽松应对大幅度室内漂移)
+            if duration > 300 && distance < 300.0 { return true }
             
             // B: 地点粘性 - 如果在已知地点范围内已超过 1 分钟，且当前速度极低，则提前进入节能
             if let p = place, duration > 60 && distance < Double(p.radius) + 100.0 && speed < 1.0 {
@@ -1052,21 +1132,21 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // 普通地点但已停留：进入节能模式，但保持 10m 灵敏度以便触发“起步”
             if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
                 manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-                manager.distanceFilter = 25.0 // 从 50m 降低到 25m，增加起步灵敏度
+                manager.distanceFilter = 10.0 // 从 25m 降至 10m，极大提升起步灵敏度
                 manager.activityType = .other
             }
         } else if speed > 25.0 {
             // 超高速移动中 (时速 > 90km/h)：提高位置采样密度，记录更平直的曲线
-            if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters {
-                manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-                manager.distanceFilter = 100.0 // 从 250m 降低到 100m，解决高速轨迹严重“拉直线”的问题
+            if manager.desiredAccuracy != kCLLocationAccuracyBest {
+                manager.desiredAccuracy = kCLLocationAccuracyBest // 从 HundredMeters 改为 Best，确保高铁/高速轨迹不丢失
+                manager.distanceFilter = 30.0 // 从 100m 降低到 30m，解决高速轨迹严重“拉直线”的问题
                 manager.activityType = .automotiveNavigation
             }
         } else if speed > 10.0 {
             // 高速移动中 (时速 > 36km/h)：
-            if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
-                manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-                manager.distanceFilter = 40.0 // 从 60m 降低到 40m
+            if manager.desiredAccuracy != kCLLocationAccuracyBest {
+                manager.desiredAccuracy = kCLLocationAccuracyBest // 统一提升至 Best
+                manager.distanceFilter = 15.0 // 从 40m 降低到 15m
                 manager.activityType = .automotiveNavigation
             }
         } else {
@@ -1139,10 +1219,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             saveOngoingTitle()
         }
         
-        // 3. 触发正在持续停留的 AI 分析 (停留 5 分钟后触发第一次，之后每 60 分钟刷新)
+        // 3. 触发正在持续停留的 AI 分析 (停留 10 分钟后触发第一次，之后每 60 分钟刷新)
         if let start = potentialStopStartLocation?.timestamp {
             let duration = Date().timeIntervalSince(start)
-            if duration >= 5 * 60 {
+            if duration >= 10 * 60 {
                 let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
                 if isAiEnabled && !isAnalyzingOngoing && (ongoingTitle == nil || (lastAIAnalysisTime != nil && Date().timeIntervalSince(lastAIAnalysisTime!) > 60 * 60)) {
                     // 只在有坐标时分析
@@ -1171,7 +1251,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             )
             if let existing = try? context.fetch(fetchDescriptor) {
-                for fp in existing { context.delete(fp) }
+                for fp in existing {
+                    // 仅保护带照片的足迹不被重置清空（视为原始数据）
+                    let isProtected = !fp.photoAssetIDs.isEmpty
+                    if !isProtected {
+                        context.delete(fp)
+                    }
+                }
             }
             
             let transportDescriptor = FetchDescriptor<TransportManualSelection>(
@@ -1301,7 +1387,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let targetMinute = calendar.component(.minute, from: time)
         let targetTotal = targetHour * 60 + targetMinute
         
-        let window = 120 // 2小时
+        let window = habitTimeWindow
         
         // 过滤时间窗口相近的记录
         let matches = history.filter { fp in
@@ -1319,9 +1405,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
         
-        // 门槛：3次
+        // 使用配置好的门槛
         let sorted = counts.sorted { $0.value > $1.value }
-        if let best = sorted.first, best.value >= 3 {
+        if let best = sorted.first, best.value >= habitFrequencyThreshold {
             return best.key
         }
         return nil
@@ -1372,7 +1458,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 footprintLocations: candidate.rawLocations.map { $0.coordinate },
                 locationHash: "TBD",
                 duration: candidate.duration,
-                title: "", 
+                title: Footprint.generateRandomTitle(for: "此处", seed: Int(candidate.startTime.timeIntervalSince1970)), 
                 status: .confirmed,
                 address: (isHistorical || currentAddress == "正在解析位置..." || currentAddress == "未知位置") ? nil : currentAddress
             )
@@ -1505,7 +1591,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             if let matchedPOI = matchedPlaceFor(coordinate: fpCoord) {
                 // 1. 优先使用本地已匹配的地点
                 let baseName = matchedPOI.name
-                if footprint.title.isEmpty || footprint.title == "寻迹此处" || footprint.title == "地点记录" || !footprint.title.contains(baseName) {
+                if Footprint.isGenericTitle(footprint.title) || !footprint.title.contains(baseName) {
                     footprint.title = Footprint.generateRandomTitle(for: baseName, seed: Int(footprint.startTime.timeIntervalSince1970))
                 }
                 footprint.address = baseName
@@ -1535,7 +1621,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             } else if let addr = footprint.address {
                 // 3. 兜底逻辑：地址已存在（非通用），确保标题与之对齐
-                if footprint.title.isEmpty || footprint.title == "寻迹此处" || footprint.title == "地点记录" {
+                if Footprint.isGenericTitle(footprint.title) {
                     footprint.title = Footprint.generateRandomTitle(for: addr, seed: Int(footprint.startTime.timeIntervalSince1970))
                 }
             }
@@ -1571,7 +1657,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let validFootprints = todayFootprints.filter { $0.status != .ignored }
         let footprintCount = validFootprints.count
         let footprintTitles = validFootprints.map { $0.title }
-            .filter { !["地点记录", "正在获取位置...", "在某地停留", "发现足迹", "寻迹此处", ""].contains($0) }
+            .filter { !Footprint.isGenericTitle($0) }
         
         let fpsLite = todayFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
         
@@ -1869,7 +1955,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                                     locationHash: "GAP_STAY",
                                     duration: gap.duration
                                 )
-                                newFp.title = "在某地停留"
+                                newFp.title = Footprint.generateRandomTitle(for: "某地", seed: Int(gap.start.timeIntervalSince1970))
                                 context.insert(newFp)
                                 
                                 if let mPlace = self.matchedPlaceFor(coordinate: gap.center) {
@@ -1986,58 +2072,47 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 重置并重新生成指定日期的足迹数据
     @MainActor
     func resetData(for date: Date) {
-        guard let container = modelContext?.container else { return }
+        guard let context = modelContext else { return }
         
         isResettingData = true
         UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
         
         Task {
-            await withCheckedContinuation { continuation in
-                Task.detached(priority: .userInitiated) {
-                    let context = ModelContext(container)
-                    let calendar = Calendar.current
-                    let targetDate = calendar.startOfDay(for: date)
-                    let nextDay = calendar.date(byAdding: .day, value: 1, to: targetDate)!
-                    
-                    // 1. 清理该日期的所有足迹、交通纠错和 AI 摘要
-                    let fpDescriptor = FetchDescriptor<Footprint>(
-                        predicate: #Predicate { $0.startTime >= targetDate && $0.startTime < nextDay }
-                    )
-                    let manualDescriptor = FetchDescriptor<TransportManualSelection>(
-                        predicate: #Predicate { $0.startTime >= targetDate && $0.startTime < nextDay }
-                    )
-                    let insightDescriptor = FetchDescriptor<DailyInsight>(
-                        predicate: #Predicate { $0.date == targetDate }
-                    )
-                    
-                    if let fps = try? context.fetch(fpDescriptor) { for fp in fps { context.delete(fp) } }
-                    if let manuals = try? context.fetch(manualDescriptor) { for m in manuals { context.delete(m) } }
-                    if let insights = try? context.fetch(insightDescriptor) { for i in insights { context.delete(i) } }
-                    
-                    try? context.save()
-                    
-                    // 2. 重新加载原始点并处理
-                    let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
-                    if !rawPoints.isEmpty {
-                        var tempQueue: [CLLocation] = []
-                        for loc in rawPoints {
-                            if let candidate = FootprintProcessor.shared.processNewLocation(loc, queue: &tempQueue, isHistorical: true) {
-                                await self.handleNewCandidateFootprint(candidate, isHistorical: true, context: context)
-                                let lastProcessedTime = candidate.endTime
-                                tempQueue.removeAll { $0.timestamp <= lastProcessedTime }
-                            }
-                        }
+            let calendar = Calendar.current
+            let startOfDay = calendar.startOfDay(for: date)
+            let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+            
+            // 1. 物理清空当天所有相关记录
+            let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
+                $0.startTime >= startOfDay && $0.startTime < endOfDay
+            })
+            let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                $0.startTime >= startOfDay && $0.startTime < endOfDay
+            })
+            let insightDesc = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDay })
+            
+            if let fps = try? context.fetch(fpDesc) {
+                for fp in fps {
+                    // 仅保护带照片的足迹（视为原始数据）
+                    let isProtected = !fp.photoAssetIDs.isEmpty
+                    if !isProtected {
+                        context.delete(fp)
                     }
-                    
-                    try? context.save()
-                    continuation.resume()
                 }
             }
+            if let tps = try? context.fetch(tpDesc) { for tp in tps { context.delete(tp) } }
+            if let insights = try? context.fetch(insightDesc) { for i in insights { context.delete(i) } }
             
-            // 3. 清理缓存，确保 UI 能够感知到数据的彻底刷新
-            TimelineBuilder.timelineCache.removeAll()
-            self.isResettingData = false
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            try? context.save()
+            
+            // 2. 调用新引擎重新构建
+            await PersistentTimelineBuilder.syncDay(date: date, in: context)
+            
+            await MainActor.run {
+                self.isResettingData = false
+                // 显式触动 UI 刷新，重置是用户主动发起的，安全可控
+                self.lastRawDataUpdateTrigger = Date()
+            }
         }
     }
 
@@ -2274,23 +2349,50 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         if showOverlay {
             await MainActor.run {
                 isSyncingInitialData = true
-                syncStatusMessage = "正在同步云端数据..."
+                syncProgress = 0.0
+                syncStatusMessage = "正在连接 iCloud..."
             }
         }
         
         do {
+            // 模拟一些进度，因为 syncToiCloud 是黑盒且可能很快
+            if showOverlay {
+                Task {
+                    for i in 1...50 {
+                        if !isSyncingInitialData { break }
+                        try? await Task.sleep(nanoseconds: 30_000_000)
+                        await MainActor.run { syncProgress = Double(i) / 100.0 }
+                    }
+                }
+            }
+            
             let count = try await RawLocationStore.shared.syncToiCloud()
+            
+            if showOverlay {
+                await MainActor.run {
+                    syncStatusMessage = "正在更新本地数据库..."
+                    syncProgress = 0.6
+                }
+            }
+            
             if count > 0 {
                 await MainActor.run {
                     self.refreshAvailableRawDates()
                     self.lastRawDataUpdateTrigger = Date()
                 }
-                await self.loadPointsFromStore() // 重新从同步后的本地文件评估当前停留时长
+                await self.loadPointsFromStore()
             }
             
             if showOverlay {
+                // 完成最后进度
+                for i in 60...100 {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                    await MainActor.run { syncProgress = Double(i) / 100.0 }
+                }
+                
                 await MainActor.run {
                     syncStatusMessage = "同步完成"
+                    syncProgress = 1.0
                     // 延迟消失
                     Task {
                         try? await Task.sleep(nanoseconds: 1 * 1_000_000_000)
@@ -2313,6 +2415,62 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     }
                 }
             }
+        }
+    }
+    
+    /// 清理云端数据（由同步询问弹窗触发）
+    func purgeCloudData() async {
+        await MainActor.run {
+            isSyncingInitialData = true
+            syncProgress = 0.0
+            syncStatusMessage = "正在清理云端数据..."
+        }
+        
+        let containerIdentifier = "iCloud.com.ct106.difangke"
+        let container = CKContainer(identifier: containerIdentifier)
+        let database = container.privateCloudDatabase
+        let zoneID = CKRecordZone.ID(zoneName: "com.apple.coredata.cloudkit.zone")
+        
+        // 进度模拟
+        let progressTask = Task {
+            for i in 1...90 {
+                if !isSyncingInitialData { break }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                await MainActor.run { syncProgress = Double(i) / 100.0 }
+            }
+        }
+        
+        do {
+            try await database.deleteRecordZone(withID: zoneID)
+            
+            // 清理 KVS
+            let kvs = NSUbiquitousKeyValueStore.default
+            kvs.removeObject(forKey: "hasSeededDefaultData")
+            kvs.synchronize()
+            
+            if let context = modelContext {
+                // 清理可能已经同步下来的本地数据
+                let models: [any PersistentModel.Type] = [
+                    Footprint.self, Place.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self
+                ]
+                for model in models {
+                    try? context.delete(model: model)
+                }
+                try? context.save()
+            }
+            
+            progressTask.cancel()
+            await MainActor.run {
+                syncProgress = 1.0
+                syncStatusMessage = "清理完成"
+            }
+        } catch {
+            print("Purge failed: \(error)")
+        }
+        
+        try? await Task.sleep(nanoseconds: 1 * 1_000_000_000)
+        await MainActor.run {
+            isSyncingInitialData = false
         }
     }
 }

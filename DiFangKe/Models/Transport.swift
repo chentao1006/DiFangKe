@@ -31,6 +31,7 @@ enum TransportType: String, CaseIterable, Codable {
     case motorcycle = "motorcycle"     // 摩托车
     case bus = "bus"                   // 公交/大巴
     case car = "car"                   // 汽车
+    case subway = "subway"             // 轨道交通
     case train = "train"               // 火车/高铁
     case airplane = "airplane"         // 飞机
     
@@ -43,6 +44,7 @@ enum TransportType: String, CaseIterable, Codable {
         case .motorcycle: return "motorcycle.fill"
         case .bus: return "bus.fill"
         case .car: return "car.fill"
+        case .subway: return "tram.fill"
         case .train: return "train.side.front.car"
         case .airplane: return "airplane"
         }
@@ -57,6 +59,7 @@ enum TransportType: String, CaseIterable, Codable {
         case .motorcycle: return "motorcycle.fill"
         case .bus: return "bus.fill"
         case .car: return "car.fill"
+        case .subway: return "tram.fill"
         case .train: return "train.side.front.car"
         case .airplane: return "airplane"
         }
@@ -64,14 +67,16 @@ enum TransportType: String, CaseIterable, Codable {
     
     static func from(speed: Double) -> TransportType {
         let kmh = speed * 3.6
-        if kmh < 3 { return .slow }      // < 3 km/h: 步行
-        if kmh < 5 { return .running }   // 3 - 5 km/h: 跑步
-        if kmh < 10 { return .bicycle }     // 5 - 10 km/h: 自行车
-        if kmh < 20 { return .ebike }       // 10 - 20 km/h: 电动车
-        if kmh < 120 { return .car }       // 120 - 450 km/h: 汽车
-        if kmh < 450 { return .train }     // 120 - 450 km/h: 火车/高铁
-        return .airplane                   // > 450 km/h: 飞机
+        if kmh < 2 { return .slow }      
+        if kmh < 3 { return .running }   
+        if kmh < 10 { return .bicycle }    
+        if kmh < 20 { return .ebike }       
+        if kmh < 40 { return .motorcycle }  
+        if kmh < 100 { return .car }       
+        if kmh < 300 { return .train }     
+        return .airplane                   
     }
+
     
     var localizedName: String {
         switch self {
@@ -82,6 +87,7 @@ enum TransportType: String, CaseIterable, Codable {
         case .motorcycle: return "摩托车"
         case .bus: return "公交/大巴"
         case .car: return "汽车"
+        case .subway: return "轨道交通"
         case .train: return "火车/高铁"
         case .airplane: return "飞机"
         }
@@ -131,5 +137,35 @@ struct Transport: Identifiable {
     
     func updatingType(_ newType: TransportType) -> Transport {
         Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: newType)
+    }
+}
+
+@Model
+final class TransportRecord {
+    var recordID: UUID = UUID()
+    var day: Date = Date()
+    var startTime: Date = Date()
+    var endTime: Date = Date()
+    var startLocation: String = "起点"
+    var endLocation: String = "终点"
+    var typeRaw: String = ""
+    var distance: Double = 0
+    var averageSpeed: Double = 0
+    var pointsData: Data = Data()
+    var manualTypeRaw: String? = nil
+    var statusRaw: String = "active" // active, ignored
+    
+    init(recordID: UUID = UUID(), day: Date, startTime: Date, endTime: Date, startLocation: String = "起点", endLocation: String = "终点", typeRaw: String, distance: Double, averageSpeed: Double, pointsData: Data, statusRaw: String = "active") {
+        self.recordID = recordID
+        self.day = day
+        self.startTime = startTime
+        self.endTime = endTime
+        self.startLocation = startLocation
+        self.endLocation = endLocation
+        self.typeRaw = typeRaw
+        self.distance = distance
+        self.averageSpeed = averageSpeed
+        self.pointsData = pointsData
+        self.statusRaw = statusRaw
     }
 }

@@ -411,11 +411,11 @@ struct HistoryStatisticsView: View {
                             // Icon + Name
                             HStack(spacing: 8) {
                                 Image(systemName: item.icon)
-                                    .font(.system(size: 14))
+                                    .font(.system(size: 16))
                                     .foregroundColor(item.color)
-                                    .frame(width: 20)
+                                    .frame(width: 22)
                                 Text(item.name)
-                                    .font(.system(size: 14, weight: .medium))
+                                    .font(.system(size: 15, weight: .medium))
                             }
                             .frame(width: 80, alignment: .leading)
                             

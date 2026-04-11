@@ -54,39 +54,44 @@ struct DiFangKeApp: App {
     @AppStorage("isFirstLaunch") private var isFirstLaunch = true
     @State private var showSplash = true
     
-    // Setup SwiftData container
-    static var sharedModelContainer: ModelContainer = {
+    @State private var modelContainer: ModelContainer
+    
+    init() {
         let schema = Schema([
             Footprint.self,
             Place.self,
             TransportManualSelection.self,
             ActivityType.self,
-            DailyInsight.self
+            DailyInsight.self,
+            TransportRecord.self
         ])
         
-        // 提升存储版本号以解决之前的 Schema 冲突导致的死锁闪退
+        // 检测是否需要暂停同步（卸载重装且尚未决定时）
+        let isFirstLaunch = !UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
+        let kvs = NSUbiquitousKeyValueStore.default
+        kvs.synchronize()
+        let hasHistoricalData = kvs.bool(forKey: "hasSeededDefaultData")
+        
+        // 如果是重装且还没做过选择，先不要开启 CloudKit
+        let shouldPauseSync = isFirstLaunch && hasHistoricalData && !UserDefaults.standard.bool(forKey: "isSyncChoiceMade")
+        
         let modelConfiguration = ModelConfiguration(
             "dfk_v5_stable",
             schema: schema, 
             isStoredInMemoryOnly: false,
-            cloudKitDatabase: .automatic
+            cloudKitDatabase: shouldPauseSync ? .none : .automatic
         )
         
         do {
-            let container = try ModelContainer(for: schema, configurations: [modelConfiguration])
-            print("[\(Date())] SwiftData: Persistent store initialized successfully at: \(modelConfiguration.url)")
-            return container
-        } catch {
-            print("[\(Date())] SwiftData CRITICAL ERROR: Failed to create persistent container: \(error)")
-            // 如果初始化失败（可能是因为本地老数据 Schema 完全不兼容），尝试回退到内存模式以保证 App 启动
-            do {
-                print("[\(Date())] SwiftData: Falling back to IN-MEMORY mode. ALL DATA WILL BE LOST ON RESTART.")
-                return try ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
-            } catch {
-                fatalError("Complete failure creating ModelContainer: \(error)")
+            self._modelContainer = State(initialValue: try ModelContainer(for: schema, configurations: [modelConfiguration]))
+            if isFirstLaunch {
+                UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
             }
+        } catch {
+            print("SwiftData CRITICAL ERROR: \(error)")
+            self._modelContainer = State(initialValue: try! ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)]))
         }
-    }()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -102,34 +107,22 @@ struct DiFangKeApp: App {
                         .environment(locationManager)
                         .onAppear {
                             CloudSettingsManager.shared.startSyncing()
-                            let context = Self.sharedModelContainer.mainContext
+                            let context = modelContainer.mainContext
                             locationManager.modelContext = context
                             PhotoService.shared.modelContext = context
-                            OpenAIService.shared.modelContainer = Self.sharedModelContainer
+                            OpenAIService.shared.modelContainer = modelContainer
                             
                             // Only start tracking if enabled in settings
                             if UserDefaults.standard.bool(forKey: "isTrackingEnabled") {
                                 locationManager.startTracking()
                             }
                             
-                            // Initialize Notifications with saved settings
-                            let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
-                            let hour = UserDefaults.standard.integer(forKey: "dailyNotificationHour")
-                            let minute = UserDefaults.standard.integer(forKey: "dailyNotificationMinute")
-                            
-                            // User default for hour/minute can be 0, but if it has never been set, we want 21:00
-                            let finalHour = UserDefaults.standard.object(forKey: "dailyNotificationHour") != nil ? hour : 21
-                            
-                            NotificationManager.shared.updateDailySummary(
-                                isEnabled: isEnabled, 
-                                hour: finalHour, 
-                                minute: minute
-                            )
+                            // ...
                             
                             setupDefaultData(context: context)
-                            
-                            // Project Rule: Do not persist AI queue across restarts
-                            // resumeUnfinishedAIAnalysis(context: context)
+                        }
+                        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RefreshModelContainer"))) { _ in
+                            refreshContainer()
                         }
                         .transition(.opacity)
                 }
@@ -138,12 +131,36 @@ struct DiFangKeApp: App {
             .task {
                 // 给初始化一点缓冲时间，让首页数据在后台能加载出一部分，避免首屏瞬间白屏或卡顿
                 try? await Task.sleep(nanoseconds: 800_000_000) // 0.8s 缓冲
+                print("[DiFangKeApp] Dismissing splash screen...")
                 withAnimation {
                     showSplash = false
                 }
             }
         }
-        .modelContainer(Self.sharedModelContainer)
+        .modelContainer(modelContainer)
+    }
+    
+    private func refreshContainer() {
+        let schema = Schema([
+            Footprint.self, Place.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self
+        ])
+        let modelConfiguration = ModelConfiguration(
+            "dfk_v5_stable",
+            schema: schema, 
+            isStoredInMemoryOnly: false,
+            cloudKitDatabase: .automatic
+        )
+        if let newContainer = try? ModelContainer(for: schema, configurations: [modelConfiguration]) {
+            self.modelContainer = newContainer
+            
+            // 重要：重置所有服务所持有的 Context
+            let context = newContainer.mainContext
+            locationManager.modelContext = context
+            PhotoService.shared.modelContext = context
+            OpenAIService.shared.modelContainer = newContainer
+            
+            print("[DiFangKeApp] ModelContainer Refreshed with CloudKit enabled.")
+        }
     }
     
     private func setupDefaultData(context: ModelContext) {
@@ -184,7 +201,7 @@ struct DiFangKeApp: App {
             let backgroundContext = ModelContext(container)
             if let unanalyzed = try? backgroundContext.fetch(descriptor), !unanalyzed.isEmpty {
                 // 将待分析项的 ID 加入队列，由 OpenAIService 自行 fetch，避免 context 失效
-                let identifiers = unanalyzed.map { $0.persistentModelID }
+                let identifiers = unanalyzed.map { $0.footprintID }
                 await OpenAIService.shared.enqueueFootprintsForAnalysis(identifiers)
             }
         }
