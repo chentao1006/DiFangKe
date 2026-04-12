@@ -258,16 +258,6 @@ struct DayTimelineView: View {
                 Text("这将删除已修正的足迹记录和交通数据，并从原始轨迹重新生成。")
             }
             } // VStack
-            .alert("AI 服务提示", isPresented: Binding(
-                get: { OpenAIService.shared.lastError != nil },
-                set: { if !$0 { OpenAIService.shared.lastError = nil } }
-            )) {
-                Button("确定", role: .cancel) { }
-            } message: {
-                if let error = OpenAIService.shared.lastError {
-                    Text(error)
-                }
-            }
         } // NavigationStack
     } // body
 

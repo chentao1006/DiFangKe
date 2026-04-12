@@ -95,6 +95,17 @@ class OpenAIService {
         UserDefaults.standard.string(forKey: "customAiModel") ?? "gpt-3.5-turbo"
     }
     
+    private var deviceId: String {
+        UIDevice.current.identifierForVendor?.uuidString ?? "unknown"
+    }
+    
+    private func generateToken(deviceId: String) -> String {
+        let hour = Int(Date().timeIntervalSince1970 / 3600)
+        let input = serviceSecret + deviceId + "\(hour)"
+        let digest = Insecure.MD5.hash(data: input.data(using: .utf8) ?? Data())
+        return digest.map { String(format: "%02hhx", $0) }.joined()
+    }
+    
     private func prepareRequest(endpoint: String, body: [String: Any]) -> URLRequest? {
         let urlString: String
         let apiKey: String
@@ -119,13 +130,13 @@ class OpenAIService {
                 self.lastError = "Config.plist 缺失 PUBLIC_SERVICE_URL"
                 return nil
             }
-            guard let secret = config.serviceSecret.isEmpty ? nil : config.serviceSecret else {
+            guard !config.serviceSecret.isEmpty else {
                 self.lastError = "Config.plist 缺失 SERVICE_SECRET"
                 return nil
             }
             
             urlString = base.hasSuffix("/") ? "\(base)\(endpoint.hasPrefix("/") ? String(endpoint.dropFirst()) : endpoint)" : "\(base)\(endpoint)"
-            apiKey = secret
+            apiKey = generateToken(deviceId: deviceId)
             model = "gpt-3.5-turbo"
         }
         
@@ -137,7 +148,13 @@ class OpenAIService {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        
+        if aiServiceType == "public" {
+            request.addValue(deviceId, forHTTPHeaderField: "X-Device-Id")
+            request.addValue(apiKey, forHTTPHeaderField: "X-Token")
+        } else {
+            request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         
         var bodyWithModel = body
         if bodyWithModel["model"] == nil {

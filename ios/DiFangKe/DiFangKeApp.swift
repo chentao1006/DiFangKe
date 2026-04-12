@@ -221,7 +221,7 @@ struct OnboardingView: View {
                     description: "地方客需要后台位置权限以自动记录您的足迹，我们将为您在本地生成精美的足迹卡片。",
                     image: "location.circle.fill",
                     color: Color.dfkAccent,
-                    buttonText: locationManager.isAlwaysAuthorized ? "已开启始终允许" : (locationManager.isAuthorized ? "去设置开启始终允许" : "允许获取位置")
+                    buttonText: "继续"
                 ) {
                     if locationManager.authStatus == .authorizedWhenInUse && !locationManager.isAlwaysAuthorized {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
@@ -248,16 +248,13 @@ struct OnboardingView: View {
                     }
                 }
                 
-                // 给已经授权了“使用期间”的用户一个前进选项，或者引导他们点击主按钮去设置
-                if locationManager.isAuthorized && !locationManager.isAlwaysAuthorized {
-                    Button("暂时仅在使用期间允许") {
-                        withAnimation {
-                            step = 1
-                        }
+                Button("以后再说") {
+                    withAnimation {
+                        step = 1
                     }
-                    .padding()
-                    .foregroundColor(.secondary)
                 }
+                .padding(.top, 10)
+                .foregroundColor(.secondary)
             } else if step == 1 {
                 onboardingStep(
                     title: "AI 智能分析",
