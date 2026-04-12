@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- AI 服务相关配置 -->
+	<key>SERVICE_SECRET</key>
+	<string>k9F3xP2vZ8mQ7sR4tY6uW1aC5dE0bHnL</string>
+	<key>PUBLIC_SERVICE_URL</key>
+	<string>https://openai.ct106.com/v1</string>
+
+    <!-- 停留识别的距离阈值（米）：确保稍微走开一点就能被识别为离开，防止附近足迹被合吞 -->
+    <key>STAY_DISTANCE_THRESHOLD</key>
+    <real>150</real>
+
+    <!-- 两个足迹合并的最大直线距离门槛（米）：防止跨街道足迹被合并 -->
+    <key>MERGE_DISTANCE_THRESHOLD</key>
+    <real>300</real>
+
+    <!-- 两个足迹合并的最大时间间隔（秒）：只要移动超过 X 分钟即视为独立足迹 -->
+    <key>STAY_MERGE_GAP_THRESHOLD</key>
+    <real>180</real>
+
+    <!-- 停留识别的最短时间（秒）： -->
+    <key>STAY_DURATION_THRESHOLD</key>
+    <real>600</real>
+
+    <!-- 交通生成最低位移（米）： -->
+    <key>TRANSPORT_MIN_DISTANCE_THRESHOLD</key>
+    <real>150</real>
+
+    <!-- 交通生成最低时长（秒）：确保极短时间的移动也能被记录 -->
+    <key>TRANSPORT_MIN_DURATION_THRESHOLD</key>
+    <real>300</real>
+
+    <!-- 缺口自动填充阈值（秒）：当数据中断时间长于此值时尝试桥接 -->
+    <key>GAP_FILLING_THRESHOLD</key>
+    <real>300</real>
+
+    <!-- 足迹习惯分析的时间窗口（分钟） -->
+    <key>HABIT_TIME_WINDOW_MINUTES</key>
+    <integer>120</integer>
+
+    <!-- 判定为“习惯地点”所需的历史重复次数 -->
+    <key>HABIT_FREQUENCY_THRESHOLD</key>
+    <integer>3</integer>
+</dict>
+</plist>
