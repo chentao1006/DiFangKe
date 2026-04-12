@@ -3,9 +3,11 @@ package com.ct106.difangke.service
 import android.app.*
 import android.content.Context
 import android.content.Intent
-import android.location.*
 import android.os.*
 import android.util.Log
+import com.amap.api.location.AMapLocationClient
+import com.amap.api.location.AMapLocationClientOption
+import com.amap.api.location.AMapLocationListener
 import com.ct106.difangke.AppConfig
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.FootprintEntity
@@ -18,10 +20,7 @@ import kotlinx.coroutines.*
 import java.util.*
 
 /**
- * 后台位置追踪前台服务（对应 iOS LocationManager 的后台追踪部分）
- *
- * 使用 Android LocationManager（无需 Google Play Services）
- * 在中国设备上通用性更佳
+ * 后台位置追踪前台服务（迁移至高德定位 SDK，以解决中国境内定位偏移和成功率问题）
  */
 class LocationTrackingService : Service() {
 
@@ -30,7 +29,6 @@ class LocationTrackingService : Service() {
         const val ACTION_START = "START_TRACKING"
         const val ACTION_STOP = "STOP_TRACKING"
 
-        // SharedFlow 用于跨组件广播实时状态
         val stateFlow = kotlinx.coroutines.flow.MutableStateFlow<TrackingState>(
             TrackingState.Idle
         )
@@ -57,7 +55,7 @@ class LocationTrackingService : Service() {
 
     sealed class TrackingState {
         object Idle : TrackingState()
-        object Tracking : TrackingState()
+        data class Tracking(val lat: Double? = null, val lon: Double? = null) : TrackingState()
         data class OngoingStay(
             val since: Date,
             val lat: Double,
@@ -68,176 +66,229 @@ class LocationTrackingService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gson = Gson()
+    private val prefs by lazy { (application as DiFangKeApp).preferences }
 
-    private lateinit var locationManager: LocationManager
+    private var locationClient: AMapLocationClient? = null
     private val rawStore by lazy { RawLocationStore.getInstance(applicationContext) }
     private val db by lazy { DiFangKeApp.instance.database }
     private val geocoder by lazy { GeocodeService.shared }
     private val processor = FootprintProcessor.shared
 
-    // 滑动窗口队列（对应 iOS trackingPoints）
     private val trackingQueue = mutableListOf<RawLocationStore.RawPoint>()
-
-    // 当前停留开始时间 + 位置（对应 iOS potentialStopStartLocation）
     private var ongoingStayStart: RawLocationStore.RawPoint? = null
+    private var ongoingStayAddress: String? = null
 
-    private val locationListener = object : LocationListener {
-        override fun onLocationChanged(location: Location) {
-            serviceScope.launch { handleNewLocation(location) }
+    private val locationListener = AMapLocationListener { location ->
+        if (location != null && location.errorCode == 0) {
+            serviceScope.launch { 
+                handleNewLocation(
+                    location.latitude, 
+                    location.longitude, 
+                    location.accuracy.toDouble(), 
+                    location.speed.toDouble(), 
+                    Date(location.time),
+                    getShortAddress(location) // 优化：提取短地址
+                )
+            }
+        } else {
+            Log.e(TAG, "定位失败: ${location?.errorCode} - ${location?.errorInfo}")
         }
+    }
 
-        override fun onProviderDisabled(provider: String) {
-            Log.w(TAG, "Provider disabled: $provider")
-        }
-
-        override fun onProviderEnabled(provider: String) {
-            Log.i(TAG, "Provider enabled: $provider")
+    private fun getShortAddress(location: com.amap.api.location.AMapLocation): String? {
+        // 优先顺序：AOI(兴趣区域) > POI(点) > 区+街道
+        return when {
+            !location.aoiName.isNullOrBlank() -> location.aoiName
+            !location.poiName.isNullOrBlank() -> location.poiName
+            !location.street.isNullOrBlank() -> "${location.district}${location.street}"
+            else -> location.address
         }
     }
 
     override fun onCreate() {
         super.onCreate()
-        locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+        try {
+            locationClient = AMapLocationClient(applicationContext)
+            val option = AMapLocationClientOption().apply {
+                locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+                interval = 3000L // 每 3 秒定位一次
+                isNeedAddress = true
+                isMockEnable = false
+                isOffset = true // 自动修正偏移
+            }
+            locationClient?.setLocationOption(option)
+            locationClient?.setLocationListener(locationListener)
+        } catch (e: Exception) {
+            Log.e(TAG, "初始化高德定位失败", e)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                startForeground(NotificationHelper.TRACKING_NOTIFICATION_ID,
-                    NotificationHelper.buildTrackingNotification(this))
-                startLocationUpdates()
-                stateFlow.value = TrackingState.Tracking
-                Log.i(TAG, "Tracking started")
+                Log.d(TAG, "ACTION_START received, starting foreground...")
+                val notification = NotificationHelper.buildTrackingNotification(this)
+                startForeground(NotificationHelper.TRACKING_NOTIFICATION_ID, notification)
+                
+                // 开启高德后台定位
+                locationClient?.enableBackgroundLocation(NotificationHelper.TRACKING_NOTIFICATION_ID, notification)
+                locationClient?.startLocation()
+                
+                stateFlow.value = TrackingState.Tracking()
+                Log.i(TAG, "Tracking service successfully started and transitioned to Tracking state")
             }
             ACTION_STOP -> {
-                stopLocationUpdates()
+                locationClient?.disableBackgroundLocation(true)
                 stopForeground(STOP_FOREGROUND_REMOVE)
+                
+                // 清理持久化的停留状态
+                serviceScope.launch {
+                    prefs.savePendingStay(null, null, null, null)
+                }
+                
                 stopSelf()
                 stateFlow.value = TrackingState.Idle
-                Log.i(TAG, "Tracking stopped")
+                Log.i(TAG, "Amap Tracking stopped")
             }
         }
         return START_STICKY
     }
 
-    @Suppress("MissingPermission")
-    private fun startLocationUpdates() {
-        // 优先 GPS，次选网络定位
-        val providers = listOf(
-            LocationManager.GPS_PROVIDER,
-            LocationManager.NETWORK_PROVIDER,
-            LocationManager.PASSIVE_PROVIDER
-        )
-        providers.forEach { provider ->
-            if (locationManager.isProviderEnabled(provider)) {
-                try {
-                    locationManager.requestLocationUpdates(
-                        provider,
-                        5_000L,      // 最少间隔 5 秒
-                        5f,          // 最少位移 5 米
-                        locationListener,
-                        Looper.getMainLooper()
-                    )
-                } catch (e: Exception) {
-                    Log.e(TAG, "Cannot register $provider", e)
-                }
-            }
-        }
-    }
+    private suspend fun handleNewLocation(lat: Double, lon: Double, accuracy: Double, speed: Double, time: Date, address: String?) {
+        // 0. 存储原始点（用于后续分析和轨迹绘制）
+        rawStore.saveRawPoint(lat, lon, accuracy, speed, time.time)
 
-    private fun stopLocationUpdates() {
-        locationManager.removeUpdates(locationListener)
-        // 强制结算当前停留
-        serviceScope.launch {
-            processor.finalizeCurrentStay(trackingQueue)?.let { candidate ->
-                saveFootprint(candidate)
-            }
-        }
-    }
-
-    private suspend fun handleNewLocation(location: Location) {
         val point = RawLocationStore.RawPoint(
-            timestamp = Date(location.time),
-            latitude = location.latitude,
-            longitude = location.longitude,
-            accuracy = location.accuracy.toDouble(),
-            speed = location.speed.toDouble()
+            timestamp = time,
+            latitude = lat,
+            longitude = lon,
+            accuracy = accuracy,
+            speed = speed
         )
 
-        // 1. 存储原始点
-        rawStore.saveLocation(location)
+        // 1. 初始化恢复逻辑（如果是重启后第一次收到点）
+        if (ongoingStayStart == null) {
+            loadPersistedStayState()
+        }
 
-        // 2. 运行停留识别算法
+        // 2. 识别停留算法
         val candidate = processor.processNewLocation(point, trackingQueue)
 
-        // 3. 更新正在进行的停留状态
-        updateOngoingState(point)
+        // 3. 更新当前显示状态
+        if (ongoingStayStart == null) {
+            stateFlow.value = TrackingState.Tracking(lat, lon)
+        }
+        updateOngoingState(point, address)
 
-        // 4. 如果识别到候选停留
+        // 3. 候选停留保存
         candidate?.let {
             saveFootprint(it)
             trackingQueue.clear()
-            trackingQueue.add(point)  // 保留触发离开的那个点
+            trackingQueue.add(point)
         }
     }
 
-    private fun updateOngoingState(current: RawLocationStore.RawPoint) {
+    private fun updateOngoingState(current: RawLocationStore.RawPoint, currentAddress: String?) {
         val queueSize = trackingQueue.size
-        if (queueSize > 3) {
+        // 至少有三个点才能判定停留趋势
+        if (queueSize >= 3) {
             val (centerLat, centerLon) = processor.calculateCenter(trackingQueue)
             val distFromCenter = processor.haversineMeters(
                 centerLat, centerLon, current.latitude, current.longitude
             )
+            
             if (distFromCenter < AppConfig.STAY_DISTANCE_THRESHOLD) {
+                // 如果当前已经在 OngoingStay 且中心位移不大，不要重设 start 时间
                 if (ongoingStayStart == null) {
                     ongoingStayStart = trackingQueue.first()
+                    // 持久化保存
                     serviceScope.launch {
-                        val address = geocoder.reverseGeocode(centerLat, centerLon)
-                        stateFlow.value = TrackingState.OngoingStay(
-                            since = ongoingStayStart!!.timestamp,
-                            lat = centerLat,
-                            lon = centerLon,
-                            address = address
-                        )
-                        NotificationHelper.updateTrackingNotification(
-                            this@LocationTrackingService,
-                            address ?: "正在停留中"
-                        )
+                        prefs.savePendingStay(centerLat, centerLon, ongoingStayStart?.timestamp?.time, currentAddress)
                     }
                 }
+                
+                serviceScope.launch {
+                    val address = currentAddress ?: geocoder.reverseGeocode(centerLat, centerLon)
+                    if (address != null && ongoingStayAddress == null) {
+                        ongoingStayAddress = address
+                        prefs.savePendingStay(centerLat, centerLon, ongoingStayStart?.timestamp?.time, address)
+                    }
+                    
+                    stateFlow.value = TrackingState.OngoingStay(
+                        since = ongoingStayStart!!.timestamp,
+                        lat = centerLat,
+                        lon = centerLon,
+                        address = address ?: ongoingStayAddress
+                    )
+                    NotificationHelper.updateTrackingNotification(
+                        this@LocationTrackingService,
+                        (address ?: ongoingStayAddress) ?: "正在停留中"
+                    )
+                }
             } else {
-                ongoingStayStart = null
+                // 位移较大，说明正在移动，不是停留态
+                if (ongoingStayStart != null) {
+                    ongoingStayStart = null
+                    ongoingStayAddress = null
+                    serviceScope.launch {
+                        prefs.savePendingStay(null, null, null, null)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun loadPersistedStayState() {
+        serviceScope.launch {
+            val lat = prefs.getPendingStayLat()
+            val lon = prefs.getPendingStayLon()
+            val time = prefs.getPendingStayStartTime()
+            val addr = prefs.getPendingStayAddress()
+            
+            if (lat != null && lon != null && time != null) {
+                // 校验时间是否在 24 小时内（防止跨天且没结算的错误状态）
+                if (System.currentTimeMillis() - (time as Long) < 24 * 3600 * 1000) {
+                    val recoveredPoint = RawLocationStore.RawPoint(
+                        timestamp = Date(time as Long),
+                        latitude = lat,
+                        longitude = lon,
+                        accuracy = 50.0,
+                        speed = 0.0
+                    )
+                    ongoingStayStart = recoveredPoint
+                    ongoingStayAddress = addr
+                    
+                    stateFlow.value = TrackingState.OngoingStay(
+                        since = Date(time as Long),
+                        lat = lat,
+                        lon = lon,
+                        address = addr
+                    )
+                    Log.i(TAG, "Successfully recovered ongoing stay from storage: $addr")
+                }
             }
         }
     }
 
     private suspend fun saveFootprint(candidate: com.ct106.difangke.data.model.CandidateFootprint) {
+        // ... (省略逻辑与之前一致，复用之前的逻辑) ...
+        // 为了确保代码完整，由于 write_to_file 是覆盖，我需要贴出之前的完整逻辑
         val durationSec = candidate.duration
-
-        // 最短停留时长
         if (durationSec < AppConfig.STAY_DURATION_THRESHOLD) return
 
         val latJson = gson.toJson(candidate.rawLatitudes)
         val lonJson = gson.toJson(candidate.rawLongitudes)
 
-        // 检查是否可以合并到最近的足迹
         val recentCutoff = Date(candidate.startTime.time - AppConfig.STAY_MERGE_GAP_THRESHOLD.toLong() * 1000)
         val lastFp = db.footprintDao().getLastFootprintAfter(recentCutoff)
 
         if (lastFp != null) {
-            val existingLats = gson.fromJson(lastFp.latitudeJson, Array<Double>::class.java)
-                .toList()
-            val existingLons = gson.fromJson(lastFp.longitudeJson, Array<Double>::class.java)
-                .toList()
+            val existingLats = gson.fromJson(lastFp.latitudeJson, Array<Double>::class.java).toList()
+            val existingLons = gson.fromJson(lastFp.longitudeJson, Array<Double>::class.java).toList()
             val avgLat = if (existingLats.isNotEmpty()) existingLats.average() else 0.0
             val avgLon = if (existingLons.isNotEmpty()) existingLons.average() else 0.0
 
-            val shouldMerge = processor.shouldMerge(
-                lastFp.endTime, avgLat, avgLon, candidate
-            )
-
-            if (shouldMerge) {
-                // 合并：延伸 endTime
+            if (processor.shouldMerge(lastFp.endTime, avgLat, avgLon, candidate)) {
                 val merged = lastFp.copy(
                     endTime = candidate.endTime,
                     latitudeJson = gson.toJson(existingLats + candidate.rawLatitudes),
@@ -248,25 +299,17 @@ class LocationTrackingService : Service() {
             }
         }
 
-        // 尝试逆地理编码获取地址
         val address = geocoder.reverseGeocode(candidate.latitude, candidate.longitude)
-
-        // 生成标题
         val title = if (address != null) {
             FootprintTitles.generate(address, candidate.startTime.time / 1000)
         } else {
             FootprintTitles.generate("此处", candidate.startTime.time / 1000)
         }
 
-        // 计算位置哈希
         val locationHash = FootprintEntity.generateLocationHash(candidate.latitude, candidate.longitude)
-
-        // 查找匹配的已保存地点
         val places = db.placeDao().getAll()
         val matchedPlace = places.firstOrNull { place ->
-            processor.haversineMeters(
-                place.latitude, place.longitude, candidate.latitude, candidate.longitude
-            ) <= place.radius + 100.0
+            processor.haversineMeters(place.latitude, place.longitude, candidate.latitude, candidate.longitude) <= place.radius + 100.0
         }
 
         val newTitle = if (matchedPlace != null) {
@@ -288,22 +331,16 @@ class LocationTrackingService : Service() {
         )
 
         db.footprintDao().insert(entity)
-        Log.i(TAG, "✅ 新足迹保存: $newTitle (${durationSec}秒)")
-
-        // 保存期间的交通段（与前一个足迹之间的间隔）
         lastFp?.let { prev ->
             saveTransportSegment(prev, entity)
         }
     }
 
-    private suspend fun saveTransportSegment(
-        prevFp: FootprintEntity,
-        newFp: FootprintEntity
-    ) {
+    private suspend fun saveTransportSegment(prevFp: FootprintEntity, newFp: FootprintEntity) {
         val gapSec = (newFp.startTime.time - prevFp.endTime.time) / 1000.0
         if (gapSec < AppConfig.TRANSPORT_MIN_DURATION_THRESHOLD) return
 
-        // 从原始轨迹中获取该时间段的点
+        // 简便起见，这里复用之前的 RawLocationStore 逻辑
         val rawPoints = rawStore.loadRecentLocations(lookbackHours = 4.0)
             .filter { it.timestamp >= prevFp.endTime && it.timestamp <= newFp.startTime }
 
@@ -317,7 +354,6 @@ class LocationTrackingService : Service() {
 
         val avgSpeed = totalDist / gapSec
         val transportType = TransportType.fromSpeed(avgSpeed)
-
         val pointsJson = gson.toJson(rawPoints.map { listOf(it.latitude, it.longitude) })
 
         val record = TransportRecordEntity(
@@ -333,14 +369,13 @@ class LocationTrackingService : Service() {
             pointsJson = pointsJson,
             statusRaw = "active"
         )
-
         db.transportRecordDao().insert(record)
-        Log.i(TAG, "🚗 交通段保存: ${transportType.localizedName} ${totalDist.toInt()}m")
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        stopLocationUpdates()
+        locationClient?.stopLocation()
+        locationClient?.onDestroy()
         serviceScope.cancel()
     }
 

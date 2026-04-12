@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "dfk_prefs")
 
@@ -34,11 +35,17 @@ class AppPreferences(private val context: Context) {
         val KEY_IS_GUIDE_DISMISSED = booleanPreferencesKey("isGuideDismissed")
         val KEY_IS_NOTIFICATION_GUIDE_DISMISSED = booleanPreferencesKey("isNotificationGuideDismissed")
         val KEY_LAST_MIDNIGHT_SIFT = longPreferencesKey("lastMidnightSift")
+        
+        // --- 正在进行的停留状态 (对应 iOS pending_lat/lng/time) ---
+        val KEY_PENDING_STAY_LAT = doublePreferencesKey("pending_stay_lat")
+        val KEY_PENDING_STAY_LON = doublePreferencesKey("pending_stay_lon")
+        val KEY_PENDING_STAY_START_TIME = longPreferencesKey("pending_stay_start_time")
+        val KEY_PENDING_STAY_ADDRESS = stringPreferencesKey("pending_stay_address")
     }
 
     // ── Flows（响应式读取）──────────────────────────────────────────
     val isTrackingEnabled: Flow<Boolean> = context.dataStore.data.map {
-        it[KEY_IS_TRACKING_ENABLED] ?: false
+        it[KEY_IS_TRACKING_ENABLED] ?: true
     }
     val isAiEnabled: Flow<Boolean> = context.dataStore.data.map {
         it[KEY_IS_AI_ENABLED] ?: false
@@ -117,34 +124,32 @@ class AppPreferences(private val context: Context) {
     suspend fun setLastMidnightSift(timestamp: Long) =
         context.dataStore.edit { it[KEY_LAST_MIDNIGHT_SIFT] = timestamp }
 
-    // ── 同步读取（首次启动检测，非响应式）────────────────────────────
-    suspend fun getHasLaunchedBefore(): Boolean =
-        context.dataStore.data.map { it[KEY_HAS_LAUNCHED_BEFORE] ?: false }.let {
-            var result = false
-            it.collect { v -> result = v; return@collect }
-            result
+    // --- 正在进行的停留状态存取 ---
+    suspend fun savePendingStay(lat: Double?, lon: Double?, startTime: Long?, address: String?) =
+        context.dataStore.edit {
+            if (lat != null) it[KEY_PENDING_STAY_LAT] = lat else it.remove(KEY_PENDING_STAY_LAT)
+            if (lon != null) it[KEY_PENDING_STAY_LON] = lon else it.remove(KEY_PENDING_STAY_LON)
+            if (startTime != null) it[KEY_PENDING_STAY_START_TIME] = startTime else it.remove(KEY_PENDING_STAY_START_TIME)
+            if (address != null) it[KEY_PENDING_STAY_ADDRESS] = address else it.remove(KEY_PENDING_STAY_ADDRESS)
         }
+
+    suspend fun getPendingStayLat(): Double? = context.dataStore.data.map { it[KEY_PENDING_STAY_LAT] }.first()
+    suspend fun getPendingStayLon(): Double? = context.dataStore.data.map { it[KEY_PENDING_STAY_LON] }.first()
+    suspend fun getPendingStayStartTime(): Long? = context.dataStore.data.map { it[KEY_PENDING_STAY_START_TIME] }.first()
+    suspend fun getPendingStayAddress(): String? = context.dataStore.data.map { it[KEY_PENDING_STAY_ADDRESS] }.first()
+
+    // ── 同步/挂起读取（非响应式）────────────────────────────
+    suspend fun getHasLaunchedBefore(): Boolean =
+        context.dataStore.data.map { it[KEY_HAS_LAUNCHED_BEFORE] ?: false }.first()
 
     suspend fun getHasSeededDefaultData(): Boolean =
-        context.dataStore.data.map { it[KEY_HAS_SEEDED_DEFAULT_DATA] ?: false }.let {
-            var result = false
-            it.collect { v -> result = v; return@collect }
-            result
-        }
+        context.dataStore.data.map { it[KEY_HAS_SEEDED_DEFAULT_DATA] ?: false }.first()
 
     suspend fun getCustomAiUrl(): String =
-        context.dataStore.data.map { it[KEY_CUSTOM_AI_URL] ?: "" }.let {
-            var result = ""
-            it.collect { v -> result = v; return@collect }
-            result
-        }
+        context.dataStore.data.map { it[KEY_CUSTOM_AI_URL] ?: "" }.first()
 
     suspend fun getCustomAiKey(): String =
-        context.dataStore.data.map { it[KEY_CUSTOM_AI_KEY] ?: "" }.let {
-            var result = ""
-            it.collect { v -> result = v; return@collect }
-            result
-        }
+        context.dataStore.data.map { it[KEY_CUSTOM_AI_KEY] ?: "" }.first()
 
     suspend fun getCustomAiModel(): String =
         context.dataStore.data.map { it[KEY_CUSTOM_AI_MODEL] ?: "gpt-3.5-turbo" }.let {

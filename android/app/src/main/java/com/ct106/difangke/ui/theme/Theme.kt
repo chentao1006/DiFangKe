@@ -16,42 +16,41 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-// 对应 iOS 的 dfkAccent 和其他主题色
-val DfkAccent = Color(0xFF6B4EE6)
-val DfkAccentDark = Color(0xFF8B73FF)
-val CardBackgroundLight = Color(0xFFF2F2F7)
-val CardBackgroundDark = Color(0xFF1C1C1E)
-
 private val DarkColorScheme = darkColorScheme(
-    primary = DfkAccentDark,
-    secondary = DfkAccentDark,
-    tertiary = Color(0xFF32ADE6),
-    background = Color(0xFF000000),
-    surface = CardBackgroundDark,
+    primary = DfkAccentLight, // 深色模式下稍亮一点的蓝色
+    secondary = DfkAccent,
+    tertiary = DfkHighlight,
+    background = BackgroundDark,
+    surface = SurfaceDark,
     onPrimary = Color.White,
     onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFFFFFFFF),
-    onSurface = Color(0xFFFFFFFF),
+    onTertiary = Color.Black,
+    onBackground = Color.White,
+    onSurface = Color.White,
+    surfaceVariant = Color(0xFF2C2C2E),
+    onSurfaceVariant = OnSurfaceSecondaryDark
 )
 
 private val LightColorScheme = lightColorScheme(
     primary = DfkAccent,
-    secondary = DfkAccent,
-    tertiary = Color(0xFF007AFF),
-    background = Color(0xFFF2F2F7),
-    surface = Color(0xFFFFFFFF),
+    secondary = DfkAccentDark,
+    tertiary = DfkHighlight,
+    background = BackgroundLight,
+    surface = SurfaceLight,
     onPrimary = Color.White,
     onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFF000000),
-    onSurface = Color(0xFF000000),
+    onTertiary = Color.Black,
+    onBackground = Color.Black,
+    onSurface = Color.Black,
+    surfaceVariant = Color(0xFFE5E5EA),
+    onSurfaceVariant = OnSurfaceSecondaryLight
 )
 
 @Composable
 fun DiFangKeTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = false, // 禁用动态主题以保留品牌色
+    // Dynamic color is available on Android 12+
+    dynamicColor: Boolean = false, // 强制关闭动态主题，以保持品牌色一致性
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {
@@ -74,6 +73,7 @@ fun DiFangKeTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
+        typography = Typography,
         content = content
     )
 }

@@ -1,16 +1,16 @@
 package com.ct106.difangke.service
 
-import android.content.Context
 import android.util.Log
 import com.ct106.difangke.AppConfig
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.DailyInsightEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
-import com.ct106.difangke.data.model.CandidateFootprint
+import com.ct106.difangke.data.model.FootprintTitles
 import com.google.gson.Gson
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -34,64 +34,104 @@ class OpenAIService private constructor() {
     private val gson = Gson()
     private val prefs by lazy { DiFangKeApp.instance.preferences }
     private val db by lazy { DiFangKeApp.instance.database }
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // 内存缓存
     var cacheDate: Date? = null
     var cachedTomorrowQuote: Pair<String, String>? = null
 
+    private fun generateToken(deviceId: String): String {
+        val hour = System.currentTimeMillis() / 1000 / 3600
+        val input = AppConfig.SERVICE_SECRET + deviceId + hour
+        return try {
+            val md = java.security.MessageDigest.getInstance("MD5")
+            val digest = md.digest(input.toByteArray())
+            digest.joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    private val requestMutex = kotlinx.coroutines.sync.Mutex()
+
+    private suspend fun getInterval(): Long {
+        val serviceType = prefs.aiServiceType.first()
+        return if (serviceType == "custom") 15000L else 60000L
+    }
+
     /**
      * 发送网络请求的通用方法
      */
-    private suspend fun postRequest(body: Map<String, Any>): JSONObject? = withContext(Dispatchers.IO) {
-        val serviceType = prefs.aiServiceType.first()
-        val isCustom = serviceType == "custom"
+    private suspend fun postRequest(body: Map<String, Any>): JSONObject? = requestMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val serviceType = prefs.aiServiceType.first()
+            val isCustom = serviceType == "custom"
 
-        val baseUrl = if (isCustom) prefs.getCustomAiUrl().trim() else AppConfig.PUBLIC_SERVICE_URL
-        val apiKey = if (isCustom) prefs.getCustomAiKey().trim() else AppConfig.SERVICE_SECRET
-        val model = if (isCustom) prefs.getCustomAiModel().trim() else "gpt-3.5-turbo"
+            val baseUrl = if (isCustom) prefs.getCustomAiUrl().trim() else AppConfig.PUBLIC_SERVICE_URL
+            var apiKey = if (isCustom) prefs.getCustomAiKey().trim() else AppConfig.SERVICE_SECRET
+            val model = if (isCustom) prefs.getCustomAiModel().trim() else "gpt-3.5-turbo"
 
-        if (baseUrl.isEmpty() || apiKey.isEmpty()) {
-            Log.e(TAG, "AI 接口配置不完整")
-            return@withContext null
+            val deviceId = if (!isCustom) {
+                android.provider.Settings.Secure.getString(
+                    DiFangKeApp.instance.contentResolver,
+                    android.provider.Settings.Secure.ANDROID_ID
+                ) ?: "android-unknown"
+            } else ""
+
+            if (!isCustom) {
+                apiKey = generateToken(deviceId)
+            }
+
+            if (baseUrl.isEmpty() || apiKey.isEmpty()) {
+                Log.e(TAG, "AI 接口配置不完整")
+                return@withContext null
+            }
+
+            val urlStr = if (baseUrl.endsWith("/")) "${baseUrl}chat/completions" else "$baseUrl/chat/completions"
+            
+            val requestBody = body.toMutableMap()
+            if (!requestBody.containsKey("model")) {
+                requestBody["model"] = model
+            }
+
+            val result = runCatching {
+                val url = URL(urlStr)
+                val conn = url.openConnection() as HttpURLConnection
+                conn.apply {
+                    requestMethod = "POST"
+                    connectTimeout = 15000
+                    readTimeout = 15000
+                    setRequestProperty("Content-Type", "application/json")
+                    if (isCustom) {
+                        setRequestProperty("Authorization", "Bearer $apiKey")
+                    } else {
+                        setRequestProperty("X-Device-Id", deviceId)
+                        setRequestProperty("X-Token", apiKey)
+                    }
+                    doOutput = true
+                }
+
+                val jsonOutput = gson.toJson(requestBody)
+                conn.outputStream.use { os ->
+                    os.write(jsonOutput.toByteArray(Charsets.UTF_8))
+                }
+
+                if (conn.responseCode !in 200..299) {
+                    Log.e(TAG, "HTTP Error: ${conn.responseCode}")
+                    return@runCatching null
+                }
+
+                val responseText = BufferedReader(InputStreamReader(conn.inputStream)).readText()
+                conn.disconnect()
+
+                JSONObject(responseText)
+            }.onFailure {
+                Log.e(TAG, "Request failed", it)
+            }.getOrNull()
+
+            // 强制休眠逻辑
+            delay(getInterval())
+            result
         }
-
-        val urlStr = if (baseUrl.endsWith("/")) "${baseUrl}chat/completions" else "$baseUrl/chat/completions"
-        
-        val requestBody = body.toMutableMap()
-        if (!requestBody.containsKey("model")) {
-            requestBody["model"] = model
-        }
-
-        runCatching {
-            val url = URL(urlStr)
-            val conn = url.openConnection() as HttpURLConnection
-            conn.apply {
-                requestMethod = "POST"
-                connectTimeout = 15000
-                readTimeout = 15000
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Authorization", "Bearer $apiKey")
-                doOutput = true
-            }
-
-            val jsonOutput = gson.toJson(requestBody)
-            conn.outputStream.use { os ->
-                os.write(jsonOutput.toByteArray(Charsets.UTF_8))
-            }
-
-            if (conn.responseCode !in 200..299) {
-                Log.e(TAG, "HTTP Error: ${conn.responseCode}")
-                return@runCatching null
-            }
-
-            val responseText = BufferedReader(InputStreamReader(conn.inputStream)).readText()
-            conn.disconnect()
-
-            JSONObject(responseText)
-        }.onFailure {
-            Log.e(TAG, "Request failed", it)
-        }.getOrNull()
     }
 
     /**
@@ -112,7 +152,7 @@ class OpenAIService private constructor() {
         val weekdayStr = "周${weekdays[cal.get(Calendar.DAY_OF_WEEK) - 1]}"
         val dateContext = "公历${DATE_FMT.format(fp.startTime)}，$weekdayStr"
 
-        var promptSnippet = ""
+        var promptSnippet: String
         if (!placeName.isNullOrEmpty()) {
             promptSnippet = "用户正在“$placeName”"
             if (!activityName.isNullOrEmpty()) promptSnippet += "进行“$activityName”活动。"
@@ -311,7 +351,7 @@ class OpenAIService private constructor() {
             cachedTomorrowQuote = res
             cacheDate = now
             res
-        } catch (e: Exception) {
+        } catch (ignored: Exception) {
             fallback
         }
     }

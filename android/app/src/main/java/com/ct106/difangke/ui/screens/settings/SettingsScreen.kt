@@ -1,6 +1,7 @@
 package com.ct106.difangke.ui.screens.settings
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
@@ -8,18 +9,17 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.ct106.difangke.data.prefs.AppPreferences
+import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
-    val context = LocalContext.current
-    val prefs = remember { AppPreferences(context) }
-    val scope = rememberCoroutineScope()
-    
-    val isTrackingEnabled by prefs.isTrackingEnabled.collectAsState(initial = false)
-    val isAiEnabled by prefs.isAiEnabled.collectAsState(initial = true)
+fun SettingsScreen(
+    onBack: () -> Unit,
+    viewModel: SettingsViewModel = viewModel()
+) {
+    val isTrackingEnabled by viewModel.isTrackingEnabled.collectAsState()
+    val isAiEnabled by viewModel.isAiEnabled.collectAsState()
 
     Scaffold(
         topBar = {
@@ -33,44 +33,53 @@ fun SettingsScreen(onBack: () -> Unit) {
             )
         }
     ) { padding ->
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .padding(16.dp)
+                .padding(padding),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text("核心功能", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.height(8.dp))
-            ListItem(
-                headlineContent = { Text("后台位置记录") },
-                supportingContent = { Text("保持开启以自动记录足迹") },
-                trailingContent = {
-                    Switch(
-                        checked = isTrackingEnabled,
-                        onCheckedChange = { 
-                            scope.launch { prefs.setTrackingEnabled(it) }
-                            // TODO: 同步启停 Service
-                        }
-                    )
-                }
-            )
+            item {
+                Text("记录设置", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(8.dp))
+                ListItem(
+                    headlineContent = { Text("后台位置记录") },
+                    supportingContent = { Text("保持开启以自动记录您的足迹，关闭后将停止追踪。") },
+                    trailingContent = {
+                        Switch(
+                            checked = isTrackingEnabled,
+                            onCheckedChange = { viewModel.setTrackingEnabled(it) }
+                        )
+                    }
+                )
+            }
+
+            item {
+                Divider()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("AI 助手", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(8.dp))
+                ListItem(
+                    headlineContent = { Text("智能分析足迹") },
+                    supportingContent = { Text("使用 OpenAI 为足迹生成精美标题和生活感悟。") },
+                    trailingContent = {
+                        Switch(
+                            checked = isAiEnabled,
+                            onCheckedChange = { viewModel.setAiEnabled(it) }
+                        )
+                    }
+                )
+            }
             
-            Spacer(modifier = Modifier.height(24.dp))
+            // TODO: Add more settings like AI Config, Data Management, About, etc.
+            // Matching iOS SettingsView functionality
             
-            Text("AI 助手", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.height(8.dp))
-            ListItem(
-                headlineContent = { Text("智能分析足迹") },
-                supportingContent = { Text("使用 AI 为您的足迹生成标题和感悟") },
-                trailingContent = {
-                    Switch(
-                        checked = isAiEnabled,
-                        onCheckedChange = { 
-                            scope.launch { prefs.setAiEnabled(it) }
-                        }
-                    )
-                }
-            )
+            item {
+                Spacer(modifier = Modifier.height(24.dp))
+                Text("版本信息", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("地方客 for Android v1.0.0 Stable", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=0.6f))
+            }
         }
     }
 }

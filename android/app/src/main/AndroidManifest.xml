@@ -24,6 +24,11 @@
     <!-- 保持 CPU 唤醒 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- 高德定位所需的额外权限 -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
     <!-- 读取外部存储（用于 CSV 存储在旧设备） -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
@@ -34,12 +39,13 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="false"
         android:theme="@style/Theme.DiFangKe"
+        android:extractNativeLibs="true"
         android:allowBackup="true">
 
         <!-- 高德地图 API Key（请在 https://lbs.amap.com/ 申请后替换） -->
         <meta-data
             android:name="com.amap.api.v2.apikey"
-            android:value="YOUR_AMAP_KEY_HERE" />
+            android:value="${AMAP_KEY}" />
 
         <activity
             android:name=".MainActivity"
@@ -57,6 +63,9 @@
             android:name=".service.LocationTrackingService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <!-- 高德定位后台服务核心 -->
+        <service android:name="com.amap.api.location.APSService" />
 
         <!-- 开机启动 Receiver -->
         <receiver

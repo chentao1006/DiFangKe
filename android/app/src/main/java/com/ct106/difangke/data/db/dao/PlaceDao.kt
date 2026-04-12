@@ -2,6 +2,7 @@ package com.ct106.difangke.data.db.dao
 
 import androidx.room.*
 import com.ct106.difangke.data.db.entity.PlaceEntity
+import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -39,7 +40,6 @@ interface PlaceDao {
 }
 
 // ── ActivityType DAO ──
-import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 
 @Dao
 interface ActivityTypeDao {

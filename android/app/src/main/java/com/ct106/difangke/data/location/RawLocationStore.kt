@@ -35,14 +35,18 @@ class RawLocationStore private constructor(context: Context) {
     private fun getFile(date: Date): File =
         File(baseDir, "${DATE_FMT.format(date)}.csv")
 
+    /** 存储单个定位点（通过原始坐标） */
+    fun saveRawPoint(lat: Double, lon: Double, accuracy: Double, speed: Double, timeMs: Long) {
+        runCatching {
+            val file = getFile(Date(timeMs))
+            val line = "${timeMs / 1000.0},$lat,$lon,$accuracy,$speed\n"
+            file.appendText(line)
+        }.onFailure { Log.e(TAG, "saveRawPoint failed", it) }
+    }
+
     /** 存储单个定位点（对应 iOS saveLocation） */
     fun saveLocation(location: Location) {
-        runCatching {
-            val file = getFile(Date(location.time))
-            val line = "${location.time / 1000.0},${location.latitude},${location.longitude}," +
-                    "${location.accuracy},${location.speed}\n"
-            file.appendText(line)
-        }.onFailure { Log.e(TAG, "save failed", it) }
+        saveRawPoint(location.latitude, location.longitude, location.accuracy.toDouble(), location.speed.toDouble(), location.time)
     }
 
     /** 加载指定日期的所有定位点（对应 iOS loadLocations） */

@@ -105,19 +105,19 @@ data class Transport(
 // ── 时间线条目（对应 iOS TimelineItem）───────────────────────────
 sealed class TimelineItem {
     data class FootprintItem(val footprint: com.ct106.difangke.data.db.entity.FootprintEntity) : TimelineItem()
-    data class TransportItem(val transport: Transport) : TimelineItem()
+    data class TransportItem(val transport: com.ct106.difangke.data.db.entity.TransportRecordEntity) : TimelineItem()
 
-    val startTime: Date get() = when (this) {
+    val startTime: java.util.Date get() = when (this) {
         is FootprintItem -> footprint.startTime
         is TransportItem -> transport.startTime
     }
-    val endTime: Date get() = when (this) {
+    val endTime: java.util.Date get() = when (this) {
         is FootprintItem -> footprint.endTime
         is TransportItem -> transport.endTime
     }
     val id: String get() = when (this) {
-        is FootprintItem -> footprint.footprintID.toString()
-        is TransportItem -> transport.id.toString()
+        is FootprintItem -> footprint.footprintID
+        is TransportItem -> transport.recordID
     }
 }
 

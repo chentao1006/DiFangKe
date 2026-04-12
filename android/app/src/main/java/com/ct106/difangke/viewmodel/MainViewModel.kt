@@ -35,6 +35,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         loadDataForDate(Date())
+        observeTrackingPreference()
+    }
+
+    private fun observeTrackingPreference() {
+        viewModelScope.launch {
+            DiFangKeApp.instance.preferences.isTrackingEnabled
+                .collectLatest { enabled ->
+                    if (enabled) {
+                        // 检查权限并启动服务
+                        val context = getApplication<Application>()
+                        if (hasLocationPermissions(context)) {
+                            LocationTrackingService.start(context)
+                        }
+                    } else {
+                        LocationTrackingService.stop(getApplication())
+                    }
+                }
+        }
+    }
+
+    private fun hasLocationPermissions(context: android.content.Context): Boolean {
+        val fine = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val background = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_BACKGROUND_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else true
+        return fine && background
     }
 
     fun setDate(date: Date) {
@@ -64,9 +90,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // 3. 合并排序
             val items = mutableListOf<TimelineItem>()
             items.addAll(footprints.map { TimelineItem.FootprintItem(it) })
-            
-            // TODO: 这里需要将 TransportRecord 转换为业务模型 Transport
-            // 为了简化先转换为 TransportItem
+            items.addAll(transports.map { TimelineItem.TransportItem(it) })
 
             items.sortBy { it.startTime }
             _timelineItems.value = items
@@ -109,11 +133,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleTracking() {
-        val context = getApplication<Application>()
-        if (trackingState.value == LocationTrackingService.TrackingState.Idle) {
-            LocationTrackingService.start(context)
-        } else {
-            LocationTrackingService.stop(context)
+        viewModelScope.launch {
+            val prefs = DiFangKeApp.instance.preferences
+            val currentState = trackingState.value != LocationTrackingService.TrackingState.Idle
+            prefs.setTrackingEnabled(!currentState)
         }
     }
 }

@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -6,15 +8,24 @@ plugins {
 
 android {
     namespace = "com.ct106.difangke"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.ct106.difangke"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // 读取 local.properties 中的 Key
+        val localProperties = Properties()
+        val localPropertiesFile = rootProject.file("local.properties")
+        if (localPropertiesFile.exists()) {
+            localProperties.load(localPropertiesFile.inputStream())
+        }
+        val amapKey = localProperties.getProperty("AMAP_KEY") ?: ""
+        manifestPlaceholders["AMAP_KEY"] = amapKey
     }
 
     buildTypes {
@@ -42,7 +53,7 @@ android {
 
     buildFeatures {
         compose = true
-        buildConfig = true
+        buildConfig = false
     }
 
     composeOptions {
@@ -52,6 +63,12 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+
+    sourceSets {
+        getByName("main") {
+            jniLibs.setSrcDirs(listOf("libs"))
         }
     }
 }
@@ -65,6 +82,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.activity:activity-compose:1.9.0")
@@ -106,9 +124,8 @@ dependencies {
     // Gson
     implementation("com.google.code.gson:gson:2.11.0")
 
-    // 高德地图 3D SDK
-    implementation("com.amap.api:3dmap:10.0.600")
-    implementation("com.amap.api:location:6.4.3")
+    // 高德地图 SDK (使用本地最新版本)
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar"))))
 
     // Debug tools
     debugImplementation("androidx.compose.ui:ui-tooling")

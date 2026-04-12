@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 基础主题 -->
+    <style name="Theme.DiFangKe" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- 基础状态栏颜色，Compose 会在代码中覆盖 -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <!-- Splash Screen 主题 (Android 12+) -->
+    <style name="Theme.DiFangKe.Splash" parent="Theme.SplashScreen">
+        <!-- 背景颜色（随系统深浅色切换） -->
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <!-- Icon（如果有的话，目前使用启动图标） -->
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <!-- 启动后的原始主题 -->
+        <item name="postSplashScreenTheme">@style/Theme.DiFangKe</item>
+    </style>
+</resources>

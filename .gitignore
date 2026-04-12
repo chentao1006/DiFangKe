@@ -70,12 +70,7 @@ android/build/
 android/*/build/
 android/app/build/
 android/local.properties
-android/.idea/workspace.xml
-android/.idea/libraries/
-android/.idea/modules.xml
-android/.idea/gradle.xml
-android/.idea/assetWizardSettings.xml
-android/.idea/navEditor.xml
+android/.idea/
 android/*.iml
 android/app/*.iml
 android/*.jks
