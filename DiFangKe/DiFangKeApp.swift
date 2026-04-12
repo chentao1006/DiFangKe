@@ -140,7 +140,7 @@ struct DiFangKeApp: App {
     
     private func refreshContainer() {
         let schema = Schema([
-            Footprint.self, Place.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self
+            Footprint.self, Place.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self, TransportRecord.self
         ])
         let modelConfiguration = ModelConfiguration(
             "dfk_v5_stable",
