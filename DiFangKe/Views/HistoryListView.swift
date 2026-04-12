@@ -553,9 +553,23 @@ struct TimelineIconsView: View {
     var body: some View {
         HStack(spacing: 6) {
             ForEach(icons.prefix(10)) { item in
-                Image(systemName: item.icon)
-                    .font(.system(size: 13))
-                    .foregroundColor(Color(hex: item.colorHex) ?? .secondary)
+                ZStack {
+                    if item.isHighlight {
+                        ZStack {
+                            Circle()
+                                .stroke(Color.dfkHighlight, lineWidth: 1.5)
+                                .frame(width: 17, height: 17)
+                            
+                            Image(systemName: item.icon)
+                                .font(.system(size: 10))
+                                .foregroundColor(item.isTransport ? .dfkAccent : (Color(hex: item.colorHex) ?? .secondary))
+                        }
+                    } else {
+                        Image(systemName: item.icon)
+                            .font(.system(size: 13))
+                            .foregroundColor(item.isTransport ? .dfkAccent : (Color(hex: item.colorHex) ?? .secondary))
+                    }
+                }
             }
             if icons.count > 10 { Image(systemName: "ellipsis").font(.system(size: 10)).foregroundColor(.secondary.opacity(0.5)) }
         }
@@ -746,13 +760,19 @@ struct MonthDayCell: View {
                         let color = Color(hex: item.colorHex) ?? .dfkAccent
                         ZStack {
                             if item.isHighlight {
-                                Image(systemName: "star.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(color)
+                                ZStack {
+                                    Circle()
+                                        .stroke(Color.dfkHighlight, lineWidth: 1)
+                                        .frame(width: 12, height: 12)
+                                    
+                                    Image(systemName: item.icon)
+                                        .font(.system(size: 7))
+                                        .foregroundColor(item.isTransport ? .dfkAccent : color)
+                                }
                             } else {
                                 Image(systemName: item.icon)
                                     .font(.system(size: 8))
-                                    .foregroundColor(color)
+                                    .foregroundColor(item.isTransport ? .dfkAccent : color)
                             }
                         }
                         .frame(width: 11, height: 11)
