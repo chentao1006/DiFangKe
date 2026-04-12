@@ -50,7 +50,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 @main
 struct DiFangKeApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var locationManager = LocationManager()
+    @State private var locationManager = LocationManager.shared
     @AppStorage("isFirstLaunch") private var isFirstLaunch = true
     @State private var showSplash = true
     

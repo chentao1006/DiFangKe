@@ -458,8 +458,12 @@ final class FootprintProcessor {
     /// 判断新候选足迹是否应与最近已有足迹合并
     func shouldMerge(lastFootprint: Footprint, newCandidate: CandidateFootprint) -> Bool {
         let timeInterval = newCandidate.startTime.timeIntervalSince(lastFootprint.endTime)
-        guard timeInterval >= 0, timeInterval < mergeTimeThreshold else { return false }
         
+        // 改进：允许时间上的重叠（timeInterval < 0），这通常意味着它是前一个记录的延续或重复
+        // 允许的最大空隙依然由 mergeTimeThreshold 决定
+        guard timeInterval < mergeTimeThreshold else { return false }
+        
+        // 检查地点是否一致
         let lastLoc = CLLocation(latitude: lastFootprint.latitude, longitude: lastFootprint.longitude)
         let newLoc = CLLocation(latitude: newCandidate.centerCoordinate.latitude,
                                 longitude: newCandidate.centerCoordinate.longitude)
@@ -477,6 +481,8 @@ final class FootprintProcessor {
 @MainActor
 @Observable
 class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
+    static let shared = LocationManager()
+    
     private let locationManager = CLLocationManager()
     
     var isAuthorized: Bool = false
@@ -1374,43 +1380,126 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
          return sortedMatches.first
      }
 
-    /// 核心算法：识别习惯活动
-    /// 只有在同一地点、同一时间段（前后2小时）出现过 3 次及以上的手动标记，才自动关联类型
+    /// 核心算法：识别习惯活动 (基于时间窗口或历史频率)
+    /// 规则：如果当前时间落在历史某活动的窗口内，则 1 次即可判定；否则需要该地点历史累计 3 次以上
     private func findFrequentActivityType(for placeID: UUID, at time: Date, context: ModelContext) -> String? {
+        return LocationManager.resolveFrequentActivityType(
+            for: placeID,
+            at: time,
+            context: context,
+            window: habitTimeWindow,
+            threshold: habitFrequencyThreshold
+        )
+    }
+
+    /// 核心算法：识别习惯活动 (静态版本以便于后台任务调用)
+    nonisolated private static func resolveFrequentActivityType(
+        for placeID: UUID,
+        at time: Date,
+        context: ModelContext,
+        window: Int,
+        threshold: Int
+    ) -> String? {
         let descriptor = FetchDescriptor<Footprint>(
             predicate: #Predicate<Footprint> { $0.placeID == placeID && $0.activityTypeValue != nil }
         )
         guard let history = try? context.fetch(descriptor) else { return nil }
         
         let calendar = Calendar.current
-        let targetHour = calendar.component(.hour, from: time)
-        let targetMinute = calendar.component(.minute, from: time)
-        let targetTotal = targetHour * 60 + targetMinute
+        let targetTotal = calendar.component(.hour, from: time) * 60 + calendar.component(.minute, from: time)
         
-        let window = habitTimeWindow
+        var countsInWindow: [String: Int] = [:]
+        var countsTotal: [String: Int] = [:]
         
-        // 过滤时间窗口相近的记录
-        let matches = history.filter { fp in
-            let h = calendar.component(.hour, from: fp.startTime)
-            let m = calendar.component(.minute, from: fp.startTime)
-            let fpTotal = h * 60 + m
+        for fp in history {
+            guard let type = fp.activityTypeValue else { continue }
+            countsTotal[type, default: 0] += 1
+            
+            let fpTotal = calendar.component(.hour, from: fp.startTime) * 60 + calendar.component(.minute, from: fp.startTime)
             let diff = abs(targetTotal - fpTotal)
-            return min(diff, 1440 - diff) <= window
-        }
-        
-        var counts: [String: Int] = [:]
-        for fp in matches {
-            if let type = fp.activityTypeValue {
-                counts[type, default: 0] += 1
+            if min(diff, 1440 - diff) <= window {
+                countsInWindow[type, default: 0] += 1
             }
         }
         
-        // 使用配置好的门槛
-        let sorted = counts.sorted { $0.value > $1.value }
-        if let best = sorted.first, best.value >= habitFrequencyThreshold {
-            return best.key
+        // 1. 优先判定窗口内的习惯：只要出现过 (1次就够)，就自动判定为该类型
+        if let bestInWindow = countsInWindow.sorted(by: { $0.value > $1.value }).first {
+            return bestInWindow.key
         }
+        
+        // 2. 其次判定该地点的整体习惯：如果历史上该地点某种类型出现超过阈值 (默认3次)
+        if let bestTotal = countsTotal.sorted(by: { $0.value > $1.value }).first, 
+           bestTotal.value >= threshold {
+            return bestTotal.key
+        }
+        
         return nil
+    }
+
+    /// 后台扫描缺失活动类型的足迹并根据习惯自动补齐，同时将需要 AI 生成标题的足迹加入队列
+    public func autoFillMissingActivityTypes(for date: Date) {
+        guard let container = modelContext?.container else { return }
+        let window = habitTimeWindow
+        let threshold = habitFrequencyThreshold
+        
+        Task.detached(priority: .background) {
+            let context = ModelContext(container)
+            // 仅扫描指定日期的足迹
+            let startOfDay = Calendar.current.startOfDay(for: date)
+            let endOfDay = startOfDay.addingTimeInterval(86400)
+            
+            let fetchDescriptor = FetchDescriptor<Footprint>(
+                predicate: #Predicate<Footprint> { 
+                    $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored" 
+                }
+            )
+            
+            guard let footprints = try? context.fetch(fetchDescriptor), !footprints.isEmpty else { return }
+            
+            var activityUpdateCount = 0
+            var footprintsToAnalyze: [PersistentIdentifier] = []
+            
+            for fp in footprints {
+                // 1. 自动关联活动类型 (仅补齐缺失的)
+                if fp.activityTypeValue == nil {
+                    if let pid = fp.placeID {
+                        if let type = LocationManager.resolveFrequentActivityType(
+                            for: pid,
+                            at: fp.startTime,
+                            context: context,
+                            window: window,
+                            threshold: threshold
+                        ) {
+                            fp.activityTypeValue = type
+                            activityUpdateCount += 1
+                        }
+                    }
+                }
+                
+                // 2. 检查是否需要 AI 辅助生成标题及备注 (跳过已分析过和用户手动编辑过的)
+                // 同时也跳过已经确定不需要 AI 的 (aiAnalyzed == true)
+                if !fp.aiAnalyzed && !fp.isTitleEditedByHand {
+                    footprintsToAnalyze.append(fp.persistentModelID)
+                }
+            }
+            
+            if activityUpdateCount > 0 {
+                try? context.save()
+                await MainActor.run {
+                    NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                }
+            }
+            
+            // 批量加入 AI 分析队列
+            let toAnalyze = footprintsToAnalyze
+            if !toAnalyze.isEmpty {
+                await MainActor.run {
+                    for id in toAnalyze {
+                        self.analyzeFootprintByID(id)
+                    }
+                }
+            }
+        }
     }
 
     private func handleNewCandidateFootprint(_ candidate: CandidateFootprint,
@@ -1431,13 +1520,20 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         let existingFootprints = try? context.fetch(fetchDescriptor)
         if let last = existingFootprints?.first, FootprintProcessor.shared.shouldMerge(lastFootprint: last, newCandidate: candidate) {
-            // 合并逻辑：延伸结束时间，追加路径点
-            last.endTime = candidate.endTime
-            last.date = Calendar.current.startOfDay(for: candidate.startTime)
-            last.duration = last.endTime.timeIntervalSince(last.startTime)
-            var currentPath = last.footprintLocations
-            currentPath.append(contentsOf: candidate.rawLocations.map { $0.coordinate })
-            last.footprintLocations = currentPath
+            // 合并逻辑：确保时间范围正确延伸，不重复生成重叠记录
+            let oldEndTime = last.endTime
+            let oldStartTime = last.startTime
+            
+            last.endTime = max(last.endTime, candidate.endTime)
+            last.startTime = min(last.startTime, candidate.startTime)
+            last.date = Calendar.current.startOfDay(for: last.startTime)
+            
+            // 仅在有明显新轨迹或时间延伸时追加坐标，避免无限堆积重叠坐标
+            if last.endTime > oldEndTime || last.startTime < oldStartTime {
+                var currentPath = last.footprintLocations
+                currentPath.append(contentsOf: candidate.rawLocations.map { $0.coordinate })
+                last.footprintLocations = currentPath
+            }
             
             // 重新匹配地点（以防合并过程中位置偏移导致匹配变化）
             if let mPlace = self.matchedPlaceFor(coordinate: candidate.centerCoordinate) {
@@ -1865,6 +1961,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     self.lastProcessedTimestamp = lastFp.endTime
                 }
             }
+            
+            // 数据加载完成后，后台扫描并补全缺失的活动类型
+            self.autoFillMissingActivityTypes(for: today)
         }
     }
     

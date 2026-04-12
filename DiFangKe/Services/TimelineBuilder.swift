@@ -992,6 +992,7 @@ class PersistentTimelineBuilder {
         defer { syncingDates.remove(startOfDay) }
         
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+        let isToday = calendar.isDateInToday(date)
         
         // 1. 获取当天的最后一条记录作为起始锚点 (不管是 confirmed, manual 还是 ignored)
         let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
@@ -1018,7 +1019,19 @@ class PersistentTimelineBuilder {
             RawLocationStore.shared.loadAllDevicesLocations(for: date)
         }.value
         
-        let newPoints = allRawPoints.filter { $0.timestamp > lastEndTime.addingTimeInterval(1) }.sorted(by: { $0.timestamp < $1.timestamp })
+        // 核心防护：如果当前设备正在记录一个停留，暂时不要将其自动生成为正式足迹，
+        // 除非停留已经结束（离开了）。这样可以避免“正在记录”卡片与列表足迹重复显示。
+        let ongoingStart = isToday ? LocationManager.shared.potentialStopStartLocation?.timestamp : nil
+        
+        let newPoints = allRawPoints.filter { point in
+            // 跳过已处理的时间
+            if point.timestamp <= lastEndTime.addingTimeInterval(1) { return false }
+            
+            // 如果有点位属于“正在进行的停留”，暂时排除，让其留在实时状态中
+            if let os = ongoingStart, point.timestamp >= os { return false }
+            
+            return true
+        }.sorted(by: { $0.timestamp < $1.timestamp })
         
         // 3. 执行增量处理逻辑（仅追加）
         if !newPoints.isEmpty {
@@ -1031,10 +1044,7 @@ class PersistentTimelineBuilder {
         try? context.save() // 阶段二存盘：合并后的结果
         
         // 5. 缝隙嗅探器：处理长时间不动的情况（如全天在家）
-        // 核心修复：只有在当天确实有轨迹点（说明定位开启中）或者是今天（显示实时状态）时才补全。
-        // 如果是历史日期且一个点都没有，或者是只有照片点，则不要强行补全到 0 点（除非是新的一天刚开始衔接）
         let hasAnyPoints = !allRawPoints.isEmpty
-        let isToday = calendar.isDateInToday(date)
         if hasAnyPoints || isToday {
             await fillGapAfterLastItem(for: date, lastEndTime: lastEndTime, in: context)
         }
@@ -1050,7 +1060,15 @@ class PersistentTimelineBuilder {
         let startOfDay = calendar.startOfDay(for: date)
         let now = Date()
         let endOfTargetDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
-        let syncLimit = min(now, endOfTargetDay)
+        
+        // 缝隙嗅探器的截止点：除了受限于当前时间，还要受限于本设备当前的“实时停留”起始点。
+        // 如果正在停留，缝隙填充不应跨越到停留时间段内，否则会造成双重视图。
+        let ongoingStart = calendar.isDateInToday(date) ? LocationManager.shared.potentialStopStartLocation?.timestamp : nil
+        
+        var syncLimit = min(now, endOfTargetDay)
+        if let os = ongoingStart {
+            syncLimit = min(syncLimit, os)
+        }
         
         let gap = syncLimit.timeIntervalSince(lastEndTime)
         

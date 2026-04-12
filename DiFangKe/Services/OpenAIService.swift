@@ -335,6 +335,10 @@ class OpenAIService {
             footprint.aiAnalyzed = true
             try? context.save()
             
+            await MainActor.run {
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            }
+            
             if result.2 >= 0.3 {
                 NotificationManager.shared.sendHighlightNotification(
                     title: result.0, 
@@ -423,6 +427,11 @@ class OpenAIService {
             context.insert(newSummary)
         }
         try? context.save()
+        
+        await MainActor.run {
+            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+        }
+        
         dailySummaryDateSet.remove(startOfDate)
     }
 

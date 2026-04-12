@@ -162,6 +162,10 @@ struct DayTimelineView: View {
                     }
                 }
             }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
+                // 后台完成活动匹配或重置数据后，刷新主视图数据分组
+                updateData()
+            }
             .overlay {
                 if locationManager.showSyncInquiry {
                     syncInquiryOverlay
@@ -245,13 +249,13 @@ struct DayTimelineView: View {
                 locationManager.allPlaces = newValue
                 locationManager.forceRefreshOngoingAnalysis()
             }
-            .alert("重置本日数据", isPresented: $showingResetAlert) {
-                Button("确定重置", role: .destructive) {
+            .alert("刷新本日足迹", isPresented: $showingResetAlert) {
+                Button("确定刷新", role: .destructive) {
                     locationManager.resetData(for: selectedDate)
                 }
                 Button("取消", role: .cancel) { }
             } message: {
-                Text("这将删除已保存的足迹记录和交通纠错，并从原始轨迹重新生成。")
+                Text("这将删除已修正的足迹记录和交通数据，并从原始轨迹重新生成。")
             }
             } // VStack
             .alert("AI 服务提示", isPresented: Binding(
@@ -483,7 +487,7 @@ struct DayTimelineView: View {
                 Button(role: .destructive) {
                     showingResetAlert = true
                 } label: {
-                    Label("重置本日数据", systemImage: "arrow.counterclockwise")
+                    Label("刷新本日足迹", systemImage: "arrow.counterclockwise")
                 }
             }
             

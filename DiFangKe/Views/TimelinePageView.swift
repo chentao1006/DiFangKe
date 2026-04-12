@@ -120,6 +120,10 @@ struct TimelinePageView: View {
             let items = PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
             self.timelineItems = items
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
+            // 当后台完成活动匹配或 AI 分析时，触发完整刷新以展示最新状态
+            refreshTimeline(force: true)
+        }
         .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in refreshTimeline(force: true) }
         .sheet(item: $selectedFootprint) { footprint in
             FootprintModalView(
@@ -159,6 +163,41 @@ struct TimelinePageView: View {
         }
         .onChange(of: locationManager.deepLinkFootprintID) { _, newValue in
             checkDeepLink(targetID: newValue)
+        }
+    }
+    
+    // 过滤掉与当前正在进行的实时停留重合的足迹，避免双重视图
+    private var filteredTimelineItems: [TimelineItem] {
+        let items = self.timelineItems
+        let isToday = Calendar.current.isDateInToday(date)
+        guard isToday, let ongoingStart = locationManager.potentialStopStartLocation?.timestamp else {
+            return items
+        }
+        
+        // 我们只过滤列表顶部的、可能与实时状态卡片冲突的记录
+        let ongoingLoc = locationManager.potentialStopStartLocation
+        
+        return items.filter { item in
+            switch item {
+            case .footprint(let fp):
+                // 1. 时间：如果足迹结束时间晚于当前停留开始时间（容错 60s）
+                let isTimeOverlap = fp.endTime > ongoingStart.addingTimeInterval(60)
+                
+                // 2. 地点：如果位置重合（200米内，认为属于同一个停留）
+                var isLocationOverlap = false
+                if let ol = ongoingLoc {
+                    let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
+                    isLocationOverlap = fpLoc.distance(from: ol) < 200
+                }
+                
+                // 如果时间和地点都重合，说明它是正在进行的停留的“前身”或者重复，在列表中隐藏它
+                if isTimeOverlap && isLocationOverlap { return false }
+                
+            case .transport(let tp):
+                // 如果交通段结束于实时停留开始之后，可能是位移漂移导致，也暂时隐藏
+                if tp.endTime > ongoingStart.addingTimeInterval(30) { return false }
+            }
+            return true
         }
     }
     
@@ -202,7 +241,7 @@ struct TimelinePageView: View {
                 RecordingStatusCard(
                     locationManager: locationManager, 
                     footprintCount: footprints.count,
-                    timelineItems: timelineItems,
+                    timelineItems: filteredTimelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
                     photoAssets: dayPhotoAssets,
                     summary: summaryContent
@@ -212,13 +251,13 @@ struct TimelinePageView: View {
                 DaySummaryCard(
                     date: date,
                     totalPoints: totalPointsCount,
-                    footprintCount: timelineItems.filter { if case .footprint = $0 { return true }; return false }.count,
-                    transportMileage: timelineItems.reduce(0) { sum, item in
+                    footprintCount: filteredTimelineItems.filter { if case .footprint = $0 { return true }; return false }.count,
+                    transportMileage: filteredTimelineItems.reduce(0) { sum, item in
                         if case .transport(let t) = item { return sum + t.distance }
                         return sum
                     },
                     points: trajectoryPoints,
-                    timelineItems: timelineItems,
+                    timelineItems: filteredTimelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
                     photoAssets: dayPhotoAssets,
                     summary: summaryContent
@@ -256,7 +295,7 @@ struct TimelinePageView: View {
                     .padding(.bottom, 16)
             }
             
-            let items = self.timelineItems
+            let items = filteredTimelineItems
             let count = items.count
             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                 switch item {
@@ -332,6 +371,11 @@ struct TimelinePageView: View {
 
         self.isLoadingTimeline = true
         
+        defer {
+            // 只要异步任务结束（无论成功、取消还是失败），都要确保 loading 状态被置回 false
+            self.isLoadingTimeline = false
+        }
+        
         if Task.isCancelled { return }
         
         // 执行彻底的持久化时间线同步算法
@@ -353,8 +397,6 @@ struct TimelinePageView: View {
         
         self.trajectoryPoints = result.0
         self.totalPointsCount = result.1
-        
-        self.isLoadingTimeline = false
         
         // 异步加载当天的照片用于地图显示
         let start = Calendar.current.startOfDay(for: targetDate)
@@ -412,6 +454,9 @@ struct TimelinePageView: View {
                 OpenAIService.shared.enqueueDailySummary(for: targetDate, footprints: footprints, force: true)
             }
         }
+        
+        // 扫一遍该日期的足迹，自动补齐缺失活动或加入 AI 生成队列
+        locationManager.autoFillMissingActivityTypes(for: targetDate)
     }
     
     private func resolveTimelineAddresses(for items: [TimelineItem]) {

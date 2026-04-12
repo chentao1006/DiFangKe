@@ -71,6 +71,7 @@ struct HistoryListView: View {
     @Environment(LocationManager.self) private var locationManager
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
     @Query private var allManualSelections: [TransportManualSelection]
+    @Query(sort: \TransportRecord.startTime, order: .reverse) private var allTransportRecords: [TransportRecord]
     @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
     
     let initialDate: Date
@@ -130,6 +131,7 @@ struct HistoryListView: View {
         }
         .onChange(of: allFootprints) { updateSummaries() }
         .onChange(of: allManualSelections) { updateSummaries() }
+        .onChange(of: allTransportRecords) { updateSummaries() }
         .sheet(item: $showingDate) { item in
             SimpleDayTimelineView(date: item.date)
                 .environment(locationManager)
@@ -255,14 +257,18 @@ struct HistoryListView: View {
             return
         }
         
-        // Use a task to fetch single day summary
-        let validFootprints = allFootprints.filter { $0.status != .ignored && Calendar.current.isDate($0.startTime, inSameDayAs: date) }
-        let manualSelectionsForDate = allManualSelections.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) && !$0.isDeleted }
         let activityTypes = allActivityTypes
         
         Task {
-            // 第一阶段：异步计算核心轨迹和足迹数据（这也是最耗时的，因为涉及 CSV 读取）
+            // 第一阶段：直接从数据库获取已处理的持久化时间线数据
+            // 这保证了周/月视图与日视图看到的内容完全一致（包含用户的手动修改和合并）
+            let timelineItems = await MainActor.run {
+                PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
+            }
+            
             let coreSummary = await Task.detached(priority: .userInitiated) {
+                let validFootprints = timelineItems.compactMap { if case .footprint(let f) = $0 { return f }; return nil }
+                
                 let highlightCount = validFootprints.filter { $0.isHighlight == true }.count
                 let highlights = validFootprints.filter { $0.isHighlight == true }
                 let highlightTitle = highlights.first?.title
@@ -271,17 +277,6 @@ struct HistoryListView: View {
                 let totalDuration = validFootprints.reduce(0) { $0 + $1.duration }
                 
                 let totalTrajectoryCount = RawLocationStore.shared.getTotalPointsCount(for: date)
-                let fpsLite = validFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
-                let manualLite = manualSelectionsForDate.map { TimelineBuilder.convertToOverrideLite($0) }
-                let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
-                
-                let timelineItems = TimelineBuilder.buildTimeline(
-                    for: date,
-                    footprints: fpsLite,
-                    allRawPoints: rawPoints,
-                    allPlaces: [],
-                    overrides: manualLite
-                )
                 
                 let timelineIcons = timelineItems.reversed().map { item in
                     DaySummary.TimelineIcon(
@@ -297,7 +292,6 @@ struct HistoryListView: View {
                     return sum
                 }
                 
-                // 暂时不数照片，先让核心数据出来
                 return DaySummary(
                     date: date,
                     totalDuration: totalDuration,
@@ -409,7 +403,7 @@ struct HistoryWeekView: View {
         return (0...count).map { weekOffset in
             let startOfWeek = calendar.date(byAdding: .weekOfYear, value: -weekOffset, to: startOfTodayWeek)!
             return (0..<7).compactMap { dayOffset in
-                calendar.date(byAdding: .day, value: 6 - dayOffset, to: startOfWeek)
+                calendar.date(byAdding: .day, value: dayOffset, to: startOfWeek)
             }
         }
     }
@@ -487,9 +481,9 @@ struct HistoryWeekView: View {
     
     private func weekHeader(for date: Date) -> some View {
         let calendar = Calendar.current
-        let monday = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date))!
-        let year = calendar.component(.year, from: monday)
-        let week = calendar.component(.weekOfYear, from: monday)
+        let startOfSectionWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date))!
+        let year = calendar.component(.year, from: startOfSectionWeek)
+        let week = calendar.component(.weekOfYear, from: startOfSectionWeek)
         
         return HStack {
             Text("\(String(format: "%d", year))年 第\(week)周")
@@ -685,12 +679,19 @@ struct HistoryMonthView: View {
         .background(Color.dfkBackground.opacity(0.95))
     }
     
+    private var weekdaySymbols: [String] {
+        let calendar = Calendar.current
+        let symbols = ["日", "一", "二", "三", "四", "五", "六"]
+        let firstIndex = calendar.firstWeekday - 1 // firstWeekday is 1-indexed (1=Sun, 2=Mon)
+        return Array(symbols[firstIndex..<symbols.count] + symbols[0..<firstIndex])
+    }
+    
     private func monthGrid(for month: Date) -> some View {
         let days = daysInMonth(for: month)
         let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 7)
         return VStack(spacing: 8) {
             HStack(spacing: 0) {
-                ForEach(["日", "一", "二", "三", "四", "五", "六"], id: \.self) { day in
+                ForEach(weekdaySymbols, id: \.self) { day in
                     Text(day).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary.opacity(0.6)).frame(maxWidth: .infinity)
                 }
             }
@@ -708,7 +709,9 @@ struct HistoryMonthView: View {
     
     private func calculateLeadingSpaces(for month: Date) -> Int {
         guard let firstDay = month.startOfMonth else { return 0 }
-        return Calendar.current.component(.weekday, from: firstDay) - 1
+        let calendar = Calendar.current
+        let weekday = calendar.component(.weekday, from: firstDay) // 1=Sun, 2=Mon...
+        return (weekday - calendar.firstWeekday + 7) % 7
     }
     
     private func daysInMonth(for month: Date) -> [Date] {
