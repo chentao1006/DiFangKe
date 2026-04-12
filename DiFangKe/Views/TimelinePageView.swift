@@ -100,10 +100,16 @@ struct TimelinePageView: View {
                 if isAiAssistantEnabled && !footprints.isEmpty {
                     if summaryContent == nil {
                         // 只为过去日期生成
-                        let isPast = Calendar.current.startOfDay(for: date) < Calendar.current.startOfDay(for: Date())
+                        let startOfDate = Calendar.current.startOfDay(for: date)
+                        let isPast = startOfDate < Calendar.current.startOfDay(for: Date())
                         
                         if isPast {
-                            OpenAIService.shared.enqueueDailySummary(for: date, footprints: footprints)
+                            let endOfDate = Calendar.current.date(byAdding: .day, value: 1, to: startOfDate)!
+                            let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                                $0.startTime >= startOfDate && $0.startTime < endOfDate && $0.statusRaw == "active"
+                            })
+                            let transports = (try? modelContext.fetch(tpDesc)) ?? []
+                            OpenAIService.shared.enqueueDailySummary(for: date, footprints: footprints, transports: transports)
                         }
                     }
                 }
@@ -449,9 +455,15 @@ struct TimelinePageView: View {
         
         // 触发摘要重新生成：如果是由足迹/交通修改引发的强制刷新，且启用了 AI，则强制重新生成当日概览
         if force && isAiAssistantEnabled && !footprints.isEmpty {
-            let isPast = Calendar.current.startOfDay(for: targetDate) < Calendar.current.startOfDay(for: Date())
+            let startOfDate = Calendar.current.startOfDay(for: targetDate)
+            let isPast = startOfDate < Calendar.current.startOfDay(for: Date())
             if isPast {
-                OpenAIService.shared.enqueueDailySummary(for: targetDate, footprints: footprints, force: true)
+                let endOfDate = Calendar.current.date(byAdding: .day, value: 1, to: startOfDate)!
+                let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                    $0.startTime >= startOfDate && $0.startTime < endOfDate && $0.statusRaw == "active"
+                })
+                let transports = (try? modelContext.fetch(tpDesc)) ?? []
+                OpenAIService.shared.enqueueDailySummary(for: targetDate, footprints: footprints, transports: transports, force: true)
             }
         }
         

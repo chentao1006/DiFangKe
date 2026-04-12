@@ -117,8 +117,6 @@ struct DiFangKeApp: App {
                                 locationManager.startTracking()
                             }
                             
-                            // ...
-                            
                             setupDefaultData(context: context)
                         }
                         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RefreshModelContainer"))) { _ in
@@ -127,10 +125,10 @@ struct DiFangKeApp: App {
                         .transition(.opacity)
                 }
             }
-            .animation(.easeInOut(duration: 0.5), value: showSplash)
+            .animation(.easeInOut(duration: 0.8), value: showSplash)
             .task {
                 // 给初始化一点缓冲时间，让首页数据在后台能加载出一部分，避免首屏瞬间白屏或卡顿
-                try? await Task.sleep(nanoseconds: 800_000_000) // 0.8s 缓冲
+                try? await Task.sleep(nanoseconds: 1_200_000_000) // 1.2s 缓冲
                 print("[DiFangKeApp] Dismissing splash screen...")
                 withAnimation {
                     showSplash = false
@@ -328,16 +326,31 @@ struct OnboardingView: View {
 
 // 品牌开屏页
 struct SplashScreenView: View {
+    @State private var isVisible = false
+    
     var body: some View {
         ZStack {
             Color.dfkBackground.ignoresSafeArea()
-            VStack(spacing: 20) {
-                Image(systemName: "map.fill")
-                    .font(.system(size: 80))
-                    .foregroundColor(.dfkAccent)
-                Text("地方客")
-                    .font(.system(size: 34, weight: .bold, design: .rounded))
-                    .foregroundColor(.dfkAccent)
+            Group {
+                if UIImage(named: "AppLogo") != nil {
+                    Image("AppLogo")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 120, height: 120)
+                        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                } else {
+                    // 兜底方案，防止资源加载失败导致空白
+                    Image(systemName: "map.fill")
+                        .font(.system(size: 80))
+                        .foregroundColor(.dfkAccent)
+                }
+            }
+            .scaleEffect(isVisible ? 1.0 : 0.8)
+            .opacity(isVisible ? 1 : 0)
+        }
+        .onAppear {
+            withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) {
+                isVisible = true
             }
         }
     }

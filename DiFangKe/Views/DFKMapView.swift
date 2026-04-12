@@ -68,15 +68,15 @@ struct DFKMapView: View {
                         
                         let footprintIcon = ZStack {
                             let activity = fp.getActivityType(from: allActivities)
-                            let activityColor = activity?.color ?? .dfkAccent
+                            let activityColor = activity?.color ?? Color.secondary.opacity(0.5)
                             
                             Circle()
                                 .fill(activityColor)
                                 .frame(width: size, height: size)
                                 .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1.5 * scale))
                             
-                            Image(systemName: activity?.icon ?? "mappin.and.ellipse")
-                                .font(.system(size: 13 * scale, weight: .bold))
+                            Image(systemName: activity?.icon ?? "questionmark.circle.dashed")
+                                .font(.system(size: (activity?.icon == nil ? 18 : 13) * scale, weight: .bold))
                                 .foregroundColor(Color(uiColor: .systemBackground))
                         }
                         .contentShape(Circle())

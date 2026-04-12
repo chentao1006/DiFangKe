@@ -35,7 +35,7 @@ class OpenAIService {
     
     enum AITask {
         case footprint(UUID)
-        case dailySummary(Date, [UUID], Bool)
+        case dailySummary(Date, [UUID], [UUID], Bool)
         case tomorrowQuote
         case pastQuote
         case notificationSummary([String])
@@ -197,15 +197,16 @@ class OpenAIService {
         self.processQueue()
     }
 
-    func enqueueDailySummary(for date: Date, footprints: [Footprint], force: Bool = false) {
+    func enqueueDailySummary(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], force: Bool = false) {
         let startOfDate = Calendar.current.startOfDay(for: date)
         if !force && dailySummaryDateSet.contains(startOfDate) { return }
         
         // 使用 UUID，避免 PersistentIdentifier 跨线程/跨 Context 的各种坑
-        let ids = footprints.map { $0.footprintID }
+        let fpIds = footprints.map { $0.footprintID }
+        let tpIds = transports.map { $0.recordID }
         
         dailySummaryDateSet.insert(startOfDate)
-        self.taskQueue.append(.dailySummary(startOfDate, ids, force))
+        self.taskQueue.append(.dailySummary(startOfDate, fpIds, tpIds, force))
         self.processQueue()
     }
     
@@ -280,8 +281,8 @@ class OpenAIService {
             case .footprint(let footprintID):
                 await self.processFootprintTask(footprintID: footprintID, context: context)
                 // 任务处理完后，不一定要从 Set 移除，因为 footprint 本身有 aiAnalyzed 标记
-            case .dailySummary(let date, let ids, let force):
-                await self.processDailySummaryTask(date: date, ids: ids, context: context, force: force)
+            case .dailySummary(let date, let fpIds, let tpIds, let force):
+                await self.processDailySummaryTask(date: date, fpIds: fpIds, tpIds: tpIds, context: context, force: force)
             case .tomorrowQuote:
                 await self.processTomorrowQuoteTask()
             case .pastQuote:
@@ -350,7 +351,7 @@ class OpenAIService {
         }
     }
     
-    private func processDailySummaryTask(date: Date, ids: [UUID], context: ModelContext, force: Bool = false) async {
+    private func processDailySummaryTask(date: Date, fpIds: [UUID], tpIds: [UUID], context: ModelContext, force: Bool = false) async {
         let startOfDate = Calendar.current.startOfDay(for: date)
         
         // 提前预加载已有的 Insight 以便比对 Fingerprint
@@ -368,38 +369,58 @@ class OpenAIService {
             }
         }
 
-        var footprintsUnderlying: [Footprint] = []
-        for id in ids {
-            let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
-            if let fp = (try? context.fetch(fpDescriptor))?.first { footprintsUnderlying.append(fp) }
+        struct SimpleItem {
+            let time: Date
+            let description: String
         }
-        guard !footprintsUnderlying.isEmpty else { return }
+        var rawItems: [SimpleItem] = []
+
+        // 1. 处理足迹
+        for id in fpIds {
+            let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
+            if let fp = (try? context.fetch(fpDescriptor))?.first {
+                let title = fp.title.isEmpty ? "点位记录" : fp.title
+                if Footprint.isGenericTitle(title) { continue }
+                
+                let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+                let activityName = fp.getActivityType(from: allActivities)?.name
+                var description = activityName != nil ? "\(title)(\(activityName!))" : title
+                
+                // 强调已收藏/高亮足迹
+                if fp.isHighlight == true {
+                    description = "【重点收藏】\(description)"
+                }
+                
+                rawItems.append(SimpleItem(time: fp.startTime, description: description))
+            }
+        }
+
+        // 2. 处理交通
+        for id in tpIds {
+            let tpDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == id })
+            if let tp = (try? context.fetch(tpDescriptor))?.first {
+                if tp.statusRaw == "ignored" { continue }
+                let type = TransportType(rawValue: tp.typeRaw)?.localizedName ?? tp.typeRaw
+                let description = "通过\(type)从\(tp.startLocation)前往\(tp.endLocation)"
+                rawItems.append(SimpleItem(time: tp.startTime, description: description))
+            }
+        }
         
-        // 获取所有活动类型以便解析名称
-        let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+        guard !rawItems.isEmpty else { return }
         
-        let sorted = footprintsUnderlying.sorted { $0.startTime < $1.startTime }
+        let sortedItems = rawItems.sorted { $0.time < $1.time }
         var deduplicated: [String] = []
-        var lastDescription: String? = nil
+        var lastDesc: String? = nil
         
-        for fp in sorted {
-            let title = fp.title.isEmpty ? "点位记录" : fp.title
-            if Footprint.isGenericTitle(title) { continue }
-            
-            // 解析活动类型名称
-            let activityName = fp.getActivityType(from: allActivities)?.name
-            let description = activityName != nil ? "\(title)(\(activityName!))" : title
-            
-            if description == lastDescription { continue }
-            
-            deduplicated.append("[\(fp.startTime.formatted(.dateTime.hour().minute()))] \(description)")
-            lastDescription = description
+        for item in sortedItems {
+            if item.description == lastDesc { continue }
+            deduplicated.append("[\(item.time.formatted(.dateTime.hour().minute()))] \(item.description)")
+            lastDesc = item.description
         }
         
         guard !deduplicated.isEmpty else { return }
         
         // 核心改动：比较本次数据的 Fingerprint 与数据库中已有的记录
-        // 如果内容完全一致，即便 force 为 true 也可以跳过 AI 生成，从而避免因修改备注（不参与摘要）导致的频繁刷新
         let currentFingerprint = deduplicated.joined(separator: "\n")
         if force && existing?.dataFingerprint == currentFingerprint {
             dailySummaryDateSet.remove(startOfDate)
