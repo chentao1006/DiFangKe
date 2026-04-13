@@ -28,6 +28,12 @@ interface TransportRecordDao {
     @Query("DELETE FROM transport_records WHERE startTime >= :start AND startTime < :end")
     suspend fun deleteForDay(start: Date, end: Date)
 
+    @Query("SELECT * FROM transport_records WHERE recordID = :id LIMIT 1")
+    suspend fun getById(id: String): TransportRecordEntity?
+
+    @Query("SELECT * FROM transport_records ORDER BY startTime DESC")
+    suspend fun getAllSync(): List<TransportRecordEntity>
+
     @Query("UPDATE transport_records SET statusRaw = 'ignored' WHERE recordID = :id")
     suspend fun ignoreById(id: String)
 }
@@ -40,6 +46,9 @@ interface DailyInsightDao {
 
     @Query("SELECT * FROM daily_insights WHERE date >= :start AND date < :end LIMIT 1")
     suspend fun getForDay(start: Date, end: Date): DailyInsightEntity?
+
+    @Query("SELECT * FROM daily_insights")
+    suspend fun getAll(): List<DailyInsightEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(insight: DailyInsightEntity)

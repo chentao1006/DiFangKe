@@ -205,6 +205,21 @@ class LocationTrackingService : Service() {
                     serviceScope.launch {
                         prefs.savePendingStay(centerLat, centerLon, ongoingStayStart?.timestamp?.time, currentAddress)
                     }
+                } else {
+                    // 核心修复：如果已有的停留点距离当前新识别的中心太远，说明用户已经大幅度移动过
+                    // 之前的 ongoingStayStart 是陈旧的（可能是重启后恢复的），应以当前窗口为准重设
+                    val distFromStart = processor.haversineMeters(
+                        ongoingStayStart!!.latitude, ongoingStayStart!!.longitude,
+                        centerLat, centerLon
+                    )
+                    if (distFromStart > AppConfig.STAY_DISTANCE_THRESHOLD * 2.5) {
+                        Log.i(TAG, "Restored stay location is too far ($distFromStart m), resetting stay start time.")
+                        ongoingStayStart = trackingQueue.first()
+                        ongoingStayAddress = null
+                        serviceScope.launch {
+                            prefs.savePendingStay(centerLat, centerLon, ongoingStayStart?.timestamp?.time, currentAddress)
+                        }
+                    }
                 }
                 
                 serviceScope.launch {
@@ -300,21 +315,11 @@ class LocationTrackingService : Service() {
         }
 
         val address = geocoder.reverseGeocode(candidate.latitude, candidate.longitude)
-        val title = if (address != null) {
-            FootprintTitles.generate(address, candidate.startTime.time / 1000)
-        } else {
-            FootprintTitles.generate("此处", candidate.startTime.time / 1000)
-        }
-
         val locationHash = FootprintEntity.generateLocationHash(candidate.latitude, candidate.longitude)
         val places = db.placeDao().getAll()
         val matchedPlace = places.firstOrNull { place ->
             processor.haversineMeters(place.latitude, place.longitude, candidate.latitude, candidate.longitude) <= place.radius + 100.0
         }
-
-        val newTitle = if (matchedPlace != null) {
-            FootprintTitles.generate(matchedPlace.name, candidate.startTime.time / 1000)
-        } else title
 
         val entity = FootprintEntity(
             footprintID = UUID.randomUUID().toString(),
@@ -324,15 +329,24 @@ class LocationTrackingService : Service() {
             latitudeJson = latJson,
             longitudeJson = lonJson,
             locationHash = locationHash,
-            title = newTitle,
+            title = if (matchedPlace != null) FootprintTitles.generate(matchedPlace.name, candidate.startTime.time / 1000) else {
+                if (address != null) FootprintTitles.generate(address, candidate.startTime.time / 1000)
+                else FootprintTitles.generate("此处", candidate.startTime.time / 1000)
+            },
             statusValue = "candidate",
             placeID = matchedPlace?.placeID,
             address = address
         )
 
-        db.footprintDao().insert(entity)
+        // 自动关联照片逻辑
+        val photoUris = com.ct106.difangke.util.PhotoLinker.linkPhotosToFootprint(applicationContext, entity)
+        val finalEntity = if (photoUris.isNotEmpty()) {
+            entity.copy(photoAssetIDsJson = com.ct106.difangke.util.PhotoLinker.mergePhotoIds("[]", photoUris))
+        } else entity
+
+        db.footprintDao().insert(finalEntity)
         lastFp?.let { prev ->
-            saveTransportSegment(prev, entity)
+            saveTransportSegment(prev, finalEntity)
         }
     }
 

@@ -27,8 +27,12 @@ import com.amap.api.maps.model.PolylineOptions
 @Composable
 fun DFKMapScreen(
     onBack: () -> Unit,
+    dateTimestamp: Long? = null,
     viewModel: MapViewModel = viewModel()
 ) {
+    LaunchedEffect(dateTimestamp) {
+        viewModel.loadPathForDate(dateTimestamp)
+    }
     val polylineColor = MaterialTheme.colorScheme.primary.toArgb()
     val pathPoints by viewModel.pathPoints.collectAsState()
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
@@ -37,7 +41,7 @@ fun DFKMapScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("今日足迹") },
+                title = { Text(if (dateTimestamp == null) "今日足迹" else "历史足迹") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "返回")

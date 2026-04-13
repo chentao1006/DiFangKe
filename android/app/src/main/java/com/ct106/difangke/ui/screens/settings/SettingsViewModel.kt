@@ -4,23 +4,59 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.datastore.preferences.core.edit
 import com.ct106.difangke.data.prefs.AppPreferences
 import com.ct106.difangke.service.LocationTrackingService
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = AppPreferences(application)
+    private val database = com.ct106.difangke.DiFangKeApp.instance.database
     
     val isTrackingEnabled: StateFlow<Boolean> = prefs.isTrackingEnabled
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
         
     val isAiEnabled: StateFlow<Boolean> = prefs.isAiEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
-    // TODO: Add more state flows for AI URL, Key, etc.
+    val aiServiceType: StateFlow<String> = prefs.aiServiceType
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "public")
+
+    val isDailyNotificationEnabled: StateFlow<Boolean> = prefs.isDailyNotificationEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+        
+    val isHighlightNotificationEnabled: StateFlow<Boolean> = prefs.isHighlightNotificationEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val notificationHour: StateFlow<Int> = prefs.notificationHour
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 21)
+        
+    val notificationMinute: StateFlow<Int> = prefs.notificationMinute
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val isAutoPhotoLinkEnabled: StateFlow<Boolean> = prefs.isAutoPhotoLinkEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val importantPlacesCount = database.placeDao().observeAll()
+        .map { list: List<com.ct106.difangke.data.db.entity.PlaceEntity> -> list.filter { p -> p.isUserDefined }.size }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val savedPlacesCount = database.placeDao().observeAll()
+        .map { list: List<com.ct106.difangke.data.db.entity.PlaceEntity> -> list.filter { p -> !p.isUserDefined && !p.isIgnored }.size }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val ignoredPlacesCount = database.placeDao().observeAll()
+        .map { list: List<com.ct106.difangke.data.db.entity.PlaceEntity> -> list.filter { p -> p.isIgnored && !p.isUserDefined }.size }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val activitiesCount = database.activityTypeDao().observeAll()
+        .map { list: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity> -> list.size }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     fun setTrackingEnabled(enabled: Boolean) {
         viewModelScope.launch {
@@ -38,4 +74,45 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             prefs.setAiEnabled(enabled)
         }
     }
+
+    fun setDailyNotificationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefs.setDailyNotificationEnabled(enabled)
+            updateNotificationSchedule()
+        }
+    }
+
+    fun setHighlightNotificationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefs.setHighlightNotificationEnabled(enabled)
+        }
+    }
+
+    fun setNotificationTime(hour: Int, minute: Int) {
+        viewModelScope.launch {
+            prefs.setNotificationTime(hour, minute)
+            updateNotificationSchedule()
+        }
+    }
+
+    fun setAutoPhotoLinkEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefs.setAutoPhotoLinkEnabled(enabled)
+        }
+    }
+
+
+    private fun updateNotificationSchedule() {
+        viewModelScope.launch {
+            val enabled = prefs.isDailyNotificationEnabled.first()
+            if (enabled) {
+                val hour = prefs.notificationHour.first()
+                val minute = prefs.notificationMinute.first()
+                com.ct106.difangke.service.DailySummaryWorker.schedule(getApplication(), hour, minute)
+            } else {
+                com.ct106.difangke.service.DailySummaryWorker.cancel(getApplication())
+            }
+        }
+    }
 }
+

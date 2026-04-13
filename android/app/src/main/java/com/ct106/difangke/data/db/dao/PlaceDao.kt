@@ -37,6 +37,9 @@ interface PlaceDao {
 
     @Query("SELECT * FROM places WHERE isIgnored = 1 ORDER BY name ASC")
     suspend fun getIgnored(): List<PlaceEntity>
+
+    @Query("DELETE FROM places")
+    suspend fun deleteAll()
 }
 
 // ── ActivityType DAO ──
@@ -49,6 +52,9 @@ interface ActivityTypeDao {
 
     @Query("SELECT * FROM activity_types ORDER BY sortOrder ASC")
     suspend fun getAll(): List<ActivityTypeEntity>
+
+    @Query("SELECT * FROM activity_types WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): ActivityTypeEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(type: ActivityTypeEntity)
@@ -64,4 +70,7 @@ interface ActivityTypeDao {
 
     @Query("SELECT COUNT(*) FROM activity_types")
     suspend fun count(): Int
+
+    @Query("DELETE FROM activity_types")
+    suspend fun deleteAll()
 }

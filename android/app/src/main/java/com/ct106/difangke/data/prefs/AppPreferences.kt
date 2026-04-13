@@ -75,6 +75,13 @@ class AppPreferences(private val context: Context) {
         it[KEY_IS_NOTIFICATION_GUIDE_DISMISSED] ?: false
     }
 
+    val isAutoPhotoLinkEnabled: Flow<Boolean> = context.dataStore.data.map {
+        it[KEY_IS_AUTO_PHOTO_LINK_ENABLED] ?: true
+    }
+    
+    suspend fun setAutoPhotoLinkEnabled(enabled: Boolean) =
+        context.dataStore.edit { it[KEY_IS_AUTO_PHOTO_LINK_ENABLED] = enabled }
+
     // ── Suspend 写入 ──────────────────────────────────────────────
     suspend fun setTrackingEnabled(enabled: Boolean) =
         context.dataStore.edit { it[KEY_IS_TRACKING_ENABLED] = enabled }
@@ -146,15 +153,13 @@ class AppPreferences(private val context: Context) {
         context.dataStore.data.map { it[KEY_HAS_SEEDED_DEFAULT_DATA] ?: false }.first()
 
     suspend fun getCustomAiUrl(): String =
-        context.dataStore.data.map { it[KEY_CUSTOM_AI_URL] ?: "" }.first()
+        context.dataStore.data.map { it[KEY_CUSTOM_AI_URL] ?: "" }.first().let { 
+            if (it.isEmpty()) "https://api.openai.com/v1" else it
+        }
 
     suspend fun getCustomAiKey(): String =
         context.dataStore.data.map { it[KEY_CUSTOM_AI_KEY] ?: "" }.first()
 
     suspend fun getCustomAiModel(): String =
-        context.dataStore.data.map { it[KEY_CUSTOM_AI_MODEL] ?: "gpt-3.5-turbo" }.let {
-            var result = "gpt-3.5-turbo"
-            it.collect { v -> result = v; return@collect }
-            result
-        }
+        context.dataStore.data.map { it[KEY_CUSTOM_AI_MODEL] ?: "gpt-4o-mini" }.first()
 }

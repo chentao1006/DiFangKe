@@ -12,15 +12,48 @@ import com.ct106.difangke.service.LocationTrackingService
 import com.ct106.difangke.service.OpenAIService
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = DiFangKeApp.instance.database
     val openAI = OpenAIService.shared
 
-    private val _currentDate = MutableStateFlow(Date())
+    private val _currentDate = MutableStateFlow(Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }.time)
     val currentDate: StateFlow<Date> = _currentDate.asStateFlow()
+
+    private val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA)
+    
+    val availableDates: StateFlow<List<Date>> = combine(
+        db.footprintDao().observeAvailableDates(),
+        _currentDate
+    ) { dateStrings, current ->
+        val dates: MutableList<java.util.Date> = dateStrings.mapNotNull { 
+            try { sdf.parse(it) } catch(e: Exception) { null } 
+        }.toMutableList()
+        
+        val today = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }.time
+        val tomorrow = Calendar.getInstance().apply {
+            time = today
+            add(Calendar.DAY_OF_YEAR, 1)
+        }.time
+        
+        if (dates.none { it.time == today.time }) dates.add(today)
+        if (dates.none { it.time == tomorrow.time }) dates.add(tomorrow)
+        if (dates.none { it.time == current.time }) dates.add(current)
+        
+        dates.sortedBy { it.time }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), listOf(_currentDate.value))
 
     private val _timelineItems = MutableStateFlow<List<TimelineItem>>(emptyList())
     val timelineItems: StateFlow<List<TimelineItem>> = _timelineItems.asStateFlow()
@@ -28,10 +61,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _dailyInsight = MutableStateFlow<DailyInsightEntity?>(null)
     val dailyInsight: StateFlow<DailyInsightEntity?> = _dailyInsight.asStateFlow()
 
+    private val _totalMileage = MutableStateFlow(0.0)
+    val totalMileage: StateFlow<Double> = _totalMileage.asStateFlow()
+
+    private val _totalPoints = MutableStateFlow(0)
+    val totalPoints: StateFlow<Int> = _totalPoints.asStateFlow()
+
+    private val _dailyTrajectory = MutableStateFlow<String?>(null)
+    val dailyTrajectory: StateFlow<String?> = _dailyTrajectory.asStateFlow()
+
+    private val _dailyMarkers = MutableStateFlow<String?>(null)
+    val dailyMarkers: StateFlow<String?> = _dailyMarkers.asStateFlow()
+
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
 
     val trackingState = LocationTrackingService.stateFlow
+    
+    val hasSwiped: Flow<Boolean> = DiFangKeApp.instance.preferences.hasSwiped
 
     init {
         loadDataForDate(Date())
@@ -88,15 +135,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val transports = db.transportRecordDao().getForDay(startOfDay, endOfDay)
 
             // 3. 合并排序
-            val items = mutableListOf<TimelineItem>()
-            items.addAll(footprints.map { TimelineItem.FootprintItem(it) })
-            items.addAll(transports.map { TimelineItem.TransportItem(it) })
-
-            items.sortBy { it.startTime }
+            val items = (footprints.map { TimelineItem.FootprintItem(it) } + 
+                                transports.map { TimelineItem.TransportItem(it) })
+                                .sortedByDescending { it.startTime }
             _timelineItems.value = items
+
+            // 计算统计数据
+            _totalMileage.value = transports.sumOf { it.distance }
+            _totalPoints.value = footprints.sumOf { fp ->
+                try {
+                    val latArray = org.json.JSONArray(fp.latitudeJson)
+                    latArray.length()
+                } catch (e: Exception) { 0 }
+            }
 
             // 4. 获取总结
             _dailyInsight.value = db.dailyInsightDao().getForDay(startOfDay, endOfDay)
+
+            // 5. 聚合轨迹点
+            val allPointsList = mutableListOf<List<Double>>()
+            footprints.forEach { fp ->
+                try {
+                    val lats = org.json.JSONArray(fp.latitudeJson)
+                    val lons = org.json.JSONArray(fp.longitudeJson)
+                    for (i in 0 until minOf(lats.length(), lons.length())) {
+                        allPointsList.add(listOf(lats.getDouble(i), lons.getDouble(i)))
+                    }
+                } catch (e: Exception) {}
+            }
+            transports.forEach { tp ->
+                try {
+                    val pts = org.json.JSONArray(tp.pointsJson)
+                    for (i in 0 until pts.length()) {
+                        val p = pts.getJSONArray(i)
+                        allPointsList.add(listOf(p.getDouble(0), p.getDouble(1)))
+                    }
+                } catch (e: Exception) {}
+            }
+            if (allPointsList.isNotEmpty()) {
+                val array = org.json.JSONArray()
+                allPointsList.forEach { p ->
+                    val pArr = org.json.JSONArray().put(p[0]).put(p[1])
+                    array.put(pArr)
+                }
+                _dailyTrajectory.value = array.toString()
+            } else {
+                _dailyTrajectory.value = null
+            }
+
+            // 6. 聚合足迹中心点以便在大/小地图显示标记
+            val markersList = mutableListOf<List<Double>>()
+            footprints.forEach { fp ->
+                try {
+                    val lats = org.json.JSONArray(fp.latitudeJson)
+                    val lons = org.json.JSONArray(fp.longitudeJson)
+                    if (lats.length() > 0 && lons.length() > 0) {
+                        markersList.add(listOf(lats.getDouble(0), lons.getDouble(0)))
+                    }
+                } catch (e: Exception) {}
+            }
+            if (markersList.isNotEmpty()) {
+                val array = org.json.JSONArray()
+                markersList.forEach { m ->
+                    val mArr = org.json.JSONArray().put(m[0]).put(m[1])
+                    array.put(mArr)
+                }
+                _dailyMarkers.value = array.toString()
+            } else {
+                _dailyMarkers.value = null
+            }
 
             // 发起 AI 分析任务
             triggerAiAnalysis(footprints, transports, startOfDay)
@@ -137,6 +244,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val prefs = DiFangKeApp.instance.preferences
             val currentState = trackingState.value != LocationTrackingService.TrackingState.Idle
             prefs.setTrackingEnabled(!currentState)
+        }
+    }
+
+    fun markHasSwiped() {
+        viewModelScope.launch {
+            DiFangKeApp.instance.preferences.setHasSwiped(true)
         }
     }
 }

@@ -53,4 +53,9 @@ interface FootprintDao {
         LIMIT 1
     """)
     suspend fun getLastFootprintAfter(afterTime: Date): FootprintEntity?
+    @Query("SELECT DISTINCT date(startTime/1000, 'unixepoch', 'localtime') FROM footprints WHERE statusValue != 'ignored' ORDER BY startTime ASC")
+    fun observeAvailableDates(): Flow<List<String>>
+
+    @Query("DELETE FROM footprints")
+    suspend fun deleteAll()
 }

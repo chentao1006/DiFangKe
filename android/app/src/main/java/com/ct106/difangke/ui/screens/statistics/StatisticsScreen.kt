@@ -1,24 +1,25 @@
 package com.ct106.difangke.ui.screens.statistics
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.ct106.difangke.data.model.TransportType
+import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -26,13 +27,17 @@ fun StatisticsScreen(
     onBack: () -> Unit,
     viewModel: StatisticsViewModel = viewModel()
 ) {
-    val barData by viewModel.last7DaysData.collectAsState()
-    val transportDist by viewModel.transportDistribution.collectAsState()
+    val selectedRange by viewModel.selectedRange.collectAsState()
+    val heatmapPoints by viewModel.heatmapPoints.collectAsState()
+    val activityRank by viewModel.activityRank.collectAsState()
+    val trendData by viewModel.trendData.collectAsState()
+    val aiSummary by viewModel.aiSummary.collectAsState()
+    val isGeneratingSummary by viewModel.isGeneratingSummary.collectAsState()
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("足迹统计") },
+                title = { Text("统计洞察") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "返回")
@@ -40,120 +45,218 @@ fun StatisticsScreen(
                 }
             )
         }
-    ) { padding ->
-        LazyColumn(
+    ) { paddingValues ->
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding),
-            contentPadding = PaddingValues(16.dp),
+                .padding(paddingValues)
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
-            item {
-                Text(
-                    text = "近7天停留时长 (小时)",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                if (barData.isNotEmpty()) {
-                    BarChartCanvas(barData)
-                } else {
-                    Box(Modifier.height(200.dp).fillMaxWidth(), contentAlignment = androidx.compose.ui.Alignment.Center) {
-                        Text("暂无数据", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
+            // 1. Range Picker
+            RangePickerRow(
+                selectedRange = selectedRange,
+                onRangeSelected = { viewModel.setRange(it) }
+            )
 
-            item {
-                Text(
-                    text = "交通里程分布",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                if (transportDist.isNotEmpty()) {
-                    PieChartCanvas(transportDist)
-                } else {
-                    Box(Modifier.height(200.dp).fillMaxWidth(), contentAlignment = androidx.compose.ui.Alignment.Center) {
-                        Text("暂无数据", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
+            // 2. AI Summary Card
+            AiSummaryCard(summary = aiSummary, isGenerating = isGeneratingSummary)
+
+            // 3. Activity Rank
+            ActivityRankCard(items = activityRank)
+
+            // 4. Trend Chart (Simplified placeholder)
+            TrendChartCard(points = trendData)
+            
+            Spacer(modifier = Modifier.height(80.dp))
         }
     }
 }
 
 @Composable
-fun BarChartCanvas(data: List<Float>) {
-    val barColor = MaterialTheme.colorScheme.primary
-    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+fun RangePickerRow(
+    selectedRange: StatisticsRange,
+    onRangeSelected: (StatisticsRange) -> Unit
+) {
+    var showYearMenu by remember { mutableStateOf(false) }
+    val currentYear = Calendar.getInstance().get(Calendar.YEAR)
+    val years = (currentYear downTo currentYear - 5).toList()
 
-    Canvas(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(200.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        val width = size.width
-        val height = size.height
-        val maxData = data.maxOrNull()?.coerceAtLeast(1f) ?: 1f
-        val barSpacing = width / (data.size * 1.5f)
-        val barWidth = barSpacing * 0.8f
-
-        data.forEachIndexed { index, value ->
-            val barHeight = (value / maxData) * height
-            val startX = index * barSpacing + (barSpacing - barWidth) / 2
-            
-            drawRoundRect(
-                color = barColor,
-                topLeft = Offset(startX, height - barHeight),
-                size = Size(barWidth, barHeight),
-                cornerRadius = CornerRadius(12f, 12f)
-            )
-        }
-    }
-}
-
-@Composable
-fun PieChartCanvas(data: Map<TransportType, Float>) {
-    val colors = listOf(Color(0xFF34C759), Color(0xFF007AFF), Color(0xFFFF9500), Color(0xFFFF2D55), Color(0xFF5856D6))
-    val sortedData = data.values.toList()
-    val total = sortedData.sum()
-
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        Canvas(
-            modifier = Modifier
-                .size(180.dp)
-        ) {
-            val radius = size.minDimension / 2f
-            val center = Offset(size.width / 2f, size.height / 2f)
-
-            var startAngle = -90f
-
-            data.values.forEachIndexed { index, value ->
-                val sweepAngle = (value / total) * 360f
-                
-                drawArc(
-                    color = colors[index % colors.size],
-                    startAngle = startAngle,
-                    sweepAngle = sweepAngle,
-                    useCenter = false,
-                    topLeft = Offset(center.x - radius + 20f, center.y - radius + 20f),
-                    size = Size(radius * 2 - 40f, radius * 2 - 40f),
-                    style = Stroke(width = 40f)
+        listOf(
+            StatisticsRange.LAST_7_DAYS, 
+            StatisticsRange.LAST_30_DAYS, 
+            StatisticsRange.LAST_90_DAYS, 
+            StatisticsRange.LAST_YEAR
+        ).forEach { range ->
+            val isSelected = selectedRange == range
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                    .clickable { onRangeSelected(range) }
+                    .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    range.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                 )
-                
-                startAngle += sweepAngle
             }
         }
         
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            data.keys.forEachIndexed { index, type ->
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    Box(Modifier.size(12.dp).background(colors[index % colors.size], CircleShape))
-                    Spacer(Modifier.width(8.dp))
-                    Text(type.localizedName, style = MaterialTheme.typography.bodySmall)
+        // Year Selector
+        val isCustomOrAll = selectedRange is StatisticsRange.CUSTOM_YEAR || selectedRange == StatisticsRange.ALL
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .clip(RoundedCornerShape(8.dp))
+                .background(if (isCustomOrAll) MaterialTheme.colorScheme.primary else Color.Transparent)
+                .clickable { showYearMenu = true }
+                .padding(vertical = 8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val label = when (val range = selectedRange) {
+                    is StatisticsRange.CUSTOM_YEAR -> "${range.year}"
+                    StatisticsRange.ALL -> "全部"
+                    else -> "年份"
+                }
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isCustomOrAll) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Icon(
+                    Icons.Default.KeyboardArrowDown, 
+                    null, 
+                    Modifier.size(12.dp),
+                    tint = if (isCustomOrAll) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            
+            DropdownMenu(expanded = showYearMenu, onDismissRequest = { showYearMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text("全部时间") },
+                    onClick = { onRangeSelected(StatisticsRange.ALL); showYearMenu = false }
+                )
+                years.forEach { year ->
+                    DropdownMenuItem(
+                        text = { Text("$year") },
+                        onClick = { onRangeSelected(StatisticsRange.CUSTOM_YEAR(year)); showYearMenu = false }
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+fun AiSummaryCard(summary: String?, isGenerating: Boolean) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        LabelWithIcon("生活洞察", Icons.Default.AutoAwesome)
+        Spacer(Modifier.height(12.dp))
+        
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(24.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(20.dp)
+        ) {
+            if (isGenerating) {
+                CircularProgressIndicator(modifier = Modifier.size(24.dp).align(Alignment.Center))
+            } else {
+                Text(
+                    summary ?: "还没有足够的足迹数据来生成洞察，继续探索吧！",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                    lineHeight = 22.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun ActivityRankCard(items: List<ActivityRankItem>) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        LabelWithIcon("活动分布", Icons.Default.BarChart)
+        Spacer(Modifier.height(12.dp))
+        
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(24.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            if (items.isEmpty()) {
+                Text("暂无数据", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+            } else {
+                items.take(5).forEach { item ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(android.graphics.Color.parseColor(item.colorHex)).copy(alpha = 0.2f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            // Icon placeholder
+                            Icon(Icons.Default.Place, null, modifier = Modifier.size(16.dp), tint = Color(android.graphics.Color.parseColor(item.colorHex)))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Text(item.name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                        Text("${item.count}次", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TrendChartCard(points: List<TrendPoint>) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        LabelWithIcon("活跃趋势", Icons.Default.Timeline)
+        Spacer(Modifier.height(12.dp))
+        
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(180.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(20.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("趋势图表开发中...", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+fun LabelWithIcon(label: String, icon: ImageVector) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(8.dp))
+        Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
     }
 }

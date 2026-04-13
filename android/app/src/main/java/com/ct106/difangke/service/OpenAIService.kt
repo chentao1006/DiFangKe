@@ -3,6 +3,7 @@ package com.ct106.difangke.service
 import android.util.Log
 import com.ct106.difangke.AppConfig
 import com.ct106.difangke.DiFangKeApp
+import androidx.compose.runtime.*
 import com.ct106.difangke.data.db.entity.DailyInsightEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
@@ -39,6 +40,10 @@ class OpenAIService private constructor() {
     var cacheDate: Date? = null
     var cachedTomorrowQuote: Pair<String, String>? = null
 
+    // 网络请求状态 (用于 UI 指示器)
+    var isNetworkRequesting by mutableStateOf(false)
+        private set
+
     private fun generateToken(deviceId: String): String {
         val hour = System.currentTimeMillis() / 1000 / 3600
         val input = AppConfig.SERVICE_SECRET + deviceId + hour
@@ -51,6 +56,7 @@ class OpenAIService private constructor() {
         }
     }
 
+    private var lastRequestTime = 0L
     private val requestMutex = kotlinx.coroutines.sync.Mutex()
 
     private suspend fun getInterval(): Long {
@@ -62,7 +68,18 @@ class OpenAIService private constructor() {
      * 发送网络请求的通用方法
      */
     private suspend fun postRequest(body: Map<String, Any>): JSONObject? = requestMutex.withLock {
-        withContext(Dispatchers.IO) {
+        isNetworkRequesting = true
+        val interval = getInterval()
+        val now = System.currentTimeMillis()
+        val elapsed = now - lastRequestTime
+        
+        if (elapsed < interval) {
+            val waitTime = interval - elapsed
+            Log.d(TAG, "Rate limiting: waiting ${waitTime}ms...")
+            delay(waitTime)
+        }
+
+        val result = withContext(Dispatchers.IO) {
             val serviceType = prefs.aiServiceType.first()
             val isCustom = serviceType == "custom"
 
@@ -93,7 +110,7 @@ class OpenAIService private constructor() {
                 requestBody["model"] = model
             }
 
-            val result = runCatching {
+            runCatching {
                 val url = URL(urlStr)
                 val conn = url.openConnection() as HttpURLConnection
                 conn.apply {
@@ -127,11 +144,11 @@ class OpenAIService private constructor() {
             }.onFailure {
                 Log.e(TAG, "Request failed", it)
             }.getOrNull()
-
-            // 强制休眠逻辑
-            delay(getInterval())
-            result
         }
+
+        lastRequestTime = System.currentTimeMillis()
+        isNetworkRequesting = false
+        result
     }
 
     /**
@@ -353,6 +370,40 @@ class OpenAIService private constructor() {
             res
         } catch (ignored: Exception) {
             fallback
+        }
+    }
+
+    /**
+     * 测试连接是否通畅
+     */
+    suspend fun testConnection(callback: (Boolean, String) -> Unit) = withContext(Dispatchers.IO) {
+        val body = mapOf(
+            "messages" to listOf(
+                mapOf("role" to "user", "content" to "ping")
+            ),
+            "max_tokens" to 5
+        )
+        val response = postRequest(body)
+        if (response != null && response.has("choices")) {
+            withContext(Dispatchers.Main) { callback(true, "连接成功") }
+        } else {
+            withContext(Dispatchers.Main) { callback(false, "连接失败，请检查配置及网络") }
+        }
+    }
+
+    suspend fun getCustomSummary(prompt: String): String? = withContext(Dispatchers.IO) {
+        val body = mapOf(
+            "temperature" to 0.85,
+            "messages" to listOf(
+                mapOf("role" to "system", "content" to "你是一位文字优美、情感细腻的生活观察者。"),
+                mapOf("role" to "user", "content" to prompt)
+            )
+        )
+        val response = postRequest(body) ?: return@withContext null
+        try {
+            response.getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content").trim()
+        } catch (e: Exception) {
+            null
         }
     }
 }
