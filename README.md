@@ -49,7 +49,11 @@
 
 ## 下载安装
 
-目前应用正在 App Store 上架审核中，敬请期待。
+**iOS**：在 App Store 搜索“地方客”或点击[这里](https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162)下载。
+
+   <img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/zh-cn?size=250x83&releaseDate=1276560000&h=7914488fd5b3e64803716a5035e4e790" alt="Download on the App Store" style="height: 48px; margin-right: 18px; vertical-align: middle;">
+
+   <img src="./assets/qrcode.png" alt="地方客下载二维码" width="120" style="vertical-align: middle; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); background: #fff; padding: 4px;">
 
 ## 隐私与支持
 
