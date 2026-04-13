@@ -133,14 +133,14 @@ data class ActivityTypePreset(
 val DEFAULT_ACTIVITY_PRESETS = listOf(
     ActivityTypePreset("居家", "home", "#007AFF", 0),
     ActivityTypePreset("工作", "work", "#A2845E", 1),
-    ActivityTypePreset("出行", "car", "#5856D6", 2),
-    ActivityTypePreset("步行", "walk", "#34C759", 3),
-    ActivityTypePreset("美食", "eat", "#FF2D55", 4),
-    ActivityTypePreset("购物", "shopping", "#FFCC00", 5),
-    ActivityTypePreset("景点", "sightseeing", "#FF9500", 6),
-    ActivityTypePreset("跑步", "run", "#AF52DE", 7),
-    ActivityTypePreset("骑行", "cycle", "#32ADE6", 8),
-    ActivityTypePreset("交通", "train", "#FF3B30", 9)
+    ActivityTypePreset("旅游", "airplane_ticket", "#FF9500", 2),
+    ActivityTypePreset("睡眠", "bedtime", "#5856D6", 3),
+    ActivityTypePreset("美食", "restaurant", "#FF2D55", 4),
+    ActivityTypePreset("购物", "shopping_bag", "#FFCC00", 5),
+    ActivityTypePreset("运动", "directions_run", "#34C759", 6),
+    ActivityTypePreset("娱乐", "sports_esports", "#AF52DE", 7),
+    ActivityTypePreset("学习", "menu_book", "#32ADE6", 8),
+    ActivityTypePreset("医疗", "medical_services", "#FF3B30", 9)
 )
 
 // ── 位置建议（对应 iOS LocationSuggestion）───────────────────────

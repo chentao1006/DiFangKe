@@ -38,7 +38,7 @@ class PlacesViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun savePlace(id: String?, name: String, address: String, lat: Double, lon: Double) {
+    fun savePlace(id: String?, name: String, address: String, lat: Double, lon: Double, radius: Float = 50f) {
         viewModelScope.launch {
             if (id == null) {
                 db.placeDao().insert(PlaceEntity(
@@ -46,16 +46,18 @@ class PlacesViewModel(application: Application) : AndroidViewModel(application) 
                     address = address,
                     latitude = lat,
                     longitude = lon,
+                    radius = radius,
                     isUserDefined = true
                 ))
             } else {
-                val existing = allPlaces.value.find { it.placeID == id }
+                val existing = db.placeDao().getById(id)
                 if (existing != null) {
                     db.placeDao().update(existing.copy(
                         name = name,
                         address = address,
                         latitude = lat,
-                        longitude = lon
+                        longitude = lon,
+                        radius = radius
                     ))
                 }
             }

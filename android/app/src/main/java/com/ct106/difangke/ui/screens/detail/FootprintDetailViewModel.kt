@@ -46,5 +46,13 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
             _footprint.value = updated
         }
     }
+
+    fun deleteFootprint() {
+        val current = _footprint.value ?: return
+        viewModelScope.launch {
+            db.footprintDao().delete(current)
+            _footprint.value = null
+        }
+    }
 }
 

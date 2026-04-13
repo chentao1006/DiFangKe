@@ -51,13 +51,40 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                 } catch (e: Exception) {}
             }
 
+            // 加载交通轨迹
+            val transports = db.transportRecordDao().getForDay(startOfTarget, Date(startOfTarget.time + 86400000L))
+            transports.forEach { tp ->
+                try {
+                    val pts = gson.fromJson(tp.pointsJson, Array<Array<Double>>::class.java)
+                    pts.forEach { p ->
+                        dbPoints.add(p[0] to p[1])
+                    }
+                } catch (e: Exception) {}
+            }
+
             // 2. 加载 RawLocationStore 中的原始流水点
             val rawPoints = rawStore.loadLocations(startOfTarget)
             val trajectoryPoints = rawPoints.map { it.latitude to it.longitude }
 
-            // 3. 合并
-            val finalPoints = if (trajectoryPoints.isNotEmpty()) trajectoryPoints else dbPoints
+            // 3. 合并 (如果是今天且有流水点，优先用流水点；否则用数据库聚合点)
+            val finalPoints = if (trajectoryPoints.isNotEmpty() && (timestamp == null || isToday(timestamp))) {
+                trajectoryPoints
+            } else {
+                dbPoints
+            }
             _pathPoints.value = finalPoints.map { it to 0L }
         }
+    }
+
+    private fun isToday(timestamp: Long): Boolean {
+        val cal = Calendar.getInstance()
+        val today = cal.apply {
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        cal.timeInMillis = timestamp
+        val target = cal.apply {
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        return today == target
     }
 }

@@ -25,6 +25,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.ui.components.getIconForName
 import java.text.SimpleDateFormat
 import java.util.*
 import org.json.JSONArray
@@ -42,6 +43,32 @@ fun FootprintDetailScreen(
     var title by remember { mutableStateOf("") }
     var reason by remember { mutableStateOf("") }
     var selectedActivityType by remember { mutableStateOf<String?>(null) }
+    var showingDeleteAlert by remember { mutableStateOf(false) }
+
+    if (showingDeleteAlert) {
+        AlertDialog(
+            onDismissRequest = { showingDeleteAlert = false },
+            title = { Text("删除足迹", fontWeight = FontWeight.Bold) },
+            text = { Text("确定要删除这段段时光吗？此操作不可撤销。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteFootprint()
+                        onBack()
+                        showingDeleteAlert = false
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showingDeleteAlert = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
 
     LaunchedEffect(footprintId) {
         viewModel.loadFootprint(footprintId)
@@ -221,7 +248,7 @@ fun FootprintDetailScreen(
                 
                 // 删除按钮
                 TextButton(
-                    onClick = { /* TODO: 实现删除 */ },
+                    onClick = { showingDeleteAlert = true },
                     modifier = Modifier.align(Alignment.CenterHorizontally),
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
                 ) {
@@ -255,7 +282,7 @@ fun ActivityTypeIcon(
             if (selected != null) {
                 // 这里可以根据 icon 字符串映射到图标
                 Icon(
-                    imageVector = Icons.Default.AutoAwesome, // 默认占位
+                    imageVector = com.ct106.difangke.ui.components.getIconForName(selected.icon),
                     contentDescription = selected.name,
                     tint = try { Color(android.graphics.Color.parseColor(selected.colorHex)) } catch (e: Exception) { MaterialTheme.colorScheme.primary },
                     modifier = Modifier.size(28.dp)
@@ -282,7 +309,7 @@ fun ActivityTypeIcon(
                     onClick = { onTypeSelected(type.id); showMenu = false },
                     leadingIcon = { 
                         Icon(
-                            Icons.Default.Label, // 占位
+                            imageVector = com.ct106.difangke.ui.components.getIconForName(type.icon),
                             contentDescription = null,
                             tint = try { Color(android.graphics.Color.parseColor(type.colorHex)) } catch (e: Exception) { Color.Gray }
                         )

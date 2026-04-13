@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
+import com.ct106.difangke.ui.components.getIconForName
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -34,6 +35,31 @@ fun ActivityTypeSettingsScreen(
     val activities by viewModel.activities.collectAsState()
     var editingActivity by remember { mutableStateOf<ActivityTypeEntity?>(null) }
     var showingAddDialog by remember { mutableStateOf(false) }
+    var trashActivity by remember { mutableStateOf<ActivityTypeEntity?>(null) }
+
+    if (trashActivity != null) {
+        AlertDialog(
+            onDismissRequest = { trashActivity = null },
+            title = { Text("确认删除", fontWeight = FontWeight.Bold) },
+            text = { Text("确认执行删除操作吗？此操作无法撤销。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteActivity(trashActivity!!)
+                        trashActivity = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { trashActivity = null }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -71,7 +97,7 @@ fun ActivityTypeSettingsScreen(
                 ActivityTypeRow(
                     activity = activity,
                     onClick = { editingActivity = activity },
-                    onDelete = { viewModel.deleteActivity(activity) }
+                    onDelete = { trashActivity = activity }
                 )
                 Divider(
                     modifier = Modifier.padding(horizontal = 16.dp),
@@ -139,52 +165,7 @@ fun ActivityTypeRow(
     )
 }
 
-// 辅助函数把图标名称转为 ImageVector
-@Composable
-fun getIconForName(name: String): androidx.compose.ui.graphics.vector.ImageVector {
-    return when(name) {
-        "home" -> Icons.Default.Home
-        "work" -> Icons.Default.Work
-        "restaurant" -> Icons.Default.Restaurant
-        "shopping_bag" -> Icons.Default.ShoppingBag
-        "directions_run" -> Icons.Default.DirectionsRun
-        "directions_walk" -> Icons.Default.DirectionsWalk
-        "directions_bike" -> Icons.Default.DirectionsBike
-        "directions_car" -> Icons.Default.DirectionsCar
-        "flight" -> Icons.Default.Flight
-        "train" -> Icons.Default.Train
-        "tram" -> Icons.Default.Tram
-        "directions_boat" -> Icons.Default.DirectionsBoat
-        "sports_esports" -> Icons.Default.SportsEsports
-        "menu_book" -> Icons.Default.MenuBook
-        "local_hospital" -> Icons.Default.LocalHospital
-        "bedtime" -> Icons.Default.Bedtime
-        "theater_comedy" -> Icons.Default.TheaterComedy
-        "fitness_center" -> Icons.Default.FitnessCenter
-        "self_improvement" -> Icons.Default.SelfImprovement
-        "coffee" -> Icons.Default.LocalCafe
-        "restaurant" -> Icons.Default.Restaurant
-        "shopping_cart" -> Icons.Default.ShoppingCart
-        "shopping_bag" -> Icons.Default.ShoppingBag
-        "movie" -> Icons.Default.Movie
-        "brush" -> Icons.Default.Brush
-        "palette" -> Icons.Default.Palette
-        "camera_alt" -> Icons.Default.CameraAlt
-        "music_note" -> Icons.Default.MusicNote
-        "school" -> Icons.Default.School
-        "work" -> Icons.Default.Work
-        "laptop" -> Icons.Default.LaptopMac
-        "calculate" -> Icons.Default.Calculate
-        "bank" -> Icons.Default.HomeWork
-        "park" -> Icons.Default.Park
-        "stadium" -> Icons.Default.Stadium
-        "hiking" -> Icons.Default.Hiking
-        "pool" -> Icons.Default.Pool
-        "pets" -> Icons.Default.Pets
-        "volunteer_activism" -> Icons.Default.VolunteerActivism
-        else -> Icons.Default.Label
-    }
-}
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -205,11 +186,14 @@ fun ActivityTypeEditorDialog(
     )
 
     val icons = listOf(
-        "home", "work", "laptop", "restaurant", "coffee", "shopping_cart", "shopping_bag",
-        "directions_run", "directions_walk", "directions_bike", "directions_car", "flight", "train",
-        "sports_esports", "menu_book", "movie", "camera_alt", "music_note", "brush", "palette",
-        "local_hospital", "bedtime", "theater_comedy", "fitness_center", "self_improvement",
-        "school", "calculate", "bank", "park", "stadium", "hiking", "pool", "pets", "label"
+        "home", "work", "laptop", "restaurant", "coffee", "local_bar", "fastfood", "cake",
+        "shopping_cart", "shopping_bag", "directions_run", "directions_walk", "directions_bike", "directions_car",
+        "airplane_ticket", "train", "tram", "directions_boat", "sports_esports", "menu_book", "movie", "camera_alt",
+        "music_note", "piano", "brush", "palette", "medical_services", "bedtime", "theater_comedy", "fitness_center",
+        "self_improvement", "school", "calculate", "bank", "park", "landscape", "beach_access", "stadium", "hiking",
+        "pool", "pets", "volunteer_activism", "celebration", "church", "museum", "attractions", "castle", "stroller",
+        "child_care", "family_restroom", "wc", "smoke_free", "apartment", "cottage", "factory", "sailing", "kayaking",
+        "surfing", "emoji_events", "label"
     )
 
     AlertDialog(

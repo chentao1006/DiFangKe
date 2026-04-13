@@ -106,14 +106,14 @@ fun FootprintCardView(
                 .clickable { onClick() },
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.elevatedCardColors(
-                containerColor = if (androidx.compose.foundation.isSystemInDarkTheme()) Color.Black else Color.White
+                containerColor = MaterialTheme.colorScheme.surface
             ),
             elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
                 // 背景图标 (iOS 风格)
                 Icon(
-                    imageVector = getActivityIcon(footprint.activityTypeValue),
+                    imageVector = getIconForName(footprint.activityTypeValue),
                     contentDescription = null,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -274,7 +274,7 @@ fun RecordingStatusCard(
             .clickable { onNavigateToMap() },
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.elevatedCardColors(
-            containerColor = if (androidx.compose.foundation.isSystemInDarkTheme()) Color.Black else Color.White
+            containerColor = MaterialTheme.colorScheme.surface
         ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
     ) {
@@ -399,6 +399,7 @@ fun RecordingStatusCard(
                         MiniMapView(
                             lat = currentLat, 
                             lon = currentLon,
+                            isCurrentLocation = true,
                             onClick = onNavigateToMap
                         )
                     }
@@ -454,7 +455,7 @@ fun DaySummaryCard(
             .clickable { onNavigateToMap() },
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.elevatedCardColors(
-            containerColor = if (androidx.compose.foundation.isSystemInDarkTheme()) Color.Black else Color.White
+            containerColor = MaterialTheme.colorScheme.surface
         ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp)
     ) {
@@ -503,22 +504,7 @@ private fun formatDistance(meters: Double): String {
     }
 }
 
-private fun getActivityIcon(type: String?): androidx.compose.ui.graphics.vector.ImageVector {
-    return when(type) {
-        "walk" -> Icons.Default.DirectionsWalk
-        "run" -> Icons.Default.DirectionsRun
-        "cycle" -> Icons.Default.DirectionsBike
-        "car" -> Icons.Default.DirectionsCar
-        "train" -> Icons.Default.Train
-        "plane" -> Icons.Default.AirplanemodeActive
-        "eat" -> Icons.Default.Restaurant
-        "work" -> Icons.Default.BusinessCenter
-        "home" -> Icons.Default.Home
-        "shopping" -> Icons.Default.ShoppingCart
-        "sightseeing" -> Icons.Default.PhotoCamera
-        else -> Icons.AutoMirrored.Filled.Help
-    }
-}
+
 
 @Composable
 fun DailyInsightView(content: String) {
@@ -567,7 +553,7 @@ fun DailyInsightView(content: String) {
 }
 
 @Composable
-fun MiniMapView(lat: Double? = null, lon: Double? = null, pointsJson: String? = null, markersJson: String? = null, onClick: () -> Unit) {
+fun MiniMapView(lat: Double? = null, lon: Double? = null, pointsJson: String? = null, markersJson: String? = null, isCurrentLocation: Boolean = false, onClick: () -> Unit) {
     val context = LocalContext.current
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
@@ -605,7 +591,15 @@ fun MiniMapView(lat: Double? = null, lon: Double? = null, pointsJson: String? = 
             
             amap.clear()
             
-            if (pointsJson != null) {
+            if (isCurrentLocation && lat != null && lon != null) {
+                val myLocationStyle = com.amap.api.maps.model.MyLocationStyle()
+                myLocationStyle.myLocationType(com.amap.api.maps.model.MyLocationStyle.LOCATION_TYPE_LOCATION_ROTATE_NO_CENTER)
+                myLocationStyle.showMyLocation(true)
+                amap.myLocationStyle = myLocationStyle
+                amap.isMyLocationEnabled = true
+                val target = com.amap.api.maps.model.LatLng(lat, lon)
+                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(target, 16f))
+            } else if (pointsJson != null) {
                 try {
                     val array = org.json.JSONArray(pointsJson)
                     val points = mutableListOf<com.amap.api.maps.model.LatLng>()
@@ -734,7 +728,7 @@ fun PlaceholderFootprintCard(trackingState: LocationTrackingService.TrackingStat
                 .padding(vertical = 8.dp),
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.elevatedCardColors(
-                containerColor = if (androidx.compose.foundation.isSystemInDarkTheme()) Color.Black.copy(alpha = 0.5f) else Color.White
+                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
             ),
             elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
         ) {

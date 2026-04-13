@@ -19,6 +19,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.util.Log
+import android.os.Bundle
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -63,10 +65,13 @@ fun StatisticsScreen(
             // 2. AI Summary Card
             AiSummaryCard(summary = aiSummary, isGenerating = isGeneratingSummary)
 
-            // 3. Activity Rank
+            // 3. Heatmap Card
+            HeatmapCard(points = heatmapPoints)
+
+            // 4. Activity Rank
             ActivityRankCard(items = activityRank)
 
-            // 4. Trend Chart (Simplified placeholder)
+            // 5. Trend Chart
             TrendChartCard(points = trendData)
             
             Spacer(modifier = Modifier.height(80.dp))
@@ -169,22 +174,97 @@ fun AiSummaryCard(summary: String?, isGenerating: Boolean) {
         LabelWithIcon("生活洞察", Icons.Default.AutoAwesome)
         Spacer(Modifier.height(12.dp))
         
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(20.dp)
+        ElevatedCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
         ) {
-            if (isGenerating) {
-                CircularProgressIndicator(modifier = Modifier.size(24.dp).align(Alignment.Center))
-            } else {
-                Text(
-                    summary ?: "还没有足够的足迹数据来生成洞察，继续探索吧！",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                    lineHeight = 22.sp
-                )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp)
+            ) {
+                if (isGenerating) {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp).align(Alignment.Center))
+                } else {
+                    Text(
+                        summary ?: "还没有足够的足迹数据来生成洞察，继续探索吧！",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                        lineHeight = 22.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HeatmapCard(points: List<HeatmapPoint>) {
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    Column(modifier = Modifier.fillMaxWidth()) {
+        LabelWithIcon("热力分布", Icons.Default.Whatshot)
+        Spacer(Modifier.height(12.dp))
+        
+        ElevatedCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(260.dp)
+                    .clip(RoundedCornerShape(24.dp))
+            ) {
+                androidx.compose.ui.viewinterop.AndroidView(
+                    factory = { ctx ->
+                        com.amap.api.maps.TextureMapView(ctx).apply {
+                            onCreate(Bundle())
+                            onResume()
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                ) { view ->
+                    val amap = view.map
+                    amap.mapType = if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT else com.amap.api.maps.AMap.MAP_TYPE_NORMAL
+                    amap.uiSettings.apply {
+                        isZoomControlsEnabled = false
+                        isMyLocationButtonEnabled = false
+                    }
+                    amap.clear()
+                    
+                    if (points.isNotEmpty()) {
+                        try {
+                            val latLngs = points.map { com.amap.api.maps.model.LatLng(it.lat, it.lon) }
+                            val provider = com.amap.api.maps.model.HeatmapTileProvider.Builder()
+                                .data(latLngs)
+                                .radius(20) // 适当调大热力半径
+                                .build()
+                            amap.addTileOverlay(com.amap.api.maps.model.TileOverlayOptions().tileProvider(provider))
+                            
+                            // 自动缩放
+                            val boundsBuilder = com.amap.api.maps.model.LatLngBounds.builder()
+                            latLngs.forEach { boundsBuilder.include(it) }
+                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 50))
+                        } catch (e: Exception) {
+                            // 降级：显示 Marker
+                            points.take(50).forEach { 
+                                amap.addMarker(com.amap.api.maps.model.MarkerOptions().position(com.amap.api.maps.model.LatLng(it.lat, it.lon)))
+                            }
+                        }
+                    }
+                }
+                
+                if (points.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha=0.03f)), contentAlignment = Alignment.Center) {
+                        Text("暂无分布数据", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    }
+                }
             }
         }
     }
@@ -196,35 +276,46 @@ fun ActivityRankCard(items: List<ActivityRankItem>) {
         LabelWithIcon("活动分布", Icons.Default.BarChart)
         Spacer(Modifier.height(12.dp))
         
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ElevatedCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
         ) {
-            if (items.isEmpty()) {
-                Text("暂无数据", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
-            } else {
-                items.take(5).forEach { item ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(32.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(android.graphics.Color.parseColor(item.colorHex)).copy(alpha = 0.2f)),
-                            contentAlignment = Alignment.Center
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                if (items.isEmpty()) {
+                    Text("暂无数据", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+                } else {
+                    items.take(8).forEach { item ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Icon placeholder
-                            Icon(Icons.Default.Place, null, modifier = Modifier.size(16.dp), tint = Color(android.graphics.Color.parseColor(item.colorHex)))
+                            val color = try { Color(android.graphics.Color.parseColor(item.colorHex)) } catch (e: Exception) { MaterialTheme.colorScheme.primary }
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(color.copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = com.ct106.difangke.ui.components.getIconForName(item.icon), 
+                                    contentDescription = null, 
+                                    modifier = Modifier.size(18.dp), 
+                                    tint = color
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Text(item.name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            Text("${item.count}次", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                         }
-                        Spacer(Modifier.width(12.dp))
-                        Text(item.name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                        Text("${item.count}次", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -238,16 +329,22 @@ fun TrendChartCard(points: List<TrendPoint>) {
         LabelWithIcon("活跃趋势", Icons.Default.Timeline)
         Spacer(Modifier.height(12.dp))
         
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(180.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(20.dp),
-            contentAlignment = Alignment.Center
+        ElevatedCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
         ) {
-            Text("趋势图表开发中...", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(180.dp)
+                    .padding(20.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("分段活跃度趋势图表开发中...", color = Color.Gray.copy(alpha=0.6f), style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }

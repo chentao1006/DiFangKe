@@ -51,6 +51,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (dates.none { it.time == today.time }) dates.add(today)
         if (dates.none { it.time == tomorrow.time }) dates.add(tomorrow)
         if (dates.none { it.time == current.time }) dates.add(current)
+
+        // 核心修复：确保有最早日期的前一天（iOS 特性）
+        val earliest = dates.minByOrNull { it.time }
+        if (earliest != null) {
+            val beforeEarliest = Calendar.getInstance().apply {
+                time = earliest
+                add(Calendar.DAY_OF_YEAR, -1)
+            }.time
+            if (dates.none { it.time == beforeEarliest.time }) {
+                dates.add(beforeEarliest)
+            }
+        }
         
         dates.sortedBy { it.time }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), listOf(_currentDate.value))

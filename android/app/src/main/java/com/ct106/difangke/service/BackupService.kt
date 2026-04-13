@@ -93,7 +93,7 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         val speed: Double,
         val pts: String,
         val manualType: String?,
-        val status: String
+        val status: String? = null
     )
 
     data class RestoreReport(
@@ -224,14 +224,16 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
             }
         }
 
-        backup.activityTypes?.forEach { a ->
+        backup.activityTypes?.forEachIndexed { index, a ->
             val existing = db.activityTypeDao().getById(a.id)
             if (existing == null) {
                 db.activityTypeDao().insert(com.ct106.difangke.data.db.entity.ActivityTypeEntity(
                     id = a.id,
                     name = a.name,
                     icon = a.icon,
-                    colorHex = a.colorHex
+                    colorHex = a.colorHex,
+                    sortOrder = index,
+                    isSystem = false
                 ))
             }
         }
@@ -251,7 +253,7 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     averageSpeed = t.speed,
                     pointsJson = t.pts,
                     manualTypeRaw = t.manualType,
-                    statusRaw = t.status
+                    statusRaw = t.status ?: "active"
                 ))
             }
         }

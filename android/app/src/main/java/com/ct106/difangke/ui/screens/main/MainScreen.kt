@@ -172,9 +172,6 @@ fun MainScreen(
                     IconButton(onClick = onNavigateToHistory) {
                         Icon(Icons.Default.History, contentDescription = "历史")
                     }
-                    IconButton(onClick = { showNativeDatePicker = true }) {
-                        Icon(Icons.Default.CalendarMonth, contentDescription = "日历")
-                    }
                     IconButton(onClick = onNavigateToStatistics) {
                         Icon(Icons.Default.BarChart, contentDescription = "统计")
                     }
@@ -339,13 +336,7 @@ fun MainScreen(
                                     }
                                 }
 
-                                dailyInsight?.let { insight ->
-                                    if (!insight.content.isNullOrEmpty()) {
-                                        item {
-                                            DailyInsightView(content = insight.content!!)
-                                        }
-                                    }
-                                }
+
                                 
                                 if (items.isEmpty() && !isFuturePage) {
                                     if (isTodayPage) {
@@ -503,6 +494,7 @@ fun SwipeHintFooter() {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MiniCalendarDialog(
     selectedDate: Date,
@@ -510,92 +502,129 @@ fun MiniCalendarDialog(
     onDateSelected: (Date) -> Unit,
     onDismiss: () -> Unit
 ) {
+    // 基础参考点：当前选中的日期对应的月份
+    val initialMonth = remember(selectedDate) {
+        Calendar.getInstance().apply { 
+            time = selectedDate
+            set(Calendar.DAY_OF_MONTH, 1)
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }
+    }
+
+    // 我们可以支持前后各 24 个月的滚动
+    val pageCount = 48
+    val initialPage = 24
+    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { pageCount })
+
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(26.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp,
-            modifier = Modifier.width(300.dp)
+            modifier = Modifier.width(320.dp)
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Header (Month Year)
-                val sdf = SimpleDateFormat("yyyy年M月", Locale.CHINA)
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier.height(320.dp)
+                ) { page ->
+                    val monthOffset = page - initialPage
+                    val monthCalendar = (initialMonth.clone() as Calendar).apply {
+                        add(Calendar.MONTH, monthOffset)
+                    }
+                    
+                    MonthView(
+                        monthCalendar = monthCalendar,
+                        selectedDate = selectedDate,
+                        availableDates = availableDates,
+                        onDateSelected = onDateSelected
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MonthView(
+    monthCalendar: Calendar,
+    selectedDate: Date,
+    availableDates: Set<Date>,
+    onDateSelected: (Date) -> Unit
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        // Header
+        val sdf = SimpleDateFormat("yyyy年M月", Locale.CHINA)
+        Text(
+            text = sdf.format(monthCalendar.time),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+        
+        // Weekdays
+        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+            listOf("日", "一", "二", "三", "四", "五", "六").forEach {
                 Text(
-                    text = sdf.format(selectedDate),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    text = it,
+                    modifier = Modifier.weight(1f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    fontWeight = FontWeight.Bold
                 )
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                // Days of week
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    listOf("日", "一", "二", "三", "四", "五", "六").forEach {
+            }
+        }
+        
+        val days = getDaysInMonth(monthCalendar.time)
+        val startOfDay = { d: Date -> 
+            Calendar.getInstance().apply { 
+                time = d; set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            }.time
+        }
+        val availableStartOfDays = remember(availableDates) {
+            availableDates.map { startOfDay(it) }.toSet()
+        }
+
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(7),
+            modifier = Modifier.fillMaxWidth().height(240.dp),
+            userScrollEnabled = false
+        ) {
+            itemsIndexed(days) { _, date ->
+                if (date != null) {
+                    val isSelected = startOfDay(date).time == startOfDay(selectedDate).time
+                    val isAvailable = availableStartOfDays.contains(startOfDay(date))
+                    val isToday = startOfDay(date).time == startOfDay(Date()).time
+                    
+                    Box(
+                        modifier = Modifier
+                            .aspectRatio(1f)
+                            .padding(2.dp)
+                            .clip(CircleShape)
+                            .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                            .clickable(enabled = isAvailable) {
+                                onDateSelected(date)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
                         Text(
-                            text = it,
-                            modifier = Modifier.weight(1f),
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                            fontWeight = FontWeight.Bold
+                            text = Calendar.getInstance().apply { time = date }.get(Calendar.DAY_OF_MONTH).toString(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = when {
+                                isSelected -> Color.White
+                                isAvailable -> if (isToday) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                            }
                         )
                     }
-                }
-                
-                Spacer(modifier = Modifier.height(8.dp))
-                
-                // Calendar Grid
-                val days = remember(selectedDate) { getDaysInMonth(selectedDate) }
-                val startOfDay = { d: Date -> 
-                    Calendar.getInstance().apply { 
-                        time = d; set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
-                    }.time
-                }
-
-                val availableStartOfDays = remember(availableDates) {
-                    availableDates.map { startOfDay(it) }.toSet()
-                }
-
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(7),
-                    modifier = Modifier.height(240.dp)
-                ) {
-                    itemsIndexed(days) { _, date ->
-                        if (date != null) {
-                            val isSelected = startOfDay(date).time == startOfDay(selectedDate).time
-                            val isAvailable = availableStartOfDays.contains(startOfDay(date))
-                            val isToday = startOfDay(date).time == startOfDay(Date()).time
-                            
-                            Box(
-                                modifier = Modifier
-                                    .aspectRatio(1f)
-                                    .padding(2.dp)
-                                    .clip(CircleShape)
-                                    .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
-                                    .clickable(enabled = isAvailable) {
-                                        onDateSelected(date)
-                                    },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = Calendar.getInstance().apply { time = date }.get(Calendar.DAY_OF_MONTH).toString(),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                    color = when {
-                                        isSelected -> Color.White
-                                        isAvailable -> if (isToday) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
-                                    }
-                                )
-                            }
-                        } else {
-                            Spacer(modifier = Modifier.aspectRatio(1f))
-                        }
-                    }
+                } else {
+                    Spacer(modifier = Modifier.aspectRatio(1f))
                 }
             }
         }

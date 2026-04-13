@@ -1,23 +1,31 @@
 package com.ct106.difangke.ui.screens.settings
 
+import android.os.Bundle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ct106.difangke.data.db.entity.PlaceEntity
 
@@ -89,8 +97,8 @@ fun PlacesManagerScreen(
         PlaceEditorDialog(
             place = null,
             onDismiss = { showingAddDialog = false },
-            onSave = { name, address, lat, lon ->
-                viewModel.savePlace(null, name, address, lat, lon)
+            onSave = { name, address, lat, lon, radius ->
+                viewModel.savePlace(null, name, address, lat, lon, radius)
                 showingAddDialog = false
             }
         )
@@ -100,8 +108,8 @@ fun PlacesManagerScreen(
         PlaceEditorDialog(
             place = editingPlace,
             onDismiss = { editingPlace = null },
-            onSave = { name, address, lat, lon ->
-                viewModel.savePlace(editingPlace!!.placeID, name, address, lat, lon)
+            onSave = { name, address, lat, lon, radius ->
+                viewModel.savePlace(editingPlace!!.placeID, name, address, lat, lon, radius)
                 editingPlace = null
             }
         )
@@ -134,7 +142,7 @@ fun PlaceRow(place: PlaceEntity, onClick: () -> Unit, onDelete: () -> Unit) {
     ListItem(
         modifier = Modifier.clickable(onClick = onClick),
         headlineContent = { Text(place.name, fontWeight = FontWeight.SemiBold) },
-        supportingContent = { Text(place.address ?: "未知地址", maxLines = 1, fontSize = 12.sp) },
+        supportingContent = { Text("${place.address ?: "未知地址"} (${place.radius.toInt()}m)", maxLines = 1, fontSize = 12.sp) },
         leadingContent = {
             Box(
                 modifier = Modifier
@@ -146,7 +154,7 @@ fun PlaceRow(place: PlaceEntity, onClick: () -> Unit, onDelete: () -> Unit) {
                 Icon(
                     imageVector = when(place.name) {
                         "家" -> Icons.Default.Home
-                        "公司" -> Icons.Default.Business
+                        "工作", "公司" -> Icons.Default.Business
                         "学校" -> Icons.Default.School
                         else -> Icons.Default.Place
                     },
@@ -164,74 +172,164 @@ fun PlaceRow(place: PlaceEntity, onClick: () -> Unit, onDelete: () -> Unit) {
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun PlaceEditorDialog(
     place: PlaceEntity?,
     onDismiss: () -> Unit,
-    onSave: (String, String, Double, Double) -> Unit
+    onSave: (String, String, Double, Double, Float) -> Unit
 ) {
     var name by remember { mutableStateOf(place?.name ?: "") }
     var address by remember { mutableStateOf(place?.address ?: "") }
-    var lat by remember { mutableStateOf(place?.latitude?.toString() ?: "") }
-    var lon by remember { mutableStateOf(place?.longitude?.toString() ?: "") }
+    var lat by remember { mutableDoubleStateOf(place?.latitude ?: 39.90923) }
+    var lon by remember { mutableDoubleStateOf(place?.longitude ?: 116.397428) }
+    var radius by remember { mutableFloatStateOf(place?.radius ?: 200f) }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (place == null) "添加重要地点" else "编辑地点", fontWeight = FontWeight.Bold) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("名称 (如：家、公司)") },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp)
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
+
+    Dialog(
+        onDismissRequest = onDismiss, 
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                TopAppBar(
+                    title = { Text(if (place == null) "添加重要地点" else "编辑地点", fontWeight = FontWeight.Bold) },
+                    navigationIcon = {
+                        IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, contentDescription = "取消") }
+                    },
+                    actions = {
+                        TextButton(
+                            onClick = { onSave(name, address, lat, lon, radius) },
+                            enabled = name.isNotBlank()
+                        ) {
+                            Text("完成", fontWeight = FontWeight.Bold)
+                        }
+                    }
                 )
-                OutlinedTextField(
-                    value = address,
-                    onValueChange = { address = it },
-                    label = { Text("详细地址") },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp)
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = lat,
-                        onValueChange = { lat = it },
-                        label = { Text("纬度") },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                    OutlinedTextField(
-                        value = lon,
-                        onValueChange = { lon = it },
-                        label = { Text("经度") },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
-                    )
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    // Map Picker
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(350.dp)
+                    ) {
+                        AndroidView(
+                            factory = { ctx ->
+                                com.amap.api.maps.TextureMapView(ctx).apply {
+                                    onCreate(Bundle())
+                                    onResume()
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        ) { view ->
+                            val amap = view.map
+                            amap.mapType = if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT else com.amap.api.maps.AMap.MAP_TYPE_NORMAL
+                            amap.uiSettings.isZoomControlsEnabled = false
+                            
+                            val center = com.amap.api.maps.model.LatLng(lat, lon)
+                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(center, 15f))
+                            
+                            amap.clear()
+                            amap.addMarker(com.amap.api.maps.model.MarkerOptions().position(center))
+                            amap.addCircle(
+                                com.amap.api.maps.model.CircleOptions()
+                                    .center(center)
+                                    .radius(radius.toDouble())
+                                    .fillColor(primaryColor and 0x22FFFFFF)
+                                    .strokeColor(primaryColor)
+                                    .strokeWidth(2f)
+                            )
+                            
+                            amap.setOnMapClickListener { pos ->
+                                lat = pos.latitude
+                                lon = pos.longitude
+                            }
+                        }
+                        
+                        // Center indicator
+                        Icon(
+                            Icons.Default.MyLocation,
+                            contentDescription = null,
+                            modifier = Modifier.align(Alignment.Center).size(24.dp).alpha(0.5f),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        
+                        Text(
+                            "点击地图选择位置",
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 16.dp)
+                                .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+
+                    Spacer(Modifier.height(24.dp))
+
+                    Column(
+                        modifier = Modifier.padding(horizontal = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(20.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = name,
+                            onValueChange = { name = it },
+                            label = { Text("名称 (如：家、公司)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            singleLine = true
+                        )
+
+                        OutlinedTextField(
+                            value = address,
+                            onValueChange = { address = it },
+                            label = { Text("详细地址 (可选)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            singleLine = true
+                        )
+
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("围栏半径", style = MaterialTheme.typography.titleSmall)
+                                Spacer(Modifier.weight(1f))
+                                Text("${radius.toInt()} 米", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            }
+                            Slider(
+                                value = radius,
+                                onValueChange = { radius = it },
+                                valueRange = 100f..1000f,
+                                steps = 8
+                            )
+                            Text(
+                                "当您进入此半径范围内，系统会自动识别为您到达了该地点。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.Gray
+                            )
+                        }
+                        
+                        Text(
+                            "坐标: ${String.format("%.6f", lat)}, ${String.format("%.6f", lon)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.Gray,
+                            modifier = Modifier.alpha(0.5f)
+                        )
+                        
+                        Spacer(Modifier.height(40.dp))
+                    }
                 }
             }
-        },
-        confirmButton = {
-            Button(
-                onClick = { 
-                    val lVal = lat.toDoubleOrNull() ?: 0.0
-                    val rVal = lon.toDoubleOrNull() ?: 0.0
-                    onSave(name, address, lVal, rVal)
-                },
-                enabled = name.isNotBlank() && address.isNotBlank(),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Text("保存")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("取消")
-            }
         }
-    )
+    }
 }
-
-
