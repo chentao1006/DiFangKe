@@ -3,7 +3,7 @@
 > **走过的地方，就是你的生活。**
 
 <p align="center">
- <img src="./Assets/1024x1024bb.png" alt="地方客 Logo" width="128" style="border-radius: 20%;">
+ <img src="./assets/1024x1024bb.png" alt="地方客 Logo" width="128" style="border-radius: 20%;">
 </p>
 
 地方客是一款轻量的日常记录工具，帮你把生活留下来。它不强调复杂的统计，而是关注“人”与“活动”，让你更清晰地理解自己生活的节奏。
