@@ -248,13 +248,6 @@ struct OnboardingView: View {
                     }
                 }
                 
-                Button("以后再说") {
-                    withAnimation {
-                        step = 1
-                    }
-                }
-                .padding(.top, 10)
-                .foregroundColor(.secondary)
             } else if step == 1 {
                 onboardingStep(
                     title: "AI 智能分析",
@@ -269,7 +262,7 @@ struct OnboardingView: View {
                     }
                 }
                 
-                Button("以后再说") {
+                Button("暂不开启") {
                     UserDefaults.standard.set(false, forKey: "isAiAssistantEnabled")
                     withAnimation {
                         isFirstLaunch = false

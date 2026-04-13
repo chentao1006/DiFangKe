@@ -8,6 +8,8 @@ struct DataManagerView: View {
     @Environment(LocationManager.self) private var locationManager
     @Query(sort: \Footprint.startTime, order: .reverse) private var allFootprints: [Footprint]
     @Query(sort: \Place.name) private var allPlaces: [Place]
+    @Query(sort: \ActivityType.sortOrder) private var allActivities: [ActivityType]
+    @Query(sort: \TransportRecord.startTime, order: .reverse) private var allTransports: [TransportRecord]
     
     @State private var showDeleteAlert = false
     @State private var showingExportFileExporter = false
@@ -90,7 +92,9 @@ struct DataManagerView: View {
         do {
             let data = try BackupService.shared.generateBackup(
                 footprints: allFootprints, 
-                places: allPlaces
+                places: allPlaces,
+                activities: allActivities,
+                transports: allTransports
             )
             self.exportData = data
             self.showingExportFileExporter = true
@@ -140,8 +144,12 @@ struct DataManagerView: View {
     
     private func deleteAllData() {
         do {
-            try modelContext.delete(model: Footprint.self)
-            try modelContext.delete(model: Place.self)
+            // Delete all records via query to avoid potential SwiftData 1.0 compiler confusion with delete(model:)
+            try modelContext.delete(model: Footprint.self, where: #Predicate<Footprint> { _ in true })
+            try modelContext.delete(model: Place.self, where: #Predicate<Place> { _ in true })
+            try modelContext.delete(model: ActivityType.self, where: #Predicate<ActivityType> { _ in true })
+            try modelContext.delete(model: TransportRecord.self, where: #Predicate<TransportRecord> { _ in true })
+            
             try modelContext.save()
             CloudSettingsManager.shared.triggerDataSyncPulse()
             locationManager.allTodayPoints = []
@@ -177,18 +185,36 @@ struct BackupDTO: Codable {
     let version: Int
     let places: [PlaceDTO]
     let footprints: [FootprintDTO]
+    let activityTypes: [ActivityTypeDTO]?
+    let transports: [TransportDTO]?
+    
+    init(version: Int, places: [PlaceDTO], footprints: [FootprintDTO], activityTypes: [ActivityTypeDTO]?, transports: [TransportDTO]?) {
+        self.version = version
+        self.places = places
+        self.footprints = footprints
+        self.activityTypes = activityTypes
+        self.transports = transports
+    }
     
     struct PlaceDTO: Codable {
-        let id: UUID
+        let id: String
         let name: String
         let lat: Double
         let lon: Double
         let rad: Float
         let addr: String?
+        let isPriority: Bool?
+        let isIgnored: Bool?
+        
+        enum CodingKeys: String, CodingKey {
+            case id, name, lat, lon, rad, addr
+            case isPriority = "isPriority"
+            case isIgnored = "isIgnored"
+        }
     }
     
     struct FootprintDTO: Codable {
-        let id: UUID
+        let id: String
         let date: Date
         let start: Date
         let end: Date
@@ -198,37 +224,101 @@ struct BackupDTO: Codable {
         let reason: String?
         let status: String
         let score: Float
-        let placeID: UUID?
+        let placeID: String?
         let photos: [String]
         let addr: String?
-        let isHist: Bool?
+        let isHighlight: Bool?
+        let activityType: String?
+        
+        init(id: String, date: Date, start: Date, end: Date, lats: [Double], lngs: [Double], title: String, reason: String?, status: String, score: Float, placeID: String?, photos: [String], addr: String?, isHighlight: Bool?, activityType: String?) {
+            self.id = id
+            self.date = date
+            self.start = start
+            self.end = end
+            self.lats = lats
+            self.lngs = lngs
+            self.title = title
+            self.reason = reason
+            self.status = status
+            self.score = score
+            self.placeID = placeID
+            self.photos = photos
+            self.addr = addr
+            self.isHighlight = isHighlight
+            self.activityType = activityType
+        }
+        
+        enum CodingKeys: String, CodingKey {
+            case id, date, start, end, lats, lngs, title, reason, status, score, photos, addr, placeID, activityType
+            case isHighlight = "isHighlight"
+        }
+    }
+
+    struct ActivityTypeDTO: Codable {
+        let id: String
+        let name: String
+        let icon: String
+        let colorHex: String
+    }
+    
+    struct TransportDTO: Codable {
+        let id: String
+        let day: Date
+        let start: Date
+        let end: Date
+        let from: String
+        let to: String
+        let type: String
+        let dist: Double
+        let speed: Double
+        let pts: String
+        let manualType: String?
+        let status: String?
     }
 }
 
 final class BackupService {
     static let shared = BackupService()
     
-    func generateBackup(footprints: [Footprint], places: [Place]) throws -> Data {
+    func generateBackup(footprints: [Footprint], places: [Place], activities: [ActivityType], transports: [TransportRecord]) throws -> Data {
         let dto = BackupDTO(
             version: 1,
-            places: places.map { BackupDTO.PlaceDTO(id: $0.placeID, name: $0.name, lat: $0.latitude, lon: $0.longitude, rad: $0.radius, addr: $0.address) },
-            footprints: footprints.map { 
+            places: places.map { BackupDTO.PlaceDTO(id: $0.placeID.uuidString, name: $0.name, lat: $0.latitude, lon: $0.longitude, rad: $0.radius, addr: $0.address, isPriority: $0.isPriority, isIgnored: $0.isIgnored) },
+            footprints: footprints.map { f in
                 BackupDTO.FootprintDTO(
-                    id: $0.footprintID, 
-                    date: $0.date, 
-                    start: $0.startTime, 
-                    end: $0.endTime, 
-                    lats: $0.latitudeArray, 
-                    lngs: $0.longitudeArray, 
-                    title: $0.title, 
-                    reason: $0.reason, 
-                    status: $0.statusValue, 
-                    score: $0.aiScore, 
-                    placeID: $0.placeID, 
-                    photos: $0.photoAssetIDs, 
-                    addr: $0.address, 
-                    isHist: $0.isHighlight
-                ) 
+                    id: f.footprintID.uuidString,
+                    date: f.date,
+                    start: f.startTime,
+                    end: f.endTime,
+                    lats: f.latitudeArray,
+                    lngs: f.longitudeArray,
+                    title: f.title,
+                    reason: f.reason,
+                    status: f.statusValue,
+                    score: f.aiScore,
+                    placeID: f.placeID?.uuidString,
+                    photos: f.photoAssetIDs,
+                    addr: f.address,
+                    isHighlight: f.isHighlight,
+                    activityType: f.activityTypeValue
+                )
+            },
+            activityTypes: activities.map { BackupDTO.ActivityTypeDTO(id: $0.id.uuidString, name: $0.name, icon: $0.icon, colorHex: $0.colorHex) },
+            transports: transports.map { t in
+                BackupDTO.TransportDTO(
+                    id: t.recordID.uuidString,
+                    day: t.day,
+                    start: t.startTime,
+                    end: t.endTime,
+                    from: t.startLocation,
+                    to: t.endLocation,
+                    type: t.typeRaw,
+                    dist: t.distance,
+                    speed: t.averageSpeed,
+                    pts: String(data: t.pointsData, encoding: String.Encoding.utf8) ?? "[]",
+                    manualType: t.manualTypeRaw,
+                    status: t.statusRaw
+                )
             }
         )
         
@@ -255,20 +345,23 @@ final class BackupService {
         var newPlaces = 0
         var skippedPlaces = 0
         for p in backup.places {
-            let id = p.id
-            let descriptor = FetchDescriptor<Place>(predicate: #Predicate { $0.placeID == id })
-            if (try? context.fetch(descriptor).first) == nil {
-                let place = Place(
-                    placeID: p.id, 
-                    name: p.name, 
-                    coordinate: CLLocationCoordinate2D(latitude: p.lat, longitude: p.lon), 
-                    radius: p.rad, 
-                    address: p.addr
-                )
-                context.insert(place)
-                newPlaces += 1
-            } else {
-                skippedPlaces += 1
+            if let uuid = UUID(uuidString: p.id) {
+                let descriptor = FetchDescriptor<Place>(predicate: #Predicate { $0.placeID == uuid })
+                if (try? context.fetch(descriptor).first) == nil {
+                    let place = Place(
+                        placeID: uuid, 
+                        name: p.name, 
+                        coordinate: CLLocationCoordinate2D(latitude: p.lat, longitude: p.lon), 
+                        radius: p.rad, 
+                        address: p.addr
+                    )
+                    place.isPriority = p.isPriority ?? false
+                    place.isIgnored = p.isIgnored ?? false
+                    context.insert(place)
+                    newPlaces += 1
+                } else {
+                    skippedPlaces += 1
+                }
             }
         }
         
@@ -276,30 +369,71 @@ final class BackupService {
         var newFootprints = 0
         var skippedFootprints = 0
         for f in backup.footprints {
-            let id = f.id
-            let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
-            if (try? context.fetch(descriptor).first) == nil {
-                let footprint = Footprint(
-                    footprintID: f.id,
-                    date: f.date,
-                    startTime: f.start,
-                    endTime: f.end,
-                    footprintLocations: zip(f.lats, f.lngs).map { CLLocationCoordinate2D(latitude: $0, longitude: $1) },
-                    locationHash: "RESTORED",
-                    duration: f.end.timeIntervalSince(f.start),
-                    title: f.title,
-                    reason: f.reason,
-                    status: FootprintStatus(rawValue: f.status) ?? .confirmed,
-                    aiScore: f.score,
-                    isHighlight: f.isHist,
-                    placeID: f.placeID,
-                    photoAssetIDs: f.photos,
-                    address: f.addr
-                )
-                context.insert(footprint)
-                newFootprints += 1
-            } else {
-                skippedFootprints += 1
+            if let footprintUUID = UUID(uuidString: f.id) {
+                let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintUUID })
+                if (try? context.fetch(descriptor).first) == nil {
+                    let footprint = Footprint(
+                        footprintID: footprintUUID,
+                        date: f.date,
+                        startTime: f.start,
+                        endTime: f.end,
+                        footprintLocations: zip(f.lats, f.lngs).map { CLLocationCoordinate2D(latitude: $0, longitude: $1) },
+                        locationHash: "RESTORED",
+                        duration: f.end.timeIntervalSince(f.start),
+                        title: f.title,
+                        reason: f.reason,
+                        status: FootprintStatus(rawValue: f.status) ?? .confirmed,
+                        aiScore: f.score,
+                        isHighlight: f.isHighlight ?? false,
+                        placeID: f.placeID != nil ? UUID(uuidString: f.placeID!) : nil,
+                        photoAssetIDs: f.photos,
+                        address: f.addr,
+                        activityTypeValue: f.activityType
+                    )
+                    context.insert(footprint)
+                    newFootprints += 1
+                } else {
+                    skippedFootprints += 1
+                }
+            }
+        }
+        
+        // 4. Restore Activity Types
+        if let activityDTOs = backup.activityTypes {
+            for a in activityDTOs {
+                if let uuid = UUID(uuidString: a.id) {
+                    let descriptor = FetchDescriptor<ActivityType>(predicate: #Predicate { $0.id == uuid })
+                    if (try? context.fetch(descriptor).first) == nil {
+                        let activity = ActivityType(id: uuid, name: a.name, icon: a.icon, colorHex: a.colorHex)
+                        context.insert(activity)
+                    }
+                }
+            }
+        }
+        
+        // 5. Restore Transports
+        if let transportDTOs = backup.transports {
+            for t in transportDTOs {
+                if let uuid = UUID(uuidString: t.id) {
+                    let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == uuid })
+                    if (try? context.fetch(descriptor).first) == nil {
+                        let record = TransportRecord(
+                            recordID: uuid,
+                            day: t.day,
+                            startTime: t.start,
+                            endTime: t.end,
+                            startLocation: t.from,
+                            endLocation: t.to,
+                            typeRaw: t.type,
+                            distance: t.dist,
+                            averageSpeed: t.speed,
+                            pointsData: t.pts.data(using: String.Encoding.utf8) ?? Data()
+                        )
+                        record.manualTypeRaw = t.manualType
+                        record.statusRaw = t.status ?? "active"
+                        context.insert(record)
+                    }
+                }
             }
         }
         
@@ -315,4 +449,3 @@ final class BackupService {
     }
 }
 
-import UniformTypeIdentifiers
