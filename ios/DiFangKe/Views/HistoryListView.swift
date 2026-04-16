@@ -39,8 +39,19 @@ struct SimpleDayTimelineView: View {
     @Query(sort: \Footprint.startTime, order: .reverse) private var allFootprints: [Footprint]
     @Query private var allManualSelections: [TransportManualSelection]
     @Query(sort: \Place.name) private var allPlaces: [Place]
+    @Query private var allInsights: [DailyInsight]
     @Environment(LocationManager.self) private var locationManager
     @Environment(\.dismiss) private var dismiss
+    
+    private var summary: String? {
+        let dayStart = Calendar.current.startOfDay(for: date)
+        return allInsights.first { 
+            if let d = $0.date {
+                return Calendar.current.isDate(d, inSameDayAs: dayStart)
+            }
+            return false
+        }?.content
+    }
     
     var body: some View {
         NavigationStack {
@@ -52,7 +63,8 @@ struct SimpleDayTimelineView: View {
                 offset: Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: Date()), to: date).day ?? 0,
                 locationManager: locationManager,
                 pastLimitOffset: -3650,
-                isFromHistory: true
+                isFromHistory: true,
+                summaryContent: summary
             )
             .navigationTitle(date.formatted(.dateTime.year().month().day()))
             .navigationBarTitleDisplayMode(.inline)
@@ -263,7 +275,9 @@ struct HistoryListView: View {
             // 第一阶段：直接从数据库获取已处理的持久化时间线数据
             // 这保证了周/月视图与日视图看到的内容完全一致（包含用户的手动修改和合并）
             let timelineItems = await MainActor.run {
-                PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
+                let items = PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
+                TimelineBuilder.timelineCache[date] = items // 共享缓存，加速随后点开详情页的加载速度
+                return items
             }
             
             let coreSummary = await Task.detached(priority: .userInitiated) {
@@ -287,10 +301,8 @@ struct HistoryListView: View {
                     )
                 }
                 
-                let totalMileage = timelineItems.reduce(0.0) { sum, item in
-                    if case .transport(let t) = item { return sum + t.distance }
-                    return sum
-                }
+                let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
+                let totalMileage = LocationManager.calculatePathDistance(rawPoints)
                 
                 return DaySummary(
                     date: date,
@@ -533,6 +545,8 @@ struct DayCell: View {
                     Text("暂无记录").font(.system(size: 12)).foregroundColor(.secondary.opacity(0.3)).padding(.top, 14)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            
             Spacer()
         }
         .padding(.horizontal, 16)
@@ -551,8 +565,8 @@ struct DayCell: View {
 struct TimelineIconsView: View {
     let icons: [DaySummary.TimelineIcon]
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(icons.prefix(10)) { item in
+        FlowLayout(spacing: 6) {
+            ForEach(icons) { item in
                 ZStack {
                     if item.isHighlight {
                         ZStack {
@@ -571,7 +585,6 @@ struct TimelineIconsView: View {
                     }
                 }
             }
-            if icons.count > 10 { Image(systemName: "ellipsis").font(.system(size: 10)).foregroundColor(.secondary.opacity(0.5)) }
         }
     }
 }
@@ -583,7 +596,7 @@ struct DayStatsView: View {
     let photoCount: Int
     
     var body: some View {
-        HStack(spacing: 8) {
+        FlowLayout(spacing: 8) {
             if trajectoryCount > 0 { statItem(icon: "dot.radiowaves.left.and.right", value: "\(trajectoryCount)") }
             if footprintCount > 0 { statItem(icon: "mappin.and.ellipse", value: "\(footprintCount)") }
             if mileage > 0 { statItem(icon: "figure.walk", value: formatMileage(mileage)) }

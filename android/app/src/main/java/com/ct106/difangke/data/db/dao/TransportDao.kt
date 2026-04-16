@@ -13,6 +13,9 @@ interface TransportRecordDao {
     @Query("SELECT * FROM transport_records WHERE startTime >= :start AND startTime < :end AND statusRaw = 'active' ORDER BY startTime ASC")
     suspend fun getForDay(start: Date, end: Date): List<TransportRecordEntity>
 
+    @Query("SELECT * FROM transport_records WHERE startTime >= :start AND startTime < :end AND statusRaw = 'active' ORDER BY startTime ASC")
+    fun observeForDay(start: Date, end: Date): Flow<List<TransportRecordEntity>>
+
     @Query("SELECT * FROM transport_records ORDER BY startTime DESC")
     fun observeAll(): Flow<List<TransportRecordEntity>>
 
@@ -46,6 +49,9 @@ interface DailyInsightDao {
 
     @Query("SELECT * FROM daily_insights WHERE date >= :start AND date < :end LIMIT 1")
     suspend fun getForDay(start: Date, end: Date): DailyInsightEntity?
+
+    @Query("SELECT * FROM daily_insights WHERE date >= :start AND date < :end LIMIT 1")
+    fun observeForDay(start: Date, end: Date): Flow<DailyInsightEntity?>
 
     @Query("SELECT * FROM daily_insights")
     suspend fun getAll(): List<DailyInsightEntity>

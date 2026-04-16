@@ -64,6 +64,16 @@ struct TransportCardView: View {
                             Text(distanceString)
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(.secondary.opacity(0.6))
+                            
+                            if let steps = transport.stepCount, steps > 0 {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "figure.walk")
+                                        .font(.system(size: 8))
+                                    Text("\(steps)")
+                                        .font(.system(size: 8, weight: .bold))
+                                }
+                                .foregroundColor(.orange.opacity(0.7))
+                            }
                         }
                         .frame(width: 80)
                         
@@ -371,6 +381,15 @@ struct TransportModalView: View {
                                 Text(String(format: "平均速度 %.1f km/h", transport.averageSpeed * 3.6))
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
+                                
+                                if let steps = transport.stepCount, steps > 0 {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "figure.walk")
+                                        Text("\(steps) 步")
+                                    }
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundColor(.orange)
+                                }
                             }
                         }
                     }

@@ -14,12 +14,36 @@ struct DataManagerView: View {
     @State private var showDeleteAlert = false
     @State private var showingExportFileExporter = false
     @State private var showingImportFilePicker = false
-    @State private var exportData: Data?
+    @State private var exportURL: URL?
+    @State private var showingShareSheet = false
     @State private var alertTitle = ""
     @State private var alertMessage = ""
     @State private var showAlert = false
+    @State private var isExporting = false
     
     var body: some View {
+        ZStack {
+            mainContent
+            
+            if isExporting {
+                Color.black.opacity(0.3)
+                    .ignoresSafeArea()
+                
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("正在准备备份文件...")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                }
+                .padding(30)
+                .background(RoundedRectangle(cornerRadius: 16).fill(Color(uiColor: .systemBackground).opacity(0.8)))
+                .shadow(radius: 10)
+            }
+        }
+    }
+    
+    private var mainContent: some View {
         Form {
             Section(header: Text("备份与恢复")) {
                 Button {
@@ -70,11 +94,10 @@ struct DataManagerView: View {
             }
         }
         .navigationTitle("数据操作")
-        .fileExporter(isPresented: $showingExportFileExporter, 
-                      document: JSONDocument(data: exportData ?? Data()), 
-                      contentType: .json, 
-                      defaultFilename: "DiFangKe_Backup_\(Date().formatted(.dateTime.year().month().day())).json") { result in
-            // Export handling
+        .sheet(isPresented: $showingShareSheet) {
+            if let url = exportURL {
+                ActivityView(activityItems: [url])
+            }
         }
         .fileImporter(isPresented: $showingImportFilePicker, 
                       allowedContentTypes: [.json], 
@@ -89,19 +112,35 @@ struct DataManagerView: View {
     }
     
     private func prepareExport() {
-        do {
-            let data = try BackupService.shared.generateBackup(
-                footprints: allFootprints, 
-                places: allPlaces,
-                activities: allActivities,
-                transports: allTransports
-            )
-            self.exportData = data
-            self.showingExportFileExporter = true
-        } catch {
-            self.alertTitle = "导出失败"
-            self.alertMessage = error.localizedDescription
-            self.showAlert = true
+        isExporting = true
+        
+        Task {
+            do {
+                // Generate backup in background
+                let data = try BackupService.shared.generateBackup(
+                    footprints: allFootprints, 
+                    places: allPlaces,
+                    activities: allActivities,
+                    transports: allTransports
+                )
+                
+                let filename = "DiFangKe_Backup_\(Date().formatted(.dateTime.year().month().day())).json"
+                let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+                try data.write(to: tempURL)
+                
+                await MainActor.run {
+                    self.exportURL = tempURL
+                    self.isExporting = false
+                    self.showingShareSheet = true
+                }
+            } catch {
+                await MainActor.run {
+                    self.isExporting = false
+                    self.alertTitle = "导出失败"
+                    self.alertMessage = error.localizedDescription
+                    self.showAlert = true
+                }
+            }
         }
     }
     
@@ -165,7 +204,17 @@ struct DataManagerView: View {
     }
 }
 
-// MARK: - File Helpers
+struct ActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+    let applicationActivities: [UIActivity]? = nil
+
+    func makeUIViewController(context: UIViewControllerRepresentableContext<ActivityView>) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: UIViewControllerRepresentableContext<ActivityView>) {}
+}
 
 struct JSONDocument: FileDocument {
     static var readableContentTypes: [UTType] = [.json]
@@ -205,11 +254,13 @@ struct BackupDTO: Codable {
         let addr: String?
         let isPriority: Bool?
         let isIgnored: Bool?
+        let isUserDefined: Bool?
         
         enum CodingKeys: String, CodingKey {
             case id, name, lat, lon, rad, addr
             case isPriority = "isPriority"
             case isIgnored = "isIgnored"
+            case isUserDefined = "isUserDefined"
         }
     }
     
@@ -283,7 +334,7 @@ final class BackupService {
     func generateBackup(footprints: [Footprint], places: [Place], activities: [ActivityType], transports: [TransportRecord]) throws -> Data {
         let dto = BackupDTO(
             version: 1,
-            places: places.map { BackupDTO.PlaceDTO(id: $0.placeID.uuidString, name: $0.name, lat: $0.latitude, lon: $0.longitude, rad: $0.radius, addr: $0.address, isPriority: $0.isPriority, isIgnored: $0.isIgnored) },
+            places: places.map { BackupDTO.PlaceDTO(id: $0.placeID.uuidString, name: $0.name, lat: $0.latitude, lon: $0.longitude, rad: $0.radius, addr: $0.address, isPriority: $0.isPriority, isIgnored: $0.isIgnored, isUserDefined: $0.isUserDefined) },
             footprints: footprints.map { f in
                 BackupDTO.FootprintDTO(
                     id: f.footprintID.uuidString,
@@ -353,9 +404,9 @@ final class BackupService {
                         name: p.name, 
                         coordinate: CLLocationCoordinate2D(latitude: p.lat, longitude: p.lon), 
                         radius: p.rad, 
-                        address: p.addr
+                        address: p.addr,
+                        isUserDefined: p.isUserDefined ?? true
                     )
-                    place.isPriority = p.isPriority ?? false
                     place.isIgnored = p.isIgnored ?? false
                     context.insert(place)
                     newPlaces += 1

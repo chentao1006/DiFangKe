@@ -5,6 +5,7 @@ import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.Color
 
 @Composable
 fun getIconForName(name: String?): ImageVector {
@@ -84,5 +85,20 @@ fun getIconForName(name: String?): ImageVector {
         "sightseeing" -> Icons.Default.PhotoCamera
         "plane" -> Icons.Default.Flight
         else -> Icons.AutoMirrored.Filled.Help
+    }
+}
+
+fun getIconColorForName(name: String?): Color {
+    return when(name?.lowercase()) {
+        "home" -> Color(0xFF4CAF50)
+        "work" -> Color(0xFF2196F3)
+        "restaurant", "eat" -> Color(0xFFFF9800)
+        "shopping_bag", "shopping", "shopping_cart" -> Color(0xFFE91E63)
+        "directions_run", "run", "fitness_center" -> Color(0xFF4CAF50)
+        "local_cafe", "coffee" -> Color(0xFF795548)
+        "park", "hiking", "landscape" -> Color(0xFF4CAF50)
+        "plane", "flight" -> Color(0xFF2196F3)
+        "train", "subway" -> Color(0xFF3F51B5)
+        else -> Color(0xFF9E9E9E)
     }
 }

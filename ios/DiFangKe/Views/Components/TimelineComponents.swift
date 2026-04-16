@@ -9,15 +9,20 @@ struct DaySummaryCard: View {
     let date: Date
     let totalPoints: Int
     let footprintCount: Int
-    let transportMileage: Double
+    let totalMileage: Double
     let points: [CLLocationCoordinate2D]
     var timelineItems: [TimelineItem] = []
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     var photoAssets: [PHAsset] = []
     var summary: String? = nil
+    var isLoading: Bool = false
     
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
+    
+    private var hasDataForMap: Bool {
+        !points.isEmpty || !photoAssets.isEmpty || !timelineItems.isEmpty
+    }
     
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -46,7 +51,7 @@ struct DaySummaryCard: View {
                             DayStatSeparator()
                             DayStatItem(value: "\(footprintCount)", label: "足迹")
                             DayStatSeparator()
-                            DayStatItem(value: formatDistance(transportMileage), label: "里程数")
+                            DayStatItem(value: formatDistance(totalMileage), label: "里程数")
                         }
                         .padding(.top, 2)
                     }
@@ -57,7 +62,7 @@ struct DaySummaryCard: View {
                 .padding(.trailing, 16)
                 
                  // Mini Map Section
-                if !points.isEmpty || !photoAssets.isEmpty {
+                if hasDataForMap {
                     DFKMapView(
                         cameraPosition: $cameraPosition,
                         isInteractive: false,
@@ -65,40 +70,35 @@ struct DaySummaryCard: View {
                         points: points,
                         timelineItems: timelineItems,
                         photoAssets: photoAssets,
-                        onTimelineItemTap: onTimelineItemTap,
+                        onTimelineItemTap: onTimelineItemTap
                     )
                     .frame(height: 140)
                     .cornerRadius(12)
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        if !points.isEmpty || !photoAssets.isEmpty {
-                            showFullscreenMap = true
-                        }
+                        showFullscreenMap = true
                     }
-                    .onAppear {
-                        if !points.isEmpty {
-                            if let region = points.boundingRegion() {
-                                cameraPosition = .region(region)
-                            }
-                        } else if !photoAssets.isEmpty {
-                            let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
-                            if let region = photoCoords.boundingRegion() {
-                                cameraPosition = .region(region)
-                            }
-                        }
-                    }
+                    .onAppear { updateCameraPosition() }
+                    .onChange(of: points.count) { _, _ in updateCameraPosition() }
+                    .onChange(of: photoAssets.count) { _, _ in updateCameraPosition() }
+                    .onChange(of: timelineItems.count) { _, _ in updateCameraPosition() }
                     .padding(.leading, 8)
                     .padding(.trailing, 12)
                     .padding(.bottom, 12)
                 } else {
-                    // Placeholder if no points but still showing card
+                    // Placeholder if truly no data
                     RoundedRectangle(cornerRadius: 12)
                         .fill(Color.secondary.opacity(0.05))
                         .frame(height: 140)
                         .overlay(
-                            Text("地图加载中...")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
+                            VStack(spacing: 8) {
+                                Image(systemName: "map.fill")
+                                    .font(.system(size: 20))
+                                    .foregroundColor(.secondary.opacity(0.3))
+                                Text(isLoading ? "正在加载..." : (totalPoints > 0 ? "正在分析路线轨迹..." : "本日无位置记录"))
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
                         )
                         .padding(.leading, 8)
                         .padding(.trailing, 12)
@@ -113,7 +113,7 @@ struct DaySummaryCard: View {
         )
         .padding(.bottom, 14)
         .onTapGesture {
-            if !points.isEmpty || !photoAssets.isEmpty {
+            if hasDataForMap {
                 showFullscreenMap = true
             }
         }
@@ -129,12 +129,36 @@ struct DaySummaryCard: View {
         }
     }
     
-    private func formatDistance(_ meters: Double) -> String {
-        if meters < 1000 {
-            return "\(Int(meters))m"
-        } else {
-            return String(format: "%.1fkm", meters / 1000.0)
+    private func updateCameraPosition() {
+        var allCoords = points
+        
+        // 加入足迹坐标
+        for item in timelineItems {
+            if case .footprint(let fp) = item {
+                allCoords.append(CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude))
+            }
         }
+        
+        // 加入照片坐标
+        let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
+        allCoords.append(contentsOf: photoCoords)
+        
+        if !allCoords.isEmpty {
+            if let region = allCoords.boundingRegion(paddingFactor: 1.4) {
+                withAnimation {
+                    cameraPosition = .region(region)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Shared Utilities
+private func formatDistance(_ meters: Double) -> String {
+    if meters < 1000 {
+        return "\(Int(meters))m"
+    } else {
+        return String(format: "%.1fkm", meters / 1000.0)
     }
 }
 
@@ -215,18 +239,10 @@ struct FullFrameTrajectoryMapView: View {
                 PhotoFullscreenView(assetIDs: assetIDs, currentIndex: index)
             }
             .ignoresSafeArea(edges: .bottom)
-            .onAppear {
-                if !points.isEmpty {
-                    if let region = points.boundingRegion() {
-                        cameraPosition = .region(region)
-                    }
-                } else if !photoAssets.isEmpty {
-                    let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
-                    if let region = photoCoords.boundingRegion() {
-                        cameraPosition = .region(region)
-                    }
-                }
-            }
+            .onAppear { updateCamera() }
+            .onChange(of: points.count) { _, _ in updateCamera() }
+            .onChange(of: photoAssets.count) { _, _ in updateCamera() }
+            .onChange(of: timelineItems.count) { _, _ in updateCamera() }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -234,6 +250,31 @@ struct FullFrameTrajectoryMapView: View {
                     Button("完成") { dismiss() }.fontWeight(.bold)
                 }
             }
+        }
+    }
+    
+    private func updateCamera() {
+        var allCoords = points
+        
+        // 加入足迹坐标
+        for item in timelineItems {
+            if case .footprint(let fp) = item {
+                allCoords.append(CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude))
+            }
+        }
+        
+        // 加入照片坐标
+        let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
+        allCoords.append(contentsOf: photoCoords)
+        
+        if !allCoords.isEmpty {
+            if let region = allCoords.boundingRegion(paddingFactor: 1.4) {
+                withAnimation {
+                    cameraPosition = .region(region)
+                }
+            }
+        } else if showsUserLocation, let lastLoc = LocationManager.shared.lastLocation {
+            cameraPosition = .region(MKCoordinateRegion(center: lastLoc.coordinate, latitudinalMeters: 1000, longitudinalMeters: 1000))
         }
     }
 }
@@ -496,16 +537,17 @@ struct FootprintCardView: View {
                                     .lineLimit(1)
                             }
                             
-                            if let placeID = footprint.placeID,
-                               let place = allPlaces.first(where: { $0.placeID == placeID && $0.isUserDefined }) {
-                                Text(place.name)
-                                    .font(.system(size: 9, weight: .bold, design: .rounded))
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1.5)
-                                    .background(Color.orange.opacity(0.12))
-                                    .foregroundColor(.orange)
-                                    .clipShape(Capsule())
-                                    .fixedSize()
+                            if let placeID = footprint.placeID {
+                                if let place = allPlaces.first(where: { $0.placeID == placeID && $0.isUserDefined }) {
+                                    Text(place.name)
+                                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1.5)
+                                        .background(Color.orange.opacity(0.12))
+                                        .foregroundColor(.orange)
+                                        .clipShape(Capsule())
+                                        .fixedSize()
+                                }
                             }
                         }
                         .padding(.top, 1)
@@ -524,6 +566,34 @@ struct FootprintCardView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                         .layoutPriority(1)
+                        
+                        // Health Metrics Row
+                        if let steps = footprint.stepCount, steps > 10 {
+                            HStack(spacing: 8) {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "figure.walk")
+                                    Text("\(steps) 步")
+                                }
+                                
+                                if let dist = footprint.walkingDistance, dist > 0 {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
+                                            .font(.system(size: 10))
+                                        Text(formatDistance(dist))
+                                    }
+                                }
+                                
+                                if let floors = footprint.floorsAscended, floors > 0 {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "stairs")
+                                        Text("\(floors) 层")
+                                    }
+                                }
+                            }
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundColor(.orange.opacity(0.9))
+                            .padding(.top, 1)
+                        }
                         
                         if let reason = footprint.reason, !reason.isEmpty {
                             Text(reason)

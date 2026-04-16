@@ -42,6 +42,11 @@ final class Footprint {
     var isTitleEditedByHand: Bool = false
     var activityTypeValue: String?
     
+    // Health metrics
+    var stepCount: Int?
+    var walkingDistance: Double?
+    var floorsAscended: Int?
+    
     var status: FootprintStatus {
         get { FootprintStatus(rawValue: statusValue) ?? .candidate }
         set { statusValue = newValue.rawValue }
@@ -140,7 +145,10 @@ final class Footprint {
          aiAnalyzed: Bool = false,
          isTitleEditedByHand: Bool = false,
          activityType: ActivityType? = nil,
-         activityTypeValue: String? = nil) {
+         activityTypeValue: String? = nil,
+         stepCount: Int? = nil,
+         walkingDistance: Double? = nil,
+         floorsAscended: Int? = nil) {
         
         self.footprintID = footprintID
         self.date = date
@@ -158,6 +166,9 @@ final class Footprint {
         self.aiAnalyzed = aiAnalyzed
         self.isTitleEditedByHand = isTitleEditedByHand
         self.activityTypeValue = activityTypeValue ?? activityType?.id.uuidString
+        self.stepCount = stepCount
+        self.walkingDistance = walkingDistance
+        self.floorsAscended = floorsAscended
         
         // Use provided title, or address, or default to generic poetic title
         if let title = title, !title.isEmpty {

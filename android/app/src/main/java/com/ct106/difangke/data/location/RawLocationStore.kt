@@ -144,6 +144,25 @@ class RawLocationStore private constructor(context: Context) {
         }
     }
 
+    /** 计算指定日期的总路程（单位：米） */
+    fun calculateTotalDistance(date: Date): Double {
+        val locations = loadLocations(date).filter { it.accuracy < 100 } // 过滤精度较差的点以减少噪点
+        if (locations.size < 2) return 0.0
+        
+        var total = 0.0
+        for (i in 0 until locations.size - 1) {
+            val p1 = locations[i]
+            val p2 = locations[i + 1]
+            val dist = haversineMeters(p1.latitude, p1.longitude, p2.latitude, p2.longitude)
+            // 过滤单点漂移引起的路程暴涨（如果两点间速度超过 150km/h，可能是漂移，除非是飞机）
+            val dt = (p2.timestamp.time - p1.timestamp.time) / 1000.0
+            if (dt > 0 && dist / dt < 45.0) { // 约 160km/h
+                total += dist
+            }
+        }
+        return total
+    }
+
     data class RawPoint(
         val timestamp: Date,
         val latitude: Double,

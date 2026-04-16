@@ -14,6 +14,7 @@ import com.ct106.difangke.data.model.DaySummary
 import com.ct106.difangke.data.model.TimelineItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.ct106.difangke.data.location.RawLocationStore
 
 class HistoryViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -72,10 +73,9 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                                        transports.map { TimelineItem.TransportItem(it) })
                                        .sortedByDescending { it.startTime }
                     
-                    val totalMileage = transports.sumOf { it.distance }
-                    val totalPoints = fps.sumOf { 
-                        try { org.json.JSONArray(it.latitudeJson ?: "[]").length() } catch(e: Exception) { 0 }
-                    }
+                    val store = RawLocationStore.getInstance(getApplication())
+                    val totalMileage = store.calculateTotalDistance(date)
+                    val totalPoints = store.getTotalPointsCount(date)
                     
                     val icons = timelineItems.take(10).map { item ->
                         DaySummary.TimelineIcon(

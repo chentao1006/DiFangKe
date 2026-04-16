@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,12 +43,15 @@ fun HistoryScreen(
 ) {
     val summaries by viewModel.summaries.collectAsState()
     val scope = rememberCoroutineScope()
-    val pagerState = rememberPagerState(pageCount = { 4 })
+    val pagerState = rememberPagerState(pageCount = { 3 })
     
-    val tabs = listOf("周", "月", "收藏", "统计")
+    val tabs = listOf("周", "月", "收藏")
+
+    val isDark = isSystemInDarkTheme()
+    val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
+        containerColor = bgColor,
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text("往昔足迹", fontWeight = FontWeight.Bold) },
@@ -102,7 +106,6 @@ fun HistoryScreen(
                     0 -> HistoryWeekView(summaries, onDateSelected)
                     1 -> HistoryMonthView(summaries, onDateSelected)
                     2 -> HistoryFavoritesView(summaries, onNavigateToDetail)
-                    3 -> HistoryStatisticsView(summaries)
                 }
             }
         }
@@ -156,6 +159,7 @@ fun HistoryWeekView(summaries: Map<Date, DaySummary>, onDateSelected: (Date) -> 
                 Text(
                     text = "${cal.get(Calendar.YEAR)}年 第${cal.get(Calendar.WEEK_OF_YEAR)}周",
                     style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(vertical = 8.dp)
                 )
@@ -181,7 +185,7 @@ fun HistoryDayRow(date: Date, summary: DaySummary, onClick: () -> Unit) {
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.elevatedCardColors(
-            containerColor = if (androidx.compose.foundation.isSystemInDarkTheme()) Color.Black else Color.White
+            containerColor = if (androidx.compose.foundation.isSystemInDarkTheme()) Color(0xFF1C1C1E) else Color.White
         ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
     ) {
@@ -268,7 +272,13 @@ fun MonthGridSection(monthDate: Date, summaries: Map<Date, DaySummary>, onDateSe
     }
 
     Column {
-        Text(monthTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 12.dp))
+        Text(
+            text = monthTitle,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
         
         LazyVerticalGrid(
             columns = GridCells.Fixed(7),
@@ -333,7 +343,7 @@ fun StatCard(label: String, value: String, icon: androidx.compose.ui.graphics.ve
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.elevatedCardColors(
-            containerColor = if (androidx.compose.foundation.isSystemInDarkTheme()) Color.Black else Color.White
+            containerColor = if (androidx.compose.foundation.isSystemInDarkTheme()) Color(0xFF1C1C1E) else Color.White
         ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp)
     ) {

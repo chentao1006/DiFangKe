@@ -105,8 +105,9 @@ struct Transport: Identifiable {
     let averageSpeed: Double // in m/s
     let points: [CLLocationCoordinate2D]
     var manualType: TransportType? = nil
+    var stepCount: Int? = nil
     
-    init(id: UUID = UUID(), startTime: Date, endTime: Date, startLocation: String, endLocation: String, type: TransportType, distance: Double, averageSpeed: Double, points: [CLLocationCoordinate2D], manualType: TransportType? = nil) {
+    init(id: UUID = UUID(), startTime: Date, endTime: Date, startLocation: String, endLocation: String, type: TransportType, distance: Double, averageSpeed: Double, points: [CLLocationCoordinate2D], manualType: TransportType? = nil, stepCount: Int? = nil) {
         self.id = id
         self.startTime = startTime
         self.endTime = endTime
@@ -117,6 +118,7 @@ struct Transport: Identifiable {
         self.averageSpeed = averageSpeed
         self.points = points
         self.manualType = manualType
+        self.stepCount = stepCount
     }
     
     var duration: TimeInterval {
@@ -128,15 +130,15 @@ struct Transport: Identifiable {
     }
     
     func updatingStart(_ location: String) -> Transport {
-        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: location, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: manualType)
+        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: location, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: manualType, stepCount: stepCount)
     }
     
     func updatingEnd(_ location: String) -> Transport {
-        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: location, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: manualType)
+        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: location, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: manualType, stepCount: stepCount)
     }
     
     func updatingType(_ newType: TransportType) -> Transport {
-        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: newType)
+        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: newType, stepCount: stepCount)
     }
 }
 
@@ -154,8 +156,9 @@ final class TransportRecord {
     var pointsData: Data = Data()
     var manualTypeRaw: String? = nil
     var statusRaw: String = "active" // active, ignored
+    var stepCount: Int? = nil
     
-    init(recordID: UUID = UUID(), day: Date, startTime: Date, endTime: Date, startLocation: String = "起点", endLocation: String = "终点", typeRaw: String, distance: Double, averageSpeed: Double, pointsData: Data, statusRaw: String = "active") {
+    init(recordID: UUID = UUID(), day: Date, startTime: Date, endTime: Date, startLocation: String = "起点", endLocation: String = "终点", typeRaw: String, distance: Double, averageSpeed: Double, pointsData: Data, statusRaw: String = "active", stepCount: Int? = nil) {
         self.recordID = recordID
         self.day = day
         self.startTime = startTime
@@ -167,5 +170,6 @@ final class TransportRecord {
         self.averageSpeed = averageSpeed
         self.pointsData = pointsData
         self.statusRaw = statusRaw
+        self.stepCount = stepCount
     }
 }

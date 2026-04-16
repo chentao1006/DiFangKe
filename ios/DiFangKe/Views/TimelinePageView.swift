@@ -41,6 +41,7 @@ struct TimelinePageView: View {
     
     @State private var totalPointsCount: Int = 0
     @State private var trajectoryPoints: [CLLocationCoordinate2D] = []
+    @State private var totalDailyMileage: Double = 0
     @State private var dayPhotoAssets: [PHAsset] = []
     
     init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isFromHistory: Bool = false, summaryContent: String? = nil) {
@@ -91,10 +92,8 @@ struct TimelinePageView: View {
                     self.notificationAuthStatus = status
                 }
                 
-                // 只有当没有任何数据时，才进行初次同步
-                if timelineItems.isEmpty {
-                    refreshTimeline()
-                }
+                // 即使已有缓存数据，也要执行刷新任务以加载原始轨迹路径（Trajectory Points）和照片
+                refreshTimeline()
                 
                 // AI 每日摘要检查
                 if isAiAssistantEnabled && !footprints.isEmpty {
@@ -254,19 +253,17 @@ struct TimelinePageView: View {
                 )
                 .padding(.horizontal, 16)
             } else {
-                DaySummaryCard(
-                    date: date,
-                    totalPoints: totalPointsCount,
-                    footprintCount: filteredTimelineItems.filter { if case .footprint = $0 { return true }; return false }.count,
-                    transportMileage: filteredTimelineItems.reduce(0) { sum, item in
-                        if case .transport(let t) = item { return sum + t.distance }
-                        return sum
-                    },
-                    points: trajectoryPoints,
+                    DaySummaryCard(
+                        date: date,
+                        totalPoints: totalPointsCount,
+                        footprintCount: filteredTimelineItems.filter { if case .footprint = $0 { return true }; return false }.count,
+                        totalMileage: totalDailyMileage,
+                        points: trajectoryPoints,
                     timelineItems: filteredTimelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
                     photoAssets: dayPhotoAssets,
-                    summary: summaryContent
+                    summary: summaryContent,
+                    isLoading: isLoadingTimeline
                 )
                 .padding(.horizontal, 16)
             }
@@ -385,7 +382,10 @@ struct TimelinePageView: View {
         if Task.isCancelled { return }
         
         // 执行彻底的持久化时间线同步算法
-        if force || hasRawData || isToday {
+        // 增量同步逻辑：只有在【主页】模式且有点位/是今天，或者明确【强制刷新】时，才触发 syncDay
+        // 历史视图（isFromHistory == true）点开时应直接读库，不应自动触发重新计算，除非用户手动下拉刷新
+        let shouldSync = force || (!isFromHistory && (hasRawData || isToday))
+        if shouldSync {
             await PersistentTimelineBuilder.syncDay(date: targetDate, in: modelContext)
         }
         
@@ -397,12 +397,14 @@ struct TimelinePageView: View {
         let result = await Task.detached(priority: .userInitiated) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
             let rawCoords = rawPoints.map { $0.coordinate }
+            let totalMileage = LocationManager.calculatePathDistance(rawPoints)
             let simplified = LocationManager.simplifyCoordinates(rawCoords, tolerance: 0.00005)
-            return (simplified, rawPoints.count)
+            return (simplified, rawPoints.count, totalMileage)
         }.value
         
         self.trajectoryPoints = result.0
         self.totalPointsCount = result.1
+        self.totalDailyMileage = result.2
         
         // 异步加载当天的照片用于地图显示
         let start = Calendar.current.startOfDay(for: targetDate)

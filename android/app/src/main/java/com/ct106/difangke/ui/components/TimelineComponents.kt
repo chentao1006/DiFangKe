@@ -27,12 +27,18 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
+import com.google.gson.Gson
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.service.LocationTrackingService
 import java.text.SimpleDateFormat
 import java.util.Locale
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 
 private val TIME_FORMAT = SimpleDateFormat("HH:mm", Locale.CHINA)
 private val DURATION_FORMAT = { durationSec: Int -> 
@@ -73,187 +79,325 @@ fun TimelineLine(isFirst: Boolean, isLast: Boolean, isTransport: Boolean = false
 
 @Composable
 fun FootprintCardView(
-    footprint: FootprintEntity, 
-    isFirst: Boolean, 
+    footprint: FootprintEntity,
+    activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
+    allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
+    isFirst: Boolean,
     isLast: Boolean,
     onClick: () -> Unit = {}
 ) {
-    Row(
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val cardColor = if (isDark) Color(0xFF1C1C1E) else Color.White
+    val titleColor = if (isDark) MaterialTheme.colorScheme.onSurface else Color.Black.copy(alpha = 0.8f)
+    val subtitleColor = if (isDark) MaterialTheme.colorScheme.onSurfaceVariant else Color.Gray
+
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .height(IntrinsicSize.Min)
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clickable { onClick() },
+        shape = RoundedCornerShape(26.dp),
+        color = cardColor,
+        shadowElevation = 2.dp,
+        tonalElevation = 0.dp
     ) {
-        // 左边时间轴连线
-        Box(modifier = Modifier.width(40.dp), contentAlignment = Alignment.TopCenter) {
-            TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = false)
-            
-            // 圈圈指示器
-            Box(
-                modifier = Modifier
-                    .padding(top = 28.dp)
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary)
-            )
-        }
-        
-        // 核心卡片
-        ElevatedCard(
+        Row(
             modifier = Modifier
-                .weight(1f)
-                .padding(vertical = 8.dp)
-                .clickable { onClick() },
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.elevatedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            ),
-            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                // 背景图标 (iOS 风格)
+            // 时间轴连线 (在卡片内部)
+            Box(modifier = Modifier.width(52.dp), contentAlignment = Alignment.TopCenter) {
+                TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = false)
+                
+                // 圈圈指示器
+                Box(
+                    modifier = Modifier
+                        .padding(top = 22.dp)
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                )
+            }
+            
+            // 内容区
+            val activityType = activityTypes.find { it.id == footprint.activityTypeValue }
+            val iconName = activityType?.icon ?: "place"
+            val iconColor = try { 
+                if (activityType?.colorHex != null) Color(android.graphics.Color.parseColor(activityType.colorHex))
+                else getIconColorForName(iconName)
+            } catch (e: Exception) { 
+                getIconColorForName(iconName) 
+            }
+
+            Box(modifier = Modifier.weight(1f)) {
+                // 右上角活动图标 (iOS 风格)
                 Icon(
-                    imageVector = getIconForName(footprint.activityTypeValue),
+                    imageVector = getIconForName(iconName),
                     contentDescription = null,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(top = 16.dp, end = 16.dp)
+                        .padding(top = 16.dp, end = 20.dp)
                         .size(24.dp),
-                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                    tint = iconColor
                 )
 
-                Column(modifier = Modifier.padding(16.dp)) {
+                Column(modifier = Modifier.padding(vertical = 18.dp).padding(end = 56.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = footprint.title.ifEmpty { "足迹记录" },
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1
+                            color = titleColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
+                        if (footprint.isHighlight == true) {
+                            Spacer(Modifier.width(6.dp))
+                            Icon(
+                                imageVector = Icons.Default.Star,
+                                contentDescription = null,
+                                tint = Color(0xFFFFCC00),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
                     
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(2.dp))
                     
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Default.Place, 
-                            contentDescription = null,
-                            modifier = Modifier.size(10.dp),
-                            tint = MaterialTheme.colorScheme.primary.copy(alpha=0.4f)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Text(
                             text = footprint.address ?: "未解析的位置",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                            maxLines = 1
+                            color = subtitleColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
+                        
+                        val matchedPlace = allPlaces.find { it.placeID == footprint.placeID && it.isUserDefined }
+                        if (matchedPlace != null) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = matchedPlace.name,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                     
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                     
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        val sdf = SimpleDateFormat("HH:mm", Locale.CHINA)
                         Text(
-                            text = "${TIME_FORMAT.format(footprint.startTime)} - ${TIME_FORMAT.format(footprint.endTime)}",
+                            text = "${sdf.format(footprint.startTime)} - ${sdf.format(footprint.endTime)}",
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            color = subtitleColor.copy(alpha = 0.6f)
                         )
                         Text(
                             text = " · ",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                            color = subtitleColor.copy(alpha = 0.3f)
                         )
+                        val durationMins = (footprint.endTime.time - footprint.startTime.time) / 60000
+                        val durationStr = if (durationMins >= 60) "${durationMins/60}h${durationMins%60}m" else "${durationMins}m"
                         Text(
-                            text = DURATION_FORMAT(footprint.duration.toInt()),
+                            text = durationStr,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            color = subtitleColor.copy(alpha = 0.6f)
                         )
                     }
-                    
+
                     if (!footprint.reason.isNullOrEmpty()) {
-                        Spacer(modifier = Modifier.height(14.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = footprint.reason,
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                            color = if (isDark) MaterialTheme.colorScheme.onSurfaceVariant else Color.Gray.copy(alpha = 0.8f),
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+
+                // 照片缩略图 logic (Correctly in BoxScope)
+                val photoIds = remember(footprint.photoAssetIDsJson) {
+                    try {
+                        com.google.gson.Gson().fromJson(footprint.photoAssetIDsJson, Array<String>::class.java).toList()
+                    } catch (e: Exception) {
+                        emptyList<String>()
+                    }
+                }
+                
+                if (photoIds.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(bottom = 12.dp, end = 12.dp)
+                    ) {
                         Box(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.05f))
-                                .padding(12.dp)
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.LightGray.copy(alpha = 0.3f)),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = "“${footprint.reason}”",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                                lineHeight = 22.sp
-                            )
+                            Icon(Icons.Default.Photo, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
                         }
                     }
                 }
             }
         }
-
     }
 }
 
 @Composable
-fun TransportCardView(transport: TransportRecordEntity, isFirst: Boolean, isLast: Boolean) {
-    Row(
+fun TransportCardView(
+    transport: TransportRecordEntity, 
+    isFirst: Boolean, 
+    isLast: Boolean,
+    onClick: () -> Unit = {}
+) {
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val cardColor = if (isDark) Color(0xFF1C1C1E) else Color.White
+    val titleColor = if (isDark) MaterialTheme.colorScheme.onSurface else Color.Black.copy(alpha = 0.8f)
+    val subtitleColor = if (isDark) MaterialTheme.colorScheme.onSurfaceVariant else Color.Gray
+
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .height(IntrinsicSize.Min)
+            .padding(horizontal = 16.dp, vertical = 2.dp)
+            .clickable { onClick() },
+        shape = RoundedCornerShape(20.dp),
+        color = cardColor,
+        shadowElevation = 1.dp,
+        tonalElevation = 0.dp
     ) {
-        // 左边时间轴连线
-        Box(modifier = Modifier.width(40.dp), contentAlignment = Alignment.TopCenter) {
-            TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = true)
-            
-            // 圈圈指示器
-            Box(
-                modifier = Modifier
-                    .padding(top = 28.dp)
-                    .size(24.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surface),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    Icons.Default.DirectionsBus, 
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
-        }
-        
-        // 核心卡片
-        Card(
+        Row(
             modifier = Modifier
-                .weight(1f)
-                .padding(vertical = 8.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.Transparent),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
         ) {
-            Column(modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "前往 ${transport.endLocation}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary
+            // 1. 左侧时间轴连线
+            Box(modifier = Modifier.width(52.dp), contentAlignment = Alignment.TopCenter) {
+                TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = true)
+                
+                // 圈圈指示器
+                Box(
+                    modifier = Modifier
+                        .padding(top = 16.dp)
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = getTransportIcon(transport.manualTypeRaw ?: transport.typeRaw), 
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.primary
                     )
-                    Spacer(modifier = Modifier.weight(1f))
-                    val durationSec = ((transport.endTime.time - transport.startTime.time) / 1000).toInt()
+                }
+            }
+            
+            // 2. 内容区 (iOS A->B 风格布局)
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = 16.dp)
+                    .padding(end = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 起点
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = DURATION_FORMAT(durationSec),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = transport.startLocation,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = titleColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = TIME_FORMAT.format(transport.startTime),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = subtitleColor
+                    )
+                }
+
+                // 中间装饰性图标与距离
+                Column(
+                    modifier = Modifier.width(80.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = getTransportIcon(transport.manualTypeRaw ?: transport.typeRaw),
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                    )
+                    
+                    val distanceKm = transport.distance / 1000.0
+                    val distanceText = if (distanceKm < 1.0) {
+                        "${transport.distance.toInt()}米"
+                    } else {
+                        String.format("%.1f公里", distanceKm)
+                    }
+                    Text(
+                        text = distanceText,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                        fontWeight = FontWeight.Bold,
+                        color = subtitleColor.copy(alpha = 0.6f)
+                    )
+                }
+
+                // 终点
+                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = transport.endLocation,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = titleColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.End
+                    )
+                    Text(
+                        text = TIME_FORMAT.format(transport.endTime),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = subtitleColor,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.End
                     )
                 }
             }
         }
+    }
+}
+
+// 辅助函数：根据交通工具类型获取图标
+@Composable
+private fun getTransportIcon(type: String): ImageVector {
+    return when(type.lowercase()) {
+        "walk" -> Icons.Default.DirectionsWalk
+        "run" -> Icons.Default.DirectionsRun
+        "bus" -> Icons.Default.DirectionsBus
+        "car" -> Icons.Default.DirectionsCar
+        "subway", "train" -> Icons.Default.DirectionsSubway
+        else -> Icons.Default.DirectionsBus
     }
 }
 
@@ -263,28 +407,37 @@ fun RecordingStatusCard(
     trackingState: LocationTrackingService.TrackingState,
     isTracking: Boolean,
     footprintCount: Int,
+    mileage: Double = 0.0,
+    pointCount: Int = 0,
+    summary: String? = null,
+    pointsJson: String? = null,
+    markersJson: String? = null,
     onNavigateToMap: () -> Unit,
     onRequestPermission: () -> Unit,
     hasLocationPermission: Boolean
 ) {
-    ElevatedCard(
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val cardColor = if (isDark) Color(0xFF1C1C1E) else Color.White
+    val titleColor = if (isDark) MaterialTheme.colorScheme.onSurface else Color.Black.copy(alpha = 0.8f)
+    val subtitleColor = if (isDark) MaterialTheme.colorScheme.onSurfaceVariant else Color.Gray
+
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp)
             .clickable { onNavigateToMap() },
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
+        shape = RoundedCornerShape(26.dp),
+        color = cardColor,
+        shadowElevation = 2.dp,
+        tonalElevation = 0.dp
     ) {
         Row(modifier = Modifier.fillMaxWidth()) {
-            // 1. 左侧时间轴指示器 (iOS 风格)
+            // 1. 左侧时间轴指示器 (在内部)
             Column(
-                modifier = Modifier.width(40.dp),
+                modifier = Modifier.width(52.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Spacer(modifier = Modifier.height(22.dp))
+                Spacer(modifier = Modifier.height(28.dp))
                 
                 // 呼吸效果圆点
                 if (isTracking) {
@@ -327,7 +480,7 @@ fun RecordingStatusCard(
                     Box(
                         modifier = Modifier
                             .size(10.dp)
-                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f), CircleShape)
+                            .background(subtitleColor.copy(alpha = 0.2f), CircleShape)
                     )
                 }
                 
@@ -336,7 +489,7 @@ fun RecordingStatusCard(
                     modifier = Modifier
                         .width(1.5.dp)
                         .weight(1f)
-                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
+                        .background(subtitleColor.copy(alpha = 0.1f))
                 )
             }
             
@@ -350,13 +503,13 @@ fun RecordingStatusCard(
                     Spacer(modifier = Modifier.height(18.dp))
                     Text("需要定位权限", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text("请允许后台获取位置信息以记录足迹。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("请允许后台获取位置信息以记录足迹。", style = MaterialTheme.typography.bodySmall, color = subtitleColor)
                     Spacer(modifier = Modifier.height(12.dp))
                     Button(onClick = onRequestPermission, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(0.dp)) {
                         Text("授权并开启记录")
                     }
                 } else {
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(18.dp))
                     
                     // 标题
                     val displayTitle = when (trackingState) {
@@ -364,7 +517,7 @@ fun RecordingStatusCard(
                         is LocationTrackingService.TrackingState.Tracking -> "正在寻找位置..."
                         is LocationTrackingService.TrackingState.OngoingStay -> "正在此处停留"
                     }
-                    Text(displayTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                    Text(summary ?: displayTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = titleColor, maxLines = 2)
                     
                     val ongoing = trackingState as? LocationTrackingService.TrackingState.OngoingStay
                     val tracking = trackingState as? LocationTrackingService.TrackingState.Tracking
@@ -374,28 +527,34 @@ fun RecordingStatusCard(
                     // 地址
                     if (ongoing != null && !ongoing.address.isNullOrEmpty()) {
                         Spacer(modifier = Modifier.height(2.dp))
-                        Text(ongoing.address, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Medium)
+                        Text(ongoing.address, style = MaterialTheme.typography.bodyMedium, color = if (isDark) MaterialTheme.colorScheme.onSurfaceVariant else Color.DarkGray, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     
-                    // 持续时间/状态
+                    // 状态与统计行
                     Spacer(modifier = Modifier.height(4.dp))
-                    if (!isTracking) {
-                        Text("点击开启或查看说明", style = MaterialTheme.typography.bodySmall, color = Color.Gray, fontWeight = FontWeight.Bold)
-                    } else if (ongoing != null) {
-                        val durationMins = (System.currentTimeMillis() - ongoing.since.time) / 60000
-                        val displayText = if (durationMins < 60) {
-                            "已停留 ${durationMins}分钟"
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (!isTracking) {
+                            Text("点击开启或查看说明", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                         } else {
-                            "已停留 ${durationMins / 60}小时${durationMins % 60}分"
+                            if (ongoing != null) {
+                                val durationMins = (System.currentTimeMillis() - ongoing.since.time) / 60000
+                                val durationStr = if (durationMins < 60) "${durationMins}分钟" else "${durationMins / 60}小时${durationMins % 60}分"
+                                Text("已停留 $durationStr", style = MaterialTheme.typography.bodySmall, color = subtitleColor.copy(alpha=0.6f))
+                                Text(" · ", style = MaterialTheme.typography.bodySmall, color = subtitleColor.copy(alpha=0.3f))
+                            }
+                            Text("${footprintCount}个足迹 · ${formatDistance(mileage)}", style = MaterialTheme.typography.bodySmall, color = subtitleColor.copy(alpha=0.6f))
                         }
-                        Text(displayText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=0.6f))
-                    } else {
-                        Text("今日共发现 $footprintCount 个足迹", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=0.6f))
                     }
 
-                    // 小地图
-                    if (currentLat != null && currentLon != null) {
-                        Spacer(modifier = Modifier.height(12.dp))
+                    // 小地图 (如果今天有轨迹，显示轨迹；否则显示当前位置)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    if (pointsJson != null) {
+                        MiniMapView(
+                            pointsJson = pointsJson,
+                            markersJson = markersJson,
+                            onClick = onNavigateToMap
+                        )
+                    } else if (currentLat != null && currentLon != null) {
                         MiniMapView(
                             lat = currentLat, 
                             lon = currentLon,
@@ -448,23 +607,26 @@ fun DaySummaryCard(
     centerLon: Double? = null,
     onNavigateToMap: () -> Unit
 ) {
-    ElevatedCard(
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val cardColor = if (isDark) Color(0xFF1C1C1E) else Color.White
+    val titleColor = if (isDark) MaterialTheme.colorScheme.onSurface else Color.Black.copy(alpha = 0.8f)
+
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp)
             .clickable { onNavigateToMap() },
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp)
+        shape = RoundedCornerShape(26.dp),
+        color = cardColor,
+        shadowElevation = 3.dp,
+        tonalElevation = 0.dp
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
             Text(
                 text = summary ?: "当日概览", 
                 style = MaterialTheme.typography.titleMedium, 
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = titleColor,
                 maxLines = 2
             )
             
@@ -501,54 +663,6 @@ private fun formatDistance(meters: Double): String {
         "${meters.toInt()}m"
     } else {
         String.format("%.1fkm", meters / 1000.0)
-    }
-}
-
-
-
-@Composable
-fun DailyInsightView(content: String) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            Icon(
-                Icons.Default.AutoAwesome,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
-                modifier = Modifier.size(14.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = "今日洞察",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
-                fontWeight = FontWeight.Bold
-            )
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = content,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-            textAlign = TextAlign.Center,
-            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-            lineHeight = 20.sp
-        )
-        
-        // 装饰性分割线 (极淡)
-        Spacer(modifier = Modifier.height(16.dp))
-        HorizontalDivider(
-            modifier = Modifier.width(40.dp),
-            thickness = 1.dp,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f)
-        )
     }
 }
 
@@ -611,10 +725,22 @@ fun MiniMapView(lat: Double? = null, lon: Double? = null, pointsJson: String? = 
                         amap.addPolyline(
                             com.amap.api.maps.model.PolylineOptions().addAll(points).width(12f).color(primaryColor).useGradient(true)
                         )
-                        val bounds = com.amap.api.maps.model.LatLngBounds.builder().apply {
-                            points.forEach { include(it) }
-                        }.build()
-                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, 60))
+                        
+                        if (points.size == 1) {
+                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points[0], 15f))
+                        } else {
+                            val bounds = com.amap.api.maps.model.LatLngBounds.builder().apply {
+                                points.forEach { include(it) }
+                            }.build()
+                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, 60))
+                            
+                            // 再次校验防止 bounds 导致缩放过大（如两点极其接近）
+                            view.postDelayed({
+                                if (amap.cameraPosition.zoom > 15f) {
+                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.zoomTo(15f))
+                                }
+                            }, 100)
+                        }
                     }
                 } catch (e: Exception) {}
             } else if (lat != null && lon != null) {
@@ -667,77 +793,70 @@ fun PlaceholderFootprintCard(trackingState: LocationTrackingService.TrackingStat
         "正在为您打磨今日的轨迹线...",
         "第一段记忆正在慢慢发酵..."
     )
-    
     val phrase by remember { mutableStateOf(phrases.random()) }
-    
-    val contextTip = remember(trackingState) {
-        val calendar = java.util.Calendar.getInstance()
-        val hour = calendar.get(java.util.Calendar.HOUR_OF_DAY)
-        
-        when {
-            trackingState is LocationTrackingService.TrackingState.OngoingStay -> {
-                val durationMins = (System.currentTimeMillis() - trackingState.since.time) / 60000
-                if (durationMins > 480) "要不出去走走？世界那么大，去看看"
-                else if (durationMins > 240) "你已经在这里停留好久了，想去探索新地方吗？"
-                else null
-            }
-            hour >= 23 || hour <= 4 -> "夜深了，早点休息"
-            hour in 5..8 -> "早安！又是活力满满的一天"
-            else -> null
+    val calendar = java.util.Calendar.getInstance()
+    val hour = calendar.get(java.util.Calendar.HOUR_OF_DAY)
+    val contextTip = when {
+        trackingState is LocationTrackingService.TrackingState.OngoingStay -> {
+            val durationMins = (System.currentTimeMillis() - trackingState.since.time) / 60000
+            if (durationMins > 480) "要不出去走走？世界那么大，去看看"
+            else if (durationMins > 240) "你已经在这里停留好久了，想去探索新地方吗？"
+            else null
         }
+        hour >= 23 || hour <= 4 -> "夜深了，早点休息"
+        hour in 5..8 -> "早安！又是活力满满的一天"
+        else -> null
     }
 
     val infiniteTransition = rememberInfiniteTransition(label = "skeleton")
     val opacity by infiniteTransition.animateFloat(
-        initialValue = 0.5f,
-        targetValue = 0.9f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "opacity"
+        initialValue = 0.5f, targetValue = 0.9f,
+        animationSpec = infiniteRepeatable(animation = tween(1500), repeatMode = RepeatMode.Reverse), label = "opacity"
     )
 
-    Row(
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val cardColor = if (isDark) Color(0xFF1C1C1E) else Color.White
+    val titleColor = if (isDark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f) else Color.Black.copy(alpha = 0.3f)
+    val subtitleColor = if (isDark) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f) else Color.Gray.copy(alpha = 0.4f)
+
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .height(IntrinsicSize.Min)
-            .graphicsLayer { this.alpha = opacity }
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .graphicsLayer { this.alpha = opacity },
+        shape = RoundedCornerShape(26.dp),
+        color = cardColor,
+        shadowElevation = 1.dp,
+        tonalElevation = 0.dp
     ) {
-        Box(modifier = Modifier.width(40.dp), contentAlignment = Alignment.TopCenter) {
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .width(1.5.dp)
-                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
-            )
-            
-            Box(
-                modifier = Modifier
-                    .padding(top = 28.dp)
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
-            )
-        }
-
-        ElevatedCard(
+        Row(
             modifier = Modifier
-                .weight(1f)
-                .padding(vertical = 8.dp),
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.elevatedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
-            ),
-            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
         ) {
+            Box(modifier = Modifier.width(52.dp), contentAlignment = Alignment.TopCenter) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .width(1.5.dp)
+                        .background(subtitleColor.copy(alpha = 0.1f))
+                )
+                
+                Box(
+                    modifier = Modifier
+                        .padding(top = 28.dp)
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(subtitleColor.copy(alpha = 0.2f))
+                )
+            }
+
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     text = phrase,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    color = titleColor
                 )
                 
                 if (contextTip != null) {
@@ -745,7 +864,7 @@ fun PlaceholderFootprintCard(trackingState: LocationTrackingService.TrackingStat
                     Text(
                         text = contextTip,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                        color = subtitleColor,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -753,41 +872,118 @@ fun PlaceholderFootprintCard(trackingState: LocationTrackingService.TrackingStat
                 Spacer(modifier = Modifier.height(16.dp))
                 
                 // Skeleton bars
-                Box(
-                    modifier = Modifier
-                        .width(140.dp)
-                        .height(8.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
-                )
-                
+                Box(modifier = Modifier.width(140.dp).height(8.dp).clip(RoundedCornerShape(4.dp)).background(subtitleColor.copy(alpha = 0.1f)))
                 Spacer(modifier = Modifier.height(8.dp))
-                
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .width(60.dp)
-                            .height(8.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.03f))
-                    )
+                    Box(modifier = Modifier.width(60.dp).height(8.dp).clip(RoundedCornerShape(4.dp)).background(subtitleColor.copy(alpha = 0.05f)))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .size(3.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.03f))
-                    )
+                    Box(modifier = Modifier.size(3.dp).clip(CircleShape).background(subtitleColor.copy(alpha = 0.05f)))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .width(40.dp)
-                            .height(8.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.03f))
-                    )
+                    Box(modifier = Modifier.width(40.dp).height(8.dp).clip(RoundedCornerShape(4.dp)).background(subtitleColor.copy(alpha = 0.05f)))
                 }
             }
         }
     }
+}
+
+@Composable
+fun TimelineRow(
+    item: com.ct106.difangke.data.model.TimelineItem,
+    isFirst: Boolean,
+    isLast: Boolean,
+    activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity> = emptyList(),
+    allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity> = emptyList(),
+    onClick: () -> Unit
+) {
+    when (item) {
+        is com.ct106.difangke.data.model.TimelineItem.FootprintItem -> {
+            FootprintCardView(
+                footprint = item.footprint,
+                activityTypes = activityTypes,
+                allPlaces = allPlaces,
+                isFirst = isFirst,
+                isLast = isLast,
+                onClick = onClick
+            )
+        }
+        is com.ct106.difangke.data.model.TimelineItem.TransportItem -> {
+            TransportCardView(
+                transport = item.transport,
+                isFirst = isFirst,
+                isLast = isLast,
+                onClick = onClick
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CalendarSelectionDialog(
+    currentDate: java.util.Date,
+    availableDates: List<java.util.Date>,
+    onDateSelected: (java.util.Date) -> Unit,
+    onDismiss: () -> Unit,
+    onOpenFullPicker: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择日期", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                val cal = java.util.Calendar.getInstance()
+                val today = cal.apply {
+                    set(java.util.Calendar.HOUR_OF_DAY, 0)
+                    set(java.util.Calendar.MINUTE, 0)
+                    set(java.util.Calendar.SECOND, 0)
+                    set(java.util.Calendar.MILLISECOND, 0)
+                }.time
+
+                // 最近 14 天的快速选择 (由于 UI 限制，仅展示有数据的日期)
+                val displayDates = availableDates.sortedByDescending { it.time }.take(14)
+                
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(4),
+                    modifier = Modifier.heightIn(max = 200.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(displayDates) { date ->
+                        val isSelected = date.time == currentDate.time
+                        val sdf = SimpleDateFormat("M/d", Locale.CHINA)
+                        
+                        Box(
+                            modifier = Modifier
+                                .aspectRatio(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                                .clickable { onDateSelected(date) },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                sdf.format(date),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                TextButton(
+                    onClick = onOpenFullPicker,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.CalendarMonth, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("打开完整日历")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }

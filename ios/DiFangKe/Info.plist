@@ -37,6 +37,12 @@
 	<string>地方客需要后台位置权限以自动记录您的足迹和停留点。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>地方客需要位置权限以在地图上显示您的当前位置并记录足迹。</string>
+	<key>NSMotionUsageDescription</key>
+	<string>地方客通过运动传感器识别您的实时状态（如步行、骑行），由此动态调整 GPS 采集频率，在保证轨迹精度的同时节省电量。</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>地方客需要读取步数和里程数据，用于辅助区分步行与慢速交通，并为您提供更完整的每日出行统计。</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>地方客需要同步运动统计数据以确保步数记录的准确性。</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>地方客需要访问相册以自动关联您在旅途中拍摄的照片。</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

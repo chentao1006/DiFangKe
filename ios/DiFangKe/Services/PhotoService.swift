@@ -279,8 +279,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             let totalPhotosCount = assetsWithLocation.count
             
             let incrementProgress = { (count: Int) in
-                processedPhotosCount += count
                 DispatchQueue.main.async {
+                    processedPhotosCount += count
                     onProgress?(processedPhotosCount, totalPhotosCount)
                 }
             }
@@ -387,8 +387,25 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     if let cached = geocodeCache[cacheKey] {
                         createAndAdd(t: cached.0, a: cached.1, pID: nil)
                     } else {
-                        // 串行执行地名反查
+                        // 串行执行地名反查，并添加 5 秒超时保护
+                        var isFinished = false
+                        
+                        let timeoutItem = DispatchWorkItem {
+                            if !isFinished {
+                                isFinished = true
+                                // 超时后直接增加进度并离开 group，达到“跳过”效果
+                                incrementProgress(captureClusterCount)
+                                group.leave()
+                                print("Geocoding timeout for cluster at \(firstLoc.coordinate)")
+                            }
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: timeoutItem)
+
                         geocoder.reverseGeocodeLocation(firstLoc) { placemarks, error in
+                            if isFinished { return }
+                            isFinished = true
+                            timeoutItem.cancel()
+                            
                             var resolvedTitle = "此处"
                             var resolvedAddress: String? = nil
                             

@@ -20,6 +20,9 @@ interface FootprintDao {
     @Query("SELECT * FROM footprints WHERE startTime >= :start AND startTime < :end AND statusValue != 'ignored' ORDER BY startTime ASC")
     suspend fun getBetween(start: Date, end: Date): List<FootprintEntity>
 
+    @Query("SELECT * FROM footprints WHERE startTime >= :start AND startTime < :end AND statusValue != 'ignored' ORDER BY startTime ASC")
+    fun observeBetween(start: Date, end: Date): Flow<List<FootprintEntity>>
+
     @Query("SELECT * FROM footprints WHERE footprintID = :id LIMIT 1")
     suspend fun getById(id: String): FootprintEntity?
 

@@ -52,8 +52,8 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         val lon: Double,
         val rad: Float,
         val addr: String?,
-        @SerializedName("isHist") val isPriority: Boolean? = false,
-        @SerializedName("isIgn") val isIgnored: Boolean? = false
+        @SerializedName("isIgnored") val isIgnored: Boolean? = false,
+        @SerializedName("isUserDefined") val isUserDefined: Boolean? = true
     )
 
     data class FootprintDTO(
@@ -70,7 +70,7 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         @SerializedName("placeID") val placeID: String?,
         val photos: List<String>,
         val addr: String?,
-        @SerializedName("isHist") val isHighlight: Boolean?,
+        @SerializedName("isHighlight") val isHighlight: Boolean?,
         @SerializedName("activityType") val activityType: String? = null
     )
 
@@ -113,7 +113,7 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         val dto = BackupDTO(
             version = 1,
             places = places.map { p ->
-                PlaceDTO(p.placeID, p.name, p.latitude, p.longitude, p.radius, p.address, p.isPriority, p.isIgnored)
+                PlaceDTO(p.placeID, p.name, p.latitude, p.longitude, p.radius, p.address, p.isIgnored, p.isUserDefined)
             },
             footprints = footprints.map { f ->
                 val lats = try { 
@@ -185,9 +185,8 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     longitude = p.lon,
                     radius = p.rad,
                     address = p.addr,
-                    isPriority = p.isPriority ?: false,
                     isIgnored = p.isIgnored ?: false,
-                    isUserDefined = true
+                    isUserDefined = p.isUserDefined ?: true
                 ))
                 newPlaces++
             } else {

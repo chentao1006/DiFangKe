@@ -290,7 +290,7 @@ class TimelineBuilder {
         if let p1 = place1, let p2 = place2, p1 == p2 && activity1 == activity2 { return true }
         let loc1 = CLLocation(latitude: lat1, longitude: lon1)
         let loc2 = CLLocation(latitude: lat2, longitude: lon2)
-        if loc1.distance(from: loc2) < 80 && title1 == title2 && activity1 == activity2 { return true }
+        if loc1.distance(from: loc2) < AppConfig.shared.stayDistanceThreshold && title1 == title2 && activity1 == activity2 { return true }
         return false
     }
 
@@ -304,7 +304,7 @@ class TimelineBuilder {
                     let loc2 = CLLocation(latitude: f2.latitude, longitude: f2.longitude)
                     let isSamePlace = (f1.placeID != nil && f1.placeID == f2.placeID)
                     
-                    if isSamePlace || loc1.distance(from: loc2) < 200 {
+                    if isSamePlace || loc1.distance(from: loc2) < AppConfig.shared.mergeDistanceThreshold {
                         let combined = Footprint(
                             date: f1.date,
                             startTime: f1.startTime,
@@ -1211,6 +1211,12 @@ class PersistentTimelineBuilder {
                     status: .confirmed
                 )
                 
+                // --- 异步获取健康数据 ---
+                let metrics = await HealthManager.shared.fetchMetrics(from: fp.startTime, to: fp.endTime)
+                fp.stepCount = metrics.steps
+                fp.walkingDistance = metrics.distance
+                fp.floorsAscended = metrics.floors
+                
                 let loc = clusterPoints.first!
                 if let matched = allPlaces.min(by: { p1, p2 in
                     loc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude)) <
@@ -1293,6 +1299,11 @@ class PersistentTimelineBuilder {
                         averageSpeed: avgSpeed,
                         pointsData: ptsData
                     )
+                    
+                    // --- 异步获取健康数据 (仅步数对交通段有辅助意义) ---
+                    let metrics = await HealthManager.shared.fetchMetrics(from: tStart, to: tEnd)
+                    tp.stepCount = metrics.steps
+                    
                     context.insert(tp)
                 }
                 i = k // 移动到下一个可能的停留点或末尾

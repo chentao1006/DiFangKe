@@ -11,6 +11,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +44,7 @@ fun FootprintDetailScreen(
     var title by remember { mutableStateOf("") }
     var reason by remember { mutableStateOf("") }
     var selectedActivityType by remember { mutableStateOf<String?>(null) }
+    var isHighlight by remember { mutableStateOf(false) }
     var showingDeleteAlert by remember { mutableStateOf(false) }
 
     if (showingDeleteAlert) {
@@ -79,13 +81,18 @@ fun FootprintDetailScreen(
             title = it.title
             reason = it.reason ?: ""
             selectedActivityType = it.activityTypeValue
+            isHighlight = it.isHighlight == true
         }
     }
 
     val timeFormat = SimpleDateFormat("HH:mm", Locale.CHINA)
     val dateFormat = SimpleDateFormat("yyyy年M月d日 EEEE", Locale.CHINA)
 
+    val isDark = isSystemInDarkTheme()
+    val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
+
     Scaffold(
+        containerColor = bgColor,
         topBar = {
             TopAppBar(
                 title = { Text("足迹详情", fontWeight = FontWeight.Bold) },
@@ -95,8 +102,15 @@ fun FootprintDetailScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { isHighlight = !isHighlight }) {
+                        Icon(
+                            imageVector = if (isHighlight) Icons.Default.Star else Icons.Default.StarOutline,
+                            contentDescription = if (isHighlight) "取消收藏" else "收藏",
+                            tint = if (isHighlight) Color(0xFFFFCC00) else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     TextButton(onClick = {
-                        viewModel.updateFootprint(title, reason, selectedActivityType)
+                        viewModel.updateFootprint(title, reason, selectedActivityType, isHighlight)
                         onBack()
                     }) {
                         Text("完成", fontWeight = FontWeight.Bold)
@@ -159,7 +173,7 @@ fun FootprintDetailScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    colors = CardDefaults.elevatedCardColors(containerColor = if (isDark) Color(0xFF1C1C1E) else Color.White)
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -261,6 +275,7 @@ fun FootprintDetailScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ActivityTypeIcon(
     selectedId: String?,
@@ -296,28 +311,56 @@ fun ActivityTypeIcon(
                 )
             }
         }
-        
-        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-            DropdownMenuItem(
-                text = { Text("无类型") },
-                onClick = { onTypeSelected(null); showMenu = false },
-                leadingIcon = { Icon(Icons.Default.Close, contentDescription = null) }
-            )
-            allTypes.forEach { type ->
-                DropdownMenuItem(
-                    text = { Text(type.name) },
-                    onClick = { onTypeSelected(type.id); showMenu = false },
-                    leadingIcon = { 
-                        Icon(
-                            imageVector = com.ct106.difangke.ui.components.getIconForName(type.icon),
-                            contentDescription = null,
-                            tint = try { Color(android.graphics.Color.parseColor(type.colorHex)) } catch (e: Exception) { Color.Gray }
-                        )
-                    }
+    if (showMenu) {
+        ModalBottomSheet(
+            onDismissRequest = { showMenu = false },
+            sheetState = rememberModalBottomSheetState(),
+            containerColor = MaterialTheme.colorScheme.surface,
+            dragHandle = { BottomSheetDefaults.DragHandle() }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 32.dp)
+            ) {
+                Text(
+                    text = "选择活动类型",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(16.dp)
                 )
+                
+                ListItem(
+                    headlineContent = { Text("无类型") },
+                    leadingContent = { Icon(Icons.Default.Close, contentDescription = null) },
+                    modifier = Modifier.clickable { onTypeSelected(null); showMenu = false }
+                )
+                
+                Divider(modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
+                
+                allTypes.forEach { type ->
+                    ListItem(
+                        headlineContent = { Text(type.name) },
+                        leadingContent = { 
+                            Icon(
+                                imageVector = com.ct106.difangke.ui.components.getIconForName(type.icon),
+                                contentDescription = null,
+                                tint = try { Color(android.graphics.Color.parseColor(type.colorHex)) } catch (e: Exception) { Color.Gray },
+                                modifier = Modifier.size(24.dp)
+                            )
+                        },
+                        trailingContent = {
+                            if (selectedId == type.id) {
+                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            }
+                        },
+                        modifier = Modifier.clickable { onTypeSelected(type.id); showMenu = false }
+                    )
+                }
             }
         }
     }
+}
 }
 
 @Composable
@@ -395,14 +438,22 @@ fun DetailMapView(footprint: FootprintEntity) {
                     .useGradient(true)
             )
             
-            // 移动相机到轨迹范围
+            // 移动相机到轨迹范围 (优化版)
             if (points.size == 1) {
                 amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points[0], 17f))
             } else {
-                try {
-                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(builder.build(), 100))
-                } catch (e: Exception) {
-                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points[0], 16f))
+                val bounds = builder.build()
+                // 使用 post 确保地图布局完成
+                view.post {
+                    try {
+                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, 150))
+                        // 再次校验缩放，防止单点附近太近导致范围过大
+                        if (amap.cameraPosition.zoom > 17f) {
+                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.zoomTo(17f))
+                        }
+                    } catch (e: Exception) {
+                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points[0], 16f))
+                    }
                 }
             }
         }

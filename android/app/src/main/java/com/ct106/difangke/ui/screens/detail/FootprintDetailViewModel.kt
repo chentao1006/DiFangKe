@@ -32,13 +32,14 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 
-    fun updateFootprint(title: String, reason: String, activityTypeValue: String? = null) {
+    fun updateFootprint(title: String, reason: String, activityTypeValue: String? = null, isHighlight: Boolean = false) {
         val current = _footprint.value ?: return
         viewModelScope.launch {
             val updated = current.copy(
                 title = title, 
                 reason = reason,
                 activityTypeValue = activityTypeValue ?: current.activityTypeValue,
+                isHighlight = isHighlight,
                 isTitleEditedByHand = true,
                 aiAnalyzed = true
             )

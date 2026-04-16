@@ -360,7 +360,7 @@ final class FootprintProcessor {
     private var stayDurationThreshold: TimeInterval { AppConfig.shared.stayDurationThreshold }
     
     // 1.4 合并参数
-    private var mergeTimeThreshold: TimeInterval { AppConfig.shared.stayDurationThreshold }
+    private var mergeTimeThreshold: TimeInterval { AppConfig.shared.stayMergeGapThreshold }
     private var mergeDistanceThreshold: CLLocationDistance { AppConfig.shared.mergeDistanceThreshold }
     
     /// 处理新定位点，满足停留条件则返回 CandidateFootprint
@@ -599,7 +599,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         self.locationManager.distanceFilter = 5.0 // 初始高频记录 (5米)
         self.locationManager.allowsBackgroundLocationUpdates = true
         self.locationManager.pausesLocationUpdatesAutomatically = false // 核心修复：禁止自动暂停，防止丢点
-        self.locationManager.showsBackgroundLocationIndicator = false
+        self.locationManager.showsBackgroundLocationIndicator = false // 关掉蓝色通知条，保持静默记录
         self.locationManager.activityType = .fitness // 默认为健身/步行模式
         
         // Initialize basic status
@@ -768,17 +768,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // --- 核心调整：根据用户要求，10 分钟以下不算停留，因此不显示正在进行的停留时长 ---
         if totalMinutes < 10 { return nil }
         
-        if totalMinutes >= 60 {
-            let hours = totalMinutes / 60
-            let minutes = totalMinutes % 60
-            if minutes > 0 {
-                return "\(hours) 小时 \(minutes) 分钟"
-            } else {
-                return "\(hours) 小时"
-            }
-        } else {
-            return "\(totalMinutes) 分钟"
-        }
+        return duration.formattedStayDuration
     }
 
     var matchedPlace: Place? {
@@ -828,6 +818,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         locationManager.requestAlwaysAuthorization()
         
+        // --- 核心：集成健康数据与运动传感器 ---
+        HealthManager.shared.requestAuthorization { success in
+            if success {
+                print("HealthKit authorized")
+            }
+        }
+        HealthManager.shared.startActivityTracking()
+        
         // Re-enable updates if they were stopped
         locationManager.startUpdatingLocation()
         locationManager.startMonitoringSignificantLocationChanges()
@@ -856,6 +854,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     func stopTracking() {
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
+        HealthManager.shared.stopActivityTracking()
         isTracking = false
         // 清理当前可能的停留状态
         potentialStopStartLocation = nil
@@ -1109,19 +1108,24 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let place = matchedPlace
         let speed = location.speed
         
-        // 判定是否正在长久停留 (核心修复：50m 门槛太低，室内 GPS 飘移容易突破 50m 导致恢复高精度。
-        // 我们将其放宽到 150m，并增加已知地点粘性：如果在已知地点且低速，则提前认为已驻留。)
+        // 判定是否正在长久停留
+        // 我们将其放宽到 150m (从 300m 下调)，并增加已知地点粘性
         let isStationary: Bool = {
             guard let startLoc = potentialStopStartLocation else { return false }
             let duration = Date().timeIntervalSince(startLoc.timestamp)
             let distance = location.distance(from: startLoc)
             
-            // A: 通用逻辑 - 5分钟以上且位移在 300m 内 (宽松应对大幅度室内漂移)
-            if duration > 300 && distance < 300.0 { return true }
+            // A: 通用逻辑 - 5分钟以上且位移在 150m 内 (应对室内漂移)
+            if duration > 300 && distance < 150.0 { return true }
             
             // B: 地点粘性 - 如果在已知地点范围内已超过 1 分钟，且当前速度极低，则提前进入节能
-            if let p = place, duration > 60 && distance < Double(p.radius) + 100.0 && speed < 1.0 {
+            if let p = place, duration > 60 && distance < Double(p.radius) + 80.0 && speed < 1.0 {
                 return true
+            }
+            
+            // C: 运动状态锁 - 如果传感器检测到正在步行/跑步，哪怕 GPS 位移没跟上，也要维持高频记录
+            if HealthManager.shared.currentMotionType == .walking || HealthManager.shared.currentMotionType == .running {
+                return false
             }
             
             return false
@@ -1132,27 +1136,27 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters {
                 manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
                 manager.distanceFilter = 100.0
-                manager.activityType = .other // 切换为非活跃类，促进系统休眠
+                manager.activityType = .other
             }
         } else if isStationary {
-            // 普通地点但已停留：进入节能模式，但保持 10m 灵敏度以便触发“起步”
+            // 普通地点但已停留：进入节能模式
             if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
                 manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-                manager.distanceFilter = 10.0 // 从 25m 降至 10m，极大提升起步灵敏度
+                manager.distanceFilter = 5.0 // 保持更敏感的起步识别
                 manager.activityType = .other
             }
         } else if speed > 25.0 {
             // 超高速移动中 (时速 > 90km/h)：提高位置采样密度，记录更平直的曲线
             if manager.desiredAccuracy != kCLLocationAccuracyBest {
-                manager.desiredAccuracy = kCLLocationAccuracyBest // 从 HundredMeters 改为 Best，确保高铁/高速轨迹不丢失
-                manager.distanceFilter = 30.0 // 从 100m 降低到 30m，解决高速轨迹严重“拉直线”的问题
+                manager.desiredAccuracy = kCLLocationAccuracyBest
+                manager.distanceFilter = 20.0 // 降低门槛，加密采样
                 manager.activityType = .automotiveNavigation
             }
         } else if speed > 10.0 {
             // 高速移动中 (时速 > 36km/h)：
             if manager.desiredAccuracy != kCLLocationAccuracyBest {
-                manager.desiredAccuracy = kCLLocationAccuracyBest // 统一提升至 Best
-                manager.distanceFilter = 15.0 // 从 40m 降低到 15m
+                manager.desiredAccuracy = kCLLocationAccuracyBest 
+                manager.distanceFilter = 10.0 // 加密采样
                 manager.activityType = .automotiveNavigation
             }
         } else {
@@ -1755,24 +1759,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let footprintTitles = validFootprints.map { $0.title }
             .filter { !Footprint.isGenericTitle($0) }
         
-        let fpsLite = todayFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
         
         // Calculate points and mileage using TimelineBuilder logic
         Task.detached(priority: .background) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
             
-            let timelineItems = TimelineBuilder.buildTimeline(
-                for: targetDate,
-                footprints: fpsLite,
-                allRawPoints: rawPoints,
-                allPlaces: [], 
-                overrides: []
-            )
             
-            let mileage = timelineItems.reduce(0) { sum, item in
-                if case .transport(let t) = item { return sum + t.distance }
-                return sum
-            }
+            let mileage = LocationManager.calculatePathDistance(rawPoints)
             
             await MainActor.run {
                 NotificationManager.shared.refreshDailySummary(
@@ -1986,6 +1979,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         simplified.append(coords.last!)
         return simplified
+    }
+
+    /// 计算路径总长度 (所有点之间的距离之和)
+    nonisolated public static func calculatePathDistance(_ points: [CLLocation]) -> Double {
+        guard points.count >= 2 else { return 0 }
+        var distance: Double = 0
+        for i in 0..<points.count - 1 {
+            distance += points[i].distance(from: points[i+1])
+        }
+        return distance
     }
     
     /// 补对并持久化历史间隙中的足迹 (Gap Filling -> Persistence)
@@ -2619,5 +2622,36 @@ extension CLLocation {
             speed: self.speed,
             timestamp: self.timestamp
         )
+    }
+}
+
+extension TimeInterval {
+    var formattedStayDuration: String {
+        let totalMinutes = Int(self / 60)
+        
+        if totalMinutes >= 1440 {
+            let days = totalMinutes / 1440
+            let hours = (totalMinutes % 1440) / 60
+            let minutes = totalMinutes % 60
+            
+            var components: [String] = ["\(days) 天"]
+            if hours > 0 {
+                components.append("\(hours) 小时")
+            }
+            if minutes > 0 {
+                components.append("\(minutes) 分钟")
+            }
+            return components.joined(separator: " ")
+        } else if totalMinutes >= 60 {
+            let hours = totalMinutes / 60
+            let minutes = totalMinutes % 60
+            if minutes > 0 {
+                return "\(hours) 小时 \(minutes) 分钟"
+            } else {
+                return "\(hours) 小时"
+            }
+        } else {
+            return "\(max(1, totalMinutes)) 分钟"
+        }
     }
 }

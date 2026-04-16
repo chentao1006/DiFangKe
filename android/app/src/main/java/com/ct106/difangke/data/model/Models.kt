@@ -119,6 +119,16 @@ sealed class TimelineItem {
         is FootprintItem -> footprint.footprintID
         is TransportItem -> transport.recordID
     }
+    
+    val latitude: Double get() = when (this) {
+        is FootprintItem -> footprint.representativeLatitude
+        is TransportItem -> transport.startLatitude
+    }
+    
+    val longitude: Double get() = when (this) {
+        is FootprintItem -> footprint.representativeLongitude
+        is TransportItem -> transport.startLongitude
+    }
 }
 
 // ── 活动类型预设（对应 iOS ActivityType.presets）─────────────────
@@ -210,4 +220,33 @@ object FootprintTitles {
         }
         return false
     }
+}
+
+// ── 扩展属性：用于简化数据库实体的坐标访问 ───────────────────────
+val com.ct106.difangke.data.db.entity.FootprintEntity.representativeLatitude: Double get() {
+    return try {
+        val arr = org.json.JSONArray(latitudeJson)
+        if (arr.length() > 0) arr.getDouble(0) else 0.0
+    } catch (e: Exception) { 0.0 }
+}
+
+val com.ct106.difangke.data.db.entity.FootprintEntity.representativeLongitude: Double get() {
+    return try {
+        val arr = org.json.JSONArray(longitudeJson)
+        if (arr.length() > 0) arr.getDouble(0) else 0.0
+    } catch (e: Exception) { 0.0 }
+}
+
+val com.ct106.difangke.data.db.entity.TransportRecordEntity.startLatitude: Double get() {
+    return try {
+        val arr = org.json.JSONArray(pointsJson)
+        if (arr.length() > 0) arr.getJSONArray(0).getDouble(0) else 0.0
+    } catch (e: Exception) { 0.0 }
+}
+
+val com.ct106.difangke.data.db.entity.TransportRecordEntity.startLongitude: Double get() {
+    return try {
+        val arr = org.json.JSONArray(pointsJson)
+        if (arr.length() > 0) arr.getJSONArray(0).getDouble(1) else 0.0
+    } catch (e: Exception) { 0.0 }
 }

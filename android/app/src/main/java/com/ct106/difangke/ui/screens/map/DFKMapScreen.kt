@@ -22,6 +22,7 @@ import com.amap.api.maps.model.LatLng
 import com.amap.api.maps.model.LatLngBounds
 import com.amap.api.maps.model.MyLocationStyle
 import com.amap.api.maps.model.PolylineOptions
+import java.util.Calendar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -41,7 +42,18 @@ fun DFKMapScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (dateTimestamp == null) "今日足迹" else "历史足迹") },
+                title = { 
+                    val isToday = remember(dateTimestamp) {
+                        if (dateTimestamp == null) true
+                        else {
+                            val cal1 = Calendar.getInstance()
+                            val cal2 = Calendar.getInstance().apply { timeInMillis = dateTimestamp }
+                            cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) && 
+                            cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
+                        }
+                    }
+                    Text(if (isToday) "今日足迹" else "历史足迹") 
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "返回")
@@ -104,13 +116,21 @@ fun DFKMapScreen(
                         .useGradient(true)
                 )
                 
-                // 核心修复：如果是第一次进入页面，优先移动到当前轨迹最新的定位点
+                // 核心优化：自动调整缩放和范围，使轨迹完整显示
                 if (!hasCentredToNow) {
-                    val latest = latLngs.last()
-                    // 只有当坐标有效时才移动（排除 0,0 异常）
-                    if (latest.latitude != 0.0 && latest.longitude != 0.0) {
-                        amap.moveCamera(CameraUpdateFactory.newLatLngZoom(latest, 16f))
+                    if (latLngs.size > 1) {
+                        val boundsBuilder = LatLngBounds.Builder()
+                        latLngs.forEach { boundsBuilder.include(it) }
+                        val bounds = boundsBuilder.build()
+                        // 延迟一两帧执行，确保地图 View 尺寸已测量
+                        amap.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 150))
                         hasCentredToNow = true
+                    } else if (latLngs.isNotEmpty()) {
+                        val latest = latLngs.last()
+                        if (latest.latitude != 0.0 && latest.longitude != 0.0) {
+                            amap.moveCamera(CameraUpdateFactory.newLatLngZoom(latest, 16f))
+                            hasCentredToNow = true
+                        }
                     }
                 }
             }

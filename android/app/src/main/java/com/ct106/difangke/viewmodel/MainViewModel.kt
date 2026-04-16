@@ -11,11 +11,13 @@ import com.ct106.difangke.data.model.TimelineItem
 import com.ct106.difangke.service.LocationTrackingService
 import com.ct106.difangke.service.OpenAIService
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.ct106.difangke.data.location.RawLocationStore
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -32,52 +34,99 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA)
     
-    val availableDates: StateFlow<List<Date>> = combine(
-        db.footprintDao().observeAvailableDates(),
-        _currentDate
-    ) { dateStrings, current ->
-        val dates: MutableList<java.util.Date> = dateStrings.mapNotNull { 
-            try { sdf.parse(it) } catch(e: Exception) { null } 
-        }.toMutableList()
-        
-        val today = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
-        }.time
-        val tomorrow = Calendar.getInstance().apply {
-            time = today
-            add(Calendar.DAY_OF_YEAR, 1)
-        }.time
-        
-        if (dates.none { it.time == today.time }) dates.add(today)
-        if (dates.none { it.time == tomorrow.time }) dates.add(tomorrow)
-        if (dates.none { it.time == current.time }) dates.add(current)
+    private fun zeroTime(date: Date): Date {
+        val cal = Calendar.getInstance().apply {
+            time = date
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        return cal.time
+    }
 
-        // 核心修复：确保有最早日期的前一天（iOS 特性）
-        val earliest = dates.minByOrNull { it.time }
-        if (earliest != null) {
+    val availableDates: StateFlow<List<Date>> = db.footprintDao().observeAvailableDates()
+        .map { dateStrings ->
+            val dates: MutableSet<Date> = dateStrings.mapNotNull { 
+                try { sdf.parse(it)?.let { d -> zeroTime(d) } } catch(e: Exception) { null } 
+            }.toMutableSet()
+            
+            val today = zeroTime(Date())
+            val tomorrow = Calendar.getInstance().apply {
+                time = today
+                add(Calendar.DAY_OF_YEAR, 1)
+            }.time.let { zeroTime(it) }
+            
+            dates.add(today)
+            dates.add(tomorrow)
+
+            // 核心修复：始终保证有一个历史前的页，用于引导
+            val earliestBase = dates.minByOrNull { it.time } ?: today
             val beforeEarliest = Calendar.getInstance().apply {
-                time = earliest
+                time = earliestBase
                 add(Calendar.DAY_OF_YEAR, -1)
-            }.time
-            if (dates.none { it.time == beforeEarliest.time }) {
-                dates.add(beforeEarliest)
+            }.time.let { zeroTime(it) }
+            
+            dates.add(beforeEarliest)
+
+            dates.toList().sortedBy { it.time }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), listOf(zeroTime(Calendar.getInstance().time)))
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val timelineItems: StateFlow<List<TimelineItem>> = _currentDate.flatMapLatest { date ->
+        val start = zeroTime(date)
+        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+        combine(
+            db.footprintDao().observeBetween(start, end),
+            db.transportRecordDao().observeForDay(start, end)
+        ) { fps, tps ->
+            (fps.map { TimelineItem.FootprintItem(it) } + tps.map { TimelineItem.TransportItem(it) })
+                .sortedByDescending { it.startTime }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val dailyInsight: StateFlow<DailyInsightEntity?> = _currentDate.flatMapLatest { date ->
+        val start = zeroTime(date)
+        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+        db.dailyInsightDao().observeForDay(start, end)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val totalMileage: StateFlow<Double> = _currentDate.flatMapLatest { date ->
+        flow {
+            val store = RawLocationStore.getInstance(getApplication())
+            emit(withContext(Dispatchers.IO) { store.calculateTotalDistance(date) })
+            
+            val isToday = zeroTime(Date()).time == zeroTime(date).time
+            if (isToday) {
+                LocationTrackingService.stateFlow.collect {
+                    emit(withContext(Dispatchers.IO) { store.calculateTotalDistance(date) })
+                }
             }
         }
-        
-        dates.sortedBy { it.time }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), listOf(_currentDate.value))
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.0)
 
-    private val _timelineItems = MutableStateFlow<List<TimelineItem>>(emptyList())
-    val timelineItems: StateFlow<List<TimelineItem>> = _timelineItems.asStateFlow()
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val totalPoints: StateFlow<Int> = _currentDate.flatMapLatest { date ->
+        flow {
+            val store = RawLocationStore.getInstance(getApplication())
+            emit(withContext(Dispatchers.IO) { store.getTotalPointsCount(date) })
+            
+            val isToday = zeroTime(Date()).time == zeroTime(date).time
+            if (isToday) {
+                LocationTrackingService.stateFlow.collect {
+                    emit(withContext(Dispatchers.IO) { store.getTotalPointsCount(date) })
+                }
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
-    private val _dailyInsight = MutableStateFlow<DailyInsightEntity?>(null)
-    val dailyInsight: StateFlow<DailyInsightEntity?> = _dailyInsight.asStateFlow()
+    val activityTypes: StateFlow<List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>> = db.activityTypeDao().observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    private val _totalMileage = MutableStateFlow(0.0)
-    val totalMileage: StateFlow<Double> = _totalMileage.asStateFlow()
-
-    private val _totalPoints = MutableStateFlow(0)
-    val totalPoints: StateFlow<Int> = _totalPoints.asStateFlow()
+    val allPlaces: StateFlow<List<com.ct106.difangke.data.db.entity.PlaceEntity>> = db.placeDao().observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _dailyTrajectory = MutableStateFlow<String?>(null)
     val dailyTrajectory: StateFlow<String?> = _dailyTrajectory.asStateFlow()
@@ -85,11 +134,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _dailyMarkers = MutableStateFlow<String?>(null)
     val dailyMarkers: StateFlow<String?> = _dailyMarkers.asStateFlow()
 
+    val trackingState = LocationTrackingService.stateFlow
+
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
-
-    val trackingState = LocationTrackingService.stateFlow
     
+    // 获取指定日期的足迹/交通项流
+    fun getTimelineItems(date: Date): Flow<List<TimelineItem>> {
+        val start = zeroTime(date)
+        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+        return combine(
+            db.footprintDao().observeBetween(start, end),
+            db.transportRecordDao().observeForDay(start, end)
+        ) { fps, tps ->
+            (fps.map { TimelineItem.FootprintItem(it) } + tps.map { TimelineItem.TransportItem(it) })
+                .sortedByDescending { it.startTime }
+        }
+    }
+
+    // 获取指定日期的每日洞察
+    fun getDailyInsight(date: Date): Flow<DailyInsightEntity?> {
+        val start = zeroTime(date)
+        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+        return db.dailyInsightDao().observeForDay(start, end)
+    }
+
+    // 获取指定日期的里程
+    fun getMileage(date: Date): Flow<Double> {
+        return flow {
+            val store = RawLocationStore.getInstance(getApplication())
+            emit(withContext(Dispatchers.IO) { store.calculateTotalDistance(date) })
+            
+            // 只有今天需要实时刷新
+            if (isToday(date)) {
+                trackingState.collect {
+                    emit(withContext(Dispatchers.IO) { store.calculateTotalDistance(date) })
+                }
+            }
+        }
+    }
+
+    // 获取指定日期的点数
+    fun getPointsCount(date: Date): Flow<Int> {
+        return flow {
+            val store = RawLocationStore.getInstance(getApplication())
+            emit(withContext(Dispatchers.IO) { store.getTotalPointsCount(date) })
+            
+            if (isToday(date)) {
+                trackingState.collect {
+                    emit(withContext(Dispatchers.IO) { store.getTotalPointsCount(date) })
+                }
+            }
+        }
+    }
+
+    private fun isToday(date: Date): Boolean {
+        val today = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }.time
+        return zeroTime(date).time == today.time
+    }
+
     val hasSwiped: Flow<Boolean> = DiFangKeApp.instance.preferences.hasSwiped
 
     init {
@@ -123,21 +228,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setDate(date: Date) {
-        _currentDate.value = date
-        loadDataForDate(date)
+        val zeroed = zeroTime(date)
+        if (_currentDate.value.time != zeroed.time) {
+            _currentDate.value = zeroed
+            loadDataForDate(zeroed)
+        }
     }
 
     fun loadDataForDate(date: Date) {
         viewModelScope.launch {
+            // 清理旧数据
+            _dailyTrajectory.value = null
+            _dailyMarkers.value = null
+
+            val startOfDay = zeroTime(date)
             val cal = Calendar.getInstance().apply {
-                time = date
-                set(Calendar.HOUR_OF_DAY, 0)
-                set(Calendar.MINUTE, 0)
-                set(Calendar.SECOND, 0)
-                set(Calendar.MILLISECOND, 0)
+                time = startOfDay
+                add(Calendar.DAY_OF_YEAR, 1)
             }
-            val startOfDay = cal.time
-            cal.add(Calendar.DAY_OF_YEAR, 1)
             val endOfDay = cal.time
 
             // 1. 获取足迹
@@ -146,23 +254,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // 2. 获取交通记录
             val transports = db.transportRecordDao().getForDay(startOfDay, endOfDay)
 
-            // 3. 合并排序
-            val items = (footprints.map { TimelineItem.FootprintItem(it) } + 
-                                transports.map { TimelineItem.TransportItem(it) })
-                                .sortedByDescending { it.startTime }
-            _timelineItems.value = items
+            // 不需要手动计算统计数据，Flow 自动处理
 
-            // 计算统计数据
-            _totalMileage.value = transports.sumOf { it.distance }
-            _totalPoints.value = footprints.sumOf { fp ->
-                try {
-                    val latArray = org.json.JSONArray(fp.latitudeJson)
-                    latArray.length()
-                } catch (e: Exception) { 0 }
-            }
-
-            // 4. 获取总结
-            _dailyInsight.value = db.dailyInsightDao().getForDay(startOfDay, endOfDay)
+            // 不需要手动更新 DailyInsight，Flow 自动处理
 
             // 5. 聚合轨迹点
             val allPointsList = mutableListOf<List<Double>>()
@@ -241,14 +335,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 time = date
                 add(Calendar.DAY_OF_YEAR, 1)
             }
-            _dailyInsight.value = db.dailyInsightDao().getForDay(date, cal.time)
         }
     }
 
     fun refresh() {
-        _isRefreshing.value = true
-        loadDataForDate(_currentDate.value)
-        _isRefreshing.value = false
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            loadDataForDate(_currentDate.value)
+            _isRefreshing.value = false
+        }
     }
 
     fun toggleTracking() {
