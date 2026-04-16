@@ -1,5 +1,11 @@
 pluginManagement {
     repositories {
+        // 阿里云镜像加速（国内环境）- 放在最前面优先使用
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/central") }
+        maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
+        maven { url = uri("https://maven.aliyun.com/repository/public") }
+        
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -9,18 +15,18 @@ pluginManagement {
         }
         mavenCentral()
         gradlePluginPortal()
-        // 阿里云镜像加速（国内环境）
-        maven { url = uri("https://maven.aliyun.com/repository/google") }
-        maven { url = uri("https://maven.aliyun.com/repository/central") }
     }
 }
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        google()
-        mavenCentral()
+        // 阿里云镜像加速（国内环境）- 放在最前面优先使用
         maven { url = uri("https://maven.aliyun.com/repository/google") }
         maven { url = uri("https://maven.aliyun.com/repository/central") }
+        maven { url = uri("https://maven.aliyun.com/repository/public") }
+        
+        google()
+        mavenCentral()
         // 高德地图 SDK
         maven { url = uri("https://jitpack.io") }
     }
