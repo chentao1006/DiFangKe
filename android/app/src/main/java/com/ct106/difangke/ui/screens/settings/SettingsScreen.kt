@@ -41,6 +41,9 @@ fun SettingsScreen(
     val ignoredPlacesCount by viewModel.ignoredPlacesCount.collectAsState()
     val activitiesCount by viewModel.activitiesCount.collectAsState()
     val aiServiceType by viewModel.aiServiceType.collectAsState()
+    
+    val updateInfo by viewModel.updateInfo.collectAsState()
+    val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
 
     Scaffold(
         topBar = {
@@ -169,6 +172,13 @@ fun SettingsScreen(
                     )
                 }
             }
+            item {
+                SettingsNavigationItem(
+                    title = "检查更新",
+                    badge = if (isCheckingUpdate) "检查中..." else "",
+                    onClick = { viewModel.checkUpdate() }
+                )
+            }
 
             // ── 数据管理 ──────────────────────────────────────────────
             item { SettingsHeader("数据管理") }
@@ -199,6 +209,56 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(32.dp))
             }
         }
+    }
+
+    // ── 更新提示对话框 ──────────────────────────────────────────────
+    if (updateInfo != null) {
+        val info = updateInfo!!
+        val isNew = viewModel.isNewVersionAvailable(info.versionCode)
+        
+        AlertDialog(
+            onDismissRequest = { viewModel.clearUpdateInfo() },
+            title = { Text(if (isNew) "发现新版本 ${info.versionName}" else "当前已是最新版本") },
+            text = {
+                Column {
+                    if (isNew) {
+                        Text(info.releaseNotes)
+                    } else {
+                        Text("您的应用已是最新。")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "当前版本: 1.0.0 (Build 1006)\n最新版本: ${info.versionName} (Build ${info.versionCode})",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                if (isNew) {
+                    Button(
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        onClick = {
+                            viewModel.startUpdate(info.downloadUrl)
+                            viewModel.clearUpdateInfo()
+                        }
+                    ) {
+                        Text("立即更新")
+                    }
+                } else {
+                    TextButton(onClick = { viewModel.clearUpdateInfo() }) {
+                        Text("好的")
+                    }
+                }
+            },
+            dismissButton = {
+                if (isNew) {
+                    TextButton(onClick = { viewModel.clearUpdateInfo() }) {
+                        Text("稍后再说")
+                    }
+                }
+            }
+        )
     }
 }
 

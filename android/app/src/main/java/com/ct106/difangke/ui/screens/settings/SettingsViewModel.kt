@@ -7,12 +7,16 @@ import androidx.lifecycle.viewModelScope
 import androidx.datastore.preferences.core.edit
 import com.ct106.difangke.data.prefs.AppPreferences
 import com.ct106.difangke.service.LocationTrackingService
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.ct106.difangke.service.UpdateManager
+import com.ct106.difangke.service.UpdateInfo
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = AppPreferences(application)
@@ -113,6 +117,34 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 com.ct106.difangke.service.DailySummaryWorker.cancel(getApplication())
             }
         }
+    }
+
+    // ── 自动更新 ──────────────────────────────────────────────────
+    private val _updateInfo = MutableStateFlow<UpdateInfo?>(null)
+    val updateInfo: StateFlow<UpdateInfo?> = _updateInfo.asStateFlow()
+
+    private val _isCheckingUpdate = MutableStateFlow(false)
+    val isCheckingUpdate: StateFlow<Boolean> = _isCheckingUpdate.asStateFlow()
+
+    fun checkUpdate() {
+        viewModelScope.launch {
+            _isCheckingUpdate.value = true
+            val info = UpdateManager.getInstance(getApplication()).checkUpdate()
+            _updateInfo.value = info
+            _isCheckingUpdate.value = false
+        }
+    }
+
+    fun startUpdate(url: String) {
+        UpdateManager.getInstance(getApplication()).downloadAndInstall(url)
+    }
+
+    fun clearUpdateInfo() {
+        _updateInfo.value = null
+    }
+
+    fun isNewVersionAvailable(remoteVersionCode: Int): Boolean {
+        return UpdateManager.getInstance(getApplication()).isNewVersionAvailable(remoteVersionCode)
     }
 }
 
