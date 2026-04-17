@@ -28,6 +28,13 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ct106.difangke.data.db.entity.PlaceEntity
+import com.amap.api.services.geocoder.GeocodeResult
+import com.amap.api.services.geocoder.GeocodeSearch
+import com.amap.api.services.geocoder.RegeocodeQuery
+import com.amap.api.services.geocoder.RegeocodeResult
+import com.amap.api.services.core.LatLonPoint
+import com.amap.api.services.poisearch.PoiResult
+import com.amap.api.services.poisearch.PoiSearch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -177,16 +184,69 @@ fun PlaceRow(place: PlaceEntity, onClick: () -> Unit, onDelete: () -> Unit) {
 fun PlaceEditorDialog(
     place: PlaceEntity?,
     onDismiss: () -> Unit,
-    onSave: (String, String, Double, Double, Float) -> Unit
+    onSave: (String, String, Double, Double, Float) -> Unit,
+    viewModel: PlacesViewModel = viewModel()
 ) {
     var name by remember { mutableStateOf(place?.name ?: "") }
     var address by remember { mutableStateOf(place?.address ?: "") }
-    var lat by remember { mutableDoubleStateOf(place?.latitude ?: 39.90923) }
-    var lon by remember { mutableDoubleStateOf(place?.longitude ?: 116.397428) }
-    var radius by remember { mutableFloatStateOf(place?.radius ?: 200f) }
+    val currentLocation by viewModel.currentLocation.collectAsState()
+    var lat by remember { mutableDoubleStateOf(place?.latitude ?: currentLocation?.first ?: 39.90923) }
+    var lon by remember { mutableDoubleStateOf(place?.longitude ?: currentLocation?.second ?: 116.397428) }
+    var radius by remember { mutableFloatStateOf(place?.radius ?: 50f) }
+    var searchQuery by remember { mutableStateOf("") }
+
+    // 如果是新地点且定位成功，自动定位到当前位置
+    LaunchedEffect(currentLocation) {
+        if (place == null && currentLocation != null && lat == 39.90923 && lon == 116.397428) {
+            currentLocation?.let {
+                lat = it.first
+                lon = it.second
+            }
+        }
+    }
 
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    
+    // 初始化逆地理编码查询
+    val geocoder = remember {
+        GeocodeSearch(context).apply {
+            setOnGeocodeSearchListener(object : GeocodeSearch.OnGeocodeSearchListener {
+                override fun onRegeocodeSearched(result: RegeocodeResult?, rCode: Int) {
+                    if (rCode == 1000 && result?.regeocodeAddress != null) {
+                        val addr = result.regeocodeAddress
+                        val full = addr.formatAddress
+                        // 移除省、市、区前缀
+                        val prefix = (addr.province ?: "") + (addr.city ?: "") + (addr.district ?: "")
+                        address = full.replaceFirst(prefix, "")
+                    }
+                }
+                override fun onGeocodeSearched(result: GeocodeResult?, rCode: Int) {}
+            })
+        }
+    }
+
+    // POI 搜索监听
+    val poiSearchListener = remember {
+        object : PoiSearch.OnPoiSearchListener {
+            override fun onPoiSearched(result: PoiResult?, rCode: Int) {
+                if (rCode == 1000 && result?.pois?.isNotEmpty() == true) {
+                    val poi = result.pois[0]
+                    lat = poi.latLonPoint.latitude
+                    lon = poi.latLonPoint.longitude
+                    
+                    // 同样尝试移除省市区
+                    val full = poi.snippet ?: poi.title
+                    val prefix = (poi.provinceName ?: "") + (poi.cityName ?: "") + (poi.adName ?: "")
+                    address = full.replaceFirst(prefix, "")
+                    
+                    if (name.isBlank()) name = poi.title
+                }
+            }
+            override fun onPoiItemSearched(item: com.amap.api.services.core.PoiItem?, rCode: Int) {}
+        }
+    }
 
     Dialog(
         onDismissRequest = onDismiss, 
@@ -212,17 +272,16 @@ fun PlaceEditorDialog(
                     }
                 )
 
-                Column(
+                // 1. 地图区域：固定不滚动，放置在顶层 Column 中，彻底解决手势冲突
+                Card(
                     modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState())
+                        .fillMaxWidth()
+                        .height(400.dp) // 再次增加高度，方便操作
+                        .padding(bottom = 8.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                 ) {
-                    // Map Picker
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(350.dp)
-                    ) {
+                    Box(modifier = Modifier.fillMaxSize()) {
                         AndroidView(
                             factory = { ctx ->
                                 com.amap.api.maps.TextureMapView(ctx).apply {
@@ -237,26 +296,46 @@ fun PlaceEditorDialog(
                             amap.uiSettings.isZoomControlsEnabled = false
                             
                             val center = com.amap.api.maps.model.LatLng(lat, lon)
-                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(center, 15f))
+                            
+                            // 仅当经纬度发生显著变化（非平移产生）时才从代码侧移动相机（如初始化）
+                            val currentTarget = amap.cameraPosition.target
+                            if (Math.abs(currentTarget.latitude - lat) > 0.000001 || Math.abs(currentTarget.longitude - lon) > 0.000001) {
+                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(center, 15f))
+                            }
                             
                             amap.clear()
-                            amap.addMarker(com.amap.api.maps.model.MarkerOptions().position(center))
+                            // 移除 Marker，因为现在以中心十字准星为准
                             amap.addCircle(
                                 com.amap.api.maps.model.CircleOptions()
-                                    .center(center)
+                                    .center(amap.cameraPosition.target) // 圆心始终随地图中心移动
                                     .radius(radius.toDouble())
                                     .fillColor(primaryColor and 0x22FFFFFF)
                                     .strokeColor(primaryColor)
                                     .strokeWidth(2f)
                             )
                             
-                            amap.setOnMapClickListener { pos ->
-                                lat = pos.latitude
-                                lon = pos.longitude
-                            }
+                            // 平移地图即定坐标
+                            amap.setOnCameraChangeListener(object : com.amap.api.maps.AMap.OnCameraChangeListener {
+                                override fun onCameraChange(pos: com.amap.api.maps.model.CameraPosition?) {}
+                                override fun onCameraChangeFinish(pos: com.amap.api.maps.model.CameraPosition?) {
+                                    pos?.let {
+                                        lat = it.target.latitude
+                                        lon = it.target.longitude
+                                        
+                                        // 自动识别地址
+                                        geocoder.getFromLocationAsyn(
+                                            RegeocodeQuery(
+                                                LatLonPoint(lat, lon),
+                                                200f,
+                                                GeocodeSearch.AMAP
+                                            )
+                                        )
+                                    }
+                                }
+                            })
                         }
                         
-                        // Center indicator
+                        // 中心指示标
                         Icon(
                             Icons.Default.MyLocation,
                             contentDescription = null,
@@ -264,20 +343,55 @@ fun PlaceEditorDialog(
                             tint = MaterialTheme.colorScheme.primary
                         )
                         
-                        Text(
-                            "点击地图选择位置",
+                        // 搜索栏
+                        Surface(
                             modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(bottom = 16.dp)
-                                .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                            color = Color.White,
-                            style = MaterialTheme.typography.labelSmall
-                        )
+                                .fillMaxWidth()
+                                .padding(12.dp)
+                                .align(Alignment.TopCenter),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+                            shape = RoundedCornerShape(8.dp),
+                            shadowElevation = 4.dp
+                        ) {
+                            TextField(
+                                value = searchQuery,
+                                onValueChange = { searchQuery = it },
+                                placeholder = { Text("搜索地点", fontSize = 14.sp) },
+                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = TextFieldDefaults.colors(
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent,
+                                    disabledContainerColor = Color.Transparent,
+                                    focusedIndicatorColor = Color.Transparent,
+                                    unfocusedIndicatorColor = Color.Transparent,
+                                ),
+                                singleLine = true,
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                    imeAction = androidx.compose.ui.text.input.ImeAction.Search
+                                ),
+                                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                                    onSearch = {
+                                        if (searchQuery.isNotBlank()) {
+                                            val query = PoiSearch.Query(searchQuery, "", "")
+                                            val search = PoiSearch(context, query)
+                                            search.setOnPoiSearchListener(poiSearchListener)
+                                            search.searchPOIAsyn()
+                                        }
+                                    }
+                                )
+                            )
+                        }
                     }
+                }
 
-                    Spacer(Modifier.height(24.dp))
-
+                // 2. 表单区域：放置在带滚动的 Column 中
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Spacer(Modifier.height(8.dp))
                     Column(
                         modifier = Modifier.padding(horizontal = 24.dp),
                         verticalArrangement = Arrangement.spacedBy(20.dp)
@@ -309,8 +423,8 @@ fun PlaceEditorDialog(
                             Slider(
                                 value = radius,
                                 onValueChange = { radius = it },
-                                valueRange = 100f..1000f,
-                                steps = 8
+                                valueRange = 20f..500f,
+                                steps = 23
                             )
                             Text(
                                 "当您进入此半径范围内，系统会自动识别为您到达了该地点。",

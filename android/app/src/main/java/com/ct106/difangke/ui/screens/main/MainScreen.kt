@@ -142,7 +142,18 @@ fun MainScreen(
             Column(modifier = Modifier.padding(padding)) {
                 DateNavigator(
                     currentDate = currentDate,
-                    onDateSelected = { date -> viewModel.setDate(date) },
+                    canGoBack = pagerState.currentPage > 0,
+                    canGoForward = pagerState.currentPage < availableDates.size - 1,
+                    onPrevClick = {
+                        if (pagerState.currentPage > 0) {
+                            scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) }
+                        }
+                    },
+                    onNextClick = {
+                        if (pagerState.currentPage < availableDates.size - 1) {
+                            scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) }
+                        }
+                    },
                     onCalendarClick = { showCalendar = true }
                 )
 
@@ -341,13 +352,13 @@ fun TimelineContent(
 @Composable
 fun DateNavigator(
     currentDate: Date,
-    onDateSelected: (Date) -> Unit,
+    canGoBack: Boolean,
+    canGoForward: Boolean,
+    onPrevClick: () -> Unit,
+    onNextClick: () -> Unit,
     onCalendarClick: () -> Unit
 ) {
     val primaryColor = Color(0xFF00A0AC)
-    val today = Calendar.getInstance().apply {
-        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
-    }.time
     
     val calendar = Calendar.getInstance().apply { time = currentDate }
     val isToday = isToday(currentDate)
@@ -386,11 +397,15 @@ fun DateNavigator(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = { 
-            val cal = Calendar.getInstance().apply { time = currentDate; add(Calendar.DAY_OF_YEAR, -1) }
-            onDateSelected(cal.time)
-        }) {
-            Icon(Icons.Default.KeyboardArrowLeft, contentDescription = "Previous", tint = primaryColor)
+        IconButton(
+            onClick = onPrevClick,
+            enabled = canGoBack
+        ) {
+            Icon(
+                Icons.Default.KeyboardArrowLeft, 
+                contentDescription = "Previous", 
+                tint = if (canGoBack) primaryColor else Color.Gray.copy(alpha = 0.3f)
+            )
         }
 
         Column(
@@ -419,18 +434,14 @@ fun DateNavigator(
             )
         }
 
-        IconButton(onClick = { 
-            val cal = Calendar.getInstance().apply { time = currentDate; add(Calendar.DAY_OF_YEAR, 1) }
-            val nextDate = cal.time
-            // 不允许跳转到未来
-            if (nextDate.time <= System.currentTimeMillis() + 60000) {
-                onDateSelected(nextDate)
-            }
-        }, enabled = currentDate.time < today.time) {
+        IconButton(
+            onClick = onNextClick,
+            enabled = canGoForward
+        ) {
             Icon(
                 Icons.Default.KeyboardArrowRight, 
                 contentDescription = "Next", 
-                tint = if (currentDate.time < today.time) primaryColor else Color.Gray.copy(alpha = 0.3f)
+                tint = if (canGoForward) primaryColor else Color.Gray.copy(alpha = 0.3f)
             )
         }
     }

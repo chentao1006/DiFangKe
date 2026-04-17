@@ -1,6 +1,7 @@
 package com.ct106.difangke.ui.screens.statistics
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ct106.difangke.DiFangKeApp
@@ -10,6 +11,7 @@ import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.service.OpenAIService
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import java.util.*
 import kotlin.math.roundToInt
 
@@ -116,21 +118,100 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
             _trendData.value = calculateTrend(filteredFootprints, range.days ?: 90)
 
             // 4. AI Summary
-            generateAiSummary(filteredFootprints, range.label)
+            checkAiSummaryCacheOrGenerate(filteredFootprints, range)
+        }
+    }
+
+    private fun checkAiSummaryCacheOrGenerate(footprints: List<FootprintEntity>, range: StatisticsRange) {
+        val sp = getApplication<Application>().getSharedPreferences("statistics_ai_cache", Context.MODE_PRIVATE)
+        val cacheKey = range.label
+        val cachedText = sp.getString("${cacheKey}_text", null)
+        val cachedTime = sp.getLong("${cacheKey}_time", 0L)
+
+        if (cachedText != null && cachedTime > 0L) {
+            val expiration = getExpirationFor(range)
+            if (System.currentTimeMillis() - cachedTime < expiration) {
+                _aiSummary.value = cachedText
+                return
+            }
+        }
+
+        generateAiSummary(footprints, range)
+    }
+
+    private fun getExpirationFor(range: StatisticsRange): Long {
+        val hour = 3600 * 1000L
+        val day = 24 * hour
+        return when (range) {
+            StatisticsRange.LAST_7_DAYS -> 1 * day
+            StatisticsRange.LAST_30_DAYS -> 3 * day
+            StatisticsRange.LAST_90_DAYS -> 7 * day
+            is StatisticsRange.CUSTOM_YEAR -> 30 * day
+            StatisticsRange.LAST_YEAR -> 30 * day
+            StatisticsRange.ALL -> 90 * day
+            else -> 1 * day
+        }
+    }
+
+    private fun generateAiSummary(footprints: List<FootprintEntity>, range: StatisticsRange) {
+        viewModelScope.launch {
+            val isAiEnabled = DiFangKeApp.instance.preferences.isAiEnabled.first()
+            if (!isAiEnabled || footprints.isEmpty()) {
+                _aiSummary.value = null
+                return@launch
+            }
+
+            _isGeneratingSummary.value = true
+            _aiSummary.value = null
+
+            val rankData = calculateActivityRank(footprints, emptyList(), emptyList())
+                .take(3).joinToString(", ") { "${it.name}(${it.count}次)" }
+            
+            val totalDurationHours = footprints.sumOf { it.endTime.time - it.startTime.time }.toDouble() / 3600000.0
+            
+            val prompt = """
+                请作为一位睿智的生活观察者，对用户在过去“${range.label}”的足迹数据进行一次有深度且清晰的总结。
+                
+                数据概览：
+                - 记录密度：${footprints.size}个生活片段，累计活跃时长约${totalDurationHours.toInt()}小时
+                - 活动重心：$rankData
+                
+                要求：
+                1. 语气：客观睿智、理感平衡。不要过于文艺或晦涩。
+                2. 洞察：总结出这段时间潜藏的“生活逻辑”或“情感底色”。
+                3. 篇幅：80字左右。
+            """.trimIndent()
+
+            val summary = OpenAIService.shared.getCustomSummary(prompt)
+            val finalized = summary ?: "这段时间，你的生活步调稳健而有序。"
+            _aiSummary.value = finalized
+            _isGeneratingSummary.value = false
+
+            // Cache it
+            val sp = getApplication<Application>().getSharedPreferences("statistics_ai_cache", Context.MODE_PRIVATE)
+            sp.edit()
+                .putString("${range.label}_text", finalized)
+                .putLong("${range.label}_time", System.currentTimeMillis())
+                .apply()
         }
     }
 
     private fun calculateHeatmap(footprints: List<FootprintEntity>): List<HeatmapPoint> {
         val groups = mutableMapOf<String, Int>()
-        val factor = 100.0
+        val factor = 1000.0 // 提高采样精度
         
         footprints.forEach { fp ->
             try {
-                val lats = org.json.JSONArray(fp.latitudeJson)
-                val lons = org.json.JSONArray(fp.longitudeJson)
-                if (lats.length() > 0 && lons.length() > 0) {
-                    val latRaw = lats.getDouble(0)
-                    val lonRaw = lons.getDouble(0)
+                val lats = JSONArray(fp.latitudeJson)
+                val lons = JSONArray(fp.longitudeJson)
+                val len = minOf(lats.length(), lons.length())
+                
+                // 采集所有坐标点，而非仅第一个
+                for (i in 0 until len) {
+                    val latRaw = lats.getDouble(i)
+                    val lonRaw = lons.getDouble(i)
+                    
+                    // 聚合点以提高性能和视觉效果
                     val lat = (latRaw * factor).roundToInt() / factor
                     val lon = (lonRaw * factor).roundToInt() / factor
                     val key = "$lat,$lon"
@@ -142,7 +223,7 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
         return groups.map { (key, count) ->
             val parts = key.split(",")
             HeatmapPoint(parts[0].toDouble(), parts[1].toDouble(), count)
-        }.sortedByDescending { it.count }.take(200)
+        }.sortedByDescending { it.count }.take(500)
     }
 
     private fun calculateActivityRank(
@@ -213,40 +294,5 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
             result.add(TrendPoint(d, score))
         }
         return result
-    }
-
-    private fun generateAiSummary(footprints: List<FootprintEntity>, rangeStr: String) {
-        viewModelScope.launch {
-            val isAiEnabled = DiFangKeApp.instance.preferences.isAiEnabled.first()
-            if (!isAiEnabled || footprints.isEmpty()) {
-                _aiSummary.value = null
-                return@launch
-            }
-
-            _isGeneratingSummary.value = true
-            _aiSummary.value = null
-
-            val rankData = calculateActivityRank(footprints, emptyList(), emptyList())
-                .take(3).joinToString(", ") { "${it.name}(${it.count}次)" }
-            
-            val totalDurationHours = footprints.sumOf { it.endTime.time - it.startTime.time }.toDouble() / 3600000.0
-            
-            val prompt = """
-                请作为一位睿智的生活观察者，对用户在过去“$rangeStr”的足迹数据进行一次有深度且清晰的总结。
-                
-                数据概览：
-                - 记录密度：${footprints.size}个生活片段，累计活跃时长约${totalDurationHours.toInt()}小时
-                - 活动重心：$rankData
-                
-                要求：
-                1. 语气：客观睿智、理感平衡。不要过于文艺或晦涩。
-                2. 洞察：总结出这段时间潜藏的“生活逻辑”或“情感底色”。
-                3. 篇幅：80字左右。
-            """.trimIndent()
-
-            val summary = OpenAIService.shared.getCustomSummary(prompt)
-            _aiSummary.value = summary ?: "这段时间，你的生活步调稳健而有序。"
-            _isGeneratingSummary.value = false
-        }
     }
 }

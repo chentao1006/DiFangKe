@@ -1,11 +1,15 @@
 package com.ct106.difangke.ui.screens.statistics
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -13,17 +17,22 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.util.Log
 import android.os.Bundle
+import com.ct106.difangke.ui.theme.DfkAccent
+import java.text.SimpleDateFormat
 import java.util.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun StatisticsScreen(
     onBack: () -> Unit,
@@ -36,45 +45,66 @@ fun StatisticsScreen(
     val aiSummary by viewModel.aiSummary.collectAsState()
     val isGeneratingSummary by viewModel.isGeneratingSummary.collectAsState()
 
+    val isDark = isSystemInDarkTheme()
+    val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
+
     Scaffold(
+        containerColor = bgColor,
         topBar = {
             TopAppBar(
-                title = { Text("统计洞察") },
+                title = { Text("统计洞察", fontWeight = FontWeight.ExtraBold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "返回")
                     }
-                }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = bgColor,
+                    scrolledContainerColor = bgColor
+                )
             )
         }
     ) { paddingValues ->
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(24.dp)
+                .padding(paddingValues),
+            contentPadding = PaddingValues(bottom = 40.dp)
         ) {
-            // 1. Range Picker
-            RangePickerRow(
-                selectedRange = selectedRange,
-                onRangeSelected = { viewModel.setRange(it) }
-            )
+            // 1. Sticky Range Picker
+            stickyHeader {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(bgColor.copy(alpha = 0.95f))
+                        .padding(vertical = 12.dp, horizontal = 20.dp)
+                ) {
+                    RangePickerRow(
+                        selectedRange = selectedRange,
+                        onRangeSelected = { viewModel.setRange(it) }
+                    )
+                }
+            }
 
-            // 2. AI Summary Card
-            AiSummaryCard(summary = aiSummary, isGenerating = isGeneratingSummary)
+            // 2. Content
+            item {
+                Column(
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(24.dp)
+                ) {
+                    // AI Summary (iOS Style: Clean text, no card)
+                    AiSummarySection(summary = aiSummary, isGenerating = isGeneratingSummary)
 
-            // 3. Heatmap Card
-            HeatmapCard(points = heatmapPoints)
+                    // Heatmap (Keep as card but matching iOS border radius)
+                    HeatmapSection(points = heatmapPoints)
 
-            // 4. Activity Rank
-            ActivityRankCard(items = activityRank)
+                    // Activity Rank (iOS Style: Progress bars)
+                    ActivityRankSection(items = activityRank)
 
-            // 5. Trend Chart
-            TrendChartCard(points = trendData)
-            
-            Spacer(modifier = Modifier.height(80.dp))
+                    // Trend Chart (iOS Style: Area/Line chart)
+                    TrendSection(points = trendData, range = selectedRange)
+                }
+            }
         }
     }
 }
@@ -87,13 +117,15 @@ fun RangePickerRow(
     var showYearMenu by remember { mutableStateOf(false) }
     val currentYear = Calendar.getInstance().get(Calendar.YEAR)
     val years = (currentYear downTo currentYear - 5).toList()
+    val isDark = isSystemInDarkTheme()
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(40.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-            .padding(4.dp),
+            .background(if (isDark) Color.White.copy(alpha = 0.1f) else Color.Black.copy(alpha = 0.05f))
+            .padding(3.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -107,17 +139,17 @@ fun RangePickerRow(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
-                    .clickable { onRangeSelected(range) }
-                    .padding(vertical = 8.dp),
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (isSelected) DfkAccent else Color.Transparent)
+                    .clickable { onRangeSelected(range) },
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     range.label,
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    color = if (isSelected) Color.White else if (isDark) Color.Gray else Color.Black.copy(alpha = 0.6f),
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                 )
             }
         }
@@ -127,10 +159,10 @@ fun RangePickerRow(
         Box(
             modifier = Modifier
                 .weight(1f)
-                .clip(RoundedCornerShape(8.dp))
-                .background(if (isCustomOrAll) MaterialTheme.colorScheme.primary else Color.Transparent)
-                .clickable { showYearMenu = true }
-                .padding(vertical = 8.dp),
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (isCustomOrAll) DfkAccent else Color.Transparent)
+                .clickable { showYearMenu = true },
             contentAlignment = Alignment.Center
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -142,13 +174,15 @@ fun RangePickerRow(
                 Text(
                     label,
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (isCustomOrAll) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (isCustomOrAll) Color.White else if (isDark) Color.Gray else Color.Black.copy(alpha = 0.6f),
+                    fontWeight = if (isCustomOrAll) FontWeight.Bold else FontWeight.Medium
                 )
+                Spacer(Modifier.width(2.dp))
                 Icon(
                     Icons.Default.KeyboardArrowDown, 
                     null, 
-                    Modifier.size(12.dp),
-                    tint = if (isCustomOrAll) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                    Modifier.size(10.dp),
+                    tint = if (isCustomOrAll) Color.White else if (isDark) Color.Gray else Color.Black.copy(alpha = 0.6f)
                 )
             }
             
@@ -169,31 +203,235 @@ fun RangePickerRow(
 }
 
 @Composable
-fun AiSummaryCard(summary: String?, isGenerating: Boolean) {
+fun AiSummarySection(summary: String?, isGenerating: Boolean) {
+    Box(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        if (isGenerating) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 12.dp)) {
+                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(10.dp))
+                Text("正在分析您的足迹数据...", color = Color.Gray, fontSize = 13.sp)
+            }
+        } else if (summary != null) {
+            Text(
+                text = summary,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                lineHeight = 22.sp
+            )
+        }
+    }
+}
+
+@Composable
+fun HeatmapSection(points: List<HeatmapPoint>) {
+    val isDark = isSystemInDarkTheme()
     Column(modifier = Modifier.fillMaxWidth()) {
-        LabelWithIcon("生活洞察", Icons.Default.AutoAwesome)
+        SectionHeader("热点地区", Icons.Default.Map)
         Spacer(Modifier.height(12.dp))
         
-        ElevatedCard(
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(280.dp)
+                .pointerInput(Unit) {
+                    // 拦截触摸事件，防止与父级滚动冲突
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent()
+                            // 一旦有触摸，告诉父级不要拦截
+                        }
+                    }
+                },
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                androidx.compose.ui.viewinterop.AndroidView(
+                    factory = { ctx ->
+                        com.amap.api.maps.TextureMapView(ctx).apply {
+                            onCreate(Bundle())
+                            onResume()
+                            // 在这里处理底层 View 的触摸拦截
+                            val amap = this.map
+                            setOnTouchListener { v, event ->
+                                when (event.action) {
+                                    android.view.MotionEvent.ACTION_DOWN,
+                                    android.view.MotionEvent.ACTION_MOVE -> {
+                                        // 递归向上请求不拦截
+                                        var p = v.parent
+                                        while (p != null) {
+                                            p.requestDisallowInterceptTouchEvent(true)
+                                            p = p.parent
+                                        }
+                                    }
+                                    android.view.MotionEvent.ACTION_UP,
+                                    android.view.MotionEvent.ACTION_CANCEL -> {
+                                        var p = v.parent
+                                        while (p != null) {
+                                            p.requestDisallowInterceptTouchEvent(false)
+                                            p = p.parent
+                                        }
+                                    }
+                                }
+                                false
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                ) { view ->
+                    val amap = view.map
+                    if (amap.mapType != (if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT else com.amap.api.maps.AMap.MAP_TYPE_NORMAL)) {
+                        amap.mapType = if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT else com.amap.api.maps.AMap.MAP_TYPE_NORMAL
+                    }
+                    amap.uiSettings.isZoomControlsEnabled = false
+                    // 彻底禁止地图互动，防止滚动冲突
+                    amap.uiSettings.setAllGesturesEnabled(false)
+                    
+                    if (points.isNotEmpty()) {
+                        amap.clear()
+                        try {
+                            val latLngs = points.map { com.amap.api.maps.model.LatLng(it.lat, it.lon) }
+                            
+                            // 创建一个在屏幕上大小固定的圆形图标
+                            val size = (22 * view.context.resources.displayMetrics.density).toInt()
+                            val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+                            val canvas = android.graphics.Canvas(bitmap)
+                            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                            
+                            // 画圆心
+                            paint.color = android.graphics.Color.parseColor("#FF9500")
+                            paint.alpha = 140 // 增加透明度
+                            canvas.drawCircle(size / 2f, size / 2f, size / 2.2f, paint)
+                            
+                            // 画外圈投影感
+                            paint.style = android.graphics.Paint.Style.STROKE
+                            paint.strokeWidth = 3f
+                            paint.alpha = 200 // 描边也稍微透明一点
+                            canvas.drawCircle(size / 2f, size / 2f, size / 2.2f, paint)
+                            
+                            val descriptor = com.amap.api.maps.model.BitmapDescriptorFactory.fromBitmap(bitmap)
+                            
+                            points.forEach { pt ->
+                                val markerOptions = com.amap.api.maps.model.MarkerOptions()
+                                    .position(com.amap.api.maps.model.LatLng(pt.lat, pt.lon))
+                                    .icon(descriptor)
+                                    .anchor(0.5f, 0.5f)
+                                    .zIndex(1000f)
+                                amap.addMarker(markerOptions)
+                            }
+                            
+                            if (latLngs.size == 1) {
+                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(latLngs[0], 13f))
+                            } else {
+                                val boundsBuilder = com.amap.api.maps.model.LatLngBounds.builder()
+                                latLngs.forEach { boundsBuilder.include(it) }
+                                try {
+                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 50))
+                                } catch (e: Exception) {
+                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(latLngs[0], 10f))
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e("Heatmap", "Error drawing markers", e)
+                        }
+                    } else {
+                        amap.clear()
+                    }
+                }
+                if (points.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize().background(Color.Gray.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
+                        Text("暂无地点分布数据", fontSize = 13.sp, color = Color.Gray)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ActivityRankSection(items: List<ActivityRankItem>) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SectionHeader("活动排行", Icons.Default.ShowChart)
+        Spacer(Modifier.height(16.dp))
+        
+        Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.elevatedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            )
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f))
         ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp)) {
+                if (items.isEmpty()) {
+                    Text("暂无活动记录", modifier = Modifier.padding(20.dp), color = Color.LightGray)
+                } else {
+                    val maxCount = items.maxByOrNull { it.count }?.count ?: 1
+                    items.take(6).forEach { item ->
+                        ActivityRankRow(item, maxCount)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ActivityRankRow(item: ActivityRankItem, maxCount: Int) {
+    val color = try { Color(android.graphics.Color.parseColor(item.colorHex)) } catch (e: Exception) { DfkAccent }
+    
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Icon + Name
+        Row(modifier = Modifier.width(90.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = com.ct106.difangke.ui.components.getIconForName(item.icon),
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = color
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(item.name, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+        }
+        
+        // Progress Bar
+        Box(modifier = Modifier.weight(1f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(Color.Gray.copy(alpha = 0.1f))) {
+            val ratio = item.count.toFloat() / maxCount.toFloat()
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp)
-            ) {
-                if (isGenerating) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp).align(Alignment.Center))
+                    .fillMaxHeight()
+                    .fillMaxWidth(ratio)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Brush.horizontalGradient(listOf(color.copy(alpha = 0.7f), color)))
+            )
+        }
+    }
+}
+
+@Composable
+fun TrendSection(points: List<TrendPoint>, range: StatisticsRange) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SectionHeader("活跃趋势", Icons.Default.Timeline)
+        Spacer(Modifier.height(16.dp))
+        
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f))
+        ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
+                if (points.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxWidth().height(180.dp), contentAlignment = Alignment.Center) {
+                        Text("数据加载中...", color = Color.Gray, fontSize = 13.sp)
+                    }
                 } else {
+                    SmoothLineChart(points = points)
+                    
+                    Spacer(Modifier.height(16.dp))
                     Text(
-                        summary ?: "还没有足够的足迹数据来生成洞察，继续探索吧！",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                        lineHeight = 22.sp
+                        "数据说明：综合了您的出行频率、活动地点和照片等",
+                        fontSize = 10.sp,
+                        color = Color.Gray.copy(alpha = 0.6f)
                     )
                 }
             }
@@ -202,158 +440,63 @@ fun AiSummaryCard(summary: String?, isGenerating: Boolean) {
 }
 
 @Composable
-fun HeatmapCard(points: List<HeatmapPoint>) {
-    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-    Column(modifier = Modifier.fillMaxWidth()) {
-        LabelWithIcon("热力分布", Icons.Default.Whatshot)
-        Spacer(Modifier.height(12.dp))
+fun SmoothLineChart(points: List<TrendPoint>) {
+    val maxScore = points.maxOfOrNull { it.score }?.toFloat()?.coerceAtLeast(1f) ?: 100f
+    
+    Canvas(modifier = Modifier.fillMaxWidth().height(180.dp).padding(horizontal = 8.dp)) {
+        val width = size.width
+        val height = size.height
+        val spacing = width / (points.size - 1).coerceAtLeast(1).toFloat()
         
-        ElevatedCard(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.elevatedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            )
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(260.dp)
-                    .clip(RoundedCornerShape(24.dp))
-            ) {
-                androidx.compose.ui.viewinterop.AndroidView(
-                    factory = { ctx ->
-                        com.amap.api.maps.TextureMapView(ctx).apply {
-                            onCreate(Bundle())
-                            onResume()
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize()
-                ) { view ->
-                    val amap = view.map
-                    amap.mapType = if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT else com.amap.api.maps.AMap.MAP_TYPE_NORMAL
-                    amap.uiSettings.apply {
-                        isZoomControlsEnabled = false
-                        isMyLocationButtonEnabled = false
-                    }
-                    amap.clear()
-                    
-                    if (points.isNotEmpty()) {
-                        try {
-                            val latLngs = points.map { com.amap.api.maps.model.LatLng(it.lat, it.lon) }
-                            val provider = com.amap.api.maps.model.HeatmapTileProvider.Builder()
-                                .data(latLngs)
-                                .radius(20) // 适当调大热力半径
-                                .build()
-                            amap.addTileOverlay(com.amap.api.maps.model.TileOverlayOptions().tileProvider(provider))
-                            
-                            // 自动缩放
-                            val boundsBuilder = com.amap.api.maps.model.LatLngBounds.builder()
-                            latLngs.forEach { boundsBuilder.include(it) }
-                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 50))
-                        } catch (e: Exception) {
-                            // 降级：显示 Marker
-                            points.take(50).forEach { 
-                                amap.addMarker(com.amap.api.maps.model.MarkerOptions().position(com.amap.api.maps.model.LatLng(it.lat, it.lon)))
-                            }
-                        }
-                    }
-                }
+        val path = Path()
+        val areaPath = Path()
+        
+        points.forEachIndexed { index, point ->
+            val x = index.toFloat() * spacing
+            val y = height - (point.score.toFloat() / maxScore) * height
+            
+            if (index == 0) {
+                path.moveTo(x, y)
+                areaPath.moveTo(x, height)
+                areaPath.lineTo(x, y)
+            } else {
+                val prevX = (index - 1).toFloat() * spacing
+                val prevY = height - (points[index - 1].score.toFloat() / maxScore) * height
+                val midX = (prevX + x) / 2f
                 
-                if (points.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha=0.03f)), contentAlignment = Alignment.Center) {
-                        Text("暂无分布数据", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                    }
-                }
+                path.cubicTo(midX, prevY, midX, y, x, y)
+                areaPath.cubicTo(midX, prevY, midX, y, x, y)
+            }
+            
+            if (index == points.size - 1) {
+                areaPath.lineTo(x, height)
+                areaPath.close()
             }
         }
-    }
-}
-
-@Composable
-fun ActivityRankCard(items: List<ActivityRankItem>) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        LabelWithIcon("活动分布", Icons.Default.BarChart)
-        Spacer(Modifier.height(12.dp))
         
-        ElevatedCard(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.elevatedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
+        // Draw Area
+        drawPath(
+            path = areaPath,
+            brush = Brush.verticalGradient(
+                colors = listOf(DfkAccent.copy(alpha = 0.3f), Color.Transparent)
             )
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                if (items.isEmpty()) {
-                    Text("暂无数据", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
-                } else {
-                    items.take(8).forEach { item ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            val color = try { Color(android.graphics.Color.parseColor(item.colorHex)) } catch (e: Exception) { MaterialTheme.colorScheme.primary }
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(color.copy(alpha = 0.15f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = com.ct106.difangke.ui.components.getIconForName(item.icon), 
-                                    contentDescription = null, 
-                                    modifier = Modifier.size(18.dp), 
-                                    tint = color
-                                )
-                            }
-                            Spacer(Modifier.width(12.dp))
-                            Text(item.name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                            Text("${item.count}次", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun TrendChartCard(points: List<TrendPoint>) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        LabelWithIcon("活跃趋势", Icons.Default.Timeline)
-        Spacer(Modifier.height(12.dp))
+        )
         
-        ElevatedCard(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.elevatedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            )
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(180.dp)
-                    .padding(20.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("分段活跃度趋势图表开发中...", color = Color.Gray.copy(alpha=0.6f), style = MaterialTheme.typography.bodySmall)
-            }
-        }
+        // Draw Line
+        drawPath(
+            path = path,
+            color = DfkAccent,
+            style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+        )
     }
 }
 
 @Composable
-fun LabelWithIcon(label: String, icon: ImageVector) {
+fun SectionHeader(title: String, icon: ImageVector) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+        Icon(icon, null, modifier = Modifier.size(16.dp), tint = DfkAccent)
         Spacer(Modifier.width(8.dp))
-        Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold)
     }
 }
+
