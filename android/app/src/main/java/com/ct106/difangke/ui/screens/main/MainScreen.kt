@@ -97,6 +97,63 @@ fun MainScreen(
         }.time
     }
     
+    var showBackgroundRationale by remember { mutableStateOf(false) }
+    
+    // 权限请求逻辑
+    val permissionsToRequest = remember {
+        val list = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            list.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        list.toTypedArray()
+    }
+
+    var hasPermissionState by remember { 
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { perms ->
+        val fineGranted = perms[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        if (fineGranted) {
+            hasPermissionState = true
+            LocationTrackingService.start(context) // 授权后立即开启服务
+        }
+    }
+
+    val backgroundLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            LocationTrackingService.start(context) // 后台授权后也尝试开启/刷新服务
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        // 1. 检查并申请基础权限
+        if (!hasPermissionState) {
+            launcher.launch(permissionsToRequest)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // 2. 检查后台定位权限
+            val hasBackground = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+            if (!hasBackground) {
+                showBackgroundRationale = true
+            } else {
+                // 如果权限都齐了，确保服务启动
+                LocationTrackingService.start(context)
+            }
+        } else {
+            // Q 以下版本，只要有基础定位就开启
+            LocationTrackingService.start(context)
+        }
+    }
+
     val isDark = isSystemInDarkTheme()
     val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
 
@@ -173,6 +230,8 @@ fun MainScreen(
                         allPlaces = allPlaces,
                         isFirstPage = pageIndex == 0,
                         isLastPage = pageIndex == availableDates.size - 1,
+                        hasLocationPermission = hasPermissionState,
+                        onRequestPermission = { launcher.launch(permissionsToRequest) },
                         onItemClick = onNavigateToDetail,
                         onMapClick = { onNavigateToMap(dateAtPage) }
                     )
@@ -201,6 +260,27 @@ fun MainScreen(
                     onDismiss = { showCalendar = false }
                 )
             }
+
+            if (showBackgroundRationale) {
+                AlertDialog(
+                    onDismissRequest = { showBackgroundRationale = false },
+                    title = { Text("需要后台定位权限") },
+                    text = { Text("为了在您关闭屏幕或使用其他应用时持续记录足迹，请在随后的系统中选择“始终允许”定位权限。") },
+                    confirmButton = {
+                        Button(onClick = {
+                            showBackgroundRationale = false
+                            backgroundLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                        }) {
+                            Text("去设置")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showBackgroundRationale = false }) {
+                            Text("取消")
+                        }
+                    }
+                )
+            }
         }
     }
 }
@@ -214,6 +294,8 @@ fun TimelinePage(
     allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
     isFirstPage: Boolean,
     isLastPage: Boolean,
+    hasLocationPermission: Boolean,
+    onRequestPermission: () -> Unit,
     onItemClick: (String) -> Unit,
     onMapClick: () -> Unit
 ) {
@@ -235,21 +317,24 @@ fun TimelinePage(
     } else if (isFirstPage && items.isEmpty()) {
         PastPlaceholderView()
     } else {
+        val todayPoints by viewModel.dailyTrajectory.collectAsState()
+        val todayMarkers by viewModel.dailyMarkers.collectAsState()
+        
         TimelineContent(
             items = items,
             dailyInsight = dailyInsight?.content,
             totalMileage = mileage,
             totalPoints = points,
+            dailyPoints = if (isToday) todayPoints else dailyInsight?.rawPointsJson,
+            dailyMarkers = if (isToday) todayMarkers else dailyInsight?.markersJson,
+            isToday = isToday,
             trackingState = trackingState,
             activityTypes = activityTypes,
             allPlaces = allPlaces,
-            isToday = isToday,
-            isRefreshing = viewModel.isRefreshing.collectAsState().value,
+            hasLocationPermission = hasLocationPermission,
+            onRequestPermission = onRequestPermission,
             onItemClick = onItemClick,
-            onMapClick = onMapClick,
-            onRefresh = { viewModel.refresh() },
-            dailyMarkers = viewModel.dailyMarkers.collectAsState().value,
-            dailyPoints = viewModel.dailyTrajectory.collectAsState().value
+            onMapClick = onMapClick
         )
     }
 }
@@ -265,10 +350,10 @@ fun TimelineContent(
     activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
     allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
     isToday: Boolean,
-    isRefreshing: Boolean,
+    hasLocationPermission: Boolean,
+    onRequestPermission: () -> Unit,
     onItemClick: (String) -> Unit,
     onMapClick: () -> Unit,
-    onRefresh: () -> Unit,
     dailyPoints: String? = null,
     dailyMarkers: String? = null
 ) {
@@ -312,8 +397,8 @@ fun TimelineContent(
                         pointsJson = dailyPoints,
                         markersJson = dailyMarkers,
                         onNavigateToMap = onMapClick,
-                        onRequestPermission = {},
-                        hasLocationPermission = true
+                        onRequestPermission = onRequestPermission,
+                        hasLocationPermission = hasLocationPermission
                     )
                 } else {
                     DaySummaryCard(

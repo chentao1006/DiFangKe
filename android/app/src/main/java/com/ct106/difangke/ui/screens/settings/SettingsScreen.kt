@@ -44,6 +44,21 @@ fun SettingsScreen(
     
     val updateInfo by viewModel.updateInfo.collectAsState()
     val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
+    
+    val packageInfo = remember {
+        try {
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        } catch (e: Exception) {
+            null
+        }
+    }
+    val versionName = packageInfo?.versionName ?: "1.0.0"
+    val versionCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+        packageInfo?.longVersionCode ?: 0L
+    } else {
+        @Suppress("DEPRECATION")
+        packageInfo?.versionCode?.toLong() ?: 0L
+    }
 
     Scaffold(
         topBar = {
@@ -201,7 +216,7 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=0.6f)
                     )
                     Text(
-                        text = "Version 1.0.0 (Build 1006)",
+                        text = "Version $versionName (Build $versionCode)",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=0.4f)
                     )
@@ -227,7 +242,7 @@ fun SettingsScreen(
                         Text("您的应用已是最新。")
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "当前版本: 1.0.0 (Build 1006)\n最新版本: ${info.versionName} (Build ${info.versionCode})",
+                            text = "当前版本: $versionName (Build $versionCode)\n最新版本: ${info.versionName} (Build ${info.versionCode})",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

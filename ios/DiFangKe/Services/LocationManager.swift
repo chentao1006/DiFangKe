@@ -28,6 +28,7 @@ final class RawLocationStore {
     
     private let fileManager = FileManager.default
     private let directoryName = "RawLocations"
+    private let saveQueue = DispatchQueue(label: "com.ct106.difangke.rawsave", qos: .background)
     
     private init() {
         createDirectoryIfNeeded()
@@ -66,18 +67,21 @@ final class RawLocationStore {
     
     /// 保存单个位置点到当日文件
     func saveLocation(_ location: CLLocation) {
-        let url = getFileURL(for: location.timestamp)
-        let line = "\(location.timestamp.timeIntervalSince1970),\(location.coordinate.latitude),\(location.coordinate.longitude),\(location.horizontalAccuracy),\(location.speed)\n"
-        
-        if let data = line.data(using: .utf8) {
-            if fileManager.fileExists(atPath: url.path) {
-                if let fileHandle = try? FileHandle(forWritingTo: url) {
-                    fileHandle.seekToEndOfFile()
-                    fileHandle.write(data)
-                    fileHandle.closeFile()
+        saveQueue.async { [weak self] in
+            guard let self = self else { return }
+            let url = self.getFileURL(for: location.timestamp)
+            let line = "\(location.timestamp.timeIntervalSince1970),\(location.coordinate.latitude),\(location.coordinate.longitude),\(location.horizontalAccuracy),\(location.speed)\n"
+            
+            if let data = line.data(using: .utf8) {
+                if self.fileManager.fileExists(atPath: url.path) {
+                    if let fileHandle = try? FileHandle(forWritingTo: url) {
+                        fileHandle.seekToEndOfFile()
+                        fileHandle.write(data)
+                        fileHandle.closeFile()
+                    }
+                } else {
+                    try? data.write(to: url)
                 }
-            } else {
-                try? data.write(to: url)
             }
         }
     }
@@ -599,7 +603,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         self.locationManager.distanceFilter = 5.0 // 初始高频记录 (5米)
         self.locationManager.allowsBackgroundLocationUpdates = true
         self.locationManager.pausesLocationUpdatesAutomatically = false // 核心修复：禁止自动暂停，防止丢点
-        self.locationManager.showsBackgroundLocationIndicator = false // 关掉蓝色通知条，保持静默记录
+        self.locationManager.showsBackgroundLocationIndicator = false // 保持静默记录，不显示蓝色状态栏（响应用户反馈）
         self.locationManager.activityType = .fitness // 默认为健身/步行模式
         
         // Initialize basic status
@@ -1123,8 +1127,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 return true
             }
             
-            // C: 运动状态锁 - 如果传感器检测到正在步行/跑步，哪怕 GPS 位移没跟上，也要维持高频记录
-            if HealthManager.shared.currentMotionType == .walking || HealthManager.shared.currentMotionType == .running {
+            // C: 运动状态锁 - 如果传感器检测到正在步行/跑步/骑行，哪怕 GPS 位移没跟上，也要维持高频记录
+            let motion = HealthManager.shared.currentMotionType
+            if motion == .walking || motion == .running || motion == .cycling {
                 return false
             }
             
@@ -1139,32 +1144,33 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 manager.activityType = .other
             }
         } else if isStationary {
-            // 普通地点但已停留：进入节能模式
+            // 真正停留了：进入节能模式
             if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
                 manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-                manager.distanceFilter = 5.0 // 保持更敏感的起步识别
+                manager.distanceFilter = 30.0 // 停留时拉大过滤
                 manager.activityType = .other
             }
-        } else if speed > 25.0 {
-            // 超高速移动中 (时速 > 90km/h)：提高位置采样密度，记录更平直的曲线
-            if manager.desiredAccuracy != kCLLocationAccuracyBest {
-                manager.desiredAccuracy = kCLLocationAccuracyBest
-                manager.distanceFilter = 20.0 // 降低门槛，加密采样
-                manager.activityType = .automotiveNavigation
-            }
-        } else if speed > 10.0 {
-            // 高速移动中 (时速 > 36km/h)：
-            if manager.desiredAccuracy != kCLLocationAccuracyBest {
-                manager.desiredAccuracy = kCLLocationAccuracyBest 
-                manager.distanceFilter = 10.0 // 加密采样
-                manager.activityType = .automotiveNavigation
-            }
         } else {
-            // 移动中 (步行、骑行或刚到达)：开启最高频采集
-            if manager.desiredAccuracy != kCLLocationAccuracyBest {
-                manager.desiredAccuracy = kCLLocationAccuracyBest
-                manager.distanceFilter = kCLDistanceFilterNone // 步行模式开启全量采集，确保不漏点
-                manager.activityType = .fitness
+            // 自动采集增强：只要在移动（不论是步行、骑行还是开车）
+            // 开启增强采样，确保不漏点
+            let motion = HealthManager.shared.currentMotionType
+            let isMovingBySensor = motion == .walking || motion == .running || motion == .cycling || motion == .automotive
+            
+            // 只要传感器认为在动，或者速度 > 0.5m/s
+            if isMovingBySensor || speed > 0.5 {
+                let targetAccuracy = kCLLocationAccuracyBestForNavigation
+                if manager.desiredAccuracy != targetAccuracy {
+                    manager.desiredAccuracy = targetAccuracy
+                    manager.distanceFilter = kCLDistanceFilterNone // 满额记录
+                    manager.activityType = (motion == .automotive) ? .automotiveNavigation : .fitness
+                }
+            } else if speed > 15.0 {
+                // 高速驾驶模式
+                if manager.desiredAccuracy != kCLLocationAccuracyBest {
+                    manager.desiredAccuracy = kCLLocationAccuracyBest
+                    manager.distanceFilter = 20.0
+                    manager.activityType = .automotiveNavigation
+                }
             }
         }
 
@@ -1191,17 +1197,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
         
-        // 1. 永久保存原始点，并存入内存缓存
+        // 1. 永久保存原始点（RawLocationStore 内部已实现异步队列写入，不会阻塞主线程）
         RawLocationStore.shared.saveLocation(location)
-        updateTodayTotalPoints()
-        allTodayPoints.append(location)
-        trackingPoints.append(location)
         
-        // 2. 处理候选足迹逻辑
-        // 为满足“保留 3 天数据”且“不重复识别”，我们从总流水中提取“未分类”段交给处理器
-        var unclassifiedQueue = trackingPoints.filter { $0.timestamp > (lastProcessedTimestamp ?? .distantPast) }
-        if let candidate = footprintProcessor.processNewLocation(location, queue: &unclassifiedQueue) {
-            handleNewCandidateFootprint(candidate)
+        // 2. 更新内存数据并处理足迹分析
+        self.updateTodayTotalPoints()
+        self.allTodayPoints.append(location)
+        self.trackingPoints.append(location)
+        
+        // 处理候选足迹逻辑
+        var unclassifiedQueue = self.trackingPoints.filter { $0.timestamp > (self.lastProcessedTimestamp ?? .distantPast) }
+        if let candidate = self.footprintProcessor.processNewLocation(location, queue: &unclassifiedQueue) {
+            self.handleNewCandidateFootprint(candidate)
         }
         
         // 3. 更新当前停留状态用于 UI 显示
@@ -1229,7 +1236,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             saveOngoingTitle()
         }
         
-        // 3. 触发正在持续停留的 AI 分析 (停留 10 分钟后触发第一次，之后每 60 分钟刷新)
+        // 4. 触发正在持续停留的 AI 分析 (停留 10 分钟后触发第一次，之后每 60 分钟刷新)
         if let start = potentialStopStartLocation?.timestamp {
             let duration = Date().timeIntervalSince(start)
             if duration >= 10 * 60 {

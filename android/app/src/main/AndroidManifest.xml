@@ -35,6 +35,9 @@
     <!-- 安装 APK 权限 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- 忽略电池优化权限 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:name=".DiFangKeApp"
         android:label="@string/app_name"
@@ -42,7 +45,6 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="false"
         android:theme="@style/Theme.DiFangKe"
-        android:extractNativeLibs="true"
         android:allowBackup="true">
 
         <!-- FileProvider 用于安装下载好的 APK -->

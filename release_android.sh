@@ -14,7 +14,7 @@ echo "🏗️  开始打包 APK (assembleRelease)..."
 # 1. 运行打包命令 (确保 gradlew 有执行权限)
 cd "$ROOT_DIR/android"
 chmod +x gradlew
-./gradlew assembleRelease
+./gradlew assembleRelease --no-configuration-cache
 if [ $? -ne 0 ]; then
     echo "❌ 错误: 打包失败，请检查上面的编译报错。"
     exit 1
@@ -62,3 +62,12 @@ EOF
 echo "✅ 已更新配置文件: $JSON_DEST"
 echo ""
 echo "🎉 发布就绪！你可以上传 download 目录了。"
+echo ""
+
+# 6. Git 提交与推送
+echo "📝 正在提交代码至 Git..."
+git add .
+# 这里使用 || true 是为了防止因为没变动导致脚本报错退出
+git commit -m "chore: release version $VERSION_NAME (Build $VERSION_CODE)" || true
+git push
+echo "🚀 代码已同步至远程仓库"

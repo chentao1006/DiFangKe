@@ -38,5 +38,7 @@ data class DailyInsightEntity(
     val content: String? = "",
     val aiGenerated: Boolean = false,
     val dataFingerprint: String? = "",
-    val createdAt: Date? = Date()
+    val createdAt: Date? = Date(),
+    val rawPointsJson: String? = "[]",
+    val markersJson: String? = "[]"
 )

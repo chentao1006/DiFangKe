@@ -32,6 +32,8 @@ class LocationTrackingService : Service() {
         val stateFlow = kotlinx.coroutines.flow.MutableStateFlow<TrackingState>(
             TrackingState.Idle
         )
+        
+        var isHighAccuracyBoostEnabled = false // 保留字段但不再由 UI 控制，改为内部逻辑
 
         fun start(context: Context) {
             val intent = Intent(context, LocationTrackingService::class.java).apply {
@@ -77,9 +79,27 @@ class LocationTrackingService : Service() {
     private val trackingQueue = mutableListOf<RawLocationStore.RawPoint>()
     private var ongoingStayStart: RawLocationStore.RawPoint? = null
     private var ongoingStayAddress: String? = null
+    private var isHighAccuracyBoostEnabled = false
 
     private val locationListener = AMapLocationListener { location ->
         if (location != null && location.errorCode == 0) {
+            // 自动调整逻辑：
+            // 如果检测到速度 > 0.3m/s (约 1km/h，判定为运动中)
+            val speed = location.speed
+            val shouldBoost = speed > 0.3
+            
+            if (shouldBoost != isHighAccuracyBoostEnabled) {
+                isHighAccuracyBoostEnabled = shouldBoost
+                // 动态调整采样频率
+                locationClient?.setLocationOption(AMapLocationClientOption().apply {
+                    locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+                    interval = if (shouldBoost) 1000L else 3000L
+                    isNeedAddress = true
+                    isMockEnable = false
+                    isOffset = true
+                })
+            }
+
             serviceScope.launch { 
                 handleNewLocation(
                     location.latitude, 
@@ -131,6 +151,14 @@ class LocationTrackingService : Service() {
                 startForeground(NotificationHelper.TRACKING_NOTIFICATION_ID, notification)
                 
                 // 开启高德后台定位
+                val boost = isHighAccuracyBoostEnabled
+                locationClient?.setLocationOption(AMapLocationClientOption().apply {
+                    locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+                    interval = if (boost) 1000L else 3000L
+                    isNeedAddress = true
+                    isMockEnable = false
+                    isOffset = true
+                })
                 locationClient?.enableBackgroundLocation(NotificationHelper.TRACKING_NOTIFICATION_ID, notification)
                 locationClient?.startLocation()
                 
