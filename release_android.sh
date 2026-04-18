@@ -25,12 +25,23 @@ echo "🚀 开始自动化发布流程..."
 
 # 2. 检查输出文件
 if [ ! -f "$APK_SOURCE" ]; then
-    # 尝试另一个常见的输出路径
-    ALT_APK_SOURCE="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
-    if [ -f "$ALT_APK_SOURCE" ]; then
-        APK_SOURCE=$ALT_APK_SOURCE
-    else
+    # 尝试常见的输出路径（包括已签名和未签名版本）
+    POSSIBLE_APK=(
+        "$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
+        "$ROOT_DIR/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+    )
+    
+    APK_SOURCE=""
+    for path in "${POSSIBLE_APK[@]}"; do
+        if [ -f "$path" ]; then
+            APK_SOURCE=$path
+            break
+        fi
+    done
+
+    if [ -z "$APK_SOURCE" ]; then
         echo "❌ 错误: 找不到生成的 APK 文件。"
+        echo "💡 提示: 请检查 android/app/build/outputs/apk/release/ 目录下生成的 APK 名称。"
         exit 1
     fi
 fi

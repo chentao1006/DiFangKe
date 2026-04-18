@@ -14,8 +14,8 @@ android {
         applicationId = "com.ct106.difangke"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.0.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // 读取 local.properties 中的 Key
