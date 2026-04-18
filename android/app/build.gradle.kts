@@ -10,26 +10,36 @@ android {
     namespace = "com.ct106.difangke"
     compileSdk = 36
 
+    val localProperties = Properties()
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        localProperties.load(localPropertiesFile.inputStream())
+    }
+
     defaultConfig {
         applicationId = "com.ct106.difangke"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = localProperties.getProperty("VERSION_CODE")?.toInt() ?: 3
+        versionName = localProperties.getProperty("VERSION_NAME") ?: "1.0.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // 读取 local.properties 中的 Key
-        val localProperties = Properties()
-        val localPropertiesFile = rootProject.file("local.properties")
-        if (localPropertiesFile.exists()) {
-            localProperties.load(localPropertiesFile.inputStream())
-        }
         val amapKey = localProperties.getProperty("AMAP_KEY") ?: ""
         manifestPlaceholders["AMAP_KEY"] = amapKey
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("../" + (localProperties.getProperty("KEY_FILE") ?: "difangke.jks"))
+            storePassword = localProperties.getProperty("STORE_PASSWORD") ?: ""
+            keyAlias = localProperties.getProperty("KEY_ALIAS") ?: ""
+            keyPassword = localProperties.getProperty("KEY_PASSWORD") ?: ""
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

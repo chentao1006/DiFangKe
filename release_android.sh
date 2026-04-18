@@ -25,30 +25,23 @@ echo "🚀 开始自动化发布流程..."
 
 # 2. 检查输出文件
 if [ ! -f "$APK_SOURCE" ]; then
-    # 尝试常见的输出路径（包括已签名和未签名版本）
-    POSSIBLE_APK=(
-        "$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
-        "$ROOT_DIR/android/app/build/outputs/apk/release/app-release-unsigned.apk"
-    )
+    # 只允许已签名的正式版本
+    APK_SOURCE="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
     
-    APK_SOURCE=""
-    for path in "${POSSIBLE_APK[@]}"; do
-        if [ -f "$path" ]; then
-            APK_SOURCE=$path
-            break
-        fi
-    done
-
-    if [ -z "$APK_SOURCE" ]; then
-        echo "❌ 错误: 找不到生成的 APK 文件。"
-        echo "💡 提示: 请检查 android/app/build/outputs/apk/release/ 目录下生成的 APK 名称。"
+    if [ ! -f "$APK_SOURCE" ]; then
+        echo "❌ 错误: 找不到签名的 APK 文件 (app-release.apk)。"
+        echo "💡 提示: 请确保 build.gradle.kts 中配置了正确的 signingConfigs 且密码正确。"
         exit 1
     fi
 fi
 
-# 3. 提取版本信息
-VERSION_CODE=$(grep 'versionCode[[:space:]]*=' "$GRADLE_FILE" | awk -F'=' '{print $2}' | tr -d '[:space:]')
-VERSION_NAME=$(grep 'versionName[[:space:]]*=' "$GRADLE_FILE" | awk -F'"' '{print $2}')
+# 3. 提取版本信息 (从 local.properties 读取)
+get_prop() {
+    grep "^${1}=" "$ROOT_DIR/android/local.properties" | cut -d'=' -f2 | tr -d '[:space:]'
+}
+
+VERSION_CODE=$(get_prop "VERSION_CODE")
+VERSION_NAME=$(get_prop "VERSION_NAME")
 
 [ -z "$VERSION_CODE" ] && VERSION_CODE="1"
 [ -z "$VERSION_NAME" ] && VERSION_NAME="1.0.0"
