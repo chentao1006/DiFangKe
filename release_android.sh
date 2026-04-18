@@ -83,6 +83,15 @@ cat <<EOF > "$JSON_DEST"
 EOF
 
 echo "✅ 已更新配置文件: $JSON_DEST"
+
+# 5.1 更新 index.html 中的下载链接 (防止缓存)
+INDEX_FILE="$ROOT_DIR/index.html"
+if [ -f "$INDEX_FILE" ]; then
+    echo "🌐 正在更新 index.html 中的下载链接版本号..."
+    # 使用 VERSION_CODE 作为 query 参数，适配 macOS 的 sed
+    sed -i '' "s|download/difangke.apk[^\"']*|download/difangke.apk?v=$VERSION_CODE|g" "$INDEX_FILE"
+    echo "✅ index.html 已更新"
+fi
 echo ""
 echo "🎉 发布就绪！你可以上传 download 目录了。"
 echo ""
