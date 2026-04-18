@@ -34,6 +34,8 @@ android {
             storePassword = localProperties.getProperty("STORE_PASSWORD") ?: ""
             keyAlias = localProperties.getProperty("KEY_ALIAS") ?: ""
             keyPassword = localProperties.getProperty("KEY_PASSWORD") ?: ""
+            isV1SigningEnabled = true
+            isV2SigningEnabled = true
         }
     }
 

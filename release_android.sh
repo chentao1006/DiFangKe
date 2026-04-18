@@ -14,7 +14,7 @@ echo "🏗️  开始打包 APK (assembleRelease)..."
 # 1. 运行打包命令 (确保 gradlew 有执行权限)
 cd "$ROOT_DIR/android"
 chmod +x gradlew
-./gradlew assembleRelease --no-configuration-cache
+./gradlew clean assembleRelease --no-configuration-cache
 if [ $? -ne 0 ]; then
     echo "❌ 错误: 打包失败，请检查上面的编译报错。"
     exit 1
