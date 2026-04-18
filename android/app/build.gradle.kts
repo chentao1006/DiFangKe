@@ -24,6 +24,11 @@ android {
         versionName = localProperties.getProperty("VERSION_NAME") ?: "1.0.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        ndk {
+            abiFilters.add("arm64-v8a")
+            abiFilters.add("armeabi-v7a")
+        }
+
         val amapKey = localProperties.getProperty("AMAP_KEY") ?: ""
         manifestPlaceholders["AMAP_KEY"] = amapKey
     }
@@ -43,6 +48,7 @@ android {
         release {
             signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

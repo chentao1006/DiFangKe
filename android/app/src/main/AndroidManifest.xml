@@ -45,7 +45,8 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="false"
         android:theme="@style/Theme.DiFangKe"
-        android:allowBackup="true">
+        android:allowBackup="true"
+        android:extractNativeLibs="true">
 
         <!-- FileProvider 用于安装下载好的 APK -->
         <provider
