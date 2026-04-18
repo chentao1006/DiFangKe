@@ -22,3 +22,14 @@
 # If you use navigation
 -keep class com.amap.api.navi.** {*;}
 -keep class com.autonavi.tbt.** {*;}
+
+# GSON
+-keepattributes Signature
+-keepattributes *Annotation*
+-keep class com.google.gson.** { *; }
+
+# Apps Data Models & Config
+-keep class com.ct106.difangke.AppConfig { *; }
+-keep class com.ct106.difangke.service.UpdateInfo { *; }
+-keep class com.ct106.difangke.service.UpdateManager { *; }
+-keep class com.ct106.difangke.data.db.entity.** { *; }

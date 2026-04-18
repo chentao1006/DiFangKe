@@ -191,7 +191,7 @@ fun SettingsScreen(
                 SettingsNavigationItem(
                     title = "检查更新",
                     badge = if (isCheckingUpdate) "检查中..." else "",
-                    onClick = { viewModel.checkUpdate() }
+                    onClick = { if (!isCheckingUpdate) viewModel.checkUpdate() }
                 )
             }
 

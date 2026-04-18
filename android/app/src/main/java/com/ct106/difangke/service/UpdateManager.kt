@@ -19,13 +19,19 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
+import com.google.gson.annotations.SerializedName
+
 /**
  * APK 更新包信息
  */
 data class UpdateInfo(
+    @SerializedName("versionCode")
     val versionCode: Int,
+    @SerializedName("versionName")
     val versionName: String,
+    @SerializedName("downloadUrl")
     val downloadUrl: String,
+    @SerializedName("releaseNotes")
     val releaseNotes: String
 )
 

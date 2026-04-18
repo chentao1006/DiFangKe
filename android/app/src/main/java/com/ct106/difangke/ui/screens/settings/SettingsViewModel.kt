@@ -130,6 +130,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             _isCheckingUpdate.value = true
             val info = UpdateManager.getInstance(getApplication()).checkUpdate()
+            if (info == null) {
+                android.widget.Toast.makeText(getApplication(), "无法连接到更新服务器，请稍后再试", android.widget.Toast.LENGTH_SHORT).show()
+            }
             _updateInfo.value = info
             _isCheckingUpdate.value = false
         }
