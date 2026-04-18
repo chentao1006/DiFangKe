@@ -50,7 +50,14 @@ class DataManagerViewModel(application: Application) : AndroidViewModel(applicat
                     } ?: ""
                 }
                 val report = backupService.restoreBackup(json)
-                _importResult.value = "导入成功！\n新增足迹: ${report.new}, 跳过: ${report.skipped}\n重要地点: ${report.newPlaces}"
+                _importResult.value = """
+                    导入成功！
+                    - 足迹: ${report.newFootprints} 新增, ${report.skippedFootprints} 跳过
+                    - 交通: ${report.newTransports} 新增, ${report.skippedTransports} 跳过
+                    - 重要地点: ${report.newPlacesUser} 新增, ${report.skippedPlacesUser} 跳过
+                    - 其他地点: ${report.newPlacesSystem} 新增, ${report.skippedPlacesSystem} 跳过
+                    - 活动类型: ${report.newActivityTypes} 新增
+                """.trimIndent()
             } catch (e: Exception) {
                 _importResult.value = "导入失败: ${e.message}"
             } finally {

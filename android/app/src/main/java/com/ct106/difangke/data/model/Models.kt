@@ -116,8 +116,8 @@ sealed class TimelineItem {
         is TransportItem -> transport.endTime
     }
     val id: String get() = when (this) {
-        is FootprintItem -> footprint.footprintID
-        is TransportItem -> transport.recordID
+        is FootprintItem -> "f_${footprint.footprintID}"
+        is TransportItem -> "t_${transport.recordID}"
     }
     
     val latitude: Double get() = when (this) {

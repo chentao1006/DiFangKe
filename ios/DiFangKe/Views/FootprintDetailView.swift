@@ -587,7 +587,7 @@ extension FootprintModalView {
                     HStack(alignment: .center, spacing: 6) { 
                         Image(systemName: isUpdatingAddress ? "arrow.triangle.2.circlepath" : "mappin.and.ellipse")
                             .font(.caption)
-                            .foregroundColor(Color.dfkAccent)
+                            .foregroundColor(Color.secondary)
                             .symbolEffect(.bounce, value: isUpdatingAddress)
                         
                         if isUpdatingAddress {
@@ -598,7 +598,7 @@ extension FootprintModalView {
                             HStack(spacing: 6) {
                                 Text(footprint.address ?? (matchedPlace?.address ?? "未记录位置"))
                                     .font(.system(size: 16, design: .rounded))
-                                    .foregroundColor(Color.dfkMainText)
+                                    .foregroundColor(matchedPlace != nil ? .orange : Color.dfkMainText)
                                     .lineLimit(2)
                                 
                                 Image(systemName: "pencil")
@@ -612,16 +612,7 @@ extension FootprintModalView {
                 
                 Spacer()
                 
-                if let place = matchedPlace {
-                        Text(place.name)
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.orange.opacity(0.12))
-                    .foregroundColor(.orange)
-                    .clipShape(Capsule())
-                    .fixedSize()
-                } else {
+                if matchedPlace == nil {
                     Button {
                         showAddPlaceModal = true
                     } label: {

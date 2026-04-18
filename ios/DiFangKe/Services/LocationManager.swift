@@ -640,6 +640,27 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 self?.syncOngoingStayFromCloud()
             }
         }
+        
+        // 核心监测：监听运动状态变化，一旦“动起来”，立即强制提升定位频率，不等 GPS 响应
+        HealthManager.shared.$isMoving
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] isMoving in
+                if isMoving {
+                    self?.forceHighAccuracyBoost()
+                }
+            }
+            .store(in: &cancellables)
+    }
+    
+    private var cancellables = Set<AnyCancellable>()
+    
+    /// 强制激活高精度模式（通常由计步器或运动传感器触发，早于 GPS 位移）
+    private func forceHighAccuracyBoost() {
+        print("🚀 Motion detected! Forcing high accuracy boost...")
+        locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        locationManager.distanceFilter = kCLDistanceFilterNone
+        locationManager.activityType = .fitness
     }
     
     /// 遍历原始轨迹存储目录，找出所有有记录的日期并缓存
@@ -1147,7 +1168,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // 真正停留了：进入节能模式
             if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
                 manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-                manager.distanceFilter = 30.0 // 停留时拉大过滤
+                // 将 30m 缩减为 10m，配合计步器双重保护，确保出门瞬间就能被捕捉
+                manager.distanceFilter = 10.0 
                 manager.activityType = .other
             }
         } else {

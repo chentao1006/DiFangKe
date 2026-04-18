@@ -54,6 +54,7 @@ class HealthManager: ObservableObject {
     func startActivityTracking() {
         guard CMMotionActivityManager.isActivityAvailable() else { return }
         
+        // 1. 运动状态监控 (提供基础分类)
         activityManager.startActivityUpdates(to: .main) { [weak self] activity in
             guard let self = self, let activity = activity else { return }
             
@@ -79,10 +80,30 @@ class HealthManager: ObservableObject {
             
             self.isMoving = !activity.stationary && !activity.unknown
         }
+        
+        // 2. 计步器监控 (提供极速运动反馈)
+        // 只要步数在增加，就强制标记为 isMoving，这对于解决刚出门时的“漏记”至关重要
+        if CMPedometer.isStepCountingAvailable() {
+            pedometer.startUpdates(from: Date()) { [weak self] data, error in
+                guard let self = self, let data = data, error == nil else { return }
+                if data.numberOfSteps.intValue > 0 {
+                    DispatchQueue.main.async {
+                        // 如果计步器有增加，且当前不是车载模式，则强制激活移动状态
+                        if self.currentMotionType != .automotive {
+                            self.isMoving = true
+                            if self.currentMotionType == .stationary || self.currentMotionType == .unknown {
+                                self.currentMotionType = .walking
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     
     func stopActivityTracking() {
         activityManager.stopActivityUpdates()
+        pedometer.stopUpdates()
     }
     
     // MARK: - HealthKit (Historical Data for Footprints)

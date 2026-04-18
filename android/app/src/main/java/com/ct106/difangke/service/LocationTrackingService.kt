@@ -57,12 +57,13 @@ class LocationTrackingService : Service() {
 
     sealed class TrackingState {
         object Idle : TrackingState()
-        data class Tracking(val lat: Double? = null, val lon: Double? = null) : TrackingState()
+        data class Tracking(val lat: Double? = null, val lon: Double? = null, val speed: Double = 0.0) : TrackingState()
         data class OngoingStay(
             val since: Date,
             val lat: Double,
             val lon: Double,
-            val address: String? = null
+            val address: String? = null,
+            val speed: Double = 0.0
         ) : TrackingState()
     }
 
@@ -204,7 +205,7 @@ class LocationTrackingService : Service() {
 
         // 3. 更新当前显示状态
         if (ongoingStayStart == null) {
-            stateFlow.value = TrackingState.Tracking(lat, lon)
+            stateFlow.value = TrackingState.Tracking(lat, lon, speed)
         }
         updateOngoingState(point, address)
 
@@ -261,7 +262,8 @@ class LocationTrackingService : Service() {
                         since = ongoingStayStart!!.timestamp,
                         lat = centerLat,
                         lon = centerLon,
-                        address = address ?: ongoingStayAddress
+                        address = address ?: ongoingStayAddress,
+                        speed = current.speed
                     )
                     NotificationHelper.updateTrackingNotification(
                         this@LocationTrackingService,
@@ -305,7 +307,8 @@ class LocationTrackingService : Service() {
                         since = Date(time as Long),
                         lat = lat,
                         lon = lon,
-                        address = addr
+                        address = addr,
+                        speed = 0.0
                     )
                     Log.i(TAG, "Successfully recovered ongoing stay from storage: $addr")
                 }

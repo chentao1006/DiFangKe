@@ -317,16 +317,25 @@ fun TimelinePage(
     } else if (isFirstPage && items.isEmpty()) {
         PastPlaceholderView()
     } else {
-        val todayPoints by viewModel.dailyTrajectory.collectAsState()
-        val todayMarkers by viewModel.dailyMarkers.collectAsState()
+        // 使用针对特定日期的 Flow，避免 Pager 中不同页面的数据冲突
+        val dailyPoints by viewModel.getDailyTrajectory(date).collectAsState(initial = null)
+        val dailyMarkers by viewModel.getDailyMarkers(date).collectAsState(initial = null)
         
+        // 计算中心点作为兜底（如果 pointsJson 为空，地图至少能定位到当天的某个足迹）
+        val centerPoint = items.filterIsInstance<TimelineItem.FootprintItem>()
+            .firstOrNull()?.let { it.latitude to it.longitude }
+            ?: items.filterIsInstance<TimelineItem.TransportItem>()
+                .firstOrNull()?.let { 0.0 to 0.0 } // 优先用足迹
+
         TimelineContent(
             items = items,
             dailyInsight = dailyInsight?.content,
             totalMileage = mileage,
             totalPoints = points,
-            dailyPoints = if (isToday) todayPoints else dailyInsight?.rawPointsJson,
-            dailyMarkers = if (isToday) todayMarkers else dailyInsight?.markersJson,
+            dailyPoints = dailyPoints ?: dailyInsight?.rawPointsJson,
+            dailyMarkers = dailyMarkers ?: dailyInsight?.markersJson,
+            centerLat = centerPoint?.first,
+            centerLon = centerPoint?.second,
             isToday = isToday,
             trackingState = trackingState,
             activityTypes = activityTypes,
@@ -355,7 +364,9 @@ fun TimelineContent(
     onItemClick: (String) -> Unit,
     onMapClick: () -> Unit,
     dailyPoints: String? = null,
-    dailyMarkers: String? = null
+    dailyMarkers: String? = null,
+    centerLat: Double? = null,
+    centerLon: Double? = null
 ) {
     // 过滤掉与当前正在进行的实时停留重合的足迹 (iOS Parity)
     val filteredItems = remember(items, trackingState, isToday) {
@@ -408,6 +419,8 @@ fun TimelineContent(
                         summary = dailyInsight,
                         pointsJson = dailyPoints,
                         markersJson = dailyMarkers,
+                        centerLat = centerLat,
+                        centerLon = centerLon,
                         onNavigateToMap = onMapClick
                     )
                 }

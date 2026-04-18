@@ -15,6 +15,9 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
     private val _footprint = MutableStateFlow<FootprintEntity?>(null)
     val footprint: StateFlow<FootprintEntity?> = _footprint.asStateFlow()
 
+    private val _matchedPlace = MutableStateFlow<com.ct106.difangke.data.db.entity.PlaceEntity?>(null)
+    val matchedPlace: StateFlow<com.ct106.difangke.data.db.entity.PlaceEntity?> = _matchedPlace.asStateFlow()
+
     private val _activityTypes = MutableStateFlow<List<ActivityTypeEntity>>(emptyList())
     val activityTypes: StateFlow<List<ActivityTypeEntity>> = _activityTypes.asStateFlow()
 
@@ -28,7 +31,19 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
 
     fun loadFootprint(id: String) {
         viewModelScope.launch {
-            _footprint.value = db.footprintDao().getById(id)
+            val fp = db.footprintDao().getById(id)
+            _footprint.value = fp
+            
+            if (fp?.placeID != null) {
+                val place = db.placeDao().getById(fp.placeID)
+                if (place?.isUserDefined == true) {
+                    _matchedPlace.value = place
+                } else {
+                    _matchedPlace.value = null
+                }
+            } else {
+                _matchedPlace.value = null
+            }
         }
     }
 

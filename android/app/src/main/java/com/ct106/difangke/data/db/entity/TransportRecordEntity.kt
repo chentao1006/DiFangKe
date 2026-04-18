@@ -24,7 +24,8 @@ data class TransportRecordEntity(
     val pointsJson: String = "[]",
     val manualTypeRaw: String? = null,
     /** active 或 ignored */
-    val statusRaw: String = "active"
+    val statusRaw: String = "active",
+    val stepCount: Int? = null
 )
 
 /**

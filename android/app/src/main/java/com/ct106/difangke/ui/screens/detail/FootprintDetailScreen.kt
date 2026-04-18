@@ -168,6 +168,9 @@ fun FootprintDetailScreen(
                 }
 
                 // 2. 时间和地址卡片
+                val matchedPlace by viewModel.matchedPlace.collectAsState()
+                val importantColor = Color(0xFFFF9800) // Orange
+                
                 ElevatedCard(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -177,13 +180,16 @@ fun FootprintDetailScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Place, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                            Icon(Icons.Default.Place, contentDescription = null, modifier = Modifier.size(16.dp), tint = if (matchedPlace != null) importantColor else MaterialTheme.colorScheme.primary)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = footprint!!.address ?: "未知位置",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = footprint!!.address ?: "未知位置",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    color = if (matchedPlace != null) importantColor else MaterialTheme.colorScheme.onSurface
                             )
+                        }
                         }
                         
                         Spacer(modifier = Modifier.height(12.dp))

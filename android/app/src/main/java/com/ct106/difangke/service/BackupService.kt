@@ -93,15 +93,21 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         val speed: Double,
         val pts: String,
         val manualType: String?,
-        val status: String? = null
+        val status: String? = null,
+        val steps: Int? = null
     )
 
     data class RestoreReport(
-        val total: Int,
-        val new: Int,
-        val skipped: Int,
-        val newPlaces: Int,
-        val skippedPlaces: Int
+        val newFootprints: Int,
+        val skippedFootprints: Int,
+        val newPlacesUser: Int,
+        val skippedPlacesUser: Int,
+        val newPlacesSystem: Int,
+        val skippedPlacesSystem: Int,
+        val newTransports: Int,
+        val skippedTransports: Int,
+        val newActivityTypes: Int,
+        val skippedActivityTypes: Int
     )
 
     suspend fun generateBackup(): String = withContext(Dispatchers.IO) {
@@ -163,7 +169,8 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     speed = tr.averageSpeed,
                     pts = tr.pointsJson,
                     manualType = tr.manualTypeRaw,
-                    status = tr.statusRaw
+                    status = tr.statusRaw,
+                    steps = tr.stepCount
                 )
             }
         )
@@ -173,9 +180,12 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
     suspend fun restoreBackup(json: String): RestoreReport = withContext(Dispatchers.IO) {
         val backup = gson.fromJson(json, BackupDTO::class.java)
         
-        var newPlaces = 0
-        var skippedPlaces = 0
+        var newPlacesUser = 0
+        var skippedPlacesUser = 0
+        var newPlacesSystem = 0
+        var skippedPlacesSystem = 0
         for (p in backup.places) {
+            val isUserDefined = p.isUserDefined ?: true
             val existing = db.placeDao().getById(p.id)
             if (existing == null) {
                 db.placeDao().insert(PlaceEntity(
@@ -186,11 +196,11 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     radius = p.rad,
                     address = p.addr,
                     isIgnored = p.isIgnored ?: false,
-                    isUserDefined = p.isUserDefined ?: true
+                    isUserDefined = isUserDefined
                 ))
-                newPlaces++
+                if (isUserDefined) newPlacesUser++ else newPlacesSystem++
             } else {
-                skippedPlaces++
+                if (isUserDefined) skippedPlacesUser++ else skippedPlacesSystem++
             }
         }
 
@@ -223,20 +233,8 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
             }
         }
 
-        backup.activityTypes?.forEachIndexed { index, a ->
-            val existing = db.activityTypeDao().getById(a.id)
-            if (existing == null) {
-                db.activityTypeDao().insert(com.ct106.difangke.data.db.entity.ActivityTypeEntity(
-                    id = a.id,
-                    name = a.name,
-                    icon = a.icon,
-                    colorHex = a.colorHex,
-                    sortOrder = index,
-                    isSystem = false
-                ))
-            }
-        }
-
+        var newTransports = 0
+        var skippedTransports = 0
         backup.transports?.forEach { t ->
             val existing = db.transportRecordDao().getById(t.id)
             if (existing == null) {
@@ -252,17 +250,45 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     averageSpeed = t.speed,
                     pointsJson = t.pts,
                     manualTypeRaw = t.manualType,
-                    statusRaw = t.status ?: "active"
+                    statusRaw = t.status ?: "active",
+                    stepCount = t.steps
                 ))
+                newTransports++
+            } else {
+                skippedTransports++
+            }
+        }
+
+        var newActivities = 0
+        var skippedActivities = 0
+        backup.activityTypes?.forEachIndexed { index, a ->
+            val existing = db.activityTypeDao().getById(a.id)
+            if (existing == null) {
+                db.activityTypeDao().insert(com.ct106.difangke.data.db.entity.ActivityTypeEntity(
+                    id = a.id,
+                    name = a.name,
+                    icon = a.icon,
+                    colorHex = a.colorHex,
+                    sortOrder = index,
+                    isSystem = false
+                ))
+                newActivities++
+            } else {
+                skippedActivities++
             }
         }
 
         RestoreReport(
-            total = backup.footprints.size,
-            new = newFootprints,
-            skipped = skippedFootprints,
-            newPlaces = newPlaces,
-            skippedPlaces = skippedPlaces
+            newFootprints = newFootprints,
+            skippedFootprints = skippedFootprints,
+            newPlacesUser = newPlacesUser,
+            skippedPlacesUser = skippedPlacesUser,
+            newPlacesSystem = newPlacesSystem,
+            skippedPlacesSystem = skippedPlacesSystem,
+            newTransports = newTransports,
+            skippedTransports = skippedTransports,
+            newActivityTypes = newActivities,
+            skippedActivityTypes = skippedActivities
         )
     }
 }

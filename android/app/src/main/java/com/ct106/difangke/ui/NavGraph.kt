@@ -26,6 +26,7 @@ object NavRoutes {
     const val MAP = "map?date={date}"
     const val STATISTICS = "statistics"
     const val FOOTPRINT_DETAIL = "footprint_detail/{id}"
+    const val TRANSPORT_DETAIL = "transport_detail/{id}"
     const val PLACES_MANAGER = "settings/places"
     const val SAVED_PLACES = "settings/saved_places"
     const val IGNORED_PLACES = "settings/ignored_places"
@@ -77,13 +78,30 @@ fun NavGraph() {
                     val route = if (date != null) "map?date=${date.time}" else "map"
                     navController.navigate(route)
                 },
-                onNavigateToDetail = { id -> navController.navigate("footprint_detail/$id") }
+                onNavigateToDetail = { id -> 
+                    if (id.startsWith("t_")) {
+                        navController.navigate("transport_detail/${id.substring(2)}") 
+                    } else if (id.startsWith("f_")) {
+                        navController.navigate("footprint_detail/${id.substring(2)}")
+                    } else {
+                        // For backwards compatibility or direct UUIDs
+                        navController.navigate("footprint_detail/$id")
+                    }
+                }
             )
         }
         composable(NavRoutes.HISTORY) {
             HistoryScreen(
                 onBack = { navController.popBackStack() },
-                onNavigateToDetail = { id -> navController.navigate("footprint_detail/$id") },
+                onNavigateToDetail = { id -> 
+                    if (id.startsWith("t_")) {
+                        navController.navigate("transport_detail/${id.substring(2)}") 
+                    } else if (id.startsWith("f_")) {
+                        navController.navigate("footprint_detail/${id.substring(2)}")
+                    } else {
+                        navController.navigate("footprint_detail/$id")
+                    }
+                },
                 onDateSelected = { date -> 
                     // 这里由于在 NavGraph 层，需要特殊逻辑跳回 Main 且设置日期
                 }
@@ -127,6 +145,13 @@ fun NavGraph() {
             val id = backStackEntry.arguments?.getString("id") ?: ""
             FootprintDetailScreen(
                 footprintId = id,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(NavRoutes.TRANSPORT_DETAIL) { backStackEntry ->
+            val id = backStackEntry.arguments?.getString("id") ?: ""
+            com.ct106.difangke.ui.screens.detail.TransportDetailScreen(
+                transportId = id,
                 onBack = { navController.popBackStack() }
             )
         }

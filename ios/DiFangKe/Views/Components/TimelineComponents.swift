@@ -47,8 +47,6 @@ struct DaySummaryCard: View {
                             .fixedSize(horizontal: false, vertical: true)
                         
                         HStack(spacing: 12) {
-                            DayStatItem(value: "\(totalPoints)", label: "轨迹点")
-                            DayStatSeparator()
                             DayStatItem(value: "\(footprintCount)", label: "足迹")
                             DayStatSeparator()
                             DayStatItem(value: formatDistance(totalMileage), label: "里程数")
@@ -132,14 +130,17 @@ struct DaySummaryCard: View {
     private func updateCameraPosition() {
         var allCoords = points
         
-        // 加入足迹坐标
+        // 1. 加入足迹坐标与交通记录坐标
         for item in timelineItems {
-            if case .footprint(let fp) = item {
+            switch item {
+            case .footprint(let fp):
                 allCoords.append(CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude))
+            case .transport(let transport):
+                allCoords.append(contentsOf: transport.points)
             }
         }
         
-        // 加入照片坐标
+        // 2. 加入照片坐标
         let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
         allCoords.append(contentsOf: photoCoords)
         
@@ -256,14 +257,17 @@ struct FullFrameTrajectoryMapView: View {
     private func updateCamera() {
         var allCoords = points
         
-        // 加入足迹坐标
+        // 1. 加入足迹坐标与交通记录坐标
         for item in timelineItems {
-            if case .footprint(let fp) = item {
+            switch item {
+            case .footprint(let fp):
                 allCoords.append(CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude))
+            case .transport(let transport):
+                allCoords.append(contentsOf: transport.points)
             }
         }
         
-        // 加入照片坐标
+        // 2. 加入照片坐标
         let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
         allCoords.append(contentsOf: photoCoords)
         
@@ -357,22 +361,19 @@ struct RecordingStatusCard: View {
                         
                         // 地址与地点行
                         HStack(spacing: 6) {
-                            if locationManager.isTracking && !locationManager.currentAddress.isEmpty && locationManager.currentAddress != "正在解析位置..." {
-                                Text(locationManager.currentAddress)
-                                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                                    .foregroundColor(Color.dfkMainText.opacity(0.85))
-                                    .lineLimit(1)
+                            if locationManager.isTracking {
+                                let matchedName = locationManager.matchedPlace?.isUserDefined == true ? locationManager.matchedPlace?.name : nil
+                                let displayText = matchedName ?? locationManager.currentAddress
+                                
+                                if !displayText.isEmpty && displayText != "正在解析位置..." {
+                                    Text(displayText)
+                                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                                        .foregroundColor(matchedName != nil ? .orange : Color.dfkMainText.opacity(0.85))
+                                        .lineLimit(1)
+                                }
                             }
                             
-                            if let place = locationManager.matchedPlace, place.isUserDefined {
-                                Text(place.name)
-                                    .font(.system(size: 9, weight: .bold, design: .rounded))
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1.5)
-                                    .background(Color.orange.opacity(0.12))
-                                    .foregroundColor(.orange)
-                                    .clipShape(Capsule())
-                            }
+
                         }
                         .padding(.top, 1)
                         
@@ -404,7 +405,7 @@ struct RecordingStatusCard: View {
                     points: locationManager.allTodayCoordinates,
                     timelineItems: timelineItems,
                     photoAssets: photoAssets,
-                    onTimelineItemTap: onTimelineItemTap,
+                    onTimelineItemTap: onTimelineItemTap
                 )
                 .frame(height: 160)
                 .cornerRadius(12)
@@ -416,24 +417,13 @@ struct RecordingStatusCard: View {
                     showFullscreenMap = true
                 }
                 .onAppear {
-                    if let region = locationManager.allTodayCoordinates.boundingRegion() {
-                        cameraPosition = .region(region)
-                    } else if !photoAssets.isEmpty {
-                        let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
-                        if let region = photoCoords.boundingRegion() {
-                            cameraPosition = .region(region)
-                        }
-                    } else if let newLoc = locationManager.lastLocation {
-                        cameraPosition = .region(MKCoordinateRegion(center: newLoc.coordinate, latitudinalMeters: 500, longitudinalMeters: 500))
-                    }
+                    updateTodayCamera()
                 }
-                .onChange(of: locationManager.allTodayCoordinates.count) { _, count in
-                    // Only auto-adjust if the trajectory is growing and not already focused by user manual
-                    if let region = locationManager.allTodayCoordinates.boundingRegion() {
-                        withAnimation {
-                            cameraPosition = .region(region)
-                        }
-                    }
+                .onChange(of: locationManager.allTodayCoordinates.count) { _, _ in
+                    updateTodayCamera()
+                }
+                .onChange(of: timelineItems.count) { _, _ in
+                    updateTodayCamera()
                 }
                 .onChange(of: locationManager.lastLocation) { _, newLoc in
                     // If no points yet, keep tracking current position
@@ -463,6 +453,31 @@ struct RecordingStatusCard: View {
                 photoAssets: photoAssets,
                 showsUserLocation: true
             )
+        }
+    }
+    
+    private func updateTodayCamera() {
+        var allCoords = locationManager.allTodayCoordinates
+        
+        // 加入足迹坐标与交通记录坐标
+        for item in timelineItems {
+            switch item {
+            case .footprint(let fp):
+                allCoords.append(CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude))
+            case .transport(let transport):
+                allCoords.append(contentsOf: transport.points)
+            }
+        }
+        
+        let photoCoords = photoAssets.compactMap { $0.location?.gcj02.coordinate }
+        allCoords.append(contentsOf: photoCoords)
+        
+        if let region = allCoords.boundingRegion() {
+            withAnimation {
+                cameraPosition = .region(region)
+            }
+        } else if let newLoc = locationManager.lastLocation {
+            cameraPosition = .region(MKCoordinateRegion(center: newLoc.coordinate, latitudinalMeters: 500, longitudinalMeters: 500))
         }
     }
 }
@@ -530,25 +545,17 @@ struct FootprintCardView: View {
                         
 
                         HStack(spacing: 6) {
-                            if let addr = footprint.address, !addr.isEmpty {
-                                Text(addr)
+                            let matchedPlace = allPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })
+                            let displayText = matchedPlace?.name ?? footprint.address
+                            
+                            if let text = displayText, !text.isEmpty {
+                                Text(text)
                                     .font(.system(size: 13, weight: .medium, design: .rounded))
-                                    .foregroundColor(Color.dfkMainText.opacity(0.85))
+                                    .foregroundColor(matchedPlace != nil ? .orange : Color.dfkMainText.opacity(0.85))
                                     .lineLimit(1)
                             }
                             
-                            if let placeID = footprint.placeID {
-                                if let place = allPlaces.first(where: { $0.placeID == placeID && $0.isUserDefined }) {
-                                    Text(place.name)
-                                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 1.5)
-                                        .background(Color.orange.opacity(0.12))
-                                        .foregroundColor(.orange)
-                                        .clipShape(Capsule())
-                                        .fixedSize()
-                                }
-                            }
+
                         }
                         .padding(.top, 1)
                         
@@ -846,16 +853,6 @@ struct PlaceholderFootprintCard: View {
         let calendar = Calendar.current
         let hour = calendar.component(.hour, from: now)
         
-        // 1. 深度停留提示 (User's request)
-        if let startLoc = locationManager.potentialStopStartLocation {
-            let duration = now.timeIntervalSince(startLoc.timestamp)
-            if duration > 8 * 3600 {
-                return "要不出去走走？世界那么大，去看看"
-            } else if duration > 4 * 3600 {
-                return "你已经在这里停留好久了，想去探索新地方吗？"
-            }
-        }
-        
         // 2. 移动状态提示
         if let location = locationManager.lastLocation, location.speed > 1.0 {
             let speedKmh = location.speed * 3.6
@@ -869,6 +866,16 @@ struct PlaceholderFootprintCard: View {
             return "夜深了，早点休息"
         } else if hour >= 5 && hour <= 8 {
             return "早安！又是活力满满的一天"
+        }
+        
+        // 1. 深度停留提示 (User's request)
+        if let startLoc = locationManager.potentialStopStartLocation {
+            let duration = now.timeIntervalSince(startLoc.timestamp)
+            if duration > 48 * 3600 {
+                return "要不出去走走？世界那么大，去看看"
+            } else if duration > 15 * 3600 {
+                return "你已经在这里停留好久了，想去探索新地方吗？"
+            }
         }
         
         return nil

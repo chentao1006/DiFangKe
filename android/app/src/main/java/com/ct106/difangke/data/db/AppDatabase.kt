@@ -19,7 +19,7 @@ import java.util.Date
         DailyInsightEntity::class,
         TransportManualSelectionEntity::class
     ],
-    version = 1,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -43,8 +43,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "dfk_v1_stable.db"
                 )
-                // 允许主线程查询（与 iOS SwiftData 同步获取类似）
-                // 建议在生产版不开启，使用协程异步查询
+                .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance
                 instance

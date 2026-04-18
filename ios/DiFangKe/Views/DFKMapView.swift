@@ -45,6 +45,19 @@ struct DFKMapView: View {
                     .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: isInteractive ? 5 : 3, lineCap: .round, lineJoin: .round))
             }
             
+            // 交通段轨迹 (即使主轨迹点为空，也要显示交通轨迹)
+            ForEach(timelineItems) { item in
+                if case .transport(let transport) = item {
+                    // 背景边框
+                    MapPolyline(coordinates: transport.points)
+                        .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: (isInteractive ? 4 : 2) + 2, lineCap: .round, lineJoin: .round))
+                    
+                    // 交通轨迹线 (使用稍微透明一点的主色调或者区分于主轨迹的样式)
+                    MapPolyline(coordinates: transport.points)
+                        .stroke(Color.dfkAccent.opacity(0.8), style: StrokeStyle(lineWidth: isInteractive ? 4 : 2, lineCap: .round, lineJoin: .round))
+                }
+            }
+            
             if let mainCoord = mainAnnotationCoordinate {
                 Marker("", coordinate: mainCoord)
                     .tint(Color.dfkAccent)

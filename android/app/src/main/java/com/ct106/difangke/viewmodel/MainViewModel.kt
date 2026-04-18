@@ -159,6 +159,87 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return db.dailyInsightDao().observeForDay(start, end)
     }
 
+    // 获取指定日期的轨迹 (JSON 字符串)
+    fun getDailyTrajectory(date: Date): Flow<String?> {
+        val start = zeroTime(date)
+        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+
+        val trajectoryFlow = combine(
+            db.footprintDao().observeBetween(start, end),
+            db.transportRecordDao().observeForDay(start, end)
+        ) { footprints, transports ->
+            val allPointsList = mutableListOf<List<Double>>()
+            footprints.forEach { fp ->
+                try {
+                    val lats = org.json.JSONArray(fp.latitudeJson)
+                    val lons = org.json.JSONArray(fp.longitudeJson)
+                    for (i in 0 until minOf(lats.length(), lons.length())) {
+                        allPointsList.add(listOf(lats.getDouble(i), lons.getDouble(i)))
+                    }
+                } catch (e: Exception) {}
+            }
+            transports.forEach { tp ->
+                try {
+                    val array = org.json.JSONArray(tp.pointsJson)
+                    for (i in 0 until array.length()) {
+                        val element = array.get(i)
+                        if (element is org.json.JSONArray) {
+                            val v1 = element.getDouble(0)
+                            val v2 = element.getDouble(1)
+                            if (Math.abs(v1) > 90.0) allPointsList.add(listOf(v2, v1)) else allPointsList.add(listOf(v1, v2))
+                        } else if (element is org.json.JSONObject) {
+                            val lat = element.optDouble("lat", element.optDouble("latitude", Double.NaN))
+                            val lon = element.optDouble("lon", element.optDouble("longitude", Double.NaN))
+                            if (!lat.isNaN() && !lon.isNaN()) allPointsList.add(listOf(lat, lon))
+                        }
+                    }
+                } catch (e: Exception) {}
+            }
+            if (allPointsList.isNotEmpty()) {
+                val array = org.json.JSONArray()
+                allPointsList.forEach { p ->
+                    val pArr = org.json.JSONArray().put(p[0]).put(p[1])
+                    array.put(pArr)
+                }
+                array.toString()
+            } else null
+        }
+
+        // 如果是今天，额外与实时定位合并
+        return if (isToday(date)) {
+            combine(trajectoryFlow, LocationTrackingService.stateFlow) { traj, _ -> traj }
+        } else {
+            trajectoryFlow
+        }
+    }
+
+    // 获取指定日期的标记点 (JSON 字符串)
+    fun getDailyMarkers(date: Date): Flow<String?> {
+        val start = zeroTime(date)
+        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+
+        return db.footprintDao().observeBetween(start, end).map { footprints ->
+            val markersList = mutableListOf<List<Double>>()
+            footprints.forEach { fp ->
+                try {
+                    val lats = org.json.JSONArray(fp.latitudeJson)
+                    val lons = org.json.JSONArray(fp.longitudeJson)
+                    if (lats.length() > 0 && lons.length() > 0) {
+                        markersList.add(listOf(lats.getDouble(0), lons.getDouble(0)))
+                    }
+                } catch (e: Exception) {}
+            }
+            if (markersList.isNotEmpty()) {
+                val array = org.json.JSONArray()
+                markersList.forEach { m ->
+                    val mArr = org.json.JSONArray().put(m[0]).put(m[1])
+                    array.put(mArr)
+                }
+                array.toString()
+            } else null
+        }
+    }
+
     // 获取指定日期的里程
     fun getMileage(date: Date): Flow<Double> {
         return flow {
@@ -271,10 +352,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             transports.forEach { tp ->
                 try {
-                    val pts = org.json.JSONArray(tp.pointsJson)
-                    for (i in 0 until pts.length()) {
-                        val p = pts.getJSONArray(i)
-                        allPointsList.add(listOf(p.getDouble(0), p.getDouble(1)))
+                    val array = org.json.JSONArray(tp.pointsJson)
+                    for (i in 0 until array.length()) {
+                        val element = array.get(i)
+                        if (element is org.json.JSONArray) {
+                            val v1 = element.getDouble(0)
+                            val v2 = element.getDouble(1)
+                            if (Math.abs(v1) > 90.0) allPointsList.add(listOf(v2, v1)) else allPointsList.add(listOf(v1, v2))
+                        } else if (element is org.json.JSONObject) {
+                            val lat = element.optDouble("lat", element.optDouble("latitude", Double.NaN))
+                            val lon = element.optDouble("lon", element.optDouble("longitude", Double.NaN))
+                            if (!lat.isNaN() && !lon.isNaN()) allPointsList.add(listOf(lat, lon))
+                        }
                     }
                 } catch (e: Exception) {}
             }

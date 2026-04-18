@@ -158,17 +158,17 @@ struct DataManagerView: View {
             
             let data = try Data(contentsOf: url)
             let report = try BackupService.shared.restoreBackup(data: data, context: modelContext)
-            if report.total == 0 && report.newPlaces == 0 {
+            if report.newFootprints == 0 && report.newPlacesUser == 0 && report.newPlacesSystem == 0 && report.newTransports == 0 {
                 self.alertTitle = "导入结果"
-                self.alertMessage = "文件中未发现任何有效数据。"
+                self.alertMessage = "文件中未发现任何新数据（已跳过重复项）。"
             } else {
                 self.alertTitle = "导入完成"
                 var message = ""
-                message += "• 足迹: 新增 \(report.new), 跳过 \(report.skipped)"
-                
-                if report.newPlaces > 0 || report.skippedPlaces > 0 {
-                    message += "\n• 重要地点: 新增 \(report.newPlaces), 跳过 \(report.skippedPlaces)"
-                }
+                message += "• 足迹: 新增 \(report.newFootprints), 跳过 \(report.skippedFootprints)"
+                message += "\n• 交通: 新增 \(report.newTransports), 跳过 \(report.skippedTransports)"
+                message += "\n• 重要地点: 新增 \(report.newPlacesUser), 跳过 \(report.skippedPlacesUser)"
+                message += "\n• 其他地点: 新增 \(report.newPlacesSystem), 跳过 \(report.skippedPlacesSystem)"
+                message += "\n• 活动类型: 新增 \(report.newActivityTypes)"
                 
                 self.alertMessage = message
             }
@@ -380,11 +380,15 @@ final class BackupService {
     }
     
     struct RestoreReport {
-        let total: Int
-        let new: Int
-        let skipped: Int
-        let newPlaces: Int
-        let skippedPlaces: Int
+        let newFootprints: Int
+        let skippedFootprints: Int
+        let newPlacesUser: Int
+        let skippedPlacesUser: Int
+        let newPlacesSystem: Int
+        let skippedPlacesSystem: Int
+        let newTransports: Int
+        let skippedTransports: Int
+        let newActivityTypes: Int
     }
     
     func restoreBackup(data: Data, context: ModelContext) throws -> RestoreReport {
@@ -393,10 +397,13 @@ final class BackupService {
         let backup = try decoder.decode(BackupDTO.self, from: data)
         
         // 2. Restore Places
-        var newPlaces = 0
-        var skippedPlaces = 0
+        var newPlacesUser = 0
+        var skippedPlacesUser = 0
+        var newPlacesSystem = 0
+        var skippedPlacesSystem = 0
         for p in backup.places {
             if let uuid = UUID(uuidString: p.id) {
+                let isUser = p.isUserDefined ?? true
                 let descriptor = FetchDescriptor<Place>(predicate: #Predicate { $0.placeID == uuid })
                 if (try? context.fetch(descriptor).first) == nil {
                     let place = Place(
@@ -405,13 +412,13 @@ final class BackupService {
                         coordinate: CLLocationCoordinate2D(latitude: p.lat, longitude: p.lon), 
                         radius: p.rad, 
                         address: p.addr,
-                        isUserDefined: p.isUserDefined ?? true
+                        isUserDefined: isUser
                     )
                     place.isIgnored = p.isIgnored ?? false
                     context.insert(place)
-                    newPlaces += 1
+                    if isUser { newPlacesUser += 1 } else { newPlacesSystem += 1 }
                 } else {
-                    skippedPlaces += 1
+                    if isUser { skippedPlacesUser += 1 } else { skippedPlacesSystem += 1 }
                 }
             }
         }
@@ -450,6 +457,7 @@ final class BackupService {
         }
         
         // 4. Restore Activity Types
+        var newActivityTypes = 0
         if let activityDTOs = backup.activityTypes {
             for a in activityDTOs {
                 if let uuid = UUID(uuidString: a.id) {
@@ -457,12 +465,15 @@ final class BackupService {
                     if (try? context.fetch(descriptor).first) == nil {
                         let activity = ActivityType(id: uuid, name: a.name, icon: a.icon, colorHex: a.colorHex)
                         context.insert(activity)
+                        newActivityTypes += 1
                     }
                 }
             }
         }
         
         // 5. Restore Transports
+        var newTransports = 0
+        var skippedTransports = 0
         if let transportDTOs = backup.transports {
             for t in transportDTOs {
                 if let uuid = UUID(uuidString: t.id) {
@@ -483,6 +494,9 @@ final class BackupService {
                         record.manualTypeRaw = t.manualType
                         record.statusRaw = t.status ?? "active"
                         context.insert(record)
+                        newTransports += 1
+                    } else {
+                        skippedTransports += 1
                     }
                 }
             }
@@ -491,11 +505,15 @@ final class BackupService {
         try context.save()
         CloudSettingsManager.shared.triggerDataSyncPulse()
         return RestoreReport(
-            total: backup.footprints.count, 
-            new: newFootprints, 
-            skipped: skippedFootprints,
-            newPlaces: newPlaces,
-            skippedPlaces: skippedPlaces
+            newFootprints: newFootprints, 
+            skippedFootprints: skippedFootprints,
+            newPlacesUser: newPlacesUser,
+            skippedPlacesUser: skippedPlacesUser,
+            newPlacesSystem: newPlacesSystem,
+            skippedPlacesSystem: skippedPlacesSystem,
+            newTransports: newTransports,
+            skippedTransports: skippedTransports,
+            newActivityTypes: newActivityTypes
         )
     }
 }

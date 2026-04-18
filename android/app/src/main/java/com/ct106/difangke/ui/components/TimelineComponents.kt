@@ -173,28 +173,13 @@ fun FootprintCardView(
                         Text(
                             text = footprint.address ?: "未解析的位置",
                             style = MaterialTheme.typography.labelSmall,
-                            color = subtitleColor,
+                            color = if (allPlaces.any { it.placeID == footprint.placeID && it.isUserDefined }) Color(0xFFFF9800) else subtitleColor,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
                         
-                        val matchedPlace = allPlaces.find { it.placeID == footprint.placeID && it.isUserDefined }
-                        if (matchedPlace != null) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = matchedPlace.name,
-                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
+                        // Matched place name display removed, address is now colored instead
                     }
                     
                     Spacer(modifier = Modifier.height(6.dp))
@@ -637,8 +622,6 @@ fun DaySummaryCard(
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                DayStatItem(value = "$pointCount", label = "轨迹点")
-                DayStatSeparator()
                 DayStatItem(value = "$footprintCount", label = "足迹")
                 DayStatSeparator()
                 DayStatItem(value = formatDistance(mileage), label = "里程数")
@@ -729,17 +712,25 @@ fun MiniMapView(lat: Double? = null, lon: Double? = null, pointsJson: String? = 
                         if (points.size == 1) {
                             amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points[0], 15f))
                         } else {
-                            val bounds = com.amap.api.maps.model.LatLngBounds.builder().apply {
-                                points.forEach { include(it) }
-                            }.build()
-                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, 60))
-                            
-                            // 再次校验防止 bounds 导致缩放过大（如两点极其接近）
-                            view.postDelayed({
-                                if (amap.cameraPosition.zoom > 15f) {
-                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.zoomTo(15f))
+                            // 监听地图加载完成回调，确保 AMap 获得宽高后再执行 newLatLngBounds
+                            amap.setOnMapLoadedListener {
+                                try {
+                                    val bounds = com.amap.api.maps.model.LatLngBounds.builder().apply {
+                                        points.forEach { include(it) }
+                                    }.build()
+                                    // 增加 padding 比例，适配不同屏幕
+                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, 120))
+                                    
+                                    // 再次确认缩放防止因点太近导致的视野过大
+                                    if (amap.cameraPosition.zoom > 15.5f) {
+                                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.zoomTo(15.5f))
+                                    }
+                                } catch (e: Exception) {
+                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points.first(), 15f))
                                 }
-                            }, 100)
+                            }
+                            // 立即执行一次定位兜底
+                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points.first(), 15f))
                         }
                     }
                 } catch (e: Exception) {}
@@ -796,15 +787,27 @@ fun PlaceholderFootprintCard(trackingState: LocationTrackingService.TrackingStat
     val phrase by remember { mutableStateOf(phrases.random()) }
     val calendar = java.util.Calendar.getInstance()
     val hour = calendar.get(java.util.Calendar.HOUR_OF_DAY)
+    val speed = when (trackingState) {
+        is LocationTrackingService.TrackingState.Tracking -> trackingState.speed
+        is LocationTrackingService.TrackingState.OngoingStay -> trackingState.speed
+        else -> 0.0
+    }
+    
     val contextTip = when {
-        trackingState is LocationTrackingService.TrackingState.OngoingStay -> {
-            val durationMins = (System.currentTimeMillis() - trackingState.since.time) / 60000
-            if (durationMins > 480) "要不出去走走？世界那么大，去看看"
-            else if (durationMins > 240) "你已经在这里停留好久了，想去探索新地方吗？"
-            else null
-        }
+        // 1. 移动状态提示
+        speed * 3.6 > 20 -> "正在飞驰中，注意安全"
+        
+        // 2. 时间维度提示
         hour >= 23 || hour <= 4 -> "夜深了，早点休息"
         hour in 5..8 -> "早安！又是活力满满的一天"
+        
+        // 3. 深度停留提示
+        trackingState is LocationTrackingService.TrackingState.OngoingStay -> {
+            val durationHours = (System.currentTimeMillis() - trackingState.since.time) / 3600000.0
+            if (durationHours > 48) "要不出去走走？世界那么大，去看看"
+            else if (durationHours > 15) "你已经在这里停留好久了，想去探索新地方吗？"
+            else null
+        }
         else -> null
     }
 
