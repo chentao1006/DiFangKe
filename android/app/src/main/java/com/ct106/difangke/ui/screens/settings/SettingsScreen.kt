@@ -254,7 +254,7 @@ fun SettingsScreen(
                     Button(
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                         onClick = {
-                            viewModel.startUpdate(info.downloadUrl)
+                            viewModel.startUpdate(info.downloadUrl, info.versionCode)
                             viewModel.clearUpdateInfo()
                         }
                     ) {

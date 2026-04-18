@@ -102,15 +102,18 @@ class UpdateManager private constructor(private val context: Context) {
     /**
      * 开始下载并安装 APK
      */
-    fun downloadAndInstall(url: String, fileName: String = "difangke_latest.apk") {
+    fun downloadAndInstall(url: String, versionCode: Int, fileName: String = "difangke_latest.apk") {
         try {
+            // 为 URL 加上版本号 query，防止下载到旧缓存
+            val finalUrl = if (url.contains("?")) "$url&v=$versionCode" else "$url?v=$versionCode"
+            
             // 清理旧文件
             val destinationFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
             if (destinationFile.exists()) {
                 destinationFile.delete()
             }
 
-            val request = DownloadManager.Request(Uri.parse(url))
+            val request = DownloadManager.Request(Uri.parse(finalUrl))
                 .setTitle("正在下载地方客更新")
                 .setDescription("正在获取最新版本...")
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)

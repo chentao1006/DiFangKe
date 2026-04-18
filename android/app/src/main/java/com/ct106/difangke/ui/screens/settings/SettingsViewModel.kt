@@ -139,8 +139,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun startUpdate(url: String) {
-        UpdateManager.getInstance(getApplication()).downloadAndInstall(url)
+    fun startUpdate(url: String, versionCode: Int) {
+        UpdateManager.getInstance(getApplication()).downloadAndInstall(url, versionCode)
     }
 
     fun clearUpdateInfo() {

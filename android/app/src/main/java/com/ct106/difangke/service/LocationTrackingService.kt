@@ -80,25 +80,37 @@ class LocationTrackingService : Service() {
     private val trackingQueue = mutableListOf<RawLocationStore.RawPoint>()
     private var ongoingStayStart: RawLocationStore.RawPoint? = null
     private var ongoingStayAddress: String? = null
-    private var isHighAccuracyBoostEnabled = false
+    private var lastNotificationText: String? = null
+    private var currentIntervalTier = -1 // -1: initial, 0: stationary, 1: moving, 2: fast
 
     private val locationListener = AMapLocationListener { location ->
         if (location != null && location.errorCode == 0) {
-            // 自动调整逻辑：
-            // 如果检测到速度 > 0.3m/s (约 1km/h，判定为运动中)
             val speed = location.speed
-            val shouldBoost = speed > 0.3
+            // 根据速度调整采样频率以节省耗电
+            // 0: 停留 (<0.5m/s), 1: 正常运动 (0.5~10m/s), 2: 高速 (10m/s以上)
+            val newTier = when {
+                speed > 10.0 -> 2
+                speed > 0.5 -> 1
+                else -> 0
+            }
             
-            if (shouldBoost != isHighAccuracyBoostEnabled) {
-                isHighAccuracyBoostEnabled = shouldBoost
-                // 动态调整采样频率
+            if (newTier != currentIntervalTier) {
+                currentIntervalTier = newTier
+                val newInterval = when (newTier) {
+                    2 -> 8000L    // 高速：8秒
+                    1 -> 15000L   // 正常移动：15秒
+                    else -> 30000L // 停留：30秒
+                }
+                
                 locationClient?.setLocationOption(AMapLocationClientOption().apply {
                     locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
-                    interval = if (shouldBoost) 1000L else 3000L
+                    interval = newInterval
                     isNeedAddress = true
                     isMockEnable = false
                     isOffset = true
+                    isSensorEnable = true // 开启传感器辅助定位
                 })
+                Log.d(TAG, "Interval adjusted to $newInterval ms due to speed $speed m/s")
             }
 
             serviceScope.launch { 
@@ -132,10 +144,11 @@ class LocationTrackingService : Service() {
             locationClient = AMapLocationClient(applicationContext)
             val option = AMapLocationClientOption().apply {
                 locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
-                interval = 3000L // 每 3 秒定位一次
+                interval = 30000L // 默认初次 30 秒定位一次
                 isNeedAddress = true
                 isMockEnable = false
                 isOffset = true // 自动修正偏移
+                isSensorEnable = true
             }
             locationClient?.setLocationOption(option)
             locationClient?.setLocationListener(locationListener)
@@ -152,13 +165,18 @@ class LocationTrackingService : Service() {
                 startForeground(NotificationHelper.TRACKING_NOTIFICATION_ID, notification)
                 
                 // 开启高德后台定位
-                val boost = isHighAccuracyBoostEnabled
+                val intervalMs = when (currentIntervalTier) {
+                    2 -> 8000L
+                    1 -> 15000L
+                    else -> 30000L
+                }
                 locationClient?.setLocationOption(AMapLocationClientOption().apply {
                     locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
-                    interval = if (boost) 1000L else 3000L
+                    interval = intervalMs
                     isNeedAddress = true
                     isMockEnable = false
                     isOffset = true
+                    isSensorEnable = true
                 })
                 locationClient?.enableBackgroundLocation(NotificationHelper.TRACKING_NOTIFICATION_ID, notification)
                 locationClient?.startLocation()
@@ -265,10 +283,15 @@ class LocationTrackingService : Service() {
                         address = address ?: ongoingStayAddress,
                         speed = current.speed
                     )
-                    NotificationHelper.updateTrackingNotification(
-                        this@LocationTrackingService,
-                        (address ?: ongoingStayAddress) ?: "正在停留中"
-                    )
+                    
+                    val notifText = (address ?: ongoingStayAddress) ?: "正在停留中"
+                    if (notifText != lastNotificationText) {
+                        lastNotificationText = notifText
+                        NotificationHelper.updateTrackingNotification(
+                            this@LocationTrackingService,
+                            notifText
+                        )
+                    }
                 }
             } else {
                 // 位移较大，说明正在移动，不是停留态
