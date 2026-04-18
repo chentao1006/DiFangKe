@@ -50,6 +50,25 @@ echo "📦 检测到版本: $VERSION_NAME (Build $VERSION_CODE)"
 
 # 4. 准备目录与复制
 mkdir -p "$DEPLOY_DIR"
+
+# 4.1 手动强制重新签署 (确保同时拥有 V1 和 V2 证书)
+SDK_DIR=$(grep "^sdk.dir=" "$ROOT_DIR/android/local.properties" | cut -d'=' -f2)
+APKSIGNER=$(find "$SDK_DIR/build-tools" -name "apksigner" | sort -r | head -n 1)
+KS_PATH="$ROOT_DIR/android/difangke.jks"
+KS_PASS=$(get_prop "STORE_PASSWORD")
+KEY_ALIAS=$(get_prop "KEY_ALIAS")
+
+if [ -x "$APKSIGNER" ] && [ -f "$KS_PATH" ]; then
+    echo "🔏 正在进行手动二次签署 (强制开启 V1/V2)..."
+    "$APKSIGNER" sign --ks "$KS_PATH" --ks-pass "pass:$KS_PASS" --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KS_PASS" --v1-signing-enabled true --v2-signing-enabled true "$APK_SOURCE"
+    if [ $? -eq 0 ]; then
+        echo "✅ 手动签署完成！验证证书中..."
+        "$APKSIGNER" verify -v "$APK_SOURCE" | grep "Verified using v"
+    else
+        echo "⚠️  警告: 手动签署失败，将使用原始编译文件。"
+    fi
+fi
+
 cp "$APK_SOURCE" "$APK_DEST"
 echo "✅ 已复制 APK 至: $APK_DEST"
 
