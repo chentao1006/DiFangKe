@@ -20,7 +20,7 @@ import kotlinx.coroutines.runBlocking
 
 object NavRoutes {
     const val ONBOARDING = "onboarding"
-    const val MAIN = "main"
+    const val MAIN = "main?date={date}"
     const val HISTORY = "history"
     const val SETTINGS = "settings"
     const val MAP = "map?date={date}"
@@ -33,6 +33,7 @@ object NavRoutes {
     const val ACTIVITY_TYPE_SETTINGS = "settings/activities"
     const val AI_SETTINGS = "settings/ai"
     const val DATA_MANAGER = "settings/data"
+    const val DAILY_TIMELINE = "daily_timeline/{date}"
 }
 
 
@@ -69,8 +70,12 @@ fun NavGraph() {
                 }
             )
         }
-        composable(NavRoutes.MAIN) {
+        composable(NavRoutes.MAIN) { backStackEntry ->
+            val initialDateStr = backStackEntry.arguments?.getString("date")
+            val initialDate = initialDateStr?.toLongOrNull()?.let { java.util.Date(it) }
+            
             MainScreen(
+                initialDate = initialDate,
                 onNavigateToHistory = { navController.navigate(NavRoutes.HISTORY) },
                 onNavigateToStatistics = { navController.navigate(NavRoutes.STATISTICS) },
                 onNavigateToSettings = { navController.navigate(NavRoutes.SETTINGS) },
@@ -103,7 +108,7 @@ fun NavGraph() {
                     }
                 },
                 onDateSelected = { date -> 
-                    // 这里由于在 NavGraph 层，需要特殊逻辑跳回 Main 且设置日期
+                    navController.navigate("daily_timeline/${date.time}")
                 }
             )
         }
@@ -153,6 +158,25 @@ fun NavGraph() {
             com.ct106.difangke.ui.screens.detail.TransportDetailScreen(
                 transportId = id,
                 onBack = { navController.popBackStack() }
+            )
+        }
+        composable(NavRoutes.DAILY_TIMELINE) { backStackEntry ->
+            val dateTimestamp = backStackEntry.arguments?.getString("date")?.toLongOrNull() ?: System.currentTimeMillis()
+            com.ct106.difangke.ui.screens.history.DailyTimelineScreen(
+                date = java.util.Date(dateTimestamp),
+                onBack = { navController.popBackStack() },
+                onNavigateToDetail = { id -> 
+                    if (id.startsWith("t_")) {
+                        navController.navigate("transport_detail/${id.substring(2)}") 
+                    } else if (id.startsWith("f_")) {
+                        navController.navigate("footprint_detail/${id.substring(2)}")
+                    } else {
+                        navController.navigate("footprint_detail/$id")
+                    }
+                },
+                onNavigateToMap = { date -> 
+                    navController.navigate("map?date=${date.time}")
+                }
             )
         }
     }

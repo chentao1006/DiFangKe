@@ -4,11 +4,21 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.devtools.ksp")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
     namespace = "com.ct106.difangke"
     compileSdk = 36
+
+    // 从源码 AppConfig.kt 中动态读取配置的函数
+    fun readConfigValue(key: String): String {
+        val configFile = file("src/main/java/com/ct106/difangke/AppConfig.kt")
+        if (!configFile.exists()) return ""
+        val content = configFile.readText()
+        val match = Regex("const val $key\\s*=\\s*\"([^\"]*)\"").find(content)
+        return match?.groupValues?.get(1) ?: ""
+    }
 
     val localProperties = Properties()
     val localPropertiesFile = rootProject.file("local.properties")
@@ -16,12 +26,20 @@ android {
         localProperties.load(localPropertiesFile.inputStream())
     }
 
+    val versionProperties = Properties()
+    val versionPropertiesFile = rootProject.file("version.properties")
+    if (versionPropertiesFile.exists()) {
+        versionProperties.load(versionPropertiesFile.inputStream())
+    }
+
     defaultConfig {
         applicationId = "com.ct106.difangke"
         minSdk = 26
         targetSdk = 36
-        versionCode = localProperties.getProperty("VERSION_CODE")?.toInt() ?: 3
-        versionName = localProperties.getProperty("VERSION_NAME") ?: "1.0.2"
+        versionCode = versionProperties.getProperty("VERSION_CODE")?.toInt() 
+            ?: throw GradleException("VERSION_CODE missing in version.properties")
+        versionName = versionProperties.getProperty("VERSION_NAME") 
+            ?: throw GradleException("VERSION_NAME missing in version.properties")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
@@ -29,8 +47,8 @@ android {
             abiFilters.add("armeabi-v7a")
         }
 
-        val amapKey = localProperties.getProperty("AMAP_KEY") ?: ""
-        manifestPlaceholders["AMAP_KEY"] = amapKey
+        // 地图 Key 配置：直接从 AppConfig.kt 源码中读取，确保单一事实来源
+        manifestPlaceholders["AMAP_KEY"] = readConfigValue("AMAP_REST_KEY")
     }
 
     signingConfigs {
@@ -72,10 +90,6 @@ android {
     buildFeatures {
         compose = true
         buildConfig = false
-    }
-
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"
     }
 
     packaging {

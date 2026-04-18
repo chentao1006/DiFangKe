@@ -52,6 +52,7 @@ import androidx.compose.ui.text.style.TextAlign
 @Composable
 fun MainScreen(
     viewModel: MainViewModel = androidx.lifecycle.viewmodel.compose.viewModel(),
+    initialDate: Date? = null,
     onNavigateToHistory: () -> Unit,
     onNavigateToStatistics: () -> Unit,
     onNavigateToSettings: () -> Unit,
@@ -69,9 +70,19 @@ fun MainScreen(
     val trackingState by viewModel.trackingState.collectAsState()
     
     val pagerState = rememberPagerState(
-        initialPage = availableDates.indexOfFirst { it.time == currentDate.time }.coerceAtLeast(0), 
+        initialPage = 0, 
         pageCount = { availableDates.size }
     )
+    
+    // 初始化 Pager 到特定日期 (如果是从历史跳转过来的)
+    LaunchedEffect(availableDates, initialDate) {
+        if (availableDates.isNotEmpty() && initialDate != null) {
+            val index = availableDates.indexOfFirst { it.time == initialDate.time }
+            if (index >= 0) {
+                pagerState.scrollToPage(index)
+            }
+        }
+    }
     
     // 同步 Pager 到当前日期 (Date -> Pager)
     LaunchedEffect(currentDate, availableDates) {

@@ -28,7 +28,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ct106.difangke.data.model.DaySummary
+import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.data.db.entity.ActivityTypeEntity
+import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.viewmodel.HistoryViewModel
+import com.ct106.difangke.ui.components.FootprintCardView
+import com.ct106.difangke.ui.components.getIconForName
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.launch
@@ -42,6 +47,10 @@ fun HistoryScreen(
     viewModel: HistoryViewModel = viewModel()
 ) {
     val summaries by viewModel.summaries.collectAsState()
+    val favoriteFootprints by viewModel.favoriteFootprints.collectAsState()
+    val activityTypes by viewModel.activityTypes.collectAsState()
+    val allPlaces by viewModel.allPlaces.collectAsState()
+    
     val scope = rememberCoroutineScope()
     val pagerState = rememberPagerState(pageCount = { 3 })
     
@@ -105,7 +114,12 @@ fun HistoryScreen(
                 when (page) {
                     0 -> HistoryWeekView(summaries, onDateSelected)
                     1 -> HistoryMonthView(summaries, onDateSelected)
-                    2 -> HistoryFavoritesView(summaries, onNavigateToDetail)
+                    2 -> HistoryFavoritesView(
+                        favorites = favoriteFootprints,
+                        activityTypes = activityTypes,
+                        allPlaces = allPlaces,
+                        onNavigateToDetail = { onNavigateToDetail("f_$it") }
+                    )
                 }
             }
         }
@@ -113,26 +127,57 @@ fun HistoryScreen(
 }
 
 @Composable
-fun HistoryFavoritesView(summaries: Map<Date, DaySummary>, onNavigateToDetail: (String) -> Unit) {
-    val favorites = summaries.values.filter { it.highlightCount > 0 }.sortedByDescending { it.date }
+fun HistoryFavoritesView(
+    favorites: List<FootprintEntity>,
+    activityTypes: List<ActivityTypeEntity>,
+    allPlaces: List<PlaceEntity>,
+    onNavigateToDetail: (String) -> Unit
+) {
+    val groupedFavorites = favorites.groupBy { fp ->
+        Calendar.getInstance().apply {
+            time = fp.startTime
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.time
+    }
+    val sortedDates = groupedFavorites.keys.sortedDescending()
     
     if (favorites.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("暂无收藏的精彩瞬间", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=0.5f))
         }
     } else {
-        LazyColumn(contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            items(favorites) { summary ->
-                ElevatedCard(
-                    modifier = Modifier.fillMaxWidth().clickable { /* 应该跳到详情，但摘要存的是天 */ },
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(SimpleDateFormat("yyyy年M月d日", Locale.CHINA).format(summary.date), style = MaterialTheme.typography.labelSmall)
-                        Spacer(Modifier.height(4.dp))
-                        Text(summary.highlightTitle ?: "未命名精彩", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    }
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(vertical = 16.dp)
+        ) {
+            sortedDates.forEach { date ->
+                item {
+                    Text(
+                        text = SimpleDateFormat("yyyy年M月d日", Locale.CHINA).format(date),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
+                    )
                 }
+                
+                val dailyFavorites = groupedFavorites[date] ?: emptyList()
+                items(dailyFavorites) { fp ->
+                    FootprintCardView(
+                        footprint = fp,
+                        activityTypes = activityTypes,
+                        allPlaces = allPlaces,
+                        isFirst = true,
+                        isLast = true,
+                        showTimeline = false,
+                        onClick = { onNavigateToDetail(fp.footprintID) }
+                    )
+                }
+                
+                item { Spacer(Modifier.height(16.dp)) }
             }
         }
     }
@@ -145,15 +190,21 @@ fun HistoryWeekView(summaries: Map<Date, DaySummary>, onDateSelected: (Date) -> 
         Calendar.getInstance().apply {
             time = date
             set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
         }.time
     }
+    val sortedWeekStarts = groupedByWeek.keys.sortedDescending()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        groupedByWeek.forEach { (weekStart, dates) ->
+        sortedWeekStarts.forEach { weekStart ->
+            val dates = groupedByWeek[weekStart] ?: return@forEach
             item {
                 val cal = Calendar.getInstance().apply { time = weekStart }
                 Text(
@@ -175,9 +226,6 @@ fun HistoryWeekView(summaries: Map<Date, DaySummary>, onDateSelected: (Date) -> 
 
 @Composable
 fun HistoryDayRow(date: Date, summary: DaySummary, onClick: () -> Unit) {
-    val isToday = java.util.Calendar.getInstance().apply { time = date }.get(java.util.Calendar.DAY_OF_YEAR) == 
-                 java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_YEAR)
-    
     ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
@@ -244,11 +292,13 @@ fun StatSmallItem(icon: androidx.compose.ui.graphics.vector.ImageVector, value: 
 @Composable
 fun HistoryMonthView(summaries: Map<Date, DaySummary>, onDateSelected: (Date) -> Unit) {
     // 简易月份视图：列出最近 12 个月
-    val cal = Calendar.getInstance()
-    val months = (0..11).map {
-        val date = cal.time
-        cal.add(Calendar.MONTH, -1)
-        date
+    val months = remember {
+        val cal = Calendar.getInstance()
+        (0..11).map {
+            val date = cal.time
+            cal.add(Calendar.MONTH, -1)
+            date
+        }
     }
 
     LazyColumn(contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
@@ -263,11 +313,15 @@ fun MonthGridSection(monthDate: Date, summaries: Map<Date, DaySummary>, onDateSe
     val cal = Calendar.getInstance().apply { time = monthDate; set(Calendar.DAY_OF_MONTH, 1) }
     val monthTitle = SimpleDateFormat("yyyy年 M月", Locale.CHINA).format(monthDate)
     val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
-    val firstDayOfWeek = cal.get(Calendar.DAY_OF_WEEK) - 1 // 0-Sun
+    val firstDayOfWeek = (cal.get(Calendar.DAY_OF_WEEK) - 1) // 0-Sun
     
     val days = (1..daysInMonth).map { day ->
         val d = cal.clone() as Calendar
         d.set(Calendar.DAY_OF_MONTH, day)
+        d.set(Calendar.HOUR_OF_DAY, 0)
+        d.set(Calendar.MINUTE, 0)
+        d.set(Calendar.SECOND, 0)
+        d.set(Calendar.MILLISECOND, 0)
         d.time
     }
 
@@ -282,7 +336,7 @@ fun MonthGridSection(monthDate: Date, summaries: Map<Date, DaySummary>, onDateSe
         
         LazyVerticalGrid(
             columns = GridCells.Fixed(7),
-            modifier = Modifier.height(300.dp), // 使用固定高度或适当计算
+            modifier = Modifier.height(300.dp), 
             userScrollEnabled = false
         ) {
             items(firstDayOfWeek) { Spacer(Modifier.fillMaxSize()) }
@@ -297,8 +351,7 @@ fun MonthGridSection(monthDate: Date, summaries: Map<Date, DaySummary>, onDateSe
 @Composable
 fun MonthDayCell(date: Date, summary: DaySummary?, onClick: () -> Unit) {
     val hasData = summary != null && summary.footprintCount > 0
-    val todayCal = java.util.Calendar.getInstance()
-    val isToday = isSameDay(date, todayCal.time)
+    val isToday = isSameDay(date, Date())
     
     Column(
         modifier = Modifier
@@ -321,56 +374,6 @@ fun MonthDayCell(date: Date, summary: DaySummary?, onClick: () -> Unit) {
         }
     }
 }
-
-@Composable
-fun HistoryStatisticsView(summaries: Map<Date, DaySummary>) {
-    val totalMileage = summaries.values.sumOf { it.mileage }
-    val totalFootprints = summaries.values.sumOf { it.footprintCount }
-    val activeDays = summaries.values.count { it.footprintCount > 0 }
-
-    Column(modifier = Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-        Text("数据总览", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        
-        StatCard("总里程", String.format("%.2f km", totalMileage / 1000.0), Icons.Default.Route)
-        StatCard("足迹总数", "$totalFootprints", Icons.Default.Place)
-        StatCard("活跃天数", "$activeDays", Icons.Default.CalendarToday)
-    }
-}
-
-@Composable
-fun StatCard(label: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = if (androidx.compose.foundation.isSystemInDarkTheme()) Color(0xFF1C1C1E) else Color.White
-        ),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp)
-    ) {
-        Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, modifier = Modifier.size(32.dp), tint = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.width(20.dp))
-            Column {
-                Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(value, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            }
-        }
-    }
-}
-
-private fun getIconForName(name: String): androidx.compose.ui.graphics.vector.ImageVector {
-    return when(name) {
-        "home" -> Icons.Default.Home
-        "work" -> Icons.Default.Work
-        "restaurant" -> Icons.Default.Restaurant
-        "shopping_bag" -> Icons.Default.ShoppingBag
-        "directions_run" -> Icons.Default.DirectionsRun
-        "directions_bus" -> Icons.Default.DirectionsBus
-        else -> Icons.Default.Place
-    }
-}
-
-private fun Color.withAlpha(alpha: Float): Color = copy(alpha = alpha)
 
 private fun isSameDay(d1: Date, d2: Date): Boolean {
     val c1 = java.util.Calendar.getInstance().apply { time = d1 }

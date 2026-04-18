@@ -39,6 +39,16 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     private val _summaries = MutableStateFlow<Map<Date, DaySummary>>(emptyMap())
     val summaries: StateFlow<Map<Date, DaySummary>> = _summaries.asStateFlow()
 
+    private val _activityTypes = MutableStateFlow<List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>>(emptyList())
+    val activityTypes: StateFlow<List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>> = _activityTypes.asStateFlow()
+
+    private val _allPlaces = MutableStateFlow<List<com.ct106.difangke.data.db.entity.PlaceEntity>>(emptyList())
+    val allPlaces: StateFlow<List<com.ct106.difangke.data.db.entity.PlaceEntity>> = _allPlaces.asStateFlow()
+
+    val favoriteFootprints = _footprints.map { list ->
+        list.filter { it.isHighlight == true }.sortedByDescending { it.startTime }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
 
@@ -50,7 +60,12 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             _isRefreshing.value = true
             val allFootprints = db.footprintDao().getAll()
+            val allActivityTypes = db.activityTypeDao().getAll()
+            val allPlaces = db.placeDao().getAll()
+            
             _footprints.value = allFootprints
+            _activityTypes.value = allActivityTypes
+            _allPlaces.value = allPlaces
             
             // 计算总结数据 (耗时操作移至 IO 线程)
             withContext(Dispatchers.IO) {

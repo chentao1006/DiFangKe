@@ -84,6 +84,7 @@ fun FootprintCardView(
     allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
     isFirst: Boolean,
     isLast: Boolean,
+    showTimeline: Boolean = true,
     onClick: () -> Unit = {}
 ) {
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
@@ -107,17 +108,21 @@ fun FootprintCardView(
                 .height(IntrinsicSize.Min)
         ) {
             // 时间轴连线 (在卡片内部)
-            Box(modifier = Modifier.width(52.dp), contentAlignment = Alignment.TopCenter) {
-                TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = false)
-                
-                // 圈圈指示器
-                Box(
-                    modifier = Modifier
-                        .padding(top = 22.dp)
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
-                )
+            if (showTimeline) {
+                Box(modifier = Modifier.width(52.dp), contentAlignment = Alignment.TopCenter) {
+                    TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = false)
+                    
+                    // 圈圈指示器
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 22.dp)
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
+            } else {
+                Spacer(modifier = Modifier.width(16.dp))
             }
             
             // 内容区
@@ -253,6 +258,7 @@ fun TransportCardView(
     transport: TransportRecordEntity, 
     isFirst: Boolean, 
     isLast: Boolean,
+    showTimeline: Boolean = true,
     onClick: () -> Unit = {}
 ) {
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
@@ -276,25 +282,29 @@ fun TransportCardView(
                 .height(IntrinsicSize.Min)
         ) {
             // 1. 左侧时间轴连线
-            Box(modifier = Modifier.width(52.dp), contentAlignment = Alignment.TopCenter) {
-                TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = true)
-                
-                // 圈圈指示器
-                Box(
-                    modifier = Modifier
-                        .padding(top = 16.dp)
-                        .size(20.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = getTransportIcon(transport.manualTypeRaw ?: transport.typeRaw), 
-                        contentDescription = null,
-                        modifier = Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
+            if (showTimeline) {
+                Box(modifier = Modifier.width(52.dp), contentAlignment = Alignment.TopCenter) {
+                    TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = true)
+                    
+                    // 圈圈指示器
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 16.dp)
+                            .size(20.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = getTransportIcon(transport.manualTypeRaw ?: transport.typeRaw), 
+                            contentDescription = null,
+                            modifier = Modifier.size(12.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
+            } else {
+                Spacer(modifier = Modifier.width(16.dp))
             }
             
             // 2. 内容区 (iOS A->B 风格布局)
@@ -896,6 +906,7 @@ fun TimelineRow(
     isLast: Boolean,
     activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity> = emptyList(),
     allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity> = emptyList(),
+    showTimeline: Boolean = true,
     onClick: () -> Unit
 ) {
     when (item) {
@@ -906,6 +917,7 @@ fun TimelineRow(
                 allPlaces = allPlaces,
                 isFirst = isFirst,
                 isLast = isLast,
+                showTimeline = showTimeline,
                 onClick = onClick
             )
         }
@@ -914,6 +926,7 @@ fun TimelineRow(
                 transport = item.transport,
                 isFirst = isFirst,
                 isLast = isLast,
+                showTimeline = showTimeline,
                 onClick = onClick
             )
         }

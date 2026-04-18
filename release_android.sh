@@ -9,6 +9,25 @@ DEPLOY_DIR="$ROOT_DIR/download"
 APK_DEST="$DEPLOY_DIR/difangke.apk"
 JSON_DEST="$DEPLOY_DIR/update_android.json"
 
+# --- 自动版本更新 ---
+VERSION_PROPS="$ROOT_DIR/android/version.properties"
+CURRENT_VERSION_CODE=$(grep "^VERSION_CODE=" "$VERSION_PROPS" | cut -d'=' -f2 | tr -d '[:space:]')
+CURRENT_VERSION_NAME=$(grep "^VERSION_NAME=" "$VERSION_PROPS" | cut -d'=' -f2 | tr -d '[:space:]')
+
+echo "----------------------------------------"
+echo "📦 当前项目版本: $CURRENT_VERSION_NAME (Build $CURRENT_VERSION_CODE)"
+read -p "请输入新的版本号 [回车保持 $CURRENT_VERSION_NAME]: " NEW_VERSION_NAME
+[ -z "$NEW_VERSION_NAME" ] && NEW_VERSION_NAME=$CURRENT_VERSION_NAME
+
+# 自动递增 Version Code
+NEW_VERSION_CODE=$((CURRENT_VERSION_CODE + 1))
+
+echo "🔄 正在更新版本号到 $NEW_VERSION_NAME ($NEW_VERSION_CODE)..."
+sed -i '' "s/^VERSION_CODE=.*/VERSION_CODE=$NEW_VERSION_CODE/" "$VERSION_PROPS"
+sed -i '' "s/^VERSION_NAME=.*/VERSION_NAME=$NEW_VERSION_NAME/" "$VERSION_PROPS"
+echo "----------------------------------------"
+echo ""
+
 echo "🏗️  开始打包 APK (assembleRelease)..."
 
 # 1. 运行打包命令 (确保 gradlew 有执行权限)
@@ -35,13 +54,16 @@ if [ ! -f "$APK_SOURCE" ]; then
     fi
 fi
 
-# 3. 提取版本信息 (从 local.properties 读取)
-get_prop() {
+# 3. 提取版本信息
+get_version_prop() {
+    grep "^${1}=" "$ROOT_DIR/android/version.properties" | cut -d'=' -f2 | tr -d '[:space:]'
+}
+get_local_prop() {
     grep "^${1}=" "$ROOT_DIR/android/local.properties" | cut -d'=' -f2 | tr -d '[:space:]'
 }
 
-VERSION_CODE=$(get_prop "VERSION_CODE")
-VERSION_NAME=$(get_prop "VERSION_NAME")
+VERSION_CODE=$(get_version_prop "VERSION_CODE")
+VERSION_NAME=$(get_version_prop "VERSION_NAME")
 
 [ -z "$VERSION_CODE" ] && VERSION_CODE="1"
 [ -z "$VERSION_NAME" ] && VERSION_NAME="1.0.0"
@@ -55,8 +77,8 @@ mkdir -p "$DEPLOY_DIR"
 SDK_DIR=$(grep "^sdk.dir=" "$ROOT_DIR/android/local.properties" | cut -d'=' -f2)
 APKSIGNER=$(find "$SDK_DIR/build-tools" -name "apksigner" | sort -r | head -n 1)
 KS_PATH="$ROOT_DIR/android/difangke.jks"
-KS_PASS=$(get_prop "STORE_PASSWORD")
-KEY_ALIAS=$(get_prop "KEY_ALIAS")
+KS_PASS=$(get_local_prop "STORE_PASSWORD")
+KEY_ALIAS=$(get_local_prop "KEY_ALIAS")
 
 if [ -x "$APKSIGNER" ] && [ -f "$KS_PATH" ]; then
     echo "🔏 正在进行手动二次签署 (强制开启 V1/V2)..."

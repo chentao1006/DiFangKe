@@ -9,28 +9,29 @@ import androidx.compose.ui.graphics.Color
 
 @Composable
 fun getIconForName(name: String?): ImageVector {
-    return when(name) {
+    return when(name?.lowercase()) {
         "home" -> Icons.Default.Home
         "work" -> Icons.Default.Work
-        "restaurant" -> Icons.Default.Restaurant
-        "shopping_bag" -> Icons.Default.ShoppingBag
-        "directions_run" -> Icons.Default.DirectionsRun
-        "directions_walk" -> Icons.Default.DirectionsWalk
-        "directions_bike" -> Icons.Default.DirectionsBike
-        "directions_car" -> Icons.Default.DirectionsCar
-        "flight", "airplane_ticket" -> Icons.Default.Flight
+        "restaurant", "eat" -> Icons.Default.Restaurant
+        "shopping_bag", "shopping", "shopping_cart" -> Icons.Default.ShoppingCart
+        "directions_run", "run" -> Icons.AutoMirrored.Filled.DirectionsRun
+        "directions_walk", "walk" -> Icons.AutoMirrored.Filled.DirectionsWalk
+        "directions_bike", "cycle" -> Icons.AutoMirrored.Filled.DirectionsBike
+        "directions_car", "car" -> Icons.Default.DirectionsCar
+        "directions_bus" -> Icons.Default.DirectionsBus
+        "place" -> Icons.Default.Place
+        "flight", "airplane_ticket", "plane" -> Icons.Default.Flight
         "train" -> Icons.Default.Train
         "tram" -> Icons.Default.Tram
         "directions_boat" -> Icons.Default.DirectionsBoat
         "sports_esports" -> Icons.Default.SportsEsports
-        "menu_book" -> Icons.Default.MenuBook
+        "menu_book" -> Icons.AutoMirrored.Filled.MenuBook
         "local_hospital", "medical_services" -> Icons.Default.MedicalServices
         "bedtime", "nights_stay" -> Icons.Default.Bedtime
         "theater_comedy" -> Icons.Default.TheaterComedy
         "fitness_center" -> Icons.Default.FitnessCenter
         "self_improvement" -> Icons.Default.SelfImprovement
         "local_cafe", "coffee" -> Icons.Default.LocalCafe
-        "shopping_cart" -> Icons.Default.ShoppingCart
         "movie" -> Icons.Default.Movie
         "brush" -> Icons.Default.Brush
         "palette" -> Icons.Default.Palette
@@ -76,15 +77,8 @@ fun getIconForName(name: String?): ImageVector {
         "surfing" -> Icons.Default.Surfing
         "piano" -> Icons.Default.Piano
         "emoji_events" -> Icons.Default.EmojiEvents
-        "car" -> Icons.Default.DirectionsCar
-        "walk" -> Icons.Default.DirectionsWalk
-        "run" -> Icons.Default.DirectionsRun
-        "cycle" -> Icons.Default.DirectionsBike
-        "eat" -> Icons.Default.Restaurant
-        "shopping" -> Icons.Default.ShoppingCart
         "sightseeing" -> Icons.Default.PhotoCamera
-        "plane" -> Icons.Default.Flight
-        else -> Icons.AutoMirrored.Filled.Help
+        else -> Icons.Default.Place
     }
 }
 
