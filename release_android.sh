@@ -4,7 +4,7 @@
 ROOT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 GRADLE_FILE="$ROOT_DIR/android/app/build.gradle.kts"
-APK_SOURCE="$ROOT_DIR/android/app/release/app-release.apk"
+APK_SOURCE="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
 DEPLOY_DIR="$ROOT_DIR/download"
 APK_DEST="$DEPLOY_DIR/difangke.apk"
 JSON_DEST="$DEPLOY_DIR/update_android.json"
