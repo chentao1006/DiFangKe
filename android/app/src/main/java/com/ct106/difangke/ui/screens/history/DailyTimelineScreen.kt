@@ -59,7 +59,11 @@ fun DailyTimelineScreen(
                 isFirstPage = false,
                 isLastPage = false,
                 hasLocationPermission = true,
+                hasNotificationPermission = true,
+                isNotificationGuideDismissed = true,
                 onRequestPermission = { },
+                onRequestNotification = { },
+                onDismissNotificationGuide = { },
                 onItemClick = onNavigateToDetail,
                 onMapClick = { onNavigateToMap(date) }
             )

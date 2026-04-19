@@ -140,6 +140,10 @@ struct Transport: Identifiable {
     func updatingType(_ newType: TransportType) -> Transport {
         Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: newType, stepCount: stepCount)
     }
+
+    func updatingTimes(start: Date, end: Date) -> Transport {
+        Transport(id: id, startTime: start, endTime: end, startLocation: startLocation, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: manualType, stepCount: stepCount)
+    }
 }
 
 @Model

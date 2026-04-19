@@ -87,7 +87,7 @@ final class RawLocationStore {
     }
     
     /// 读取指定日期的所有坐标点
-    func loadLocations(for date: Date) -> [CLLocation] {
+    func loadLocations(for date: Date, filtered: Bool = true) -> [CLLocation] {
         let url = getFileURL(for: date)
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return [] }
         guard let content = String(data: data, encoding: .utf8) else { return [] }
@@ -131,7 +131,7 @@ final class RawLocationStore {
                 lastValidPoint = loc
             }
         }
-        return locations
+        return filtered ? RawLocationStore.filterRidiculousSpikes(locations) : locations
     }
     
     /// 获取最近一段的点。如果提供了 since，则至少获取到 since 那个时间点。
@@ -157,7 +157,7 @@ final class RawLocationStore {
     }
 
     /// 读取指定日期的所有坐标点（包含本设备和其他同步过来的设备）
-    func loadAllDevicesLocations(for date: Date) -> [CLLocation] {
+    func loadAllDevicesLocations(for date: Date, filtered: Bool = true) -> [CLLocation] {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         let datePrefix = formatter.string(from: date)
@@ -170,13 +170,14 @@ final class RawLocationStore {
         let relevantFiles = files.filter { $0.lastPathComponent.hasPrefix(datePrefix) && $0.pathExtension == "csv" }
         
         for fileURL in relevantFiles {
-            let dayPoints = loadLocations(fromURL: fileURL)
+            let dayPoints = loadLocations(fromURL: fileURL, filtered: filtered)
             allPoints.append(contentsOf: dayPoints)
         }
-        return allPoints.sorted { $0.timestamp < $1.timestamp }
+        let sorted = allPoints.sorted { $0.timestamp < $1.timestamp }
+        return filtered ? RawLocationStore.filterRidiculousSpikes(sorted) : sorted
     }
     
-    private func loadLocations(fromURL url: URL) -> [CLLocation] {
+    private func loadLocations(fromURL url: URL, filtered: Bool = true) -> [CLLocation] {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
               let content = String(data: data, encoding: .utf8) else { return [] }
         
@@ -219,7 +220,105 @@ final class RawLocationStore {
                 lastValidPoint = loc
             }
         }
-        return locations
+        return filtered ? RawLocationStore.filterRidiculousSpikes(locations) : locations
+    }
+    
+    /// 从源文件中彻底删除某个点 (匹配时间戳)
+    func deleteLocation(at timestamp: Double, for date: Date) {
+        saveQueue.sync { [weak self] in
+            guard let self = self else { return }
+            
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            let prefix = formatter.string(from: date)
+            
+            guard let files = try? self.fileManager.contentsOfDirectory(at: self.baseDirectory, includingPropertiesForKeys: nil) else { return }
+            let targetFiles = files.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "csv" }
+            
+            for url in targetFiles {
+                guard let data = try? Data(contentsOf: url),
+                      let content = String(data: data, encoding: .utf8) else { continue }
+                
+                let lines = content.components(separatedBy: .newlines)
+                let originalCount = lines.count
+                let filteredLines = lines.filter { line in
+                    guard !line.isEmpty else { return false }
+                    let parts = line.split(separator: ",")
+                    if let ts = Double(parts[0]) {
+                        return abs(ts - timestamp) > 0.0001
+                    }
+                    return true
+                }
+                
+                if filteredLines.count < originalCount - 1 {
+                    let newContent = filteredLines.joined(separator: "\n") + "\n"
+                    try? newContent.write(to: url, atomically: true, encoding: .utf8)
+                }
+            }
+            
+            // 异步回主线程通知更新
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: NSNotification.Name("RawLocationDataDeleted"), object: nil, userInfo: ["date": date])
+            }
+        }
+    }
+
+    /// 核心算法：识别并剔除轨迹中的突发性漂移点（Spike Filter）
+    /// 几分钟内跨越数公里又回到附近，属于典型的坐标跳变 (支持连续多点跳转检测)
+    static func filterRidiculousSpikes(_ points: [CLLocation]) -> [CLLocation] {
+        guard points.count >= 3 else { return points }
+        var cleaned: [CLLocation] = []
+        cleaned.append(points[0])
+        
+        var i = 1
+        while i < points.count {
+            let prev = cleaned.last!
+            let current = points[i]
+            
+            // --- 强化判定逻辑：基于速度与回弹的多点联合过滤 ---
+            let tPrevToCurrent = max(current.timestamp.timeIntervalSince(prev.timestamp), 0.1)
+            let dPrevToCurrent = current.distance(from: prev)
+            let speedPrevToCurrent = dPrevToCurrent / tPrevToCurrent // m/s
+            
+            // 如果瞬时时速超过 250km/h (约 70m/s)，触发跳变探测
+            if speedPrevToCurrent > 70 {
+                var jumpReturnIndex = -1
+                let searchLimit = min(i + 20, points.count) // 扩大搜索窗口到 20 个点
+                
+                for j in (i + 1)..<searchLimit {
+                    let next = points[j]
+                    let tPrevToNext = max(next.timestamp.timeIntervalSince(prev.timestamp), 0.1)
+                    let dPrevToNext = next.distance(from: prev)
+                    let avgSpeedToNext = dPrevToNext / tPrevToNext
+                    
+                    // 如果点 j 相对于 prev 的平均速度是合理的（< 150km/h，约 42m/s）
+                    // 但 current 这一点是突发性的极速跳转，则说明 [i...j-1] 段是漂移
+                    if avgSpeedToNext < 42 && dPrevToCurrent > 800 {
+                        // 且回归点 next 距离 current 也必须足够远，证明 current 是偏离轨迹的点
+                        if current.distance(from: next) > 800 {
+                            jumpReturnIndex = j
+                            break
+                        }
+                    }
+                }
+                
+                if jumpReturnIndex != -1 {
+                    print("🚩 Aggressively filtered ghost jump cluster from \(i) to \(jumpReturnIndex)")
+                    i = jumpReturnIndex
+                    continue
+                }
+            }
+            
+            // --- 补救：对极差精度的孤立点直接剔除 ---
+            if current.horizontalAccuracy > 1500 && dPrevToCurrent > 2000 {
+                i += 1
+                continue
+            }
+            
+            cleaned.append(current)
+            i += 1
+        }
+        return cleaned
     }
     
     /// 高效获取指定日期的总点数（统计行数，不解析对象）
@@ -612,6 +711,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         loadPotentialStop()
         
         setupTimers()
+        setupSubscribers()
         
         // Move heavy disk I/O to background to avoid blocking app launch
         Task(priority: .userInitiated) { [weak self] in
@@ -655,6 +755,25 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     private var cancellables = Set<AnyCancellable>()
+    
+    private func setupSubscribers() {
+        NotificationCenter.default.publisher(for: NSNotification.Name("RawLocationDataDeleted"))
+            .receive(on: RunLoop.main)
+            .sink { [weak self] notification in
+                guard let self = self, let date = notification.userInfo?["date"] as? Date else { return }
+                
+                // 如果删除的是今天的点，清空缓存强制重新加载
+                if Calendar.current.isDateInToday(date) {
+                    Task {
+                        await self.loadPointsFromStore()
+                    }
+                }
+                
+                // 触动全局 UI 刷新
+                self.lastRawDataUpdateTrigger = Date()
+            }
+            .store(in: &cancellables)
+    }
     
     /// 强制激活高精度模式（通常由计步器或运动传感器触发，早于 GPS 位移）
     private func forceHighAccuracyBoost() {

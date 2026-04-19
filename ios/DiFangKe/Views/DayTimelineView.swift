@@ -28,6 +28,7 @@ struct DayTimelineView: View {
     @Query private var allInsights: [DailyInsight]
     @State private var groupedInsights: [Date: DailyInsight] = [:]
     @State private var showingResetAlert = false
+    @State private var showingRawPointsDate: IdentifiableDate? = nil
     @State private var showingCalendar = false
     @State private var updateTask: Task<Void, Never>?
     @State private var preLoadTask: Task<Void, Never>?
@@ -231,6 +232,10 @@ struct DayTimelineView: View {
                     .transition(.opacity.combined(with: .scale))
                 }
             }
+            .sheet(item: $showingRawPointsDate) { item in
+                RawPointsListView(date: item.date)
+                    .environment(locationManager)
+            }
             .onDisappear {
                 stopRepeatTimer()
                 updateTask?.cancel()
@@ -249,13 +254,13 @@ struct DayTimelineView: View {
                 locationManager.allPlaces = newValue
                 locationManager.forceRefreshOngoingAnalysis()
             }
-            .alert("刷新本日足迹", isPresented: $showingResetAlert) {
-                Button("确定刷新", role: .destructive) {
+            .alert("重新生成本日数据", isPresented: $showingResetAlert) {
+                Button("确定重新生成", role: .destructive) {
                     locationManager.resetData(for: selectedDate)
                 }
                 Button("取消", role: .cancel) { }
             } message: {
-                Text("这将删除已修正的足迹记录和交通数据，并从原始轨迹重新生成。")
+                Text("这将删除已手动修正或确认的足迹记录，并基于原始轨迹点重新分析生成时间线。")
             }
             } // VStack
         } // NavigationStack
@@ -475,10 +480,18 @@ struct DayTimelineView: View {
                 .presentationCompactAdaptation(.popover)
             }
             .contextMenu {
+                Button {
+                    showingRawPointsDate = IdentifiableDate(date: selectedDate)
+                } label: {
+                    Label("查看所有轨迹点", systemImage: "dot.radiowaves.left.and.right")
+                }
+                
+                Divider()
+                
                 Button(role: .destructive) {
                     showingResetAlert = true
                 } label: {
-                    Label("刷新本日足迹", systemImage: "arrow.counterclockwise")
+                    Label("重新生成今日数据", systemImage: "arrow.counterclockwise")
                 }
             }
             

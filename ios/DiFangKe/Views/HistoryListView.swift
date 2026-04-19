@@ -70,12 +70,20 @@ struct SimpleDayTimelineView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { dismiss() }
-                        .fontWeight(.bold)
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
                 }
             }
         }
     }
+}
+
+struct IdentifiableDate: Identifiable {
+    var id: Date { date }
+    let date: Date
 }
 
 struct HistoryListView: View {
@@ -92,6 +100,7 @@ struct HistoryListView: View {
     @State private var cachedSummaries: [Date: DaySummary] = [:]
     @State private var showingDate: IdentifiableDate? = nil
     @State private var showingPhotoImportRange = false
+    @State private var showingRawPointsDate: IdentifiableDate? = nil
     @State private var selectedRange: (Date, Date)? = nil
     @State private var isScanning = false
     @State private var isImporting = false
@@ -106,11 +115,6 @@ struct HistoryListView: View {
     @ObservedObject private var photoService = PhotoService.shared
     
     @Query(sort: \Place.name) private var allPlacesForScan: [Place]
-    
-    struct IdentifiableDate: Identifiable {
-        var id: Date { date }
-        let date: Date
-    }
     
     enum ViewMode: String, CaseIterable {
         case week = "周"
@@ -146,6 +150,11 @@ struct HistoryListView: View {
         .onChange(of: allTransportRecords) { updateSummaries() }
         .sheet(item: $showingDate) { item in
             SimpleDayTimelineView(date: item.date)
+                .environment(locationManager)
+                .onDisappear { updateSummaries() }
+        }
+        .sheet(item: $showingRawPointsDate) { item in
+            RawPointsListView(date: item.date)
                 .environment(locationManager)
                 .onDisappear { updateSummaries() }
         }
@@ -234,12 +243,12 @@ struct HistoryListView: View {
     
     private var contentArea: some View {
         TabView(selection: $viewMode) {
-            HistoryWeekView(summaries: cachedSummaries, targetDate: initialDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledWeek, requestSummary: ensureSummary) { date in
+            HistoryWeekView(summaries: cachedSummaries, targetDate: initialDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledWeek, showingRawPointsDate: $showingRawPointsDate, requestSummary: ensureSummary) { date in
                 showingDate = IdentifiableDate(date: date)
             }
             .tag(ViewMode.week)
             
-            HistoryMonthView(summaries: cachedSummaries, targetDate: initialDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledMonth, requestSummary: ensureSummary) { date in
+            HistoryMonthView(summaries: cachedSummaries, targetDate: initialDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledMonth, showingRawPointsDate: $showingRawPointsDate, requestSummary: ensureSummary) { date in
                 showingDate = IdentifiableDate(date: date)
             }
             .tag(ViewMode.month)
@@ -392,6 +401,7 @@ struct HistoryWeekView: View {
     let targetDate: Date
     let earliestDate: Date
     @Binding var hasScrolled: Bool
+    @Binding var showingRawPointsDate: IdentifiableDate?
     let requestSummary: (Date) -> Void
     let onDayTap: (Date) -> Void
     
@@ -436,6 +446,13 @@ struct HistoryWeekView: View {
                                             summary: summaries[date],
                                             onTap: { onDayTap(date) }
                                         )
+                                        .contextMenu {
+                                            Button {
+                                                showingRawPointsDate = IdentifiableDate(date: date)
+                                            } label: {
+                                                Label("查看所有轨迹点", systemImage: "dot.radiowaves.left.and.right")
+                                            }
+                                        }
                                         .onAppear { requestSummary(date) }
                                     }
                                 }
@@ -624,6 +641,7 @@ struct HistoryMonthView: View {
     let targetDate: Date
     let earliestDate: Date
     @Binding var hasScrolled: Bool
+    @Binding var showingRawPointsDate: IdentifiableDate?
     let requestSummary: (Date) -> Void
     let onDayTap: (Date) -> Void
     
@@ -728,6 +746,13 @@ struct HistoryMonthView: View {
                 ForEach(0..<leadingSpaces, id: \.self) { _ in Color.clear.frame(height: 40) }
                 ForEach(days, id: \.self) { date in
                     MonthDayCell(date: date, targetDate: targetDate, summary: summaries[date], onTap: { onDayTap(date) }, onAppearAction: { requestSummary(date) })
+                        .contextMenu {
+                            Button {
+                                showingRawPointsDate = IdentifiableDate(date: date)
+                            } label: {
+                                Label("查看所有轨迹点", systemImage: "dot.radiowaves.left.and.right")
+                            }
+                        }
                 }
             }
             .padding(.horizontal)

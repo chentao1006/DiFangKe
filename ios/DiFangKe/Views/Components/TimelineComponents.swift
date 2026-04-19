@@ -200,6 +200,7 @@ struct FullFrameTrajectoryMapView: View {
     @State private var selectedFootprint: Footprint?
     @State private var selectedTransport: Transport?
     @State private var selectedPhotoAsset: IdentifiableString?
+    @State private var hasAutoCentered = false
     
     var body: some View {
         NavigationStack {
@@ -248,13 +249,20 @@ struct FullFrameTrajectoryMapView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { dismiss() }.fontWeight(.bold)
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
                 }
+                
             }
         }
     }
     
-    private func updateCamera() {
+    private func updateCamera(force: Bool = false) {
+        if !force && hasAutoCentered && !points.isEmpty { return }
+        
         var allCoords = points
         
         // 1. 加入足迹坐标与交通记录坐标
@@ -275,10 +283,12 @@ struct FullFrameTrajectoryMapView: View {
             if let region = allCoords.boundingRegion(paddingFactor: 1.4) {
                 withAnimation {
                     cameraPosition = .region(region)
+                    hasAutoCentered = true
                 }
             }
         } else if showsUserLocation, let lastLoc = LocationManager.shared.lastLocation {
             cameraPosition = .region(MKCoordinateRegion(center: lastLoc.coordinate, latitudinalMeters: 1000, longitudinalMeters: 1000))
+            hasAutoCentered = true
         }
     }
 }
@@ -697,6 +707,7 @@ struct FootprintCardView: View {
         let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
         
         geocoder.reverseGeocodeLocation(location) { placemarks, error in
+
             guard let placemark = placemarks?.first, error == nil else { return }
             
             let name = placemark.name ?? ""

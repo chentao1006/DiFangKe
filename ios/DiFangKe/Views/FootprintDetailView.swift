@@ -122,12 +122,14 @@ struct FootprintModalView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { 
+                    Button { 
                         checkAndGenerateAIContent()
                         try? modelContext.save()
                         onDismiss?(hasChanged)
                         dismiss() 
-                    }.fontWeight(.bold)
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
                 }
             }
             .alert("确认删除足迹？", isPresented: $showingDeleteAlert) {
@@ -970,8 +972,11 @@ struct FullFrameMapView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("完成") { dismiss() }
-                            .fontWeight(.bold)
+                        Button {
+                            dismiss()
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
                     }
                 }
         }
