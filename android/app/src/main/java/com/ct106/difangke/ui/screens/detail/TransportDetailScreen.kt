@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -98,7 +99,7 @@ fun TransportDetailScreen(
             title = { Text("交通详情", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
             navigationIcon = {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.Default.Close, contentDescription = "取消")
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                 }
             },
             actions = {
@@ -106,7 +107,7 @@ fun TransportDetailScreen(
                     viewModel.updateTransport(selectedType, localStartName, localEndName)
                     onBack()
                 }) {
-                    Text("完成", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("保存", fontWeight = FontWeight.Bold)
                 }
             },
             colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
@@ -156,7 +157,7 @@ fun TransportDetailScreen(
                         onEndChange = { localEndName = it }
                     )
 
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp).alpha(0.1f))
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp).alpha(0.1f))
 
                     // Bottom info row
                     Row(
@@ -172,7 +173,7 @@ fun TransportDetailScreen(
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(4.dp))
                             
                             // Interactive Type Picker
                             TransportTypeChip(
@@ -200,7 +201,7 @@ fun TransportDetailScreen(
                             if ((t.stepCount ?: 0) > 0) {
                                 Spacer(Modifier.height(4.dp))
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.DirectionsWalk, null, Modifier.size(12.dp), tint = Color(0xFFF2A900))
+                                    Icon(Icons.AutoMirrored.Filled.DirectionsWalk, null, Modifier.size(12.dp), tint = Color(0xFFF2A900))
                                     Text(
                                         text = "${t.stepCount} 步",
                                         style = MaterialTheme.typography.labelSmall,
@@ -244,7 +245,7 @@ fun LocationEditSection(
     endName: String,
     onEndChange: (String) -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         // Start
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF34C759)))
@@ -252,7 +253,7 @@ fun LocationEditSection(
             TextField(
                 value = startName,
                 onValueChange = onStartChange,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().height(48.dp),
                 placeholder = { Text("起点位置") },
                 colors = textFieldColors(),
                 textStyle = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
@@ -270,7 +271,7 @@ fun LocationEditSection(
             TextField(
                 value = endName,
                 onValueChange = onEndChange,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().height(48.dp),
                 placeholder = { Text("终点位置") },
                 colors = textFieldColors(),
                 textStyle = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
@@ -450,9 +451,9 @@ private fun parsePoints(pointsJson: String): List<com.amap.api.maps.model.LatLng
 
 @Composable
 private fun getTransportIcon(type: TransportType) = when(type) {
-    TransportType.SLOW -> Icons.Default.DirectionsWalk
-    TransportType.RUNNING -> Icons.Default.DirectionsRun
-    TransportType.BICYCLE -> Icons.Default.DirectionsBike
+    TransportType.SLOW -> Icons.AutoMirrored.Filled.DirectionsWalk
+    TransportType.RUNNING -> Icons.AutoMirrored.Filled.DirectionsRun
+    TransportType.BICYCLE -> Icons.AutoMirrored.Filled.DirectionsBike
     TransportType.EBIKE -> Icons.Default.ElectricMoped
     TransportType.MOTORCYCLE -> Icons.Default.TwoWheeler
     TransportType.BUS -> Icons.Default.DirectionsBus

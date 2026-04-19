@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material3.*
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,7 +58,8 @@ fun MainScreen(
     onNavigateToStatistics: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onNavigateToMap: (Date?) -> Unit,
-    onNavigateToDetail: (String) -> Unit
+    onNavigateToDetail: (String) -> Unit,
+    onNavigateToRawPoints: (Date) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -190,6 +192,25 @@ fun MainScreen(
     val isDark = isSystemInDarkTheme()
     val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
 
+    var showRebuildConfirm by remember { mutableStateOf<java.util.Date?>(null) }
+    
+    if (showRebuildConfirm != null) {
+        AlertDialog(
+            onDismissRequest = { showRebuildConfirm = null },
+            title = { Text("重新生成数据") },
+            text = { Text("确定要重新生成这一天的足迹和交通吗？这会覆盖已有的候选数据。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.rebuildTimeline(showRebuildConfirm!!)
+                    showRebuildConfirm = null
+                }) { Text("确定", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRebuildConfirm = null }) { Text("取消") }
+            }
+        )
+    }
+
     Scaffold(
         containerColor = bgColor,
         topBar = {
@@ -244,7 +265,9 @@ fun MainScreen(
                             scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) }
                         }
                     },
-                    onCalendarClick = { showCalendar = true }
+                    onCalendarClick = { showCalendar = true },
+                    onRebuildClick = { showRebuildConfirm = currentDate },
+                    onViewRawPointsClick = { onNavigateToRawPoints(currentDate) }
                 )
 
                 HorizontalPager(
@@ -545,6 +568,7 @@ fun TimelineContent(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DateNavigator(
     currentDate: Date,
@@ -552,8 +576,11 @@ fun DateNavigator(
     canGoForward: Boolean,
     onPrevClick: () -> Unit,
     onNextClick: () -> Unit,
-    onCalendarClick: () -> Unit
+    onCalendarClick: () -> Unit,
+    onRebuildClick: () -> Unit,
+    onViewRawPointsClick: () -> Unit
 ) {
+    var showMenu by remember { mutableStateOf(false) }
     val primaryColor = Color(0xFF00A0AC)
     
     val calendar = Calendar.getInstance().apply { time = currentDate }
@@ -606,8 +633,32 @@ fun DateNavigator(
 
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.clickable { onCalendarClick() }
+            modifier = Modifier.combinedClickable(
+                onClick = { onCalendarClick() },
+                onLongClick = { showMenu = true }
+            )
         ) {
+            DropdownMenu(
+                expanded = showMenu,
+                onDismissRequest = { showMenu = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text("查看所有轨迹点") },
+                    onClick = {
+                        showMenu = false
+                        onViewRawPointsClick()
+                    },
+                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.List, null) }
+                )
+                DropdownMenuItem(
+                    text = { Text("重新生成本日数据") },
+                    onClick = {
+                        showMenu = false
+                        onRebuildClick()
+                    },
+                    leadingIcon = { Icon(Icons.Default.Refresh, null) }
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = dateHeader,

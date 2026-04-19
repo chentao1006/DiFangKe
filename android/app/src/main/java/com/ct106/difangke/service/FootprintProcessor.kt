@@ -86,7 +86,13 @@ class FootprintProcessor private constructor() {
 
         // 6. 只有"离开"停留中心时才结算
         if (distToCenter > stayRadius) {
-            return detectStayPoint(analysisQueue)
+            val result = detectStayPoint(analysisQueue)
+            if (result == null) {
+                // 如果不是一个停留且已经离开，说明是移动段，清空残留以免污染下一个潜在停留
+                queue.clear()
+                queue.add(location)
+            }
+            return result
         }
         return null
     }

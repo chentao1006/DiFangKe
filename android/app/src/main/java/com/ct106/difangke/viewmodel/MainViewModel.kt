@@ -23,6 +23,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = DiFangKeApp.instance.database
     val openAI = OpenAIService.shared
+    private val builder = com.ct106.difangke.service.PersistentTimelineBuilder(application)
 
     private val _currentDate = MutableStateFlow(Calendar.getInstance().apply {
         set(Calendar.HOUR_OF_DAY, 0)
@@ -136,107 +137,130 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val trackingState = LocationTrackingService.stateFlow
 
+    private val _lastDataSyncTrigger = MutableStateFlow(Date())
+    val lastDataSyncTrigger: StateFlow<Date> = _lastDataSyncTrigger.asStateFlow()
+
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    // ── 缓存策略：使用 Map 存储各日期的 StateFlow，避免切换/返回页面时由于 collectAsState(initial=null) 导致的重载闪烁 ─────
+    private val timelineCache = mutableMapOf<Long, StateFlow<List<TimelineItem>>>()
+    private val trajectoryCache = mutableMapOf<Long, StateFlow<String?>>()
+    private val markersCache = mutableMapOf<Long, StateFlow<String?>>()
+    private val insightCache = mutableMapOf<Long, StateFlow<DailyInsightEntity?>>()
     
     // 获取指定日期的足迹/交通项流
     fun getTimelineItems(date: Date): Flow<List<TimelineItem>> {
-        val start = zeroTime(date)
-        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
-        return combine(
-            db.footprintDao().observeBetween(start, end),
-            db.transportRecordDao().observeForDay(start, end)
-        ) { fps, tps ->
-            (fps.map { TimelineItem.FootprintItem(it) } + tps.map { TimelineItem.TransportItem(it) })
-                .sortedByDescending { it.startTime }
+        val dateMs = zeroTime(date).time
+        return timelineCache.getOrPut(dateMs) {
+            val start = zeroTime(date)
+            val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+            combine(
+                db.footprintDao().observeBetween(start, end),
+                db.transportRecordDao().observeForDay(start, end)
+            ) { fps, tps ->
+                (fps.map { TimelineItem.FootprintItem(it) } + tps.map { TimelineItem.TransportItem(it) })
+                    .sortedByDescending { it.startTime }
+            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
         }
     }
 
     // 获取指定日期的每日洞察
     fun getDailyInsight(date: Date): Flow<DailyInsightEntity?> {
-        val start = zeroTime(date)
-        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
-        return db.dailyInsightDao().observeForDay(start, end)
+        val dateMs = zeroTime(date).time
+        return insightCache.getOrPut(dateMs) {
+            val start = zeroTime(date)
+            val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+            db.dailyInsightDao().observeForDay(start, end)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+        }
     }
 
     // 获取指定日期的轨迹 (JSON 字符串)
     fun getDailyTrajectory(date: Date): Flow<String?> {
-        val start = zeroTime(date)
-        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+        val dateMs = zeroTime(date).time
+        return trajectoryCache.getOrPut(dateMs) {
+            val start = zeroTime(date)
+            val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
 
-        val trajectoryFlow = combine(
-            db.footprintDao().observeBetween(start, end),
-            db.transportRecordDao().observeForDay(start, end)
-        ) { footprints, transports ->
-            val allPointsList = mutableListOf<List<Double>>()
-            footprints.forEach { fp ->
-                try {
-                    val lats = org.json.JSONArray(fp.latitudeJson)
-                    val lons = org.json.JSONArray(fp.longitudeJson)
-                    for (i in 0 until minOf(lats.length(), lons.length())) {
-                        allPointsList.add(listOf(lats.getDouble(i), lons.getDouble(i)))
-                    }
-                } catch (e: Exception) {}
-            }
-            transports.forEach { tp ->
-                try {
-                    val array = org.json.JSONArray(tp.pointsJson)
-                    for (i in 0 until array.length()) {
-                        val element = array.get(i)
-                        if (element is org.json.JSONArray) {
-                            val v1 = element.getDouble(0)
-                            val v2 = element.getDouble(1)
-                            if (Math.abs(v1) > 90.0) allPointsList.add(listOf(v2, v1)) else allPointsList.add(listOf(v1, v2))
-                        } else if (element is org.json.JSONObject) {
-                            val lat = element.optDouble("lat", element.optDouble("latitude", Double.NaN))
-                            val lon = element.optDouble("lon", element.optDouble("longitude", Double.NaN))
-                            if (!lat.isNaN() && !lon.isNaN()) allPointsList.add(listOf(lat, lon))
+            val trajectoryFlow = combine(
+                db.footprintDao().observeBetween(start, end),
+                db.transportRecordDao().observeForDay(start, end)
+            ) { footprints, transports ->
+                val allPointsList = mutableListOf<List<Double>>()
+                footprints.forEach { fp ->
+                    try {
+                        val lats = org.json.JSONArray(fp.latitudeJson)
+                        val lons = org.json.JSONArray(fp.longitudeJson)
+                        for (i in 0 until minOf(lats.length(), lons.length())) {
+                            allPointsList.add(listOf(lats.getDouble(i), lons.getDouble(i)))
                         }
-                    }
-                } catch (e: Exception) {}
-            }
-            if (allPointsList.isNotEmpty()) {
-                val array = org.json.JSONArray()
-                allPointsList.forEach { p ->
-                    val pArr = org.json.JSONArray().put(p[0]).put(p[1])
-                    array.put(pArr)
+                    } catch (e: Exception) {}
                 }
-                array.toString()
-            } else null
-        }
+                transports.forEach { tp ->
+                    try {
+                        val array = org.json.JSONArray(tp.pointsJson)
+                        for (i in 0 until array.length()) {
+                            val element = array.get(i)
+                            if (element is org.json.JSONArray) {
+                                val v1 = element.getDouble(0)
+                                val v2 = element.getDouble(1)
+                                if (Math.abs(v1) > 90.0) allPointsList.add(listOf(v2, v1)) else allPointsList.add(listOf(v1, v2))
+                            } else if (element is org.json.JSONObject) {
+                                val lat = element.optDouble("lat", element.optDouble("latitude", Double.NaN))
+                                val lon = element.optDouble("lon", element.optDouble("longitude", Double.NaN))
+                                if (!lat.isNaN() && !lon.isNaN()) allPointsList.add(listOf(lat, lon))
+                            }
+                        }
+                    } catch (e: Exception) {}
+                }
+                if (allPointsList.isNotEmpty()) {
+                    val array = org.json.JSONArray()
+                    allPointsList.forEach { p ->
+                        val pArr = org.json.JSONArray().put(p[0]).put(p[1])
+                        array.put(pArr)
+                    }
+                    array.toString()
+                } else null
+            }
 
-        // 如果是今天，额外与实时定位合并
-        return if (isToday(date)) {
-            combine(trajectoryFlow, LocationTrackingService.stateFlow) { traj, _ -> traj }
-        } else {
-            trajectoryFlow
+            // 如果是今天，额外与实时定位合并
+            if (isToday(date)) {
+                combine(trajectoryFlow, LocationTrackingService.stateFlow) { traj, _ -> traj }
+                    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+            } else {
+                trajectoryFlow.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+            }
         }
     }
 
     // 获取指定日期的标记点 (JSON 字符串)
     fun getDailyMarkers(date: Date): Flow<String?> {
-        val start = zeroTime(date)
-        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+        val dateMs = zeroTime(date).time
+        return markersCache.getOrPut(dateMs) {
+            val start = zeroTime(date)
+            val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
 
-        return db.footprintDao().observeBetween(start, end).map { footprints ->
-            val markersList = mutableListOf<List<Double>>()
-            footprints.forEach { fp ->
-                try {
-                    val lats = org.json.JSONArray(fp.latitudeJson)
-                    val lons = org.json.JSONArray(fp.longitudeJson)
-                    if (lats.length() > 0 && lons.length() > 0) {
-                        markersList.add(listOf(lats.getDouble(0), lons.getDouble(0)))
-                    }
-                } catch (e: Exception) {}
-            }
-            if (markersList.isNotEmpty()) {
-                val array = org.json.JSONArray()
-                markersList.forEach { m ->
-                    val mArr = org.json.JSONArray().put(m[0]).put(m[1])
-                    array.put(mArr)
+            db.footprintDao().observeBetween(start, end).map { footprints ->
+                val markersList = mutableListOf<List<Double>>()
+                footprints.forEach { fp ->
+                    try {
+                        val lats = org.json.JSONArray(fp.latitudeJson)
+                        val lons = org.json.JSONArray(fp.longitudeJson)
+                        if (lats.length() > 0 && lons.length() > 0) {
+                            markersList.add(listOf(lats.getDouble(0), lons.getDouble(0)))
+                        }
+                    } catch (e: Exception) {}
                 }
-                array.toString()
-            } else null
+                if (markersList.isNotEmpty()) {
+                    val array = org.json.JSONArray()
+                    markersList.forEach { m ->
+                        val mArr = org.json.JSONArray().put(m[0]).put(m[1])
+                        array.put(mArr)
+                    }
+                    array.toString()
+                } else null
+            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
         }
     }
 
@@ -281,6 +305,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         loadDataForDate(Date())
         observeTrackingPreference()
+        setupBroadcastReceiver()
+    }
+
+    private fun setupBroadcastReceiver() {
+        val filter = android.content.IntentFilter("com.ct106.difangke.RAW_LOCATION_DATA_DELETED")
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+                val deletedDateMs = intent?.getLongExtra("date", -1L) ?: -1L
+                if (deletedDateMs != -1L) {
+                    val deletedDate = Date(deletedDateMs)
+                    if (zeroTime(deletedDate).time == zeroTime(_currentDate.value).time) {
+                        // 如果删除的是当前页面的点，触发刷新
+                        refresh()
+                        _lastDataSyncTrigger.value = Date()
+                    }
+                }
+            }
+        }
+        getApplication<Application>().registerReceiver(receiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
     }
 
     private fun observeTrackingPreference() {
@@ -432,6 +475,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isRefreshing.value = true
             loadDataForDate(_currentDate.value)
             _isRefreshing.value = false
+        }
+    }
+
+    /** 重新生成全天数据（对应 iOS syncDay） */
+    fun rebuildTimeline(date: Date) {
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            builder.rebuildDay(date)
+            loadDataForDate(date)
+            _isRefreshing.value = false
+            _lastDataSyncTrigger.value = Date()
         }
     }
 

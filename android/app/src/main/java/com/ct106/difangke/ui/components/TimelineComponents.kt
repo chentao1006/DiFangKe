@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import com.google.gson.Gson
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
+import com.ct106.difangke.data.model.FootprintTitles
 import com.ct106.difangke.service.LocationTrackingService
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -175,10 +176,18 @@ fun FootprintCardView(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        val matchedPlace = allPlaces.find { it.placeID == footprint.placeID }
+                        val locationText = when {
+                            !footprint.address.isNullOrEmpty() && footprint.address != "null" && footprint.address != "[]" -> footprint.address!!
+                            matchedPlace != null -> matchedPlace.name
+                            !footprint.aiAnalyzed -> FootprintTitles.extractLocation(footprint.title)
+                            else -> "寻迹此处"
+                        }.ifEmpty { "寻迹此处" }
+
                         Text(
-                            text = footprint.address ?: "未解析的位置",
+                            text = locationText,
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (allPlaces.any { it.placeID == footprint.placeID && it.isUserDefined }) Color(0xFFFF9800) else subtitleColor,
+                            color = if (matchedPlace?.isUserDefined == true) Color(0xFFFF9800) else subtitleColor,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
@@ -383,15 +392,20 @@ fun TransportCardView(
     }
 }
 
-// 辅助函数：根据交通工具类型获取图标
 @Composable
-private fun getTransportIcon(type: String): ImageVector {
-    return when(type.lowercase()) {
-        "walk" -> Icons.Default.DirectionsWalk
-        "run" -> Icons.Default.DirectionsRun
-        "bus" -> Icons.Default.DirectionsBus
-        "car" -> Icons.Default.DirectionsCar
-        "subway", "train" -> Icons.Default.DirectionsSubway
+private fun getTransportIcon(typeRaw: String): ImageVector {
+    val type = com.ct106.difangke.data.model.TransportType.from(typeRaw)
+    return when(type) {
+        com.ct106.difangke.data.model.TransportType.SLOW -> Icons.AutoMirrored.Filled.DirectionsWalk
+        com.ct106.difangke.data.model.TransportType.RUNNING -> Icons.AutoMirrored.Filled.DirectionsRun
+        com.ct106.difangke.data.model.TransportType.BICYCLE -> Icons.AutoMirrored.Filled.DirectionsBike
+        com.ct106.difangke.data.model.TransportType.EBIKE -> Icons.Default.ElectricMoped
+        com.ct106.difangke.data.model.TransportType.MOTORCYCLE -> Icons.Default.TwoWheeler
+        com.ct106.difangke.data.model.TransportType.BUS -> Icons.Default.DirectionsBus
+        com.ct106.difangke.data.model.TransportType.CAR -> Icons.Default.DirectionsCar
+        com.ct106.difangke.data.model.TransportType.SUBWAY -> Icons.Default.DirectionsSubway
+        com.ct106.difangke.data.model.TransportType.TRAIN -> Icons.Default.Train
+        com.ct106.difangke.data.model.TransportType.AIRPLANE -> Icons.Default.Flight
         else -> Icons.Default.DirectionsBus
     }
 }

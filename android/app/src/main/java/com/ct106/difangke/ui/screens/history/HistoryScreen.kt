@@ -17,6 +17,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,6 +46,7 @@ fun HistoryScreen(
     onBack: () -> Unit,
     onNavigateToDetail: (String) -> Unit,
     onDateSelected: (Date) -> Unit, // 跳向主页特定日期
+    onNavigateToRawPoints: (Date) -> Unit,
     viewModel: HistoryViewModel = viewModel()
 ) {
     val summaries by viewModel.summaries.collectAsState()
@@ -112,8 +115,8 @@ fun HistoryScreen(
                 verticalAlignment = Alignment.Top
             ) { page ->
                 when (page) {
-                    0 -> HistoryWeekView(summaries, onDateSelected)
-                    1 -> HistoryMonthView(summaries, onDateSelected)
+                    0 -> HistoryWeekView(summaries, onDateSelected, { viewModel.rebuildTimeline(it) }, onNavigateToRawPoints)
+                    1 -> HistoryMonthView(summaries, onDateSelected, { viewModel.rebuildTimeline(it) }, onNavigateToRawPoints)
                     2 -> HistoryFavoritesView(
                         favorites = favoriteFootprints,
                         activityTypes = activityTypes,
@@ -184,7 +187,12 @@ fun HistoryFavoritesView(
 }
 
 @Composable
-fun HistoryWeekView(summaries: Map<Date, DaySummary>, onDateSelected: (Date) -> Unit) {
+fun HistoryWeekView(
+    summaries: Map<Date, DaySummary>, 
+    onDateSelected: (Date) -> Unit,
+    onRebuild: (Date) -> Unit,
+    onViewRawPoints: (Date) -> Unit
+) {
     val sortedDates = summaries.keys.sortedDescending()
     val groupedByWeek = sortedDates.groupBy { date ->
         Calendar.getInstance().apply {
@@ -218,19 +226,36 @@ fun HistoryWeekView(summaries: Map<Date, DaySummary>, onDateSelected: (Date) -> 
             
             items(dates) { date ->
                 val summary = summaries[date] ?: return@items
-                HistoryDayRow(date, summary, onClick = { onDateSelected(date) })
+                HistoryDayRow(
+                    date = date, 
+                    summary = summary, 
+                    onClick = { onDateSelected(date) },
+                    onRebuild = { onRebuild(date) },
+                    onViewRawPoints = { onViewRawPoints(date) }
+                )
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun HistoryDayRow(date: Date, summary: DaySummary, onClick: () -> Unit) {
+fun HistoryDayRow(
+    date: Date, 
+    summary: DaySummary, 
+    onClick: () -> Unit,
+    onRebuild: () -> Unit,
+    onViewRawPoints: () -> Unit
+) {
+    var showMenu by remember { mutableStateOf(false) }
     ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { showMenu = true }
+            ),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.elevatedCardColors(
             containerColor = if (androidx.compose.foundation.isSystemInDarkTheme()) Color(0xFF1C1C1E) else Color.White
@@ -243,6 +268,18 @@ fun HistoryDayRow(date: Date, summary: DaySummary, onClick: () -> Unit) {
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text("重新生成本日数据") },
+                    onClick = { showMenu = false; onRebuild() },
+                    leadingIcon = { Icon(Icons.Default.Refresh, null) }
+                )
+                DropdownMenuItem(
+                    text = { Text("查看所有轨迹点") },
+                    onClick = { showMenu = false; onViewRawPoints() },
+                    leadingIcon = { Icon(Icons.Default.List, null) }
+                )
+            }
             Column(modifier = Modifier.width(70.dp)) {
                 Text(
                     text = SimpleDateFormat("EEE", Locale.CHINA).format(date),
@@ -290,7 +327,12 @@ fun StatSmallItem(icon: androidx.compose.ui.graphics.vector.ImageVector, value: 
 }
 
 @Composable
-fun HistoryMonthView(summaries: Map<Date, DaySummary>, onDateSelected: (Date) -> Unit) {
+fun HistoryMonthView(
+    summaries: Map<Date, DaySummary>, 
+    onDateSelected: (Date) -> Unit,
+    onRebuild: (Date) -> Unit,
+    onViewRawPoints: (Date) -> Unit
+) {
     // 简易月份视图：列出最近 12 个月
     val months = remember {
         val cal = Calendar.getInstance()
@@ -303,13 +345,19 @@ fun HistoryMonthView(summaries: Map<Date, DaySummary>, onDateSelected: (Date) ->
 
     LazyColumn(contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
         items(months) { monthDate ->
-            MonthGridSection(monthDate, summaries, onDateSelected)
+            MonthGridSection(monthDate, summaries, onDateSelected, onRebuild, onViewRawPoints)
         }
     }
 }
 
 @Composable
-fun MonthGridSection(monthDate: Date, summaries: Map<Date, DaySummary>, onDateSelected: (Date) -> Unit) {
+fun MonthGridSection(
+    monthDate: Date, 
+    summaries: Map<Date, DaySummary>, 
+    onDateSelected: (Date) -> Unit,
+    onRebuild: (Date) -> Unit,
+    onViewRawPoints: (Date) -> Unit
+) {
     val cal = Calendar.getInstance().apply { time = monthDate; set(Calendar.DAY_OF_MONTH, 1) }
     val monthTitle = SimpleDateFormat("yyyy年 M月", Locale.CHINA).format(monthDate)
     val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
@@ -342,14 +390,28 @@ fun MonthGridSection(monthDate: Date, summaries: Map<Date, DaySummary>, onDateSe
             items(firstDayOfWeek) { Spacer(Modifier.fillMaxSize()) }
             items(days) { date ->
                 val summary = summaries.entries.find { isSameDay(it.key, date) }?.value
-                MonthDayCell(date, summary, onClick = { onDateSelected(date) })
+                MonthDayCell(
+                    date = date, 
+                    summary = summary, 
+                    onClick = { onDateSelected(date) },
+                    onRebuild = { onRebuild(date) },
+                    onViewRawPoints = { onViewRawPoints(date) }
+                )
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MonthDayCell(date: Date, summary: DaySummary?, onClick: () -> Unit) {
+fun MonthDayCell(
+    date: Date, 
+    summary: DaySummary?, 
+    onClick: () -> Unit,
+    onRebuild: () -> Unit,
+    onViewRawPoints: () -> Unit
+) {
+    var showMenu by remember { mutableStateOf(false) }
     val hasData = summary != null && summary.footprintCount > 0
     val isToday = isSameDay(date, Date())
     
@@ -359,10 +421,26 @@ fun MonthDayCell(date: Date, summary: DaySummary?, onClick: () -> Unit) {
             .padding(2.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(if (isToday) MaterialTheme.colorScheme.primary.copy(alpha = 0.1f) else Color.Transparent)
-            .clickable(enabled = hasData, onClick = onClick),
+            .combinedClickable(
+                enabled = hasData || isToday,
+                onClick = onClick,
+                onLongClick = { if (hasData) showMenu = true }
+            ),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
+        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+            DropdownMenuItem(
+                text = { Text("重新生成本日数据") },
+                onClick = { showMenu = false; onRebuild() },
+                leadingIcon = { Icon(Icons.Default.Refresh, null) }
+            )
+            DropdownMenuItem(
+                text = { Text("查看所有轨迹点") },
+                onClick = { showMenu = false; onViewRawPoints() },
+                leadingIcon = { Icon(Icons.Default.List, null) }
+            )
+        }
         Text(
             text = Calendar.getInstance().apply { time = date }.get(Calendar.DAY_OF_MONTH).toString(),
             style = MaterialTheme.typography.bodySmall,

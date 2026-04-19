@@ -34,6 +34,7 @@ object NavRoutes {
     const val AI_SETTINGS = "settings/ai"
     const val DATA_MANAGER = "settings/data"
     const val DAILY_TIMELINE = "daily_timeline/{date}"
+    const val RAW_POINTS = "raw_points?date={date}"
 }
 
 
@@ -92,6 +93,9 @@ fun NavGraph() {
                         // For backwards compatibility or direct UUIDs
                         navController.navigate("footprint_detail/$id")
                     }
+                },
+                onNavigateToRawPoints = { date ->
+                    navController.navigate("raw_points?date=${date.time}")
                 }
             )
         }
@@ -109,6 +113,9 @@ fun NavGraph() {
                 },
                 onDateSelected = { date -> 
                     navController.navigate("daily_timeline/${date.time}")
+                },
+                onNavigateToRawPoints = { date ->
+                    navController.navigate("raw_points?date=${date.time}")
                 }
             )
         }
@@ -176,7 +183,17 @@ fun NavGraph() {
                 },
                 onNavigateToMap = { date -> 
                     navController.navigate("map?date=${date.time}")
+                },
+                onNavigateToRawPoints = { date ->
+                    navController.navigate("raw_points?date=${date.time}")
                 }
+            )
+        }
+        composable(NavRoutes.RAW_POINTS) { backStackEntry ->
+            val dateTimestamp = backStackEntry.arguments?.getString("date")?.toLongOrNull() ?: System.currentTimeMillis()
+            com.ct106.difangke.ui.screens.map.RawPointsScreen(
+                date = java.util.Date(dateTimestamp),
+                onBack = { navController.popBackStack() }
             )
         }
     }

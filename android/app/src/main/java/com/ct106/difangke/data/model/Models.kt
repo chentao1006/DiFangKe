@@ -220,6 +220,26 @@ object FootprintTitles {
         }
         return false
     }
+
+    fun extractLocation(title: String): String {
+        var clean = title
+        val prefixes = listOf("在", "寻迹于", "漫步于", "徘徊在", "身处", "栖息于")
+        val suffixes = listOf("停留", "驻足", "的一段时光")
+        
+        for (p in prefixes) {
+            if (clean.startsWith(p)) {
+                clean = clean.substring(p.length)
+                break
+            }
+        }
+        for (s in suffixes) {
+            if (clean.endsWith(s)) {
+                clean = clean.substring(0, clean.length - s.length)
+                break
+            }
+        }
+        return clean.trim().ifEmpty { title }
+    }
 }
 
 // ── 扩展属性：用于简化数据库实体的坐标访问 ───────────────────────

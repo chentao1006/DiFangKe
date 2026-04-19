@@ -4,12 +4,14 @@ import android.os.Bundle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material3.*
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.*
@@ -20,12 +22,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.data.model.FootprintTitles
 import com.ct106.difangke.ui.components.getIconForName
 import java.text.SimpleDateFormat
 import java.util.*
@@ -43,10 +47,15 @@ fun FootprintDetailScreen(
     
     var title by remember { mutableStateOf("") }
     var reason by remember { mutableStateOf("") }
+    var addressText by remember { mutableStateOf("") }
     var selectedActivityType by remember { mutableStateOf<String?>(null) }
     var isHighlight by remember { mutableStateOf(false) }
+    val nearbyPOIs by viewModel.nearbyPOIs.collectAsState()
+    
+    var showLocationPicker by remember { mutableStateOf(false) }
+    val sheetState = rememberModalBottomSheetState()
     var showingDeleteAlert by remember { mutableStateOf(false) }
-
+    
     if (showingDeleteAlert) {
         AlertDialog(
             onDismissRequest = { showingDeleteAlert = false },
@@ -76,12 +85,23 @@ fun FootprintDetailScreen(
         viewModel.loadFootprint(footprintId)
     }
 
-    LaunchedEffect(footprint) {
+    val matchedPlace by viewModel.matchedPlace.collectAsState()
+
+    LaunchedEffect(footprint, matchedPlace) {
         footprint?.let {
             title = it.title
             reason = it.reason ?: ""
             selectedActivityType = it.activityTypeValue
             isHighlight = it.isHighlight == true
+            
+            // 只有当当前输入框为空时才初始化（防止输入时被覆盖）
+            if (addressText.isEmpty()) {
+                addressText = when {
+                    !it.address.isNullOrEmpty() && it.address != "null" && it.address != "[]" -> it.address!!
+                    matchedPlace != null -> matchedPlace!!.name
+                    else -> ""
+                }.ifEmpty { "" }
+            }
         }
     }
 
@@ -98,7 +118,7 @@ fun FootprintDetailScreen(
                 title = { Text("足迹详情", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
@@ -110,10 +130,10 @@ fun FootprintDetailScreen(
                         )
                     }
                     TextButton(onClick = {
-                        viewModel.updateFootprint(title, reason, selectedActivityType, isHighlight)
+                        viewModel.updateFootprint(title, reason, addressText, selectedActivityType, isHighlight)
                         onBack()
                     }) {
-                        Text("完成", fontWeight = FontWeight.Bold)
+                        Text("保存", fontWeight = FontWeight.Bold)
                     }
                 }
             )
@@ -140,10 +160,11 @@ fun FootprintDetailScreen(
                             placeholder = { Text("有什么值得记住的") },
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(16.dp),
-                            colors = TextFieldDefaults.outlinedTextFieldColors(
+                            colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
                                 unfocusedBorderColor = Color.Transparent,
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                             ),
                             singleLine = true,
                             textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
@@ -168,7 +189,6 @@ fun FootprintDetailScreen(
                 }
 
                 // 2. 时间和地址卡片
-                val matchedPlace by viewModel.matchedPlace.collectAsState()
                 val importantColor = Color(0xFFFF9800) // Orange
                 
                 ElevatedCard(
@@ -180,16 +200,115 @@ fun FootprintDetailScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Place, contentDescription = null, modifier = Modifier.size(16.dp), tint = if (matchedPlace != null) importantColor else MaterialTheme.colorScheme.primary)
+                             Icon(
+                                 imageVector = Icons.Default.Place, 
+                                 contentDescription = null, 
+                                 modifier = Modifier.size(16.dp), 
+                                 tint = if (matchedPlace?.isUserDefined == true) importantColor else MaterialTheme.colorScheme.primary
+                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = footprint!!.address ?: "未知位置",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium,
-                                    color = if (matchedPlace != null) importantColor else MaterialTheme.colorScheme.onSurface
-                            )
+                             Column(
+                                  modifier = Modifier
+                                      .weight(1f)
+                                      .clickable { showLocationPicker = true }
+                              ) {
+                                  val mPlace = matchedPlace
+                                  Row(verticalAlignment = Alignment.CenterVertically) {
+                                      Text(
+                                          text = addressText.ifEmpty { "未记录位置" },
+                                          style = MaterialTheme.typography.bodyMedium,
+                                          fontWeight = FontWeight.Medium,
+                                          color = if (mPlace?.isUserDefined == true) importantColor else MaterialTheme.colorScheme.onSurface,
+                                          maxLines = 1,
+                                          overflow = TextOverflow.Ellipsis,
+                                          modifier = Modifier.weight(1f, fill = false)
+                                      )
+                                      Spacer(modifier = Modifier.width(4.dp))
+                                      Icon(
+                                          imageVector = Icons.Default.Edit,
+                                          contentDescription = null,
+                                          modifier = Modifier.size(12.dp),
+                                          tint = Color.Gray.copy(alpha = 0.5f)
+                                      )
+                                  }
+                              }
                         }
+
+                        if (showLocationPicker) {
+                            ModalBottomSheet(
+                                onDismissRequest = { showLocationPicker = false },
+                                sheetState = sheetState,
+                                containerColor = if (isDark) Color(0xFF1C1C1E) else Color.White
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 32.dp)
+                                ) {
+                                    Text(
+                                        "选择正确地点",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(16.dp)
+                                    )
+                                    
+                                    HorizontalDivider(color = Color.Gray.copy(alpha = 0.1f))
+                                    
+                                    // 搜索框
+                                    var searchQuery by remember { mutableStateOf("") }
+                                    OutlinedTextField(
+                                        value = searchQuery,
+                                        onValueChange = { 
+                                            searchQuery = it 
+                                            viewModel.searchPOI(it)
+                                        },
+                                        placeholder = { Text("搜索地点关键词...") },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                                        trailingIcon = {
+                                            if (searchQuery.isNotEmpty()) {
+                                                IconButton(onClick = { 
+                                                    searchQuery = "" 
+                                                    viewModel.searchPOI("") // 重置搜索
+                                                }) {
+                                                    Icon(Icons.Default.Clear, contentDescription = null)
+                                                }
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                        singleLine = true,
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            unfocusedBorderColor = Color.Gray.copy(alpha = 0.2f),
+                                            focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                                        )
+                                    )
+
+                                    if (nearbyPOIs.isEmpty()) {
+                                        Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                                            Text("未发现周边显著地点", color = Color.Gray)
+                                        }
+                                    } else {
+                                        androidx.compose.foundation.lazy.LazyColumn(
+                                            modifier = Modifier.heightIn(max = 400.dp)
+                                        ) {
+                                            items(nearbyPOIs.size) { index ->
+                                                val poi = nearbyPOIs[index]
+                                                ListItem(
+                                                    headlineContent = { Text(poi.name, fontWeight = FontWeight.SemiBold) },
+                                                    supportingContent = { Text(poi.address, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                                    leadingContent = { Icon(Icons.Default.LocationOn, contentDescription = null, tint = Color.Gray.copy(alpha = 0.5f)) },
+                                                    modifier = Modifier.clickable {
+                                                        addressText = poi.name
+                                                        showLocationPicker = false
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         
                         Spacer(modifier = Modifier.height(12.dp))
@@ -256,10 +375,11 @@ fun FootprintDetailScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp),
                     shape = RoundedCornerShape(16.dp),
-                    colors = TextFieldDefaults.outlinedTextFieldColors(
+                    colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
                         unfocusedBorderColor = Color.Transparent,
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                     ),
                     minLines = 4
                 )
@@ -342,7 +462,7 @@ fun ActivityTypeIcon(
                     modifier = Modifier.clickable { onTypeSelected(null); showMenu = false }
                 )
                 
-                Divider(modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
                 
                 allTypes.forEach { type ->
                     ListItem(

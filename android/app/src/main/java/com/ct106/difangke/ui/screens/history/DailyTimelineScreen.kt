@@ -4,6 +4,9 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -22,6 +25,7 @@ fun DailyTimelineScreen(
     onBack: () -> Unit,
     onNavigateToDetail: (String) -> Unit,
     onNavigateToMap: (Date) -> Unit,
+    onNavigateToRawPoints: (Date) -> Unit,
     viewModel: MainViewModel = viewModel()
 ) {
     val trackingState by viewModel.trackingState.collectAsState()
@@ -32,6 +36,24 @@ fun DailyTimelineScreen(
     val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
     
     val dateTitle = SimpleDateFormat("yyyy年M月d日", Locale.CHINA).format(date)
+    var showRebuildConfirm by remember { mutableStateOf(false) }
+
+    if (showRebuildConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRebuildConfirm = false },
+            title = { Text("重新生成数据") },
+            text = { Text("确定要重新生成这一天的足迹和交通吗？这会覆盖已有的候选数据。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.rebuildTimeline(date)
+                    showRebuildConfirm = false
+                }) { Text("确定", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRebuildConfirm = false }) { Text("取消") }
+            }
+        )
+    }
 
     Scaffold(
         containerColor = bgColor,
@@ -41,6 +63,35 @@ fun DailyTimelineScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                actions = {
+                    var showMenu by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { showMenu = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                        }
+                        DropdownMenu(
+                            expanded = showMenu,
+                            onDismissRequest = { showMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("查看所有轨迹点") },
+                                onClick = {
+                                    showMenu = false
+                                    onNavigateToRawPoints(date)
+                                },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.List, null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("重新生成本日数据") },
+                                onClick = {
+                                    showMenu = false
+                                    showRebuildConfirm = true
+                                },
+                                leadingIcon = { Icon(Icons.Default.Refresh, null) }
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(

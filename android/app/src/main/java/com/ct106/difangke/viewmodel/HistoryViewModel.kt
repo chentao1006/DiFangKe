@@ -20,6 +20,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
 
     private val db = DiFangKeApp.instance.database
     val openAI = OpenAIService.shared
+    private val builder = com.ct106.difangke.service.PersistentTimelineBuilder(application)
 
     private val _footprints = MutableStateFlow<List<FootprintEntity>>(emptyList())
     
@@ -51,6 +52,9 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
 
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    private val _lastDataSyncTrigger = MutableStateFlow(Date())
+    val lastDataSyncTrigger: StateFlow<Date> = _lastDataSyncTrigger.asStateFlow()
 
     init {
         refreshData()
@@ -127,6 +131,16 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             db.footprintDao().delete(footprint)
             refreshData()
+        }
+    }
+
+    fun rebuildTimeline(date: Date) {
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            builder.rebuildDay(date)
+            refreshData()
+            _isRefreshing.value = false
+            _lastDataSyncTrigger.value = Date()
         }
     }
 }

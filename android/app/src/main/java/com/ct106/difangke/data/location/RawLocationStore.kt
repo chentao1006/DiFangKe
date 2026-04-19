@@ -8,6 +8,8 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import android.content.Intent
+import kotlin.math.*
 
 /**
  * 原始轨迹 CSV 文件存储（对应 iOS RawLocationStore）
@@ -50,13 +52,11 @@ class RawLocationStore private constructor(context: Context) {
     }
 
     /** 加载指定日期的所有定位点（对应 iOS loadLocations） */
-    fun loadLocations(date: Date): List<RawPoint> {
+    fun loadLocations(date: Date, filtered: Boolean = true): List<RawPoint> {
         val file = getFile(date)
         if (!file.exists()) return emptyList()
 
-        val result = mutableListOf<RawPoint>()
-        var lastValid: RawPoint? = null
-
+        val rawList = mutableListOf<RawPoint>()
         file.forEachLine { line ->
             if (line.isBlank()) return@forEachLine
             val parts = line.split(",")
@@ -68,32 +68,74 @@ class RawLocationStore private constructor(context: Context) {
                 val acc = if (parts.size > 3) parts[3].toDouble() else 0.0
                 val spd = if (parts.size > 4) parts[4].toDouble() else 0.0
 
-                val point = RawPoint(
+                rawList.add(RawPoint(
                     timestamp = Date((ts * 1000).toLong()),
                     latitude = lat,
                     longitude = lon,
                     accuracy = acc,
                     speed = spd
-                )
-
-                // 过滤离谱漂移点（对应 iOS 的补救措施）
-                val prev = lastValid
-                if (prev != null) {
-                    val dt = (point.timestamp.time - prev.timestamp.time) / 1000.0
-                    if (dt > 0) {
-                        val dist = haversineMeters(prev.latitude, prev.longitude, lat, lon)
-                        val calcSpeed = dist / dt
-                        val isRidiculous = (acc > 500 && dist > 2000) ||
-                                (calcSpeed > 100.0 && acc > 100)
-                        if (isRidiculous) return@runCatching
-                    }
-                }
-
-                result.add(point)
-                lastValid = point
+                ))
             }
         }
+        
+        if (!filtered) return rawList
+        return filterRidiculousSpikes(rawList)
+    }
+
+    /** 过滤离谱漂移点（对应 iOS filterRidiculousSpikes） */
+    private fun filterRidiculousSpikes(locations: List<RawPoint>): List<RawPoint> {
+        if (locations.size < 3) return locations
+        val result = mutableListOf<RawPoint>()
+        result.add(locations[0])
+        
+        for (i in 1 until locations.size - 1) {
+            val prev = result.last()
+            val curr = locations[i]
+            val next = locations[i + 1]
+            
+            val d1 = haversineMeters(prev.latitude, prev.longitude, curr.latitude, curr.longitude)
+            val d2 = haversineMeters(curr.latitude, curr.longitude, next.latitude, next.longitude)
+            val gap = haversineMeters(prev.latitude, prev.longitude, next.latitude, next.longitude)
+            
+            // 跳出 > 1km 且 跳回 > 1km，且起终点差距不大 -> 判定为坐标突跳
+            if (d1 > 1000 && d2 > 1000 && gap < 500) {
+                continue
+            }
+            
+            // 基础精度/速度过滤
+            if (curr.accuracy > 500 && d1 > 2000) continue
+            
+            result.add(curr)
+        }
+        result.add(locations.last())
         return result
+    }
+
+    /** 删除指定时间点的数据（用于手动纠错，对应 iOS deleteLocation） */
+    fun deleteLocation(timestamp: Double, date: Date, context: Context) {
+        val file = getFile(date)
+        if (!file.exists()) return
+        
+        runCatching {
+            val lines = file.readLines()
+            val filteredLines = lines.filter { line ->
+                if (line.isBlank()) return@filter false
+                val parts = line.split(",")
+                if (parts.isEmpty()) return@filter false
+                val ts = parts[0].toDoubleOrNull() ?: 0.0
+                // 允许 10ms 误差
+                abs(ts - timestamp) > 0.01
+            }
+            
+            if (filteredLines.size < lines.size) {
+                file.writeText(filteredLines.joinToString("\n") + "\n")
+                // 发送通知，告知 UI 和核心逻辑刷新
+                val intent = Intent("com.ct106.difangke.RAW_LOCATION_DATA_DELETED").apply {
+                    putExtra("date", date.time)
+                }
+                context.sendBroadcast(intent)
+            }
+        }.onFailure { Log.e(TAG, "deleteLocation failed", it) }
     }
 
     /** 查找所有有数据的日期（对应 iOS refreshAvailableRawDates） */

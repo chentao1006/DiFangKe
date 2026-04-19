@@ -408,8 +408,13 @@ class LocationTrackingService : Service() {
         val gapSec = (newFp.startTime.time - prevFp.endTime.time) / 1000.0
         if (gapSec < AppConfig.TRANSPORT_MIN_DURATION_THRESHOLD) return
 
-        val rawPoints = rawStore.loadRecentLocations(lookbackHours = 4.0)
+        var rawPoints = rawStore.loadRecentLocations(lookbackHours = 4.0)
             .filter { it.timestamp >= prevFp.endTime && it.timestamp <= newFp.startTime }
+        
+        if (rawPoints.isEmpty() && gapSec > 14400) {
+            rawPoints = rawStore.loadRecentLocations(lookbackHours = 8.0)
+                .filter { it.timestamp >= prevFp.endTime && it.timestamp <= newFp.startTime }
+        }
 
         val totalDist: Double
         val avgSpeed: Double
@@ -454,11 +459,13 @@ class LocationTrackingService : Service() {
 
         val record = TransportRecordEntity(
             recordID = UUID.randomUUID().toString(),
-            day = prevFp.endTime,
+            day = getStartOfDay(prevFp.endTime),
             startTime = prevFp.endTime,
             endTime = newFp.startTime,
-            startLocation = prevFp.address ?: prevFp.title,
-            endLocation = newFp.address ?: newFp.title,
+            startLocation = if (!prevFp.address.isNullOrEmpty() && !FootprintTitles.isGeneric(prevFp.address!!)) prevFp.address!! 
+                            else FootprintTitles.extractLocation(prevFp.title),
+            endLocation = if (!newFp.address.isNullOrEmpty() && !FootprintTitles.isGeneric(newFp.address!!)) newFp.address!! 
+                          else FootprintTitles.extractLocation(newFp.title),
             typeRaw = transportType.raw,
             distance = totalDist,
             averageSpeed = avgSpeed,
@@ -466,6 +473,17 @@ class LocationTrackingService : Service() {
             statusRaw = "active"
         )
         db.transportRecordDao().insert(record)
+    }
+    
+    private fun getStartOfDay(date: Date): Date {
+        val cal = Calendar.getInstance().apply {
+            time = date
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        return cal.time
     }
 
     override fun onDestroy() {
