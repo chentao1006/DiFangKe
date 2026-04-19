@@ -286,22 +286,23 @@ struct DayTimelineView: View {
         updateTask?.cancel()
         
         let rawDates = locationManager.availableRawDates
-        // 1. 获取所有足迹并合并重复 UUID（防止脏数据导致时间轴重叠显示两个一模一样的）
-        var seenUUIDs = Set<UUID>()
-        let uniqueFootprints = footprints.filter { fp in
-            if seenUUIDs.contains(fp.footprintID) || fp.status == .ignored { return false }
-            seenUUIDs.insert(fp.footprintID)
-            return true
-        }
-        
         let todayVal = Calendar.current.startOfDay(for: Date())
         
-        updateTask = Task {
+        updateTask = Task { @MainActor in
             // 清理当前选中日期的缓存，确保刷新后能看到最新结果
             TimelineBuilder.timelineCache.removeValue(forKey: selectedDate)
             
             try? await Task.sleep(nanoseconds: 300_000_000)
             if Task.isCancelled { return }
+
+            // 1. 获取所有足迹并合并重复 UUID（防止脏数据导致时间轴重叠显示两个一模一样的）
+            // 移入 Task 中并放在 sleep 之后，利用防抖避免主线程卡顿
+            var seenUUIDs = Set<UUID>()
+            let uniqueFootprints = footprints.filter { fp in
+                if seenUUIDs.contains(fp.footprintID) || fp.status == .ignored { return false }
+                seenUUIDs.insert(fp.footprintID)
+                return true
+            }
 
             let calendar = Calendar.current
             let capturedToday = todayVal

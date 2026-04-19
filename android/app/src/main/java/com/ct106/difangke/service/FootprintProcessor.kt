@@ -24,9 +24,9 @@ class FootprintProcessor private constructor() {
 
     // 从 AppConfig 读取阈值
     private val stayRadius get() = AppConfig.STAY_DISTANCE_THRESHOLD
-    private val stayDuration get() = AppConfig.STAY_DURATION_THRESHOLD  // seconds
-    private val mergeTimeThreshold get() = AppConfig.STAY_MERGE_GAP_THRESHOLD  // seconds
-    private val mergeDistance get() = AppConfig.MERGE_DISTANCE_THRESHOLD  // meters
+    private val stayDuration get() = AppConfig.LIVE_STAY_MIN_DURATION_THRESHOLD  // seconds
+    private val mergeTimeThreshold get() = AppConfig.LIVE_STAY_MERGE_TIME_THRESHOLD  // seconds
+    private val mergeDistance get() = AppConfig.LIVE_STAY_MERGE_DISTANCE_THRESHOLD  // meters
 
     /**
      * 处理新定位点（对应 iOS processNewLocation）

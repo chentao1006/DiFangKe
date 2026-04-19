@@ -126,6 +126,15 @@ struct SettingsView: View {
                 }
                 
                 Toggle("精彩足迹提醒", isOn: $isHighlightNotificationEnabled)
+                    .onChange(of: isHighlightNotificationEnabled) { _, newValue in
+                        if newValue {
+                            NotificationManager.shared.requestAuthorization { granted in
+                                if !granted {
+                                    isHighlightNotificationEnabled = false
+                                }
+                            }
+                        }
+                    }
             }
             
             Section(header: Text("系统配置"), footer: Text("智能分析服务将根据您的地点历史自动建议标题。")) {
@@ -152,6 +161,15 @@ struct SettingsView: View {
         .navigationTitle("设置")
         .navigationBarTitleDisplayMode(.inline)
         .tint(.dfkAccent)
+        .onAppear {
+            NotificationManager.shared.getAuthorizationStatus { status in
+                if status != .authorized && status != .provisional && status != .ephemeral {
+                    // 如果系统没有授权通知，则内部状态应强制关闭，便于用户手动开启来触发权限申请
+                    isDailyNotificationEnabled = false
+                    isHighlightNotificationEnabled = false
+                }
+            }
+        }
     }
     
     private func updateNotifications() {

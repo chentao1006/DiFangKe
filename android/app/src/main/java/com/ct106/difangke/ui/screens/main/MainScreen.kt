@@ -137,6 +137,28 @@ fun MainScreen(
             LocationTrackingService.start(context) // 授权后立即开启服务
         }
     }
+    
+    val notificationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        // Triggered when user responds to notification permission
+    }
+
+    val sharedPreferences = remember { context.getSharedPreferences("dfk_prefs", android.content.Context.MODE_PRIVATE) }
+    var isNotificationGuideDismissed by remember { 
+        mutableStateOf(sharedPreferences.getBoolean("isNotificationGuideDismissed", false)) 
+    }
+    
+    val dismissGuide = {
+        isNotificationGuideDismissed = true
+        sharedPreferences.edit().putBoolean("isNotificationGuideDismissed", true).apply()
+    }
+    
+    val hasNotificationPermission = remember(context) { 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else true
+    }
 
     val backgroundLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -242,7 +264,16 @@ fun MainScreen(
                         isFirstPage = pageIndex == 0,
                         isLastPage = pageIndex == availableDates.size - 1,
                         hasLocationPermission = hasPermissionState,
+                        hasNotificationPermission = hasNotificationPermission,
+                        isNotificationGuideDismissed = isNotificationGuideDismissed,
                         onRequestPermission = { launcher.launch(permissionsToRequest) },
+                        onRequestNotification = { 
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            dismissGuide() 
+                        },
+                        onDismissNotificationGuide = { dismissGuide() },
                         onItemClick = onNavigateToDetail,
                         onMapClick = { onNavigateToMap(dateAtPage) }
                     )
@@ -297,6 +328,43 @@ fun MainScreen(
 }
 
 @Composable
+fun NotificationGuideCard(
+    onDismiss: () -> Unit,
+    onRequest: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha=0.3f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier.size(36.dp).background(MaterialTheme.colorScheme.primary.copy(alpha=0.2f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.NotificationsActive, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("开启每日足迹汇总", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+                Text("每日为您汇总今日精彩足迹与回忆", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            TextButton(onClick = onRequest) {
+                Text("立即开启", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            }
+            IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                Icon(Icons.Default.Close, null, modifier = Modifier.size(16.dp), tint = Color.Gray)
+            }
+        }
+    }
+}
+
+@Composable
 fun TimelinePage(
     date: Date,
     viewModel: MainViewModel,
@@ -306,7 +374,11 @@ fun TimelinePage(
     isFirstPage: Boolean,
     isLastPage: Boolean,
     hasLocationPermission: Boolean,
+    hasNotificationPermission: Boolean,
+    isNotificationGuideDismissed: Boolean,
     onRequestPermission: () -> Unit,
+    onRequestNotification: () -> Unit,
+    onDismissNotificationGuide: () -> Unit,
     onItemClick: (String) -> Unit,
     onMapClick: () -> Unit
 ) {
@@ -352,7 +424,11 @@ fun TimelinePage(
             activityTypes = activityTypes,
             allPlaces = allPlaces,
             hasLocationPermission = hasLocationPermission,
+            hasNotificationPermission = hasNotificationPermission,
+            isNotificationGuideDismissed = isNotificationGuideDismissed,
             onRequestPermission = onRequestPermission,
+            onRequestNotification = onRequestNotification,
+            onDismissNotificationGuide = onDismissNotificationGuide,
             onItemClick = onItemClick,
             onMapClick = onMapClick
         )
@@ -371,7 +447,11 @@ fun TimelineContent(
     allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
     isToday: Boolean,
     hasLocationPermission: Boolean,
+    hasNotificationPermission: Boolean,
+    isNotificationGuideDismissed: Boolean,
     onRequestPermission: () -> Unit,
+    onRequestNotification: () -> Unit,
+    onDismissNotificationGuide: () -> Unit,
     onItemClick: (String) -> Unit,
     onMapClick: () -> Unit,
     dailyPoints: String? = null,
@@ -433,6 +513,13 @@ fun TimelineContent(
                         centerLat = centerLat,
                         centerLon = centerLon,
                         onNavigateToMap = onMapClick
+                    )
+                }
+                
+                if (isToday && !hasNotificationPermission && !isNotificationGuideDismissed) {
+                    NotificationGuideCard(
+                        onDismiss = onDismissNotificationGuide,
+                        onRequest = onRequestNotification
                     )
                 }
             }

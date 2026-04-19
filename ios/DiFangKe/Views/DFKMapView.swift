@@ -43,18 +43,18 @@ struct DFKMapView: View {
                 // 主轨迹线
                 MapPolyline(coordinates: points)
                     .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: isInteractive ? 5 : 3, lineCap: .round, lineJoin: .round))
-            }
-            
-            // 交通段轨迹 (即使主轨迹点为空，也要显示交通轨迹)
-            ForEach(timelineItems) { item in
-                if case .transport(let transport) = item {
-                    // 背景边框
-                    MapPolyline(coordinates: transport.points)
-                        .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: (isInteractive ? 4 : 2) + 2, lineCap: .round, lineJoin: .round))
-                    
-                    // 交通轨迹线 (使用稍微透明一点的主色调或者区分于主轨迹的样式)
-                    MapPolyline(coordinates: transport.points)
-                        .stroke(Color.dfkAccent.opacity(0.8), style: StrokeStyle(lineWidth: isInteractive ? 4 : 2, lineCap: .round, lineJoin: .round))
+            } else {
+                // 交通段轨迹 (仅在主轨迹点为空时，显示交通轨迹作为后备)
+                ForEach(timelineItems) { item in
+                    if case .transport(let transport) = item {
+                        // 背景边框
+                        MapPolyline(coordinates: transport.points)
+                            .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: (isInteractive ? 5 : 3) + 2.5, lineCap: .round, lineJoin: .round))
+                        
+                        // 交通轨迹线 (样式与主轨迹线一致)
+                        MapPolyline(coordinates: transport.points)
+                            .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: isInteractive ? 5 : 3, lineCap: .round, lineJoin: .round))
+                    }
                 }
             }
             
@@ -72,8 +72,7 @@ struct DFKMapView: View {
             
             // 每一个 TimelineItem 在地图上的标注 (放在最后以确保在顶层显示)
             ForEach(timelineItems) { item in
-                switch item {
-                case .footprint(let fp):
+                if case .footprint(let fp) = item {
                     Annotation("", coordinate: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)) {
                         let scale = calculateScale(for: fp.duration)
                         let baseSize: CGFloat = 28
@@ -102,9 +101,19 @@ struct DFKMapView: View {
                             }
                         }
                     }
-                case .transport(let transport):
-                    if let midPoint = transport.points.distanceMidpoint {
-                        Annotation("", coordinate: midPoint) {
+                } else if case .transport(let transport) = item {
+                    // 获取更精确的中点：优先从主轨迹线中截取属于该交通段的子路段来计算中点
+                    // 这样可以确保图标既在“路线上”，又处于“路程的中心”
+                    let finalPoint: CLLocationCoordinate2D? = {
+                        if !points.isEmpty, let start = transport.points.first, let end = transport.points.last {
+                            let sub = points.subpath(from: start, to: end)
+                            if sub.count >= 2 { return sub.distanceMidpoint }
+                        }
+                        return transport.points.distanceMidpoint
+                    }()
+
+                    if let coord = finalPoint {
+                        Annotation("", coordinate: coord) {
                             let transportIcon = ZStack {
                                 RoundedRectangle(cornerRadius: 6)
                                     .fill(Color.dfkAccent)
@@ -259,7 +268,35 @@ extension Array where Element == CLLocationCoordinate2D {
                 )
             }
         }
-        
         return self[count / 2]
+    }
+    
+    /// 寻找给定坐标点在该数组中距离最近的元素索引
+    func indexOfClosestPoint(to target: CLLocationCoordinate2D) -> Int {
+        var minDistanceSq = Double.infinity
+        var index = 0
+        for (i, p) in enumerated() {
+            let dLat = p.latitude - target.latitude
+            let dLon = p.longitude - target.longitude
+            let distSq = dLat * dLat + dLon * dLon
+            if distSq < minDistanceSq {
+                minDistanceSq = distSq
+                index = i
+            }
+        }
+        return index
+    }
+    
+    /// 从当前轨迹中截取从 start 点到 end 点对应的子路段
+    func subpath(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D) -> [CLLocationCoordinate2D] {
+        guard count >= 2 else { return [] }
+        let startIndex = self.indexOfClosestPoint(to: start)
+        let endIndex = self.indexOfClosestPoint(to: end)
+        
+        let lower = Swift.min(startIndex, endIndex)
+        let upper = Swift.max(startIndex, endIndex)
+        
+        guard upper - lower >= 1 else { return [] }
+        return Array(self[lower...upper])
     }
 }

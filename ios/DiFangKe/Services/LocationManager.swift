@@ -568,16 +568,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         return kvs.bool(forKey: "hasSeededDefaultData")
     }
     
-    /// 根据当前精度/省电模式，提供给 UI 呈现不同频率的“呼吸”动画时长
+    /// 根据当前速度/精度，提供给 UI 呈现不同频率的“呼吸”动画时长
     var pulseDuration: Double {
         if !isTracking { return 4.0 }
-        let acc = locationManager.desiredAccuracy
-        if acc < 20.0 { // 10m - 高频
+        
+        let speed = lastLocation?.speed ?? 0
+        if speed > 10.0 { // 高速：0.8s
             return 0.8
-        } else if locationManager.activityType == .automotiveNavigation { // 高速巡航
-            return 1.8
-        } else { // 100m - 低功耗
-            return 3.5
+        } else if speed > 0.5 { // 移动：1.5s
+            return 1.5
+        } else { // 停留：3.0s (低功耗)
+            return 3.0
         }
     }
     
@@ -880,6 +881,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
         HealthManager.shared.stopActivityTracking()
+        for region in locationManager.monitoredRegions {
+            if region.identifier == "StationaryWakeupRegion" {
+                locationManager.stopMonitoring(for: region)
+            }
+        }
         isTracking = false
         // 清理当前可能的停留状态
         potentialStopStartLocation = nil
@@ -893,9 +899,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 第一步：删除时长 < 5分钟的噪点记录
     /// 第二步：合并间隔 < 30分钟 且 距离 < 200m 的相邻记录
     public func consolidateFootprints(in context: ModelContext) async {
-        let mergeTime: TimeInterval = 20 * 60      // 增加至 20min，更好地容忍数据断断续续
-        let mergeDist: CLLocationDistance = 180.0  // 增加至 180m，更好地合并漂移严重的停留点
-        let minKeepDuration: TimeInterval = 4 * 60  // 略微降低至 4min
+        let mergeTime: TimeInterval = AppConfig.shared.liveStayMergeTimeThreshold
+        let mergeDist: CLLocationDistance = AppConfig.shared.liveStayMergeDistanceThreshold
+        let minKeepDuration: TimeInterval = AppConfig.shared.liveStayMinDurationThreshold
 
         // 为了性能，自动维护只针对最近 7 天的数据，避免每次全量扫库导致卡顿
         let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? .distantPast
@@ -1164,6 +1170,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 manager.distanceFilter = 100.0
                 manager.activityType = .other
             }
+            updateRegionMonitoring(isStationary: true)
         } else if isStationary {
             // 真正停留了：进入节能模式
             if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
@@ -1172,6 +1179,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 manager.distanceFilter = 10.0 
                 manager.activityType = .other
             }
+            updateRegionMonitoring(isStationary: true)
         } else {
             // 自动采集增强：只要在移动（不论是步行、骑行还是开车）
             // 开启增强采样，确保不漏点
@@ -1194,6 +1202,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     manager.activityType = .automotiveNavigation
                 }
             }
+            updateRegionMonitoring(isStationary: false)
         }
 
         // 反地理编码更新地址（高速节流至 1000 米，兼顾体验与能效）
@@ -1339,6 +1348,53 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         print("Location manager error: \(error.localizedDescription)")
+    }
+    
+    // MARK: - Region Monitoring for Immediate Wakeup
+    
+    private func updateRegionMonitoring(isStationary: Bool) {
+        let identifier = "StationaryWakeupRegion"
+        
+        if isStationary {
+            guard let center = potentialStopStartLocation?.coordinate else { return }
+            
+            // 检查是否已经存在该区域，并且中心点没有发生大的变化
+            if let existingRegion = locationManager.monitoredRegions.first(where: { $0.identifier == identifier }) as? CLCircularRegion {
+                let existingLocation = CLLocation(latitude: existingRegion.center.latitude, longitude: existingRegion.center.longitude)
+                let newLocation = CLLocation(latitude: center.latitude, longitude: center.longitude)
+                if newLocation.distance(from: existingLocation) < 50.0 {
+                    return // 已经有一个相近的区域在监控，不需要重新启动
+                } else {
+                    locationManager.stopMonitoring(for: existingRegion)
+                }
+            }
+            
+            // 使用150米半径离开触发唤醒（受硬件限制，通常最小有效的圆在100~200m左右）
+            let radius: CLLocationDistance = 150.0
+            let region = CLCircularRegion(center: center, radius: radius, identifier: identifier)
+            region.notifyOnEntry = false
+            region.notifyOnExit = true
+            locationManager.startMonitoring(for: region)
+        } else {
+            // 移动中，清除地理围栏
+            if let existingRegion = locationManager.monitoredRegions.first(where: { $0.identifier == identifier }) {
+                locationManager.stopMonitoring(for: existingRegion)
+            }
+        }
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+        if region.identifier == "StationaryWakeupRegion" {
+            print("Exited stationary region! Waking up GPS immediately...")
+            // 强行提高定位精度以立即捕获一条好的轨迹点
+            manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+            manager.distanceFilter = kCLDistanceFilterNone
+            manager.activityType = .fitness
+            manager.requestLocation()
+            
+            // 移除监听
+            manager.stopMonitoring(for: region)
+        }
     }
     
     private func analyzeOngoingStay(at location: CLLocation) {

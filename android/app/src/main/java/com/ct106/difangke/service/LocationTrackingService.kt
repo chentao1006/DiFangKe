@@ -348,7 +348,7 @@ class LocationTrackingService : Service() {
         val latJson = gson.toJson(candidate.rawLatitudes)
         val lonJson = gson.toJson(candidate.rawLongitudes)
 
-        val recentCutoff = Date(candidate.startTime.time - AppConfig.STAY_MERGE_GAP_THRESHOLD.toLong() * 1000)
+        val recentCutoff = Date(candidate.startTime.time - AppConfig.LIVE_STAY_MERGE_TIME_THRESHOLD.toLong() * 1000)
         val lastFp = db.footprintDao().getLastFootprintAfter(recentCutoff)
 
         if (lastFp != null) {
@@ -408,21 +408,49 @@ class LocationTrackingService : Service() {
         val gapSec = (newFp.startTime.time - prevFp.endTime.time) / 1000.0
         if (gapSec < AppConfig.TRANSPORT_MIN_DURATION_THRESHOLD) return
 
-        // 简便起见，这里复用之前的 RawLocationStore 逻辑
         val rawPoints = rawStore.loadRecentLocations(lookbackHours = 4.0)
             .filter { it.timestamp >= prevFp.endTime && it.timestamp <= newFp.startTime }
 
-        if (rawPoints.isEmpty()) return
+        val totalDist: Double
+        val avgSpeed: Double
+        val pointsJson: String
+        
+        val prevLats = gson.fromJson(prevFp.latitudeJson, Array<Double>::class.java).toList()
+        val prevLons = gson.fromJson(prevFp.longitudeJson, Array<Double>::class.java).toList()
+        val newLats = gson.fromJson(newFp.latitudeJson, Array<Double>::class.java).toList()
+        val newLons = gson.fromJson(newFp.longitudeJson, Array<Double>::class.java).toList()
 
-        val totalDist = rawPoints.zipWithNext { a, b ->
-            processor.haversineMeters(a.latitude, a.longitude, b.latitude, b.longitude)
-        }.sum()
+        val lat1 = if (prevLats.isNotEmpty()) prevLats.average() else 0.0
+        val lon1 = if (prevLons.isNotEmpty()) prevLons.average() else 0.0
+        val lat2 = if (newLats.isNotEmpty()) newLats.average() else 0.0
+        val lon2 = if (newLons.isNotEmpty()) newLons.average() else 0.0
 
-        if (totalDist < AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD) return
+        if (rawPoints.isEmpty()) {
+            totalDist = processor.haversineMeters(lat1, lon1, lat2, lon2)
+            if (totalDist > 200.0 && gapSec > 120.0) {
+                avgSpeed = totalDist / gapSec
+                pointsJson = gson.toJson(listOf(listOf(lat1, lon1), listOf(lat2, lon2)))
+            } else {
+                return
+            }
+        } else {
+            totalDist = rawPoints.zipWithNext { a, b ->
+                processor.haversineMeters(a.latitude, a.longitude, b.latitude, b.longitude)
+            }.sum()
 
-        val avgSpeed = totalDist / gapSec
+            if (totalDist < AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD) return
+
+            avgSpeed = totalDist / gapSec
+            
+            val pts = mutableListOf<List<Double>>()
+            if (lat1 != 0.0) pts.add(listOf(lat1, lon1))
+            pts.addAll(rawPoints.map { listOf(it.latitude, it.longitude) })
+            if (lat2 != 0.0) pts.add(listOf(lat2, lon2))
+            
+            pointsJson = gson.toJson(pts)
+        }
+
         val transportType = TransportType.fromSpeed(avgSpeed)
-        val pointsJson = gson.toJson(rawPoints.map { listOf(it.latitude, it.longitude) })
 
         val record = TransportRecordEntity(
             recordID = UUID.randomUUID().toString(),

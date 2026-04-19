@@ -81,4 +81,17 @@ class AppConfig {
     var habitFrequencyThreshold: Int {
         int(forKey: "HABIT_FREQUENCY_THRESHOLD", defaultValue: 3)
     }
+    
+    // --- Live tracking specific parameters ---
+    var liveStayMergeTimeThreshold: Double {
+        double(forKey: "LIVE_STAY_MERGE_TIME_THRESHOLD", defaultValue: 1200.0) // 20 min
+    }
+    
+    var liveStayMergeDistanceThreshold: Double {
+        double(forKey: "LIVE_STAY_MERGE_DISTANCE_THRESHOLD", defaultValue: 180.0) // 180 m
+    }
+    
+    var liveStayMinDurationThreshold: Double {
+        double(forKey: "LIVE_STAY_MIN_DURATION_THRESHOLD", defaultValue: 240.0) // 4 min
+    }
 }

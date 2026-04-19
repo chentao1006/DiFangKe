@@ -1043,6 +1043,13 @@ class PersistentTimelineBuilder {
         await mergeConsecutiveFootprints(for: date, in: context, threshold: AppConfig.shared.mergeDistanceThreshold)
         try? context.save() // 阶段二存盘：合并后的结果
         
+        // --- Added for Transport Merging and Gap Bridging ---
+        await mergeConsecutiveTransports(for: date, in: context)
+        await fillGapsBetweenItems(for: date, in: context)
+        await snapTransportsToFootprints(for: date, in: context)
+        try? context.save()
+        // ----------------------------------------------------
+        
         // 5. 缝隙嗅探器：处理长时间不动的情况（如全天在家）
         let hasAnyPoints = !allRawPoints.isEmpty
         if hasAnyPoints || isToday {
@@ -1099,6 +1106,204 @@ class PersistentTimelineBuilder {
             context.insert(bridgeFp)
         }
     }
+
+    @MainActor
+    private static func mergeConsecutiveTransports(for date: Date, in context: ModelContext) async {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+        
+        let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        
+        let tps = (try? context.fetch(descriptor)) ?? []
+        guard tps.count >= 2 else { return }
+        
+        var i = 0
+        while i < tps.count - 1 {
+            let current = tps[i]
+            let next = tps[i+1]
+            
+            let gap = next.startTime.timeIntervalSince(current.endTime)
+            // If they are less than 15 minutes apart, we merge them!
+            if gap >= -60 && gap <= 900 {
+                current.endTime = max(current.endTime, next.endTime)
+                current.distance += next.distance
+                let duration = current.endTime.timeIntervalSince(current.startTime)
+                current.averageSpeed = duration > 0 ? current.distance / duration : 0
+                current.typeRaw = TransportType.from(speed: current.averageSpeed).rawValue
+                
+                if let decodedCurrent = try? JSONDecoder().decode([CodableCoordinate].self, from: current.pointsData),
+                   let decodedNext = try? JSONDecoder().decode([CodableCoordinate].self, from: next.pointsData) {
+                    let combined = decodedCurrent + decodedNext
+                    if let newPtsData = try? JSONEncoder().encode(combined) {
+                        current.pointsData = newPtsData
+                    }
+                }
+                
+                current.stepCount = (current.stepCount ?? 0) + (next.stepCount ?? 0)
+                
+                if next.endLocation != "终点" && next.endLocation != "正在获取位置..." && !next.endLocation.isEmpty {
+                    current.endLocation = next.endLocation
+                }
+                
+                context.delete(next)
+                try? context.save()
+                
+                await mergeConsecutiveTransports(for: date, in: context)
+                return
+            }
+            i += 1
+        }
+    }
+
+    @MainActor
+    private static func fillGapsBetweenItems(for date: Date, in context: ModelContext) async {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+        
+        let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
+        
+        let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let fps = (try? context.fetch(fpDesc)) ?? []
+        guard fps.count >= 2 else { return }
+        
+        let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let tps = (try? context.fetch(tpDesc)) ?? []
+        
+        for i in 0..<(fps.count - 1) {
+            let currentFp = fps[i]
+            let nextFp = fps[i+1]
+            let gapStart = currentFp.endTime
+            let gapEnd = nextFp.startTime
+            let duration = gapEnd.timeIntervalSince(gapStart)
+            
+            if duration > 120 { // More than 2 minutes gap
+                let hasTransport = tps.contains { t in
+                    let intersectStart = max(gapStart, t.startTime)
+                    let intersectEnd = min(gapEnd, t.endTime)
+                    return intersectEnd.timeIntervalSince(intersectStart) > 60 
+                }
+                
+                let loc1 = CLLocation(latitude: currentFp.latitude, longitude: currentFp.longitude)
+                let loc2 = CLLocation(latitude: nextFp.latitude, longitude: nextFp.longitude)
+                let distance = loc1.distance(from: loc2)
+                
+                if !hasTransport && distance > 200 {
+                    let pts = [CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude),
+                               CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)]
+                    let ptsData = (try? JSONEncoder().encode(pts)) ?? Data()
+                    let speed = distance / duration
+                    let currentLocName = getSimplifiedLocationName(for: currentFp, allPlaces: allPlaces)
+                    let nextLocName = getSimplifiedLocationName(for: nextFp, allPlaces: allPlaces)
+                    
+                    let tp = TransportRecord(
+                        day: startOfDay,
+                        startTime: gapStart,
+                        endTime: gapEnd,
+                        startLocation: currentLocName,
+                        endLocation: nextLocName,
+                        typeRaw: TransportType.from(speed: speed).rawValue,
+                        distance: distance,
+                        averageSpeed: speed,
+                        pointsData: ptsData
+                    )
+                    context.insert(tp)
+                }
+            }
+        }
+        try? context.save()
+    }
+    
+    @MainActor
+    private static func snapTransportsToFootprints(for date: Date, in context: ModelContext) async {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+        
+        let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
+        
+        let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let fps = (try? context.fetch(fpDesc)) ?? []
+        
+        let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let tps = (try? context.fetch(tpDesc)) ?? []
+        
+        for tp in tps {
+            var changed = false
+            var decodedPoints: [CodableCoordinate] = []
+            if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: tp.pointsData) {
+                decodedPoints = decoded
+            }
+            
+            if let prevFp = fps.last(where: { $0.endTime <= tp.startTime + 60 }) {
+                let gap = tp.startTime.timeIntervalSince(prevFp.endTime)
+                if gap >= 0 && gap < 900 { 
+                    tp.startTime = prevFp.endTime
+                    let locName = getSimplifiedLocationName(for: prevFp, allPlaces: allPlaces)
+                    if !locName.isEmpty && locName != "某地" {
+                        tp.startLocation = locName
+                    }
+                    let fpCoord = CodableCoordinate(lat: prevFp.latitude, lon: prevFp.longitude)
+                    if decodedPoints.first?.lat != fpCoord.lat || decodedPoints.first?.lon != fpCoord.lon {
+                        decodedPoints.insert(fpCoord, at: 0)
+                    }
+                    changed = true
+                }
+            }
+            
+            if let nextFp = fps.first(where: { $0.startTime >= tp.endTime - 60 }) {
+                let gap = nextFp.startTime.timeIntervalSince(tp.endTime)
+                if gap >= 0 && gap < 900 {
+                    tp.endTime = nextFp.startTime
+                    let locName = getSimplifiedLocationName(for: nextFp, allPlaces: allPlaces)
+                    if !locName.isEmpty && locName != "某地" {
+                        tp.endLocation = locName
+                    }
+                    let fpCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)
+                    if decodedPoints.last?.lat != fpCoord.lat || decodedPoints.last?.lon != fpCoord.lon {
+                        decodedPoints.append(fpCoord)
+                    }
+                    changed = true
+                }
+            }
+            
+            if changed {
+                if let newPtsData = try? JSONEncoder().encode(decodedPoints) {
+                    tp.pointsData = newPtsData
+                }
+                let duration = tp.endTime.timeIntervalSince(tp.startTime)
+                if duration > 0 {
+                    tp.averageSpeed = tp.distance / duration
+                }
+            }
+        }
+        try? context.save()
+    }
+
+    private static func getSimplifiedLocationName(for footprint: Footprint, allPlaces: [Place]) -> String {
+        if let placeID = footprint.placeID, let place = allPlaces.first(where: { $0.placeID == placeID }) {
+            return place.name
+        }
+        if footprint.isTitleEditedByHand { return footprint.title }
+        if let addr = footprint.address, !addr.isEmpty { return addr }
+        // Fallback to title only if it's not generic, and try to avoid the labels
+        if !Footprint.isGenericTitle(footprint.title) {
+            return footprint.title
+        }
+        return "某地"
+    }
+
 
 
     

@@ -280,6 +280,12 @@ struct TimelinePageView: View {
                 .padding(.top, 20)
                 .padding(.bottom, 20)
             }
+            
+            if !isNotificationGuideDismissed && isToday && notificationAuthStatus == .notDetermined {
+                NotificationGuide(isNotificationGuideDismissed: $isNotificationGuideDismissed)
+                    .padding(.top, allPlaces.isEmpty && !isGuideDismissed ? 0 : 20)
+                    .padding(.bottom, 20)
+            }
         }
     }
     
@@ -292,12 +298,6 @@ struct TimelinePageView: View {
                 emptyStateView
             }
         } else {
-            if !isNotificationGuideDismissed && isToday && notificationAuthStatus == .notDetermined && !footprints.isEmpty {
-                NotificationGuide(isNotificationGuideDismissed: $isNotificationGuideDismissed)
-                    .padding(.top, 10)
-                    .padding(.bottom, 16)
-            }
-            
             let items = filteredTimelineItems
             let count = items.count
             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in

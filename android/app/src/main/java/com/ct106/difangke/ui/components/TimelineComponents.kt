@@ -436,12 +436,23 @@ fun RecordingStatusCard(
                 
                 // 呼吸效果圆点
                 if (isTracking) {
+                    val speed = when (trackingState) {
+                        is LocationTrackingService.TrackingState.Tracking -> trackingState.speed
+                        is LocationTrackingService.TrackingState.OngoingStay -> trackingState.speed
+                        else -> 0.0
+                    }
+                    val animDuration = when {
+                        speed > 10.0 -> 800  // 高速移动：0.8s (对应 Tier 2)
+                        speed > 0.5 -> 1500  // 正常移动：1.5s (对应 Tier 1)
+                        else -> 3000         // 停留：3s (对应 Tier 0)
+                    }
+
                     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
                     val scale by infiniteTransition.animateFloat(
                         initialValue = 1.0f,
                         targetValue = 2.5f,
                         animationSpec = infiniteRepeatable(
-                            animation = tween(1200, easing = LinearEasing),
+                            animation = tween(animDuration, easing = LinearEasing),
                             repeatMode = RepeatMode.Restart
                         ),
                         label = "scale"
@@ -450,7 +461,7 @@ fun RecordingStatusCard(
                         initialValue = 0.4f,
                         targetValue = 0.0f,
                         animationSpec = infiniteRepeatable(
-                            animation = tween(1200, easing = LinearEasing),
+                            animation = tween(animDuration, easing = LinearEasing),
                             repeatMode = RepeatMode.Restart
                         ),
                         label = "alpha"
