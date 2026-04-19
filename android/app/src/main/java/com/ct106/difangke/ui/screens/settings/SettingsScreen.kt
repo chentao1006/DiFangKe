@@ -60,6 +60,22 @@ fun SettingsScreen(
         packageInfo?.versionCode?.toLong() ?: 0L
     }
 
+    var showNotificationSettingsAlert by remember { mutableStateOf(false) }
+
+    val checkNotificationPermission = { onGranted: () -> Unit ->
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(
+                    context, android.Manifest.permission.POST_NOTIFICATIONS
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                onGranted()
+            } else {
+                showNotificationSettingsAlert = true
+            }
+        } else {
+            onGranted()
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -143,7 +159,15 @@ fun SettingsScreen(
                     title = "每日足迹汇总",
                     subtitle = "每日晚间为您推送当天的生活总结",
                     checked = isDailyNotificationEnabled,
-                    onCheckedChange = { viewModel.setDailyNotificationEnabled(it) }
+                    onCheckedChange = { isEnabled ->
+                        if (isEnabled) {
+                            checkNotificationPermission {
+                                viewModel.setDailyNotificationEnabled(true)
+                            }
+                        } else {
+                            viewModel.setDailyNotificationEnabled(false)
+                        }
+                    }
                 )
             }
             if (isDailyNotificationEnabled) {
@@ -164,7 +188,15 @@ fun SettingsScreen(
                     title = "精彩足迹提醒",
                     subtitle = "发现值得纪念的瞬间时给予提醒",
                     checked = isHighlightNotificationEnabled,
-                    onCheckedChange = { viewModel.setHighlightNotificationEnabled(it) }
+                    onCheckedChange = { isEnabled ->
+                        if (isEnabled) {
+                            checkNotificationPermission {
+                                viewModel.setHighlightNotificationEnabled(true)
+                            }
+                        } else {
+                            viewModel.setHighlightNotificationEnabled(false)
+                        }
+                    }
                 )
             }
 
@@ -271,6 +303,37 @@ fun SettingsScreen(
                     TextButton(onClick = { viewModel.clearUpdateInfo() }) {
                         Text("稍后再说")
                     }
+                }
+            }
+        )
+    }
+
+    if (showNotificationSettingsAlert) {
+        AlertDialog(
+            onDismissRequest = { showNotificationSettingsAlert = false },
+            title = { Text("需要通知权限") },
+            text = { Text("您已在系统中关闭了应用的通知权限，为及时收到足迹汇总提醒，请前往系统设置中开启。") },
+            confirmButton = {
+                Button(onClick = {
+                    showNotificationSettingsAlert = false
+                    val intent = android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    }
+                    try {
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        val genericIntent = android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = android.net.Uri.parse("package:${context.packageName}")
+                        }
+                        context.startActivity(genericIntent)
+                    }
+                }) {
+                    Text("前往设置")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNotificationSettingsAlert = false }) {
+                    Text("取消")
                 }
             }
         )

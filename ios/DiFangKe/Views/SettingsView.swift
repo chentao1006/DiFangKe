@@ -15,6 +15,8 @@ struct SettingsView: View {
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
     @AppStorage("aiServiceType") private var aiServiceType = "public"
     
+    @State private var showingSettingsAlert = false
+    
     private var notificationTime: Binding<Date> {
         Binding(
             get: {
@@ -111,6 +113,7 @@ struct SettingsView: View {
                             NotificationManager.shared.requestAuthorization { granted in
                                 if !granted {
                                     isDailyNotificationEnabled = false
+                                    showingSettingsAlert = true
                                 } else {
                                     updateNotifications()
                                 }
@@ -131,6 +134,7 @@ struct SettingsView: View {
                             NotificationManager.shared.requestAuthorization { granted in
                                 if !granted {
                                     isHighlightNotificationEnabled = false
+                                    showingSettingsAlert = true
                                 }
                             }
                         }
@@ -169,6 +173,16 @@ struct SettingsView: View {
                     isHighlightNotificationEnabled = false
                 }
             }
+        }
+        .alert("需要通知权限", isPresented: $showingSettingsAlert) {
+            Button("取消", role: .cancel) { }
+            Button("前往设置") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+        } message: {
+            Text("您已在系统中关闭了应用的通知权限，为及时收到足迹汇总提醒，请前往系统设置中开启。")
         }
     }
     
