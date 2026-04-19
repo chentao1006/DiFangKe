@@ -1,6 +1,6 @@
 {
-  "versionCode": 5,
-  "versionName": "1.0.3",
+  "versionCode": 7,
+  "versionName": "1.0.4",
   "downloadUrl": "https://difangke.cn/download/difangke.apk",
-  "releaseNotes": "1. 自动打包发布版本 1.0.3\n2. 修复已知问题并提升稳定性"
+  "releaseNotes": "1. 自动打包发布版本 1.0.4\n2. 修复已知问题并提升稳定性"
 }
