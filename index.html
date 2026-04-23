@@ -468,7 +468,7 @@
             <a href="#philosophy">理念</a>
             <a href="#people">人群</a>
             <a href="privacy.html">隐私</a>
-            <a href="https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162" target="_blank" class="btn-download-nav">下载应用</a>
+            <a href="https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162" target="_blank" class="btn-download-nav dynamic-download">下载应用</a>
         </nav>
     </header>
 
@@ -617,14 +617,27 @@
             startAutoSlide();
         }
 
-        function startAutoSlide() {
-            slideInterval = setInterval(() => {
-                showSlide(currentSlide + 1);
-            }, 4000);
+        // Device detection and download link adjustment
+        function setupDynamicLinks() {
+            const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+            const iosLink = "https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162";
+            const androidLink = "download/difangke.apk?v=8";
+            
+            let targetLink = iosLink; // Default
+            if (/android/i.test(userAgent)) {
+                targetLink = androidLink;
+            } else if (/iPad|iPhone|iPod/.test(userAgent) && !window.MSStream) {
+                targetLink = iosLink;
+            }
+
+            document.querySelectorAll('.dynamic-download').forEach(link => {
+                link.href = targetLink;
+            });
         }
 
         // Initialize
         startAutoSlide();
+        setupDynamicLinks();
     </script>
 
 </body>
