@@ -71,16 +71,7 @@ struct TimelinePageView: View {
     }
     
     var body: some View {
-        Group {
-            if !isFromHistory && Calendar.current.isDateInToday(date) {
-                timelineScrollView
-                    .refreshable {
-                        await handlePullToRefresh()
-                    }
-            } else {
-                timelineScrollView
-            }
-        }
+        timelineScrollView
         .onAppear {
             appearanceTask?.cancel()
             appearanceTask = Task { @MainActor in
@@ -235,6 +226,9 @@ struct TimelinePageView: View {
             }
             .padding(.top, 16)
             .padding(.bottom, 10)
+        }
+        .refreshable {
+            await handlePullToRefresh()
         }
     }
 
@@ -625,16 +619,31 @@ struct TimelinePageView: View {
     
     @MainActor
     private func handlePullToRefresh() async {
-        // 1. 同步远程原始轨迹
-        await locationManager.performRawDataSync()
+        if isFromHistory {
+            await refreshTimelineAsync(force: false)
+            
+            let startOfDate = Calendar.current.startOfDay(for: date)
+            let isPast = startOfDate < Calendar.current.startOfDay(for: Date())
+            if isPast, isAiAssistantEnabled, !footprints.isEmpty {
+                let endOfDate = Calendar.current.date(byAdding: .day, value: 1, to: startOfDate)!
+                let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                    $0.startTime >= startOfDate && $0.startTime < endOfDate && $0.statusRaw == "active"
+                })
+                let transports = (try? modelContext.fetch(tpDesc)) ?? []
+                OpenAIService.shared.enqueueDailySummary(for: date, footprints: footprints, transports: transports, force: true)
+            }
+        } else {
+            // 1. 同步远程原始轨迹
+            await locationManager.performRawDataSync()
+            
+            // 2. 触发位置碎片合并计算
+            await locationManager.triggerTimelineSift()
+            
+            // 3. 强制异步刷新当前页面的时间线显示
+            await refreshTimelineAsync(force: true)
+        }
         
-        // 2. 触发位置碎片合并计算
-        await locationManager.triggerTimelineSift()
-        
-        // 3. 强制异步刷新当前页面的时间线显示
-        await refreshTimelineAsync(force: true)
-        
-        // 4. 触感反馈
+        // 触感反馈
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 }

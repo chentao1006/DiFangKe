@@ -106,20 +106,23 @@ class NotificationManager {
         }
     }
 
-    func sendHighlightNotification(title: String, body: String, footprintID: UUID, date: Date) {
+    func sendHighlightNotification(title: String, body: String, footprintID: UUID? = nil, date: Date) {
         let isEnabled = UserDefaults.standard.bool(forKey: "isHighlightNotificationEnabled")
         guard isEnabled else { return }
         
         let content = UNMutableNotificationContent()
         content.title = title
-        // 简洁的补充引导
-        content.body = body + "\n点这里记下此刻的心情、活动或照片"
+        content.body = body
         content.sound = .default
-        content.userInfo = [
+        
+        var userInfo: [String: Any] = [
             "type": "highlight_footprint",
-            "footprintID": footprintID.uuidString,
             "date": date.timeIntervalSince1970
         ]
+        if let fid = footprintID {
+            userInfo["footprintID"] = fid.uuidString
+        }
+        content.userInfo = userInfo
         
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in

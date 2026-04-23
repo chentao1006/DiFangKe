@@ -254,9 +254,9 @@ class OpenAIService {
         self.processQueue()
     }
 
-    // 便捷方法
+    // 频率控制：公共服务限制更严格，间隔更长；自定义服务允许更频繁的请求以适应不同需求
     private var currentInterval: TimeInterval {
-        return aiServiceType == "custom" ? 15 : 60
+        return aiServiceType == "custom" ? 5 : 60
     }
 
     private func processQueue() {
@@ -302,6 +302,12 @@ class OpenAIService {
     // MARK: - Task Handlers (Async)
 
     
+    private struct DailySummaryProfile {
+        let lines: [String]
+        let fingerprint: String
+        let fallbackSummary: String
+    }
+    
     private func processDailySummaryTask(date: Date, fpIds: [UUID], tpIds: [UUID], context: ModelContext, force: Bool = false) async {
         let startOfDate = Calendar.current.startOfDay(for: date)
         
@@ -311,95 +317,122 @@ class OpenAIService {
             guard let d = $0.date else { return false }
             return Calendar.current.isDate(d, inSameDayAs: startOfDate) 
         })
+        let existingContent = existing?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasMeaningfulExistingContent = !(existingContent?.isEmpty ?? true)
 
-        // 只有非强制模式下才检查是否已存在（常规自动生成）
-        if !force {
-            if existing?.aiGenerated == true {
-                dailySummaryDateSet.remove(startOfDate)
-                return 
-            }
-        }
-
-        struct SimpleItem {
-            let time: Date
-            let description: String
-        }
-        var rawItems: [SimpleItem] = []
-
-        // 1. 处理足迹
-        for id in fpIds {
-            let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
-            if let fp = (try? context.fetch(fpDescriptor))?.first {
-                let displayName = fp.address ?? "点位记录"
-                
-                let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
-                let activityName = fp.getActivityType(from: allActivities)?.name
-                var description = activityName != nil ? "\(displayName)(\(activityName!))" : displayName
-                
-                // 强调已收藏/高亮足迹
-                if fp.isHighlight == true {
-                    description = "【重点收藏】\(description)"
-                }
-                
-                rawItems.append(SimpleItem(time: fp.startTime, description: description))
-            }
-        }
-
-        // 2. 处理交通
-        for id in tpIds {
-            let tpDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == id })
-            if let tp = (try? context.fetch(tpDescriptor))?.first {
-                if tp.statusRaw == "ignored" { continue }
-                let type = TransportType(rawValue: tp.typeRaw)?.localizedName ?? tp.typeRaw
-                let description = "通过\(type)从\(tp.startLocation)前往\(tp.endLocation)"
-                rawItems.append(SimpleItem(time: tp.startTime, description: description))
-            }
-        }
+        guard let profile = buildDailySummaryProfile(fpIds: fpIds, tpIds: tpIds, context: context) else { return }
         
-        guard !rawItems.isEmpty else { return }
+        let currentFingerprint = profile.fingerprint
         
-        let sortedItems = rawItems.sorted { $0.time < $1.time }
-        var deduplicated: [String] = []
-        var lastDesc: String? = nil
-        
-        for item in sortedItems {
-            if item.description == lastDesc { continue }
-            deduplicated.append("[\(item.time.formatted(.dateTime.hour().minute()))] \(item.description)")
-            lastDesc = item.description
-        }
-        
-        guard !deduplicated.isEmpty else { return }
-        
-        // 核心改动：比较本次数据的 Fingerprint 与数据库中已有的记录
-        let currentFingerprint = deduplicated.joined(separator: "\n")
-        if force && existing?.dataFingerprint == currentFingerprint {
+        // 只有在内容完全一致时才复用旧摘要
+        if !force, existing?.aiGenerated == true, existing?.dataFingerprint == currentFingerprint, hasMeaningfulExistingContent {
             dailySummaryDateSet.remove(startOfDate)
             return
         }
-
+        
         let summaryResult = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            self.generateDailySummary(date: startOfDate, footprintDescriptions: deduplicated) { res in
+            self.generateDailySummary(date: startOfDate, footprintDescriptions: profile.lines) { res in
                 continuation.resume(returning: res)
             }
         }
-        
-        guard let summary = summaryResult else { 
-            dailySummaryDateSet.remove(startOfDate)
-            return 
-        }
+        let finalizedSummary = dailySummaryCleanedSummary(summaryResult) ?? profile.fallbackSummary
         
         if let existing = existing {
-            existing.content = summary
+            existing.content = finalizedSummary
             existing.aiGenerated = true
             existing.dataFingerprint = currentFingerprint
         } else {
-            let newSummary = DailyInsight(date: startOfDate, content: summary, aiGenerated: true)
+            let newSummary = DailyInsight(date: startOfDate, content: finalizedSummary, aiGenerated: true)
             newSummary.dataFingerprint = currentFingerprint
             context.insert(newSummary)
         }
         try? context.save()
         
         dailySummaryDateSet.remove(startOfDate)
+    }
+
+    private func buildDailySummaryProfile(fpIds: [UUID], tpIds: [UUID], context: ModelContext) -> DailySummaryProfile? {
+        let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
+        let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+        
+        var lines: [String] = []
+        
+        for (index, id) in fpIds.enumerated() {
+            let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
+            guard let fp = (try? context.fetch(fpDescriptor))?.first else { continue }
+            let factLine = dailySummaryFactLine(for: fp, places: allPlaces, activities: allActivities)
+            guard !factLine.isEmpty else { continue }
+            lines.append("\(index + 1). \(factLine)")
+        }
+        
+        guard !lines.isEmpty else { return nil }
+        
+        let fallbackSummary = dailySummaryFallbackSummary(footprintCount: lines.count)
+        return DailySummaryProfile(
+            lines: lines,
+            fingerprint: lines.joined(separator: "\n"),
+            fallbackSummary: fallbackSummary
+        )
+    }
+
+    private func dailySummaryFactLine(for footprint: Footprint, places: [Place], activities: [ActivityType]) -> String {
+        let start = footprint.startTime.formatted(.dateTime.hour().minute())
+        let end = footprint.endTime.formatted(.dateTime.hour().minute())
+        var parts: [String] = ["\(start)-\(end)"]
+        
+        if let place = places.first(where: { $0.placeID == footprint.placeID }) {
+            let name = place.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                parts.append(name)
+            }
+        }
+        
+        if let activity = footprint.getActivityType(from: activities) {
+            let name = activity.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                parts.append("活动：\(name)")
+            }
+        }
+        
+        if footprint.isHighlight == true {
+            parts.append("重点")
+        }
+        
+        return parts.joined(separator: "｜")
+    }
+
+    private func dailySummaryFallbackSummary(footprintCount: Int) -> String {
+        switch footprintCount {
+        case 1:
+            return "今天没去别的地方"
+        case 2...3:
+            return "今天去过几个地方"
+        case 4...:
+            return "今天去过的地方还不少"
+        default:
+            return "又是平凡的一天"
+        }
+    }
+
+    private func dailySummaryCleanedSummary(_ summary: String?) -> String? {
+        guard var summary = summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty else {
+            return nil
+        }
+
+        let forbiddenPhrases = ["未提及", "未出现", "没有提及", "没有出现", "未说明", "未写明", "未提到"]
+        if forbiddenPhrases.contains(where: { summary.contains($0) }) {
+            for phrase in forbiddenPhrases {
+                summary = summary.replacingOccurrences(of: phrase, with: "")
+            }
+        }
+
+        summary = summary
+            .replacingOccurrences(of: "，，", with: "，")
+            .replacingOccurrences(of: "、、", with: "、")
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "，。；：、 "))
+
+        return summary.isEmpty ? nil : summary
     }
 
     private func processTomorrowQuoteTask() async {
@@ -432,7 +465,7 @@ class OpenAIService {
         }
         let calls = self.notificationSummaryCompletions
         self.notificationSummaryCompletions.removeAll()
-        calls.forEach { $0(result ?? "今天过得很有意义。") }
+        calls.forEach { $0(result ?? "平凡的一天") }
     }
     
     private func processOngoingTask(data: ([(Double, Double)], TimeInterval, Date, Date, String?, String?, String?)) async {
@@ -444,18 +477,32 @@ class OpenAIService {
 
     
     func generateDailySummary(date: Date, footprintDescriptions: [String], completion: @escaping (String?) -> Void) {
-        guard !footprintDescriptions.isEmpty else { completion("今天过得轻盈而自在。"); return }
+        guard !footprintDescriptions.isEmpty else { completion("平凡的一天"); return }
         
         let dateStr = date.formatted(.dateTime.year().month().day())
         let list = footprintDescriptions.joined(separator: "\n")
-        let prompt = "今天是 \(dateStr)。请根据以下足迹编写一段极简晚间回顾（15字以内）。要求：作为一位善于发现生活之美的观察者，语气温润且富有洞察力，将碎片化的记录串联成有温度的文字，绝对不要使用生硬的模板：\n\(list)"
+        let prompt = """
+        今天是 \(dateStr)。下面是当天足迹的事实片段，请你先自己归纳出一天的主线和状态，再用一句话总结今天。
+        要求：
+        1. 只输出一句中文。
+        2. 不要逐条复述，不要写时间线，不要把片段照搬成流水账。
+        3. 只做归纳，不要输出标签名、编号、括号说明或字段名，也不要照搬片段里的表达。
+        4. 只写能从片段直接推出的客观内容，不要补写感受、氛围、节奏、心情或状态判断。
+        5. 语气自然一点，像日常顺口说的话，但不要像通报、监控记录或工作汇报。
+        6. 不要主动提交通、外出、缺失说明或推断过程。
+        7. 如果信息零散，就总结整体状态，不要编造细节。
+        8. 尽量控制在 10 字以内。
+
+        事实片段：
+        \(list)
+        """
         
         let body: [String: Any] = [
             "messages": [
-                ["role": "system", "content": "你是一位文字优美、情感细腻的散文作家。请用中文回答，保持简洁、深远且充满创意的风格，避免重复和套路。"],
+                ["role": "system", "content": "你是一位只做事实概括的中文助手。输出要自然、口语化，像日常顺口说一句；不要虚构，不要抒情，不要修辞，不要使用报表口吻、监控口吻或生硬表达，也不要补写感受、氛围、节奏、心情或状态判断。"],
                 ["role": "user", "content": prompt]
             ],
-            "temperature": 0.85
+            "temperature": 0.2
         ]
         
         guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
@@ -482,7 +529,8 @@ class OpenAIService {
                     self.lastError = "解析总结内容失败"
                     completion(nil); return
                 }
-                completion(content.trimmingCharacters(in: .whitespacesAndNewlines))
+                let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                completion(trimmed.isEmpty ? nil : trimmed)
             }
         }.resume()
     }

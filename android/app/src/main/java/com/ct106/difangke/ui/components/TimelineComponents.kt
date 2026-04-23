@@ -108,47 +108,75 @@ fun FootprintCardView(
                 .fillMaxWidth()
                 .height(IntrinsicSize.Min)
         ) {
-            // 时间轴连线 (在卡片内部)
-            if (showTimeline) {
-                Box(modifier = Modifier.width(52.dp), contentAlignment = Alignment.TopCenter) {
-                    TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = false)
-                    
-                    // 圈圈指示器
-                    Box(
-                        modifier = Modifier
-                            .padding(top = 22.dp)
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
-                }
-            } else {
-                Spacer(modifier = Modifier.width(16.dp))
-            }
-            
             // 内容区
             val activityType = activityTypes.find { it.id == footprint.activityTypeValue }
             val iconName = activityType?.icon ?: "place"
-            val iconColor = try { 
+            val iconColor = try {
                 if (activityType?.colorHex != null) Color(android.graphics.Color.parseColor(activityType.colorHex))
                 else getIconColorForName(iconName)
-            } catch (e: Exception) { 
-                getIconColorForName(iconName) 
+            } catch (e: Exception) {
+                getIconColorForName(iconName)
+            }
+
+            // 时间轴指示器 (在卡片内部)
+            Box(modifier = Modifier.width(60.dp), contentAlignment = Alignment.TopCenter) {
+                if (showTimeline) {
+                    TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = false)
+                }
+
+                // 活动图标
+                Box(
+                    modifier = Modifier
+                        .padding(top = 12.dp)
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(cardColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = getIconForName(iconName),
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = iconColor
+                    )
+
+                    if (footprint.isHighlight == true) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .offset(x = 2.dp, y = 2.dp)
+                                .size(12.dp)
+                                .clip(CircleShape)
+                                .background(Color.White)
+                                .padding(1.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Star,
+                                contentDescription = null,
+                                modifier = Modifier.size(10.dp),
+                                tint = Color(0xFFFFCC00)
+                            )
+                        }
+                    }
+                }
+            }
+            
+            // 照片缩略图 logic
+            val photoIds = remember(footprint.photoAssetIDsJson) {
+                try {
+                    com.google.gson.Gson().fromJson(footprint.photoAssetIDsJson, Array<String>::class.java).toList()
+                } catch (e: Exception) {
+                    emptyList<String>()
+                }
             }
 
             Box(modifier = Modifier.weight(1f)) {
-                // 右上角活动图标 (iOS 风格)
-                Icon(
-                    imageVector = getIconForName(iconName),
-                    contentDescription = null,
+                Column(
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 16.dp, end = 20.dp)
-                        .size(24.dp),
-                    tint = iconColor
-                )
-
-                Column(modifier = Modifier.padding(vertical = 18.dp).padding(end = 56.dp)) {
+                        .padding(vertical = 14.dp)
+                        .padding(end = if (photoIds.isNotEmpty()) 84.dp else 16.dp)
+                ) {
                     val matchedPlace = allPlaces.find { it.placeID == footprint.placeID }
                     val locationText = when {
                         matchedPlace != null && matchedPlace.isUserDefined -> matchedPlace.name
@@ -194,7 +222,11 @@ fun FootprintCardView(
                             color = subtitleColor.copy(alpha = 0.3f)
                         )
                         val durationMins = (footprint.endTime.time - footprint.startTime.time) / 60000
-                        val durationStr = if (durationMins >= 60) "${durationMins/60}h${durationMins%60}m" else "${durationMins}m"
+                        val durationStr = when {
+                            durationMins < 60 -> "${durationMins}m"
+                            durationMins < 1440 -> "${durationMins / 60}h${durationMins % 60}m"
+                            else -> "${durationMins / 1440}d${(durationMins % 1440) / 60}h"
+                        }
                         Text(
                             text = durationStr,
                             style = MaterialTheme.typography.labelSmall,
@@ -206,32 +238,25 @@ fun FootprintCardView(
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = footprint.reason,
-                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                            color = if (isDark) MaterialTheme.colorScheme.onSurfaceVariant else Color.Gray.copy(alpha = 0.8f),
-                            lineHeight = 16.sp
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 18.sp,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                // 照片缩略图 logic (Correctly in BoxScope)
-                val photoIds = remember(footprint.photoAssetIDsJson) {
-                    try {
-                        com.google.gson.Gson().fromJson(footprint.photoAssetIDsJson, Array<String>::class.java).toList()
-                    } catch (e: Exception) {
-                        emptyList<String>()
-                    }
-                }
-                
                 if (photoIds.isNotEmpty()) {
                     Box(
                         modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(bottom = 12.dp, end = 12.dp)
+                            .align(Alignment.TopEnd)
+                            .padding(top = 12.dp, end = 12.dp)
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(48.dp)
-                                .clip(RoundedCornerShape(8.dp))
+                                .size(60.dp)
+                                .clip(RoundedCornerShape(10.dp))
                                 .background(Color.LightGray.copy(alpha = 0.3f)),
                             contentAlignment = Alignment.Center
                         ) {
@@ -273,36 +298,34 @@ fun TransportCardView(
                 .height(IntrinsicSize.Min)
         ) {
             // 1. 左侧时间轴连线
-            if (showTimeline) {
-                Box(modifier = Modifier.width(52.dp), contentAlignment = Alignment.TopCenter) {
+            Box(modifier = Modifier.width(60.dp), contentAlignment = Alignment.TopCenter) {
+                if (showTimeline) {
                     TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = true)
-                    
-                    // 圈圈指示器
-                    Box(
-                        modifier = Modifier
-                            .padding(top = 16.dp)
-                            .size(20.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = getTransportIcon(transport.manualTypeRaw ?: transport.typeRaw), 
-                            contentDescription = null,
-                            modifier = Modifier.size(12.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
                 }
-            } else {
-                Spacer(modifier = Modifier.width(16.dp))
+
+                // 交通工具图标 (代替原本的小圆点)
+                Box(
+                    modifier = Modifier
+                        .padding(top = 12.dp)
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(cardColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = getTransportIcon(transport.manualTypeRaw ?: transport.typeRaw),
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
             }
             
             // 2. 内容区 (iOS A->B 风格布局)
             Row(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(vertical = 16.dp)
+                    .padding(vertical = 14.dp)
                     .padding(end = 16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -326,14 +349,14 @@ fun TransportCardView(
 
                 // 中间装饰性图标与距离
                 Column(
-                    modifier = Modifier.width(80.dp),
+                    modifier = Modifier.width(70.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Icon(
-                        imageVector = getTransportIcon(transport.manualTypeRaw ?: transport.typeRaw),
+                        imageVector = if (transport.startLocation == transport.endLocation) Icons.Default.SwapHoriz else Icons.AutoMirrored.Filled.ArrowForward,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                        modifier = Modifier.size(16.dp),
+                        tint = subtitleColor.copy(alpha = 0.4f)
                     )
                     
                     val distanceKm = transport.distance / 1000.0
@@ -388,6 +411,7 @@ private fun getTransportIcon(typeRaw: String): ImageVector {
         com.ct106.difangke.data.model.TransportType.SUBWAY -> Icons.Default.DirectionsSubway
         com.ct106.difangke.data.model.TransportType.TRAIN -> Icons.Default.Train
         com.ct106.difangke.data.model.TransportType.AIRPLANE -> Icons.Default.Flight
+        com.ct106.difangke.data.model.TransportType.SHIP -> Icons.Default.DirectionsBoat
         else -> Icons.Default.DirectionsBus
     }
 }
@@ -540,7 +564,11 @@ fun RecordingStatusCard(
                         } else {
                             if (ongoing != null) {
                                 val durationMins = (System.currentTimeMillis() - ongoing.since.time) / 60000
-                                val durationStr = if (durationMins < 60) "${durationMins}分钟" else "${durationMins / 60}小时${durationMins % 60}分"
+                                val durationStr = when {
+                                    durationMins < 60 -> "${durationMins}分钟"
+                                    durationMins < 1440 -> "${durationMins / 60}小时${durationMins % 60}分"
+                                    else -> "${durationMins / 1440}天${(durationMins % 1440) / 60}小时"
+                                }
                                 Text("已停留 $durationStr", style = MaterialTheme.typography.bodySmall, color = subtitleColor.copy(alpha=0.6f))
                                 Text(" · ", style = MaterialTheme.typography.bodySmall, color = subtitleColor.copy(alpha=0.3f))
                             }
@@ -794,12 +822,8 @@ fun MiniMapView(lat: Double? = null, lon: Double? = null, pointsJson: String? = 
 @Composable
 fun PlaceholderFootprintCard(trackingState: LocationTrackingService.TrackingState) {
     val phrases = listOf(
-        "正在加载今日足迹...",
-        "正在同步位置记录...",
-        "正在生成记录卡片...",
-        "正在整理位置数据...",
-        "正在分析今日轨迹...",
-        "正在更新时间轴..."
+        "新的足迹正在记录...",
+        "新的足迹即将生成...",
     )
     val phrase by remember { mutableStateOf(phrases.random()) }
     val calendar = java.util.Calendar.getInstance()

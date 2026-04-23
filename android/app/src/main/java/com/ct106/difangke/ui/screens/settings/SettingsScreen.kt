@@ -35,6 +35,7 @@ fun SettingsScreen(
     val notificationHour by viewModel.notificationHour.collectAsState()
     val notificationMinute by viewModel.notificationMinute.collectAsState()
     val isHighlightNotificationEnabled by viewModel.isHighlightNotificationEnabled.collectAsState()
+    val isPastMemoriesNotificationEnabled by viewModel.isPastMemoriesNotificationEnabled.collectAsState()
     
     val importantPlacesCount by viewModel.importantPlacesCount.collectAsState()
     val savedPlacesCount by viewModel.savedPlacesCount.collectAsState()
@@ -195,6 +196,22 @@ fun SettingsScreen(
                             }
                         } else {
                             viewModel.setHighlightNotificationEnabled(false)
+                        }
+                    }
+                )
+            }
+            item {
+                SettingsToggleItem(
+                    title = "往年今日提醒",
+                    subtitle = "重温多年前的今天你曾到访的地方",
+                    checked = isPastMemoriesNotificationEnabled,
+                    onCheckedChange = { isEnabled ->
+                        if (isEnabled) {
+                            checkNotificationPermission {
+                                viewModel.setPastMemoriesNotificationEnabled(true)
+                            }
+                        } else {
+                            viewModel.setPastMemoriesNotificationEnabled(false)
                         }
                     }
                 )

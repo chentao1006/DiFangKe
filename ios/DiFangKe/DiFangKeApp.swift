@@ -9,6 +9,7 @@ extension Color {
     static let dfkAccent = Color("AccentColor")
     static let dfkHighlight = Color(red: 1.0, green: 0.757, blue: 0.027) // #FFC107
     static let dfkCandidate = Color(red: 0.69, green: 0.745, blue: 0.773) // #B0BEC5
+    static let dfkDeepRed = Color(red: 0.7, green: 0.0, blue: 0.0)
     static let dfkBackground = Color(uiColor: .systemBackground)
     static let dfkMainText = Color(uiColor: .label)
     static let dfkSecondaryText = Color(uiColor: .secondaryLabel)

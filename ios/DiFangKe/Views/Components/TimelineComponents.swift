@@ -368,12 +368,29 @@ struct RecordingStatusCard: View {
                 // Top Section: Info
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        let isImportantPlace = locationManager.matchedPlace?.isUserDefined == true
-                        Text(summary ?? displayTitle)
-                            .font(.system(.headline, design: .rounded))
-                            .foregroundColor(!locationManager.isTracking && summary == nil ? .secondary : (isImportantPlace ? .orange : Color.dfkMainText))
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
+                        Group {
+                            let isImportantPlace = locationManager.matchedPlace?.isUserDefined == true
+                            if let summary = summary {
+                                Text(summary)
+                                    .foregroundColor(isImportantPlace ? .orange : Color.dfkMainText)
+                            } else if !locationManager.isTracking {
+                                Text(displayTitle)
+                                    .foregroundColor(.secondary)
+                            } else if let place = locationManager.matchedPlace, place.isUserDefined {
+                                Text("正在")
+                                    .foregroundColor(Color.dfkMainText) +
+                                Text(place.name)
+                                    .foregroundColor(.orange) +
+                                Text("停留")
+                                    .foregroundColor(Color.dfkMainText)
+                            } else {
+                                Text(displayTitle)
+                                    .foregroundColor(Color.dfkMainText)
+                            }
+                        }
+                        .font(.system(.headline, design: .rounded))
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                         
                         
                         HStack(spacing: 4) {                            
@@ -383,7 +400,7 @@ struct RecordingStatusCard: View {
                                     .foregroundColor(.orange.opacity(0.8))
                             } else if let durationStr = locationManager.stayDuration {
                                 Text("已停留 \(durationStr)")
-                                    .font(.system(size: 12))
+                                    .font(.system(size: 14))
                                     .foregroundColor(.secondary)
                                     .id("duration-\(durationStr)")
                             }
@@ -509,23 +526,8 @@ struct FootprintCardView: View {
             EmptyView()
         } else {
             HStack(alignment: .top, spacing: 0) {
-                 if showTimeline {
-                     timelineIndicator
-                 }
+                 timelineIndicator
                  ZStack(alignment: .topTrailing) {
-                     if let activity = footprint.getActivityType(from: allActivities) {
-                         Image(systemName: activity.icon)
-                             .font(.system(size: 21, weight: .bold))
-                             .foregroundColor(activity.color)
-                             .padding(.top, 14)
-                             .padding(.trailing, 14)
-                     } else {
-                         Image(systemName: "questionmark.circle.dashed")
-                             .font(.system(size: 21, weight: .bold))
-                             .foregroundColor(.secondary.opacity(0.4))
-                             .padding(.top, 14)
-                             .padding(.trailing, 14)
-                     }
                      
                      VStack(alignment: .leading, spacing: 4) {
                         if showDateAboveTitle && (contextDate == nil || !Calendar.current.isDate(footprint.date, inSameDayAs: contextDate!)) {
@@ -562,20 +564,20 @@ struct FootprintCardView: View {
                         
                         if let reason = footprint.reason, !reason.isEmpty {
                             Text(reason)
-                                .font(.system(size: 11, weight: .medium, design: .rounded))
-                                .foregroundColor(Color.dfkSecondaryText.opacity(0.8))
-                                .lineLimit(1)
+                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                                .foregroundColor(Color.dfkMainText.opacity(0.8))
+                                .lineLimit(3)
                                 .frame(maxWidth: .infinity, minHeight: 14, alignment: .leading)
                                 .padding(.top, 2)
                         }
                     }
                     .padding(.vertical, 14)
-                    .padding(.leading, showTimeline ? 0 : 16)
-                    .padding(.trailing, footprint.photoAssetIDs.isEmpty ? 16 : 60) // Add space for photo if present
-                    .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
+                    .padding(.leading, 0)
+                    .padding(.trailing, footprint.photoAssetIDs.isEmpty ? 16 : 84) // Increased for larger photo
+                    .frame(maxWidth: .infinity, minHeight: 70, alignment: .topLeading)
                     
                     if let firstID = footprint.photoAssetIDs.first {
-                        ZStack(alignment: .bottomTrailing) {
+                        ZStack(alignment: .topTrailing) {
                             Color.clear // Expand to fill parent
                             
                             ZStack(alignment: .topTrailing) {
@@ -588,7 +590,7 @@ struct FootprintCardView: View {
                                     }
                                 })
                                     .id(firstID)
-                                    .frame(width: 48, height: 48)
+                                    .frame(width: 60, height: 60)
                                     .clipShape(RoundedRectangle(cornerRadius: 8))
                                 
                                 if footprint.photoAssetIDs.count > 1 {
@@ -602,7 +604,7 @@ struct FootprintCardView: View {
                                         .offset(x: -4, y: 4)
                                 }
                             }
-                            .padding(.bottom, 12)
+                            .padding(.top, 12)
                             .padding(.trailing, 12)
                         }
                         .transition(.opacity.combined(with: .scale(scale: 0.9)))
@@ -726,28 +728,48 @@ struct FootprintCardView: View {
     }
     
     private var timelineIndicator: some View {
-        VStack(spacing: 0) {
-            Rectangle().fill(Color.secondary.opacity(0.15))
-                .frame(width: 1.5)
-                .frame(height: 22)
-                .opacity(isFirst && !isToday ? 0 : 1)
+        let activity = footprint.getActivityType(from: allActivities)
+        let iconName = activity?.icon ?? "mappin.circle.fill"
+        let iconColor = activity?.color ?? .secondary.opacity(0.4)
+        
+        return VStack(spacing: 0) {
+            if showTimeline {
+                Rectangle().fill(Color.secondary.opacity(0.15))
+                    .frame(width: 1.5)
+                    .frame(height: 12)
+                    .opacity(isFirst && !isToday ? 0 : 1)
+            } else {
+                Spacer().frame(height: 8)
+            }
             
-            ZStack {
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: iconName)
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(iconColor)
+                    .frame(width: 32, height: 32)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground))
+                
                 if footprint.isHighlight == true {
-                    Image(systemName: "star.fill").font(.system(size: 14)).foregroundColor(Color.dfkHighlight).padding(4).background(Circle().fill(Color(uiColor: .systemBackground)))
-                } else {
-                    Circle().fill(Color.dfkAccent).frame(width: 10, height: 10)
-                        .scaleEffect(confirmedAnimating ? 1.4 : 1.0)
-                        .animation(.spring(response: 0.3, dampingFraction: 0.5), value: confirmedAnimating)
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(Color.dfkHighlight)
+                        .padding(2)
+                        .background(Circle().fill(Color(uiColor: .systemBackground)))
+                        .offset(x: 4, y: 4)
                 }
-            }.frame(width: 24, height: 24)
+            }
+            .frame(width: 32, height: 32)
             
-            Rectangle().fill(Color.secondary.opacity(0.15))
-                .frame(width: 1.5)
-                .frame(maxHeight: .infinity)
-                .padding(.bottom, -12)
-                .opacity(isLast ? 0 : 1)
-        }.frame(width: 40)
+            if showTimeline {
+                Rectangle().fill(Color.secondary.opacity(0.15))
+                    .frame(width: 1.5)
+                    .frame(maxHeight: .infinity)
+                    .padding(.bottom, -12)
+                    .opacity(isLast ? 0 : 1)
+            } else {
+                Spacer()
+            }
+        }.frame(width: 54)
     }
     
     @ViewBuilder
@@ -793,12 +815,8 @@ struct FootprintCardView: View {
 // MARK: - Placeholder Footprint Card
 struct PlaceholderFootprintCard: View {
     private let phrases = [
-        "正在加载今日足迹...",
-        "正在同步位置记录...",
-        "正在生成记录卡片...",
-        "正在整理位置数据...",
-        "正在分析今日轨迹...",
-        "正在更新时间轴..."
+        "新的足迹正在记录...",
+        "新的足迹即将生成...",
     ]
     
     @Environment(LocationManager.self) private var locationManager

@@ -34,9 +34,11 @@ class MainActivity : ComponentActivity() {
             requestIgnoreBatteryOptimizations()
         }
         
+        val deepLinkDate = intent.getLongExtra("date", -1L).let { if (it == -1L) null else it }
+        
         setContent {
             DiFangKeTheme {
-                NavGraph()
+                NavGraph(initialDate = deepLinkDate)
             }
         }
     }

@@ -271,7 +271,8 @@ struct DayTimelineView: View {
         let offset = latestOffsetIn(date: date)
         let dayFootprints = groupedFootprints[date] ?? []
         let dayManualSelections = groupedManualSelections[date] ?? []
-        let daySummary = groupedInsights[date]?.content
+        let daySummary = groupedInsights[date]?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDaySummary = daySummary?.isEmpty == false ? daySummary : nil
         
         TimelinePageView(
             date: date, 
@@ -281,7 +282,7 @@ struct DayTimelineView: View {
             offset: offset, 
             locationManager: locationManager, 
             pastLimitOffset: pastLimitOffset,
-            summaryContent: daySummary
+            summaryContent: normalizedDaySummary
         )
         .frame(width: UIScreen.main.bounds.width)
         .id(date)

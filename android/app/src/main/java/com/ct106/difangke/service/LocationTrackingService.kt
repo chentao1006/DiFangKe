@@ -81,6 +81,7 @@ class LocationTrackingService : Service() {
     private var ongoingStayStart: RawLocationStore.RawPoint? = null
     private var ongoingStayAddress: String? = null
     private var lastNotificationText: String? = null
+    private var lastNotifiedStayStart: Long? = null
     private var currentIntervalTier = -1 // -1: initial, 0: stationary, 1: moving, 2: fast
 
     private val locationListener = AMapLocationListener { location ->
@@ -284,6 +285,12 @@ class LocationTrackingService : Service() {
                         speed = current.speed
                     )
                     
+                    val stayStart = ongoingStayStart!!.timestamp.time
+                    if (lastNotifiedStayStart != stayStart) {
+                        checkAndSendNewPlaceNotification(centerLat, centerLon, stayStart, address ?: ongoingStayAddress)
+                        lastNotifiedStayStart = stayStart
+                    }
+                    
                     val notifText = (address ?: ongoingStayAddress) ?: "正在停留中"
                     if (notifText != lastNotificationText) {
                         lastNotificationText = notifText
@@ -302,6 +309,54 @@ class LocationTrackingService : Service() {
                         prefs.savePendingStay(null, null, null, null)
                     }
                 }
+            }
+        }
+    }
+
+    private fun checkAndSendNewPlaceNotification(lat: Double, lon: Double, startTime: Long, address: String?) {
+        serviceScope.launch {
+            val isEnabled = prefs.isHighlightNotificationEnabled.first()
+            if (!isEnabled) return@launch
+
+            val startTimeDate = Date(startTime)
+            val places = db.placeDao().getAll()
+            val matchedPlace = places.firstOrNull { place ->
+                processor.haversineMeters(place.latitude, place.longitude, lat, lon) <= place.radius + 100.0
+            }
+
+            var lastVisit: FootprintEntity? = null
+            var isNewPlace = false
+
+            if (matchedPlace != null) {
+                lastVisit = db.footprintDao().getLastVisitToPlace(matchedPlace.placeID, startTimeDate)
+                if (lastVisit == null) isNewPlace = true
+            } else {
+                val hash = FootprintEntity.generateLocationHash(lat, lon)
+                lastVisit = db.footprintDao().getLastVisitToHash(hash, startTimeDate)
+                if (lastVisit == null) isNewPlace = true
+            }
+
+            var isLongTimeNoSee = false
+            if (lastVisit != null) {
+                val diffDays = (startTime - lastVisit.startTime.time) / (1000 * 60 * 60 * 24)
+                if (diffDays >= 30) {
+                    isLongTimeNoSee = true
+                }
+            }
+
+            if (isNewPlace || isLongTimeNoSee) {
+                val title = if (isNewPlace) "发现新地方" else "久违了"
+                val placeName = matchedPlace?.name ?: address ?: "这个位置"
+                val body = if (isNewPlace) {
+                    "你第一次在「$placeName」留下足迹，开启一段新回忆吧。"
+                } else {
+                    val diffDays = (startTime - lastVisit!!.startTime.time) / (1000 * 60 * 60 * 24)
+                    "你已经有 $diffDays 天没来「$placeName」了，欢迎回来。"
+                }
+
+                NotificationHelper.sendHighlightNotification(
+                    this@LocationTrackingService, title, body, startTime.hashCode()
+                )
             }
         }
     }

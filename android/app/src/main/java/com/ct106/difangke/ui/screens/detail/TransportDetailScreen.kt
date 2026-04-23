@@ -461,4 +461,5 @@ private fun getTransportIcon(type: TransportType) = when(type) {
     TransportType.SUBWAY -> Icons.Default.DirectionsSubway
     TransportType.TRAIN -> Icons.Default.Train
     TransportType.AIRPLANE -> Icons.Default.Flight
+    TransportType.SHIP -> Icons.Default.DirectionsBoat
 }

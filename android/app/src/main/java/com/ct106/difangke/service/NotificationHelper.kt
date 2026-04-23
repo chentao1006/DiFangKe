@@ -60,8 +60,12 @@ object NotificationHelper {
         nm.notify(DAILY_SUMMARY_NOTIFICATION_ID, notification)
     }
 
-    fun sendHighlightNotification(context: Context, title: String, body: String, notifId: Int) {
-        val intent = Intent(context, MainActivity::class.java)
+    fun sendHighlightNotification(context: Context, title: String, body: String, notifId: Int, timestamp: Long? = null, footprintId: String? = null) {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            if (timestamp != null) putExtra("date", timestamp)
+            if (footprintId != null) putExtra("footprintID", footprintId)
+        }
         val pi = PendingIntent.getActivity(
             context, notifId, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE

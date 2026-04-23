@@ -27,6 +27,7 @@ class AppPreferences(private val context: Context) {
         val KEY_CUSTOM_AI_MODEL = stringPreferencesKey("customAiModel")
         val KEY_IS_DAILY_NOTIFICATION_ENABLED = booleanPreferencesKey("isDailyNotificationEnabled")
         val KEY_IS_HIGHLIGHT_NOTIFICATION_ENABLED = booleanPreferencesKey("isHighlightNotificationEnabled")
+        val KEY_IS_PAST_MEMORIES_NOTIFICATION_ENABLED = booleanPreferencesKey("isPastMemoriesNotificationEnabled")
         val KEY_NOTIFICATION_HOUR = intPreferencesKey("dailyNotificationHour")
         val KEY_NOTIFICATION_MINUTE = intPreferencesKey("dailyNotificationMinute")
         val KEY_IS_AUTO_PHOTO_LINK_ENABLED = booleanPreferencesKey("isAutoPhotoLinkEnabled")
@@ -58,6 +59,9 @@ class AppPreferences(private val context: Context) {
     }
     val isHighlightNotificationEnabled: Flow<Boolean> = context.dataStore.data.map {
         it[KEY_IS_HIGHLIGHT_NOTIFICATION_ENABLED] ?: true
+    }
+    val isPastMemoriesNotificationEnabled: Flow<Boolean> = context.dataStore.data.map {
+        it[KEY_IS_PAST_MEMORIES_NOTIFICATION_ENABLED] ?: true
     }
     val notificationHour: Flow<Int> = context.dataStore.data.map {
         it[KEY_NOTIFICATION_HOUR] ?: 21
@@ -106,6 +110,9 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setHighlightNotificationEnabled(enabled: Boolean) =
         context.dataStore.edit { it[KEY_IS_HIGHLIGHT_NOTIFICATION_ENABLED] = enabled }
+
+    suspend fun setPastMemoriesNotificationEnabled(enabled: Boolean) =
+        context.dataStore.edit { it[KEY_IS_PAST_MEMORIES_NOTIFICATION_ENABLED] = enabled }
 
     suspend fun setNotificationTime(hour: Int, minute: Int) =
         context.dataStore.edit {

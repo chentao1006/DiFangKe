@@ -7,6 +7,8 @@ import android.os.Build
 import com.ct106.difangke.data.db.AppDatabase
 import com.ct106.difangke.data.prefs.AppPreferences
 import com.ct106.difangke.service.NotificationHelper
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 class DiFangKeApp : Application() {
 
@@ -30,6 +32,18 @@ class DiFangKeApp : Application() {
         com.amap.api.location.AMapLocationClient.updatePrivacyAgree(this, true)
         
         createNotificationChannels()
+        
+        // 调度每日任务
+        kotlinx.coroutines.MainScope().launch {
+            val hour = preferences.notificationHour.first()
+            val minute = preferences.notificationMinute.first()
+            if (preferences.isDailyNotificationEnabled.first()) {
+                com.ct106.difangke.service.DailySummaryWorker.schedule(this@DiFangKeApp, hour, minute)
+            }
+            if (preferences.isPastMemoriesNotificationEnabled.first()) {
+                com.ct106.difangke.service.PastMemoriesWorker.schedule(this@DiFangKeApp)
+            }
+        }
     }
 
     private fun createNotificationChannels() {

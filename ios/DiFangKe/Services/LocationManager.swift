@@ -619,6 +619,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var todayTotalPointsCount: Int = 0    // 全天流水点数，基于本地文件统计
     var ongoingTitle: String?
     private var lastAIAnalysisTime: Date?
+    private var lastNotifiedStayStart: Date?
+    private var lastPastMemoriesCheckDate: String? // yyyy-MM-dd
     private var isAnalyzingOngoing = false
     /// 标记上一个分类足迹的截止时间，避免重复识别 (同时满足 3 天全量数据保留)
     private var lastProcessedTimestamp: Date?
@@ -1393,6 +1395,85 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
         }
+        
+        // --- 10 AM 往年今日检查 ---
+        checkDailyPastMemories()
+    }
+    
+    private func checkDailyPastMemories() {
+        let now = Date()
+        let calendar = Calendar.current
+        let hour = calendar.component(.hour, from: now)
+        
+        // 只有在 10 点之后才检查
+        guard hour >= 10 else { return }
+        
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let dateString = formatter.string(from: now)
+        
+        // 检查今天是否已经运行过
+        let lastCheck = UserDefaults.standard.string(forKey: "lastPastMemoriesCheckDate")
+        guard lastCheck != dateString else { return }
+        
+        // 检查设置是否开启
+        guard UserDefaults.standard.bool(forKey: "isPastMemoriesNotificationEnabled") else { return }
+        
+        Task { @MainActor in
+            await sendPastMemoriesNotificationIfAvailable(for: now)
+            UserDefaults.standard.set(dateString, forKey: "lastPastMemoriesCheckDate")
+        }
+    }
+    
+    private func sendPastMemoriesNotificationIfAvailable(for date: Date) async {
+        guard let context = modelContext else { return }
+        let calendar = Calendar.current
+        
+        let month = calendar.component(.month, from: date)
+        let day = calendar.component(.day, from: date)
+        let currentYear = calendar.component(.year, from: date)
+        
+        // 查找往年今日的足迹 (排除今年)
+        let descriptor = FetchDescriptor<Footprint>()
+        let allFootprints = (try? context.fetch(descriptor)) ?? []
+        
+        // 过滤往年今日
+        let pastFootprints = allFootprints.filter { fp in
+            let fpYear = calendar.component(.year, from: fp.startTime)
+            let fpMonth = calendar.component(.month, from: fp.startTime)
+            let fpDay = calendar.component(.day, from: fp.startTime)
+            
+            return fpYear < currentYear && fpMonth == month && fpDay == day
+        }
+        
+        guard !pastFootprints.isEmpty else { return }
+        
+        // 排除重要地点 (isPriority = true)
+        // 获取所有重要地点的 ID
+        let placeDescriptor = FetchDescriptor<Place>(predicate: #Predicate<Place> { $0.isPriority })
+        let importantPlaceIDs = Set((try? context.fetch(placeDescriptor))?.map { $0.placeID } ?? [])
+        
+        let filteredFootprints = pastFootprints.filter { fp in
+            if let pid = fp.placeID, importantPlaceIDs.contains(pid) {
+                return false
+            }
+            return true
+        }.sorted { $0.startTime < $1.startTime }
+        
+        guard let highlight = filteredFootprints.first else { return }
+        
+        let yearsAgo = currentYear - calendar.component(.year, from: highlight.startTime)
+        let placeName = highlight.address ?? "某个地方"
+        
+        let title = "往年今日 · \(yearsAgo)年前"
+        let body = "在那年的今天，你去了「\(placeName)」。点此重温那段时光。"
+        
+        NotificationManager.shared.sendHighlightNotification(
+            title: title,
+            body: body,
+            footprintID: highlight.footprintID,
+            date: highlight.startTime
+        )
     }
 
     @MainActor
@@ -1513,7 +1594,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     private func analyzeOngoingStay(at location: CLLocation) {
-        guard potentialStopStartLocation != nil else { return }
+        guard let startLoc = potentialStopStartLocation else { return }
         let place = matchedPlace
         
         // Set title immediately based on location instead of calling AI
@@ -1521,6 +1602,72 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         self.ongoingTitle = place?.name ?? currentAddress
         self.saveOngoingTitle()
         self.triggerNotificationSummaryRefresh()
+        
+        // --- 核心改进：新足迹与久违提醒 ---
+        // 如果该停留点的起始时间没有被通知过，则进行新旧地点的判定
+        if lastNotifiedStayStart != startLoc.timestamp {
+            checkAndSendNewPlaceNotification(at: location, startTime: startLoc.timestamp, place: place)
+            lastNotifiedStayStart = startLoc.timestamp
+        }
+    }
+    
+    private func checkAndSendNewPlaceNotification(at location: CLLocation, startTime: Date, place: Place?) {
+        guard let context = modelContext else { return }
+        
+        // 判定规则：
+        // 1. 新地方：历史上从未在该地点（或周边 200m）有过足迹
+        // 2. 很久没来：上一次来是 30 天以前
+        
+        // 由于 SwiftData Predicate 不支持计算属性 (latitude/longitude)，我们在此使用内存过滤
+        // 对于几千条记录，性能是可以接受的
+        let descriptor = FetchDescriptor<Footprint>()
+        let allFootprints = (try? context.fetch(descriptor)) ?? []
+        
+        let history = allFootprints.filter { fp in
+            // 排除当前及之后的（以防万一）
+            if fp.startTime >= startTime { return false }
+            
+            // 如果有匹配地点，优先按地点 ID 匹配
+            if let pid = place?.placeID, fp.placeID == pid {
+                return true
+            }
+            
+            // 否则按距离匹配 (200m 范围内视为同一地点)
+            let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
+            return location.distance(from: fpLoc) < 200
+        }.sorted { $0.startTime > $1.startTime }
+        
+        var isNewPlace = false
+        var isLongTimeNoSee = false
+        var lastVisitDate: Date? = nil
+        
+        if let last = history.first {
+            lastVisitDate = last.startTime
+            let days = Calendar.current.dateComponents([.day], from: lastVisitDate!, to: startTime).day ?? 0
+            if days >= 30 {
+                isLongTimeNoSee = true
+            }
+        } else {
+            isNewPlace = true
+        }
+        
+        if isNewPlace || isLongTimeNoSee {
+            let placeName = place?.name ?? currentAddress
+            let title = isNewPlace ? "发现新地方" : "久违了"
+            let body: String
+            if isNewPlace {
+                body = "你第一次在「\(placeName)」留下足迹，开启一段新回忆吧。"
+            } else {
+                let days = Calendar.current.dateComponents([.day], from: lastVisitDate!, to: startTime).day ?? 0
+                body = "你已经有 \(days) 天没来「\(placeName)」了，欢迎回来。"
+            }
+            
+            NotificationManager.shared.sendHighlightNotification(
+                title: title,
+                body: body,
+                date: startTime
+            )
+        }
     }
     
     private func saveOngoingTitle() {
@@ -2781,14 +2928,10 @@ extension TimeInterval {
         if totalMinutes >= 1440 {
             let days = totalMinutes / 1440
             let hours = (totalMinutes % 1440) / 60
-            let minutes = totalMinutes % 60
             
             var components: [String] = ["\(days) 天"]
             if hours > 0 {
                 components.append("\(hours) 小时")
-            }
-            if minutes > 0 {
-                components.append("\(minutes) 分钟")
             }
             return components.joined(separator: " ")
         } else if totalMinutes >= 60 {

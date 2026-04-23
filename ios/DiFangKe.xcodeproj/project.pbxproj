@@ -45,6 +45,7 @@
 		C68EFC122F8AA05900C1F901 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C68EFC112F8AA05900C1F901 /* AppConfig.swift */; };
 		C6ACF7672F95110B006D9536 /* RawPointsListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6ACF7662F95110B006D9536 /* RawPointsListView.swift */; };
 		C6D2DE3A2F90E39800466878 /* HealthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6D2DE392F90E39800466878 /* HealthManager.swift */; };
+		C6FC95012F9A67B2004E1FE6 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = C6FC95002F9A67B2004E1FE6 /* AppIcon.icon */; };
 		CDA3376C04480D9A7C70C2BC /* PlacePickerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F44E7F2A482D33533D342882 /* PlacePickerViewModel.swift */; };
 		D41ABCD1F214C4E81A5F8C0C /* PlacesManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D09C072C5681826463BD99 /* PlacesManagerView.swift */; };
 		DCF7DA8245034788006DA387 /* Footprint.swift in Sources */ = {isa = PBXBuildFile; fileRef = A49FF8D1053B68159E4D2EEC /* Footprint.swift */; };
@@ -97,6 +98,7 @@
 		C68EFC112F8AA05900C1F901 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		C6ACF7662F95110B006D9536 /* RawPointsListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawPointsListView.swift; sourceTree = "<group>"; };
 		C6D2DE392F90E39800466878 /* HealthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthManager.swift; sourceTree = "<group>"; };
+		C6FC95002F9A67B2004E1FE6 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		F44E7F2A482D33533D342882 /* PlacePickerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacePickerViewModel.swift; sourceTree = "<group>"; };
 		FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -115,6 +117,7 @@
 			children = (
 				C651F9AF2F7F6CBF00217426 /* DiFangKe.entitlements */,
 				76746EBFA55AE24E965803B1 /* Assets.xcassets */,
+				C6FC95002F9A67B2004E1FE6 /* AppIcon.icon */,
 				8406ACF5012D1DB8F428AB9C /* Config.plist */,
 				A54AB938AAFF2E0EF442F6AA /* ContentView.swift */,
 				2C84EEA3EDC02DA770FA555B /* DiFangKeApp.swift */,
@@ -264,6 +267,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C6FC95012F9A67B2004E1FE6 /* AppIcon.icon in Resources */,
 				E5CF6588D5181064FB5CB42D /* Assets.xcassets in Resources */,
 				C199604340369E777F064D7B /* Config.plist in Resources */,
 			);
@@ -407,7 +411,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.3;
+				MARKETING_VERSION = 1.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke;
 				PRODUCT_NAME = "地方客";
 				SDKROOT = iphoneos;
@@ -497,7 +501,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.3;
+				MARKETING_VERSION = 1.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke;
 				PRODUCT_NAME = "地方客";
 				SDKROOT = iphoneos;

@@ -223,11 +223,13 @@ class OpenAIService private constructor() {
             )
             db.footprintDao().update(updatedFp)
 
+            /*
             if (score >= 0.3 && prefs.isHighlightNotificationEnabled.first()) {
                 NotificationHelper.sendHighlightNotification(
                     DiFangKeApp.instance, newTitle, reason, fp.footprintID.hashCode()
                 )
             }
+            */
             true
         } catch (e: Exception) {
             Log.e(TAG, "解析足迹 AI 返回失败", e)

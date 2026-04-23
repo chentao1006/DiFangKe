@@ -59,6 +59,12 @@ interface FootprintDao {
     @Query("SELECT DISTINCT date(startTime/1000, 'unixepoch', 'localtime') FROM footprints WHERE statusValue != 'ignored' ORDER BY startTime ASC")
     fun observeAvailableDates(): Flow<List<String>>
 
+    @Query("SELECT * FROM footprints WHERE placeID = :placeID AND startTime < :currentTime AND statusValue != 'ignored' ORDER BY startTime DESC LIMIT 1")
+    suspend fun getLastVisitToPlace(placeID: String, currentTime: Date): FootprintEntity?
+
+    @Query("SELECT * FROM footprints WHERE locationHash = :hash AND startTime < :currentTime AND statusValue != 'ignored' ORDER BY startTime DESC LIMIT 1")
+    suspend fun getLastVisitToHash(hash: String, currentTime: Date): FootprintEntity?
+
     @Query("DELETE FROM footprints")
     suspend fun deleteAll()
 

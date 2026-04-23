@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage("dailyNotificationMinute") private var notificationMinute: Int = 0
     @AppStorage("isDailyNotificationEnabled") private var isDailyNotificationEnabled = true
     @AppStorage("isHighlightNotificationEnabled") private var isHighlightNotificationEnabled = true
+    @AppStorage("isPastMemoriesNotificationEnabled") private var isPastMemoriesNotificationEnabled = true
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
     @AppStorage("aiServiceType") private var aiServiceType = "public"
     
@@ -134,6 +135,18 @@ struct SettingsView: View {
                             NotificationManager.shared.requestAuthorization { granted in
                                 if !granted {
                                     isHighlightNotificationEnabled = false
+                                    showingSettingsAlert = true
+                                }
+                            }
+                        }
+                    }
+                
+                Toggle("往年今日提醒", isOn: $isPastMemoriesNotificationEnabled)
+                    .onChange(of: isPastMemoriesNotificationEnabled) { _, newValue in
+                        if newValue {
+                            NotificationManager.shared.requestAuthorization { granted in
+                                if !granted {
+                                    isPastMemoriesNotificationEnabled = false
                                     showingSettingsAlert = true
                                 }
                             }

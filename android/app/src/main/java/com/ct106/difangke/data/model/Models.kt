@@ -26,7 +26,8 @@ enum class TransportType(val raw: String) {
     CAR("car"),
     SUBWAY("subway"),
     TRAIN("train"),
-    AIRPLANE("airplane");
+    AIRPLANE("airplane"),
+    SHIP("ship");
 
     val localizedName: String get() = when (this) {
         SLOW -> "步行"
@@ -39,6 +40,7 @@ enum class TransportType(val raw: String) {
         SUBWAY -> "轨道交通"
         TRAIN -> "火车/高铁"
         AIRPLANE -> "飞机"
+        SHIP -> "轮船"
     }
 
     val icon: String get() = when (this) {
@@ -52,6 +54,7 @@ enum class TransportType(val raw: String) {
         SUBWAY -> "directions_subway"
         TRAIN -> "train"
         AIRPLANE -> "flight"
+        SHIP -> "directions_boat"
     }
 
     companion object {

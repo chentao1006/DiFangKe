@@ -167,8 +167,22 @@ struct DFKMapView: View {
             // 统计热力图点
             ForEach(heatmapPoints) { point in
                 Annotation("", coordinate: point.coordinate) {
-                    let ratio = Double(point.intensity) / Double(max(1, point.maxIntensity))
-                    let color: Color = ratio < 0.3 ? .orange : (ratio < 0.7 ? .red : .purple)
+                    // 使用非线性缩放（如平方根或更低幂次），使热力图颜色分布更均匀。
+                    // 解决因个别极高频地点（如家）导致其他所有地点都落在 0.2 以下变为橙色的问题。
+                    let rawRatio = Double(point.intensity) / Double(max(1, point.maxIntensity))
+                    let ratio = pow(rawRatio, 0.4) // 使用 0.4 次幂显著提升低频点权重
+                    
+                    let color: Color = {
+                        if point.maxIntensity <= 1 {
+                            return .orange
+                        } else if ratio < 0.25 {
+                            return .orange
+                        } else if ratio < 0.85 {
+                            return .red
+                        } else {
+                            return .dfkDeepRed
+                        }
+                    }()
                     
                     // 大地图模式下圆圈变大
                     let baseSize: CGFloat = isInteractive ? 24 : 14

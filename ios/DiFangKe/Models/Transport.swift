@@ -34,6 +34,7 @@ enum TransportType: String, CaseIterable, Codable {
     case subway = "subway"             // 轨道交通
     case train = "train"               // 火车/高铁
     case airplane = "airplane"         // 飞机
+    case ship = "ship"                 // 轮船
     
     var icon: String {
         switch self {
@@ -47,6 +48,7 @@ enum TransportType: String, CaseIterable, Codable {
         case .subway: return "tram.fill"
         case .train: return "train.side.front.car"
         case .airplane: return "airplane"
+        case .ship: return "ferry.fill"
         }
     }
     
@@ -62,6 +64,7 @@ enum TransportType: String, CaseIterable, Codable {
         case .subway: return "tram.fill"
         case .train: return "train.side.front.car"
         case .airplane: return "airplane"
+        case .ship: return "ferry.fill"
         }
     }
     
@@ -90,6 +93,7 @@ enum TransportType: String, CaseIterable, Codable {
         case .subway: return "轨道交通"
         case .train: return "火车/高铁"
         case .airplane: return "飞机"
+        case .ship: return "轮船"
         }
     }
 }

@@ -45,12 +45,13 @@ struct SimpleDayTimelineView: View {
     
     private var summary: String? {
         let dayStart = Calendar.current.startOfDay(for: date)
-        return allInsights.first { 
+        let content = allInsights.first { 
             if let d = $0.date {
                 return Calendar.current.isDate(d, inSameDayAs: dayStart)
             }
             return false
-        }?.content
+        }?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return content?.isEmpty == false ? content : nil
     }
     
     var body: some View {
@@ -92,6 +93,7 @@ struct HistoryListView: View {
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
     @Query private var allManualSelections: [TransportManualSelection]
     @Query(sort: \TransportRecord.startTime, order: .reverse) private var allTransportRecords: [TransportRecord]
+    @Query private var allInsights: [DailyInsight]
     @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
     
     let initialDate: Date
@@ -154,6 +156,7 @@ struct HistoryListView: View {
         .onChange(of: allFootprints) { updateSummaries() }
         .onChange(of: allManualSelections) { updateSummaries() }
         .onChange(of: allTransportRecords) { updateSummaries() }
+        .onChange(of: allInsights) { updateSummaries() }
         .sheet(item: $showingDate) { item in
             SimpleDayTimelineView(date: item.date)
                 .environment(locationManager)
@@ -618,9 +621,8 @@ struct DayCell: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            
-            Spacer()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
         .padding(.vertical, 16)
         .background(
@@ -667,11 +669,14 @@ struct DayStatsView: View {
     let photoCount: Int
     
     var body: some View {
-        FlowLayout(spacing: 8) {
+        HStack(spacing: 8) {
             if footprintCount > 0 { statItem(icon: "mappin.and.ellipse", value: "\(footprintCount)") }
             if mileage > 0 { statItem(icon: "figure.walk", value: formatMileage(mileage)) }
             if photoCount > 0 { statItem(icon: "photo.on.rectangle", value: "\(photoCount)") }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
     }
     
     private func statItem(icon: String, value: String) -> some View {

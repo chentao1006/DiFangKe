@@ -39,7 +39,7 @@ object NavRoutes {
 
 
 @Composable
-fun NavGraph() {
+fun NavGraph(initialDate: Long? = null) {
     val navController = rememberNavController()
     val context = LocalContext.current
     val prefs = remember { AppPreferences(context) }
@@ -48,7 +48,11 @@ fun NavGraph() {
     
     LaunchedEffect(Unit) {
         val hasLaunched = prefs.getHasLaunchedBefore()
-        startDestination = if (hasLaunched) NavRoutes.MAIN else NavRoutes.ONBOARDING
+        startDestination = if (hasLaunched) {
+            if (initialDate != null) "main?date=$initialDate" else NavRoutes.MAIN
+        } else {
+            NavRoutes.ONBOARDING
+        }
     }
 
     if (startDestination == null) {

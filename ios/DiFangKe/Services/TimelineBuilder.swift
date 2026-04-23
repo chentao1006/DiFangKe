@@ -201,6 +201,7 @@ class TimelineBuilder {
     @MainActor static var timelineCache: [Date: [TimelineItem]] = [:]
     
     static func buildTimeline(for date: Date, footprints: [FootprintLite], allRawPoints: [CLLocation], allPlaces: [PlaceLite] = [], overrides: [OverrideLite] = []) -> [TimelineItem] {
+        let isRawDataAvailable = !allRawPoints.isEmpty
         var items: [TimelineItem] = []
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -263,7 +264,7 @@ class TimelineBuilder {
             // Gap before current footprint
             if fp.startTime > currentTime {
                 let gapPoints = TimelineBuilder.extractPoints(from: allRawPoints, start: currentTime, end: fp.startTime)
-                fillGap(from: currentTime, to: fp.startTime, items: &items, gapPoints: gapPoints, sortedFootprints: finalizedSortedFootprints, currentIndex: index, allPlaces: allPlaces, overrides: overrides)
+                fillGap(from: currentTime, to: fp.startTime, items: &items, gapPoints: gapPoints, sortedFootprints: finalizedSortedFootprints, currentIndex: index, allPlaces: allPlaces, overrides: overrides, isRawDataAvailable: isRawDataAvailable)
             }
             
             if fp.status != .ignored {
@@ -303,7 +304,7 @@ class TimelineBuilder {
         // Final gap until now/end of day
         if dayLimit > currentTime {
             let gapPoints = TimelineBuilder.extractPoints(from: allRawPoints, start: currentTime, end: dayLimit)
-            fillGap(from: currentTime, to: dayLimit, items: &items, gapPoints: gapPoints, sortedFootprints: finalizedSortedFootprints, currentIndex: finalizedSortedFootprints.count, allPlaces: allPlaces, overrides: overrides)
+            fillGap(from: currentTime, to: dayLimit, items: &items, gapPoints: gapPoints, sortedFootprints: finalizedSortedFootprints, currentIndex: finalizedSortedFootprints.count, allPlaces: allPlaces, overrides: overrides, isRawDataAvailable: isRawDataAvailable)
         }
         
         // Post-processing: Resolve overlaps to ensure continuous and non-overlapping timeline
@@ -407,18 +408,22 @@ class TimelineBuilder {
         return merged
     }
     
-    private static func fillGap(from start: Date, to end: Date, items: inout [TimelineItem], gapPoints: [CLLocation], sortedFootprints: [FootprintLite], currentIndex: Int, allPlaces: [PlaceLite], overrides: [OverrideLite]) {
+    private static func fillGap(from start: Date, to end: Date, items: inout [TimelineItem], gapPoints: [CLLocation], sortedFootprints: [FootprintLite], currentIndex: Int, allPlaces: [PlaceLite], overrides: [OverrideLite], isRawDataAvailable: Bool) {
         let duration = end.timeIntervalSince(start)
         guard duration > 60 else { return } // Ignore gaps < 1 min
         
         if gapPoints.isEmpty {
+            let isToday = Calendar.current.isDateInToday(start)
+            // 核心防护：如果是历史日期且没有原始轨迹，不执行任何自动填充逻辑，保持真实空白
+            guard isRawDataAvailable || isToday else { return }
+            
             // Check for "Phantom Transports"
             handlePhantomTransports(from: start, to: end, items: &items, sortedFootprints: sortedFootprints, currentIndex: currentIndex, allPlaces: allPlaces, overrides: overrides)
             
             // 如果处理完“虚空交通”后，这段时间依然有幅空白，则执行强制桥接
             let lastItemEnd = items.last?.endTime ?? start
             if end.timeIntervalSince(lastItemEnd) > AppConfig.shared.stayDurationThreshold && !isOverrideDeleted(start: lastItemEnd, end: end, overrides: overrides) {
-                bridgeDataGap(from: lastItemEnd, to: end, items: &items, sortedFootprints: sortedFootprints, currentIndex: currentIndex, allPlaces: allPlaces)
+                bridgeDataGap(from: lastItemEnd, to: end, items: &items, sortedFootprints: sortedFootprints, currentIndex: currentIndex, allPlaces: allPlaces, isRawDataAvailable: isRawDataAvailable)
             }
             return
         }
@@ -499,9 +504,14 @@ class TimelineBuilder {
     }
 
     /// 当完全没有原始轨迹点时，根据位置变化逻辑桥接空白
-    private static func bridgeDataGap(from start: Date, to end: Date, items: inout [TimelineItem], sortedFootprints: [FootprintLite], currentIndex: Int, allPlaces: [PlaceLite]) {
+    private static func bridgeDataGap(from start: Date, to end: Date, items: inout [TimelineItem], sortedFootprints: [FootprintLite], currentIndex: Int, allPlaces: [PlaceLite], isRawDataAvailable: Bool) {
         let duration = end.timeIntervalSince(start)
-        // 核心修复：即使没点，只要时间超过交通门槛（30s），且有位移，就应强行桥接
+        let isToday = Calendar.current.isDateInToday(start)
+        
+        // 核心修复：如果是历史日期且完全没有原始轨迹点，则不应执行自动桥接（防止产生虚假记录）
+        guard isRawDataAvailable || isToday else { return }
+        
+        // 只要时间超过交通门槛（通常为 60s），且有位移，就应考虑桥接
         guard duration >= AppConfig.shared.transportMinDurationThreshold else { return }
         
         let loc1: CLLocation? = {
@@ -525,7 +535,7 @@ class TimelineBuilder {
             if distance < 300 {
                 // 距离相近，认为是原地停留
                 addStationaryStay(from: start, to: end, gapPoints: [], items: &items, allPlaces: allPlaces, coordinateOverride: l1.coordinate)
-            } else {
+            } else if isRawDataAvailable {
                 // 距离较远，且完全无点，合成一段虚线交通
                 addSynthesizedTransport(from: start, to: end, l1: l1.coordinate, l2: l2.coordinate, items: &items)
             }
@@ -828,6 +838,7 @@ class TimelineBuilder {
             case .car, .bus, .subway: return 4
             case .train: return 5
             case .airplane: return 6
+            case .ship: return 7
             }
         }
         return category(of: t1) != category(of: t2)
@@ -959,6 +970,7 @@ class TimelineBuilder {
             case .car, .bus, .subway: return 4
             case .train: return 5
             case .airplane: return 6
+            case .ship: return 7
             }
         }
         return cat(of: t1) == cat(of: t2)
@@ -1117,6 +1129,11 @@ class PersistentTimelineBuilder {
         let allRawPoints = await Task.detached {
             RawLocationStore.shared.loadAllDevicesLocations(for: date)
         }.value
+        
+        // 核心防护：如果没有原始轨迹点且不是今天，不要自动生成任何内容（防止产生虚假交通）
+        if allRawPoints.isEmpty && !isToday {
+            return
+        }
         
         // 核心防护：如果当前设备正在记录一个停留，暂时不要将其自动生成为正式足迹，
         // 除非停留已经结束（离开了）。这样可以避免“正在记录”卡片与列表足迹重复显示。

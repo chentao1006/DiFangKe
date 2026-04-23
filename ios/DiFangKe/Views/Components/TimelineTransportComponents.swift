@@ -21,22 +21,23 @@ struct TransportCardView: View {
                 VStack(spacing: 0) {
                     Rectangle().fill(Color.secondary.opacity(0.15))
                         .frame(width: 1.5)
-                        .frame(height: 22)
+                        .frame(height: 12)
                         .opacity(isFirst && !isToday ? 0 : 1)
                     
                     ZStack {
-                        Circle()
-                            .stroke(Color.blue.opacity(0.5), lineWidth: 1.5)
-                            .frame(width: 8, height: 8)
-                            .background(Circle().fill(Color.blue.opacity(0.2)))
-                    }.frame(width: 24, height: 24)
+                        Image(systemName: transport.currentType.sfSymbol)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(Color.dfkAccent)
+                            .frame(width: 32, height: 32)
+                            .background(Color(uiColor: .secondarySystemGroupedBackground))
+                    }.frame(width: 32, height: 32)
                     
                     Rectangle().fill(Color.secondary.opacity(0.15))
                         .frame(width: 1.5)
                         .frame(maxHeight: .infinity)
                         .padding(.bottom, -12)
                         .opacity(isLast ? 0 : 1)
-                }.frame(width: 40)
+                }.frame(width: 54)
                 
                 // 2. Card Content
                 VStack(alignment: .center, spacing: 0) {
@@ -55,11 +56,11 @@ struct TransportCardView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         
-                        // Middle: Icon & Distance
+                        // Middle: Arrow & Distance
                         VStack(spacing: 4) {
-                            transportIcon
-                                .font(.system(size: 18))
-                                .foregroundColor(.dfkAccent)
+                            Image(systemName: transport.startLocation == transport.endLocation ? "arrow.right.arrow.left" : "arrow.right")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.secondary.opacity(0.4))
                             
                             Text(distanceString)
                                 .font(.system(size: 9, weight: .bold))
@@ -75,7 +76,7 @@ struct TransportCardView: View {
                                 .foregroundColor(.orange.opacity(0.7))
                             }
                         }
-                        .frame(width: 80)
+                        .frame(width: 70)
                         
                         // Right: End
                         VStack(alignment: .trailing, spacing: 4) {
@@ -91,7 +92,7 @@ struct TransportCardView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-                    .padding(.vertical, 16)
+                    .padding(.vertical, 14)
                     .padding(.trailing, 16)
                 }
             }

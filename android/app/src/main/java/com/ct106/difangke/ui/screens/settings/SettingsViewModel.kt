@@ -37,6 +37,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val isHighlightNotificationEnabled: StateFlow<Boolean> = prefs.isHighlightNotificationEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
+    val isPastMemoriesNotificationEnabled: StateFlow<Boolean> = prefs.isPastMemoriesNotificationEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
     val notificationHour: StateFlow<Int> = prefs.notificationHour
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 21)
         
@@ -92,6 +95,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun setPastMemoriesNotificationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefs.setPastMemoriesNotificationEnabled(enabled)
+            updateNotificationSchedule()
+        }
+    }
+
     fun setNotificationTime(hour: Int, minute: Int) {
         viewModelScope.launch {
             prefs.setNotificationTime(hour, minute)
@@ -115,6 +125,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 com.ct106.difangke.service.DailySummaryWorker.schedule(getApplication(), hour, minute)
             } else {
                 com.ct106.difangke.service.DailySummaryWorker.cancel(getApplication())
+            }
+
+            val pastMemoriesEnabled = prefs.isPastMemoriesNotificationEnabled.first()
+            if (pastMemoriesEnabled) {
+                com.ct106.difangke.service.PastMemoriesWorker.schedule(getApplication())
+            } else {
+                com.ct106.difangke.service.PastMemoriesWorker.cancel(getApplication())
             }
         }
     }
