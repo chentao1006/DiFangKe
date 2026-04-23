@@ -33,3 +33,6 @@
 -keep class com.ct106.difangke.service.UpdateInfo { *; }
 -keep class com.ct106.difangke.service.UpdateManager { *; }
 -keep class com.ct106.difangke.data.db.entity.** { *; }
+
+# Preserve source file and line number information for crash reporting
+-keepattributes SourceFile,LineNumberTable
