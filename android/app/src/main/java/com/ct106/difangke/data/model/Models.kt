@@ -197,6 +197,13 @@ data class DaySummary(
 
 // ── 足迹标题生成（对应 iOS Footprint.titleTemplates）──────────────
 object FootprintTitles {
+    private val templates = listOf(
+        "在 %s 停留",
+        "位于 %s",
+        "在此处停留",
+        "探索 %s"
+    )
+
     fun generate(locationName: String, seed: Long): String {
         return locationName
     }

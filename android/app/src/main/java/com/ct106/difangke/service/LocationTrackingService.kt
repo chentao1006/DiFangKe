@@ -17,6 +17,7 @@ import com.ct106.difangke.data.model.FootprintTitles
 import com.ct106.difangke.data.model.TransportType
 import com.google.gson.Gson
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import java.util.*
 
 /**
