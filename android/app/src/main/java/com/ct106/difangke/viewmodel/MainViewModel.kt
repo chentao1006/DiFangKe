@@ -455,9 +455,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             // 对未分析的足迹进行单独分析
-            footprints.filter { !it.aiAnalyzed }.forEach { fp ->
-                openAI.analyzeFootprint(fp)
-            }
+            // footprints.filter { !it.aiAnalyzed }.forEach { fp ->
+            //     openAI.analyzeFootprint(fp)
+            // }
 
             // 如果是今天或强制，生成每日摘要
             openAI.generateDailySummary(date, footprints, transports)

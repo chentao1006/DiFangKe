@@ -34,7 +34,6 @@ class OpenAIService {
     }
     
     enum AITask {
-        case footprint(UUID)
         case dailySummary(Date, [UUID], [UUID], Bool)
         case tomorrowQuote
         case pastQuote
@@ -49,7 +48,6 @@ class OpenAIService {
     private var ongoingCompletions: [(String) -> Void] = []
     
     // 快速查找集合，避免线性搜索导致卡顿
-    private var footprintTaskSet = Set<UUID>()
     private var dailySummaryDateSet = Set<Date>()
     
     var taskQueue: [AITask] = []
@@ -202,17 +200,6 @@ class OpenAIService {
 
     // MARK: - Queue Management
     
-    func enqueueFootprintsForAnalysis(_ identifiers: [UUID]) {
-        // 批量加入，减少重复计算
-        let newIds = identifiers.filter { !footprintTaskSet.contains($0) }
-        guard !newIds.isEmpty else { return }
-        
-        for id in newIds {
-            footprintTaskSet.insert(id)
-            self.taskQueue.append(.footprint(id))
-        }
-        self.processQueue()
-    }
 
     func enqueueDailySummary(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], force: Bool = false) {
         let startOfDate = Calendar.current.startOfDay(for: date)
@@ -268,10 +255,6 @@ class OpenAIService {
     }
 
     // 便捷方法
-    func analyzeFootprint(_ footprint: Footprint) {
-        if footprint.aiAnalyzed { return }
-        self.enqueueFootprintsForAnalysis([footprint.footprintID])
-    }
     private var currentInterval: TimeInterval {
         return aiServiceType == "custom" ? 15 : 60
     }
@@ -295,9 +278,6 @@ class OpenAIService {
             self.isNetworkRequesting = true
             
             switch nextTask {
-            case .footprint(let footprintID):
-                await self.processFootprintTask(footprintID: footprintID, context: context)
-                // 任务处理完后，不一定要从 Set 移除，因为 footprint 本身有 aiAnalyzed 标记
             case .dailySummary(let date, let fpIds, let tpIds, let force):
                 await self.processDailySummaryTask(date: date, fpIds: fpIds, tpIds: tpIds, context: context, force: force)
             case .tomorrowQuote:
@@ -321,48 +301,6 @@ class OpenAIService {
     
     // MARK: - Task Handlers (Async)
 
-    private func processFootprintTask(footprintID: UUID, context: ModelContext) async {
-        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
-        guard let footprint = (try? context.fetch(descriptor))?.first, !footprint.aiAnalyzed else { return }
-        
-        let locations = footprint.footprintLocations.map { ($0.latitude, $0.longitude) }
-        var explicitPlaceName: String? = nil
-        if let pid = footprint.placeID {
-            let placeDescriptor = FetchDescriptor<Place>(predicate: #Predicate { $0.placeID == pid })
-            explicitPlaceName = (try? context.fetch(placeDescriptor))?.first?.name
-        }
-
-        let result = await withCheckedContinuation { (continuation: CheckedContinuation<(String, String, Float, Bool), Never>) in
-            self.analyzeFootprint(
-                locations: locations,
-                duration: footprint.duration,
-                startTime: footprint.startTime,
-                endTime: footprint.endTime,
-                placeName: explicitPlaceName,
-                address: footprint.address,
-                activityName: footprint.getActivityType(from: [])?.name
-            ) { title, reason, score, success in
-                continuation.resume(returning: (title, reason, score, success))
-            }
-        }
-        
-        if result.3 {
-            footprint.title = result.0
-            footprint.reason = result.1
-            footprint.aiScore = result.2
-            footprint.aiAnalyzed = true
-            try? context.save()
-            
-            if result.2 >= 0.3 {
-                NotificationManager.shared.sendHighlightNotification(
-                    title: result.0, 
-                    body: result.1, 
-                    footprintID: footprint.footprintID,
-                    date: footprint.startTime
-                )
-            }
-        }
-    }
     
     private func processDailySummaryTask(date: Date, fpIds: [UUID], tpIds: [UUID], context: ModelContext, force: Bool = false) async {
         let startOfDate = Calendar.current.startOfDay(for: date)
@@ -392,12 +330,11 @@ class OpenAIService {
         for id in fpIds {
             let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
             if let fp = (try? context.fetch(fpDescriptor))?.first {
-                let title = fp.title.isEmpty ? "点位记录" : fp.title
-                if Footprint.isGenericTitle(title) { continue }
+                let displayName = fp.address ?? "点位记录"
                 
                 let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
                 let activityName = fp.getActivityType(from: allActivities)?.name
-                var description = activityName != nil ? "\(title)(\(activityName!))" : title
+                var description = activityName != nil ? "\(displayName)(\(activityName!))" : displayName
                 
                 // 强调已收藏/高亮足迹
                 if fp.isHighlight == true {
@@ -499,121 +436,12 @@ class OpenAIService {
     }
     
     private func processOngoingTask(data: ([(Double, Double)], TimeInterval, Date, Date, String?, String?, String?)) async {
-        let result = await withCheckedContinuation { (continuation: CheckedContinuation<String, Never>) in
-            self.analyzeFootprint(
-                locations: data.0,
-                duration: data.1,
-                startTime: data.2,
-                endTime: data.3,
-                placeName: data.4,
-                address: data.5,
-                activityName: data.6,
-                isOngoing: true
-            ) { title, _, _, success in
-                continuation.resume(returning: success ? title : (data.4 ?? data.5 ?? "地点记录"))
-            }
-        }
+        let result = data.4 ?? data.5 ?? ""
         let calls = self.ongoingCompletions
         self.ongoingCompletions.removeAll()
         calls.forEach { $0(result) }
     }
 
-    // MARK: - Core AI Logic (Legacy Callback Style for Internal Use)
-    
-    func analyzeFootprint(locations: [(Double, Double)], 
-                          duration: TimeInterval, 
-                          startTime: Date, 
-                          endTime: Date, 
-                          placeName: String? = nil,
-                          address: String? = nil,
-                          activityName: String? = nil,
-                          isOngoing: Bool = false, 
-                          completion: @escaping (String, String, Float, Bool) -> Void) {
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "HH:mm"
-        let startStr = dateFormatter.string(from: startTime)
-        let endStr = dateFormatter.string(from: endTime)
-        
-        let weekdayStr = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][Calendar.current.component(.weekday, from: startTime) - 1]
-        let dateContext = "公历\(startTime.formatted(.dateTime.year().month().day()))，\(weekdayStr)"
-        
-        var promptSnippet = ""
-        if let name = placeName {
-            promptSnippet = "用户正在“\(name)”"
-            if let act = activityName { promptSnippet += "进行“\(act)”活动。" }
-        } else {
-            promptSnippet = address != nil ? "这里的具体参考地址是：\(address!)。" : "该位置是一个未曾记录的新去处。"
-            if let act = activityName { promptSnippet += "用户正在这里进行“\(act)”。" }
-        }
-
-        let prompt = """
-        用户在某地点停留：
-        日期环境：\(dateContext)
-        时间：\(startStr) - \(endStr)
-        时长：\(Int(duration / 60))分钟
-        地点与活动信息：\(promptSnippet)
-
-        请根据以上信息进行分析并输出：
-        1. 简短标题：10字以内，反映地点内涵或活动属性，严禁使用“地点记录”、“停留”、“发现足迹”等通用废话。
-        2. 精彩程度：0.0 ~ 1.0。
-        3. 足迹备注：20字以内，要求富有生活气息、温情且具有洞察力。
-           【注意】：即便信息极少（如长时间居家），也要尝试从时间段、居家氛围提取美感或描述一种宁静感，绝对禁止出现“缺乏描述”、“没有详情”、“具体活动不明”等生硬死板的表述。
-
-        返回格式（严格JSON）：
-        { "title": "...", "score": 0.85, "reason": "..." }
-        """
-        
-        let body: [String: Any] = [
-            "messages": [
-                ["role": "system", "content": "你是一位拥有敏锐洞察力的生活美学专家，擅长从平凡的日常足迹中捕捉闪光点。你的回应必须是直接的 JSON 格式，文字风格温暖、精炼且富有感染力。"],
-                ["role": "user", "content": prompt]
-            ],
-            "temperature": 0.85,
-            "response_format": ["type": "json_object"]
-        ]
-        
-        guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
-            completion(placeName ?? address ?? "地点记录", "无法发起请求", 0.0, false)
-            return
-        }
-        
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            Task { @MainActor in
-                if let error = error {
-                    self.lastError = "网络请求失败: \(error.localizedDescription)"
-                    completion("地点记录", "网络请求失败", 0.0, false)
-                    return
-                }
-                
-                if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
-                    let statusMsg = "HTTP \(httpResponse.statusCode)"
-                    self.lastError = "AI 服务响应异常: \(statusMsg)"
-                    completion("地点记录", statusMsg, 0.0, false)
-                    return
-                }
-
-                guard let data = data,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let choices = json["choices"] as? [[String: Any]],
-                      let content = (choices.first?["message"] as? [String: Any])?["content"] as? String else {
-                    self.lastError = "解析 AI 返回数据失败"
-                    completion("地点记录", "解析失败", 0.0, false)
-                    return
-                }
-                
-                let clean = content.replacingOccurrences(of: "```json", with: "").replacingOccurrences(of: "```", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                if let contentData = clean.data(using: .utf8),
-                   let parsed = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any] {
-                    let t = parsed["title"] as? String ?? "新足迹"
-                    let r = parsed["reason"] as? String ?? ""
-                    let s = (parsed["score"] as? NSNumber)?.floatValue ?? 0.0
-                    completion(t, r, s, true)
-                } else {
-                    completion("地点记录", "解析 JSON 失败", 0.0, false)
-                }
-            }
-        }.resume()
-    }
     
     func generateDailySummary(date: Date, footprintDescriptions: [String], completion: @escaping (String?) -> Void) {
         guard !footprintDescriptions.isEmpty else { completion("今天过得轻盈而自在。"); return }

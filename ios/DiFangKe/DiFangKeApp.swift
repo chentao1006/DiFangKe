@@ -186,24 +186,6 @@ struct DiFangKeApp: App {
         print("[Setup] Seeding marked as complete.")
     }
     
-    private func resumeUnfinishedAIAnalysis(context: ModelContext) {
-        // 查找最近 100 个尚未进行过 AI 分析的足迹
-        var descriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate<Footprint> { $0.aiAnalyzed == false },
-            sortBy: [SortDescriptor(\.startTime, order: .reverse)]
-        )
-        descriptor.fetchLimit = 100
-        
-        let container = context.container
-        Task.detached(priority: .background) {
-            let backgroundContext = ModelContext(container)
-            if let unanalyzed = try? backgroundContext.fetch(descriptor), !unanalyzed.isEmpty {
-                // 将待分析项的 ID 加入队列，由 OpenAIService 自行 fetch，避免 context 失效
-                let identifiers = unanalyzed.map { $0.footprintID }
-                await OpenAIService.shared.enqueueFootprintsForAnalysis(identifiers)
-            }
-        }
-    }
 }
 
 struct OnboardingView: View {

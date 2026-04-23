@@ -22,7 +22,7 @@ struct FootprintModalView: View {
     @State private var hasChanged = false
     @State private var showMap = false
     @State private var showAI = false
-    @FocusState private var titleFocused: Bool
+    @FocusState private var addressFocused: Bool
     @FocusState private var reasonFocused: Bool
     var autoFocus: Bool = false
     @State private var showingDeleteAlert = false
@@ -44,10 +44,13 @@ struct FootprintModalView: View {
     @State private var showingSearchSheet = false
     @State private var showingActivityTypeEditor = false
     
-    init(footprint: Footprint, allPlaces: [Place] = [], autoFocus: Bool = false, onDismiss: ((Bool) -> Void)? = nil) {
+    var isDraft: Bool = false
+    
+    init(footprint: Footprint, allPlaces: [Place] = [], autoFocus: Bool = false, isDraft: Bool = false, onDismiss: ((Bool) -> Void)? = nil) {
         self._footprint = Bindable(footprint)
         self.allPlaces = allPlaces
         self.autoFocus = autoFocus
+        self.isDraft = isDraft
         self.onDismiss = onDismiss
     }
     
@@ -59,6 +62,7 @@ struct FootprintModalView: View {
     @State private var isAIPerformingUpdate = false
     
     private func ensureFootprintManaged() {
+        if isDraft { return }
         if footprint.modelContext == nil {
             // 核心修复：防止因编辑“幻影”克隆体导致数据库产生重复记录
             let uuid = footprint.footprintID
@@ -98,7 +102,7 @@ struct FootprintModalView: View {
                 }
                 .contentShape(Rectangle())
                 .onTapGesture { 
-                    titleFocused = false
+                    addressFocused = false
                     reasonFocused = false
                 }
             }
@@ -113,7 +117,7 @@ struct FootprintModalView: View {
                             ensureFootprintManaged()
                             footprint.isHighlight = !(footprint.isHighlight ?? false)
                             hasChanged = true
-                            try? modelContext.save()
+                            if !isDraft { try? modelContext.save() }
                         }
                     } label: {
                         Image(systemName: (footprint.isHighlight ?? false) ? "star.fill" : "star")
@@ -123,8 +127,8 @@ struct FootprintModalView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { 
-                        checkAndGenerateAIContent()
-                        try? modelContext.save()
+                        // checkAndGenerateAIContent() // Removed AI generation for titles/remarks
+                        if !isDraft { try? modelContext.save() }
                         onDismiss?(hasChanged)
                         dismiss() 
                     } label: {
@@ -152,7 +156,7 @@ struct FootprintModalView: View {
                 if autoFocus {
                     // Slight longer delay to wait for sheet and keyboard animation
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        titleFocused = true
+                        addressFocused = true
                         // Give it another moment for focus to take effect so that selectAll works
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                             UIApplication.shared.sendAction(#selector(UIResponder.selectAll(_:)), to: nil, from: nil, for: nil)
@@ -263,8 +267,6 @@ struct FootprintModalView: View {
             .alert("开启 AI 智能助手", isPresented: $showingAINotEnabledAlert) {
                 Button("立刻开启") { 
                     isAiAssistantEnabled = true
-                    // 开启后立即触发一次生成
-                    regenerateAIContent()
                 }
                 .tint(Color.dfkAccent)
                 
@@ -281,7 +283,9 @@ struct FootprintModalView: View {
             if hasChanged {
                 footprint.status = .manual
             }
-            try? modelContext.save()
+            if !isDraft {
+                try? modelContext.save()
+            }
             onDismiss?(hasChanged)
         }
     }
@@ -298,76 +302,51 @@ extension FootprintModalView {
             footprint.photoAssetIDs = ids
             footprint.status = .manual // 标记为人工修改，防止被重置
             hasChanged = true
-            try? modelContext.save()
+            if !isDraft { try? modelContext.save() }
         }
         photoToDelete = nil
     }
     
-    private func checkAndGenerateAIContent() {
-        // 如果用户手动修改过标题，我们不再认为它是“空”的需要被 AI 覆盖
-        let isDefaultTitle = footprint.title == "地点记录" || footprint.title == "发现足迹" || footprint.title.trimmingCharacters(in: .whitespaces).isEmpty
-        let isTitleNeedsAI = !footprint.isTitleEditedByHand && isDefaultTitle
-        let isReasonEmpty = (footprint.reason ?? "").trimmingCharacters(in: .whitespaces).isEmpty
-        
-        if isTitleNeedsAI || isReasonEmpty {
-            // Auto generation should be silent if AI is off
-            regenerateAIContent(forcePrompt: false)
-        }
-    }
     
-    private func regenerateAIContent(forcePrompt: Bool = true) {
-        guard isAiAssistantEnabled else {
-            if forcePrompt {
-                showingAINotEnabledAlert = true
-            }
-            return
-        }
-        
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        
-        // 加入分析队列，遵守统一的请求频率限制
-        OpenAIService.shared.analyzeFootprint(footprint)
-    }
     
-    private var titleSection: some View {
+    private var addressSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 8) {
                 HStack(alignment: .top, spacing: 6) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        TextField("有什么值得记住的", text: $footprint.title)
-                            .font(.system(.title3, design: .rounded).bold())
-                            .foregroundColor(Color.dfkMainText)
-                            .submitLabel(.done)
-                            .focused($titleFocused)
-                            .lineLimit(1)
-                            .onSubmit { 
-                                titleFocused = false
-                                ensureFootprintManaged()
-                                footprint.aiAnalyzed = true
-                                hasChanged = true
-                                try? modelContext.save() 
-                            }
-                            .onChange(of: footprint.title) { _, _ in 
-                                if !isAIPerformingUpdate {
-                                    footprint.isTitleEditedByHand = true
-                                    hasChanged = true
+                    Menu {
+                        SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint) {
+                            showingSearchSheet = true
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if isUpdatingAddress {
+                                Text("正在重新获取地址...")
+                                    .font(.system(.title3, design: .rounded).bold())
+                                    .foregroundColor(Color.dfkMainText.opacity(0.5))
+                            } else {
+                                let matchedName = allPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })?.name
+                                let displayText = matchedName ?? footprint.address ?? "未知位置"
+                                
+                                HStack(spacing: 8) {
+                                    Text(displayText)
+                                        .font(.system(.title3, design: .rounded).bold())
+                                        .foregroundColor(matchedName != nil ? .orange : Color.dfkMainText)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                    
+                                    Image(systemName: "pencil")
+                                        .font(.system(size: 14))
+                                        .foregroundColor(.secondary.opacity(0.6))
                                 }
-                                footprint.aiAnalyzed = true 
                             }
+                        }
                     }
-                    
-                    if !titleFocused {
-                        Image(systemName: "pencil")
-                            .font(.system(size: 14))
-                            .foregroundColor(.secondary.opacity(0.6))
-                            .padding(.top, 6)
-                    }
+                    .buttonStyle(.plain)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 12).fill(titleFocused ? Color.dfkAccent.opacity(0.05) : Color.secondary.opacity(0.05)))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(titleFocused ? Color.dfkAccent.opacity(0.3) : Color.clear, lineWidth: 1))
-                .onTapGesture { titleFocused = true }
+                .padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.05)))
                 
                 VStack(alignment: .trailing, spacing: 0) {
                     Menu {
@@ -376,7 +355,7 @@ extension FootprintModalView {
                                 ensureFootprintManaged()
                                 footprint.activityTypeValue = nil
                                 hasChanged = true
-                                try? modelContext.save()
+                                if !isDraft { try? modelContext.save() }
                             }
                         } label: {
                             Label("无", systemImage: "circle.slash")
@@ -387,7 +366,7 @@ extension FootprintModalView {
                                     ensureFootprintManaged()
                                     footprint.activityTypeValue = type.id.uuidString
                                     hasChanged = true
-                                    try? modelContext.save()
+                                    if !isDraft { try? modelContext.save() }
                                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 }
                             } label: {
@@ -460,7 +439,7 @@ extension FootprintModalView {
                                 ensureFootprintManaged()
                                 footprint.activityTypeValue = activity.id.uuidString
                                 hasChanged = true
-                                try? modelContext.save()
+                                if !isDraft { try? modelContext.save() }
                                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                             }
                         } label: {
@@ -497,163 +476,43 @@ extension FootprintModalView {
     }
     
     private func getSuggestedActivities() -> [ActivityType] {
-        var suggested: [ActivityType] = []
-        let hour = Calendar.current.component(.hour, from: footprint.startTime)
-        let weekday = Calendar.current.component(.weekday, from: footprint.startTime)
-        let isWeekend = (weekday == 1 || weekday == 7)
-        let durationHours = footprint.duration / 3600.0
+        let liteActivities = allActivities.map { $0.convertToLite() }
+        let litePlaces = savedPlaces.map { $0.convertToLite() }
+        let suggestions = ActivityType.getSuggestedActivities(for: footprint, allActivities: liteActivities, allPlaces: litePlaces)
         
-        // 1. Unified Context (Title + Address + Place Name)
-        let contextText = (footprint.title + (footprint.address ?? "") + (matchedPlace?.name ?? "")).lowercased()
-        
-        // 2. Category-based Mapping (High precision POI)
-        if let category = matchedPlace?.category {
-            let catMap: [String: String] = [
-                "MKPOICategoryRestaurant": "美食", "MKPOICategoryCafe": "美食", "MKPOICategoryFoodMarket": "美食",
-                "MKPOICategorySchool": "学习", "MKPOICategoryUniversity": "学习", "MKPOICategoryLibrary": "学习",
-                "MKPOICategoryHospital": "医疗", "MKPOICategoryPharmacy": "医疗",
-                "MKPOICategoryPark": "运动", "MKPOICategoryFitnessCenter": "运动",
-                "MKPOICategoryMuseum": "旅游", "MKPOICategoryNationalPark": "旅游",
-                "MKPOICategoryMovieTheater": "娱乐", "MKPOICategoryAmusementPark": "娱乐",
-                "MKPOICategoryStore": "购物", "MKPOICategoryMall": "购物", "MKPOICategoryDepartmentStore": "购物"
-            ]
-            if let actName = catMap[category], let a = allActivities.first(where: { $0.name == actName }) {
-                suggested.append(a)
-            }
+        return suggestions.compactMap { lite in
+            allActivities.first { $0.id == lite.id }
         }
-
-        // 3. Dynamic Name Matching (Match any activity by its name)
-        for activity in allActivities where activity.name.count >= 2 {
-            if contextText.contains(activity.name.lowercased()) && !suggested.contains(where: { $0.id == activity.id }) {
-                suggested.append(activity)
-            }
-        }
-        
-        // 4. Pattern-based Keywords
-        let patterns: [(String, [String])] = [
-            ("家庭", ["妈妈", "爸爸", "外婆", "奶奶", "爷爷", "亲戚", "父母", "老家", "儿子", "女儿", "父", "母"]),
-            ("居家", ["家", "居", "屋", "公寓", "住宅", "苑", "府", "园", "里"]),
-            ("工作", ["公司", "工作", "办公", "大厦", "写字楼", "研制", "软件", "厂", "局", "馆", "office"]),
-            ("旅游", ["景点", "景区", "公园", "博物馆", "火车站", "机场", "酒店", "客栈", "游", "trip", "江", "湖", "山", "海", "岛", "古镇", "古村", "古城", "寺", "庙", "塔", "庄园", "庄"]),
-            ("美食", ["餐厅", "餐饮", "饭店", "面馆", "火锅", "咖啡", "饮品", "食堂", "美味", "吃", "food", "eat"]),
-            ("购物", ["商场", "购物", "超市", "中心", "广场", "便利店", "店", "城", "mall", "shop", "百货", "奥莱", "批发", "商业"]),
-            ("运动", ["体育", "健身", "场馆", "跑道", "馆", "羽毛球", "篮球", "游泳", "操场", "gym", "run"]),
-            ("娱乐", ["电影", "KTV", "游戏", "乐园", "影院", "游乐", "网吧", "play"]),
-            ("学习", ["学校", "大学", "中学", "图书馆", "学院", "课堂", "教育", "校区", "study", "learn"]),
-            ("医疗", ["医院", "门诊", "诊所", "药店", "大药房", "卫生院", "hospital", "clinic"])
-        ]
-        
-        for (name, keywords) in patterns {
-            if keywords.contains(where: { contextText.contains($0) }) {
-                if let a = allActivities.first(where: { $0.name == name }), !suggested.contains(where: { $0.id == a.id }) {
-                    suggested.append(a)
-                }
-            }
-        }
-        
-        // 5. Time & Duration-based logic
-        if durationHours > 3 && (hour >= 21 || hour <= 4) {
-            if let a = allActivities.first(where: { $0.name == "睡眠" }), !suggested.contains(where: { $0.id == a.id }) { suggested.append(a) }
-        }
-        if (hour >= 11 && hour <= 13) || (hour >= 18 && hour <= 21) {
-            if let a = allActivities.first(where: { $0.name == "美食" }), !suggested.contains(where: { $0.id == a.id }) { suggested.append(a) }
-        }
-        if !isWeekend && hour >= 9 && hour <= 17 && durationHours > 1.5 {
-            if let a = allActivities.first(where: { $0.name == "工作" }), !suggested.contains(where: { $0.id == a.id }) { suggested.append(a) }
-        }
-        
-        // 6. Stable Fallback
-        if suggested.count < 4 {
-            let existingIds = Set(suggested.map { $0.id })
-            let others = allActivities.filter { !existingIds.contains($0.id) }.sorted { $0.id.uuidString < $1.id.uuidString }
-            if !others.isEmpty {
-                let seed = abs(footprint.footprintID.uuidString.hashValue)
-                for i in 0..<(4 - suggested.count) {
-                    let candidate = others[(seed + i) % others.count]
-                    if !suggested.contains(where: { $0.id == candidate.id }) { suggested.append(candidate) }
-                    if suggested.count >= 4 { break }
-                }
-            }
-        }
-        return Array(suggested.prefix(5))
     }
     
     private var timeSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 6) {
-                Menu {
-                    SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint) {
-                        showingSearchSheet = true
-                    }
-                } label: {
-                    HStack(alignment: .center, spacing: 6) { 
-                        Image(systemName: isUpdatingAddress ? "arrow.triangle.2.circlepath" : "mappin.and.ellipse")
-                            .font(.caption)
-                            .foregroundColor(Color.secondary)
-                            .symbolEffect(.bounce, value: isUpdatingAddress)
-                        
-                        if isUpdatingAddress {
-                            Text("正在重新获取地址...")
-                                .font(.subheadline)
-                                .foregroundColor(Color.dfkMainText.opacity(0.5))
-                        } else {
-                            HStack(spacing: 6) {
-                                Text(footprint.address ?? (matchedPlace?.address ?? "未记录位置"))
-                                    .font(.system(size: 16, design: .rounded))
-                                    .foregroundColor(matchedPlace != nil ? .orange : Color.dfkMainText)
-                                    .lineLimit(2)
-                                
-                                Image(systemName: "pencil")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(Color.dfkSecondaryText.opacity(0.5))
-                            }
-                        }
-                    }
-                }
-                .buttonStyle(.plain)
-                
-                Spacer()
-                
-                if matchedPlace == nil {
-                    Button {
-                        showAddPlaceModal = true
-                    } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 16))
-                            .foregroundColor(.orange.opacity(0.7))
-                    }
-                    .buttonStyle(.plain)
-                }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) { 
+                Image(systemName: "calendar")
+                    .font(.system(size: 12))
+                    .foregroundColor(Color.secondary)
+                Text(footprint.date.formatted(.dateTime.year().month().day().weekday()))
+                    .font(.system(size: 14, design: .rounded))
+                    .foregroundColor(Color.secondary) 
             }
-            
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) { 
-                    Image(systemName: "calendar")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.secondary)
-                    Text(footprint.date.formatted(.dateTime.year().month().day().weekday()))
-                        .font(.system(size: 14, design: .rounded))
-                        .foregroundColor(Color.secondary) 
-                }
-                HStack(spacing: 6) { 
-                    Image(systemName: "clock")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.secondary)
-                    Text(timeRangeString)
-                        .font(.system(size: 14, design: .monospaced))
-                        .foregroundColor(Color.secondary) 
-                }
-                HStack(spacing: 6) { 
-                    Image(systemName: "hourglass")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.secondary)
-                    Text("停留 \(durationString)")
-                        .font(.system(size: 14, design: .rounded))
-                        .foregroundColor(Color.secondary) 
-                }
+            HStack(spacing: 6) { 
+                Image(systemName: "clock")
+                    .font(.system(size: 12))
+                    .foregroundColor(Color.secondary)
+                Text(timeRangeString)
+                    .font(.system(size: 14, design: .monospaced))
+                    .foregroundColor(Color.secondary) 
             }
-            .padding(.top, 4)
+            HStack(spacing: 6) { 
+                Image(systemName: "hourglass")
+                    .font(.system(size: 12))
+                    .foregroundColor(Color.secondary)
+                Text("停留 \(durationString)")
+                    .font(.system(size: 14, design: .rounded))
+                    .foregroundColor(Color.secondary) 
+            }
         }
+        .padding(.top, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -681,7 +540,7 @@ extension FootprintModalView {
                     $0.name?.contains(name) == true || name.contains($0.name ?? "")
                 }) ?? response.mapItems.first {
                     place.category = item.pointOfInterestCategory?.rawValue
-                    try? modelContext.save()
+                    if !isDraft { try? modelContext.save() }
                 }
             }
         }
@@ -752,7 +611,7 @@ extension FootprintModalView {
                             ensureFootprintManaged()
                             footprint.address = result
                             hasChanged = true
-                            try? modelContext.save()
+                            if !isDraft { try? modelContext.save() }
                         }
                     }
                 }
@@ -762,7 +621,7 @@ extension FootprintModalView {
     
     private var headerContent: some View {
         Group {
-            titleSection.padding(.horizontal, 24).padding(.top, 16)
+            addressSection.padding(.horizontal, 24).padding(.top, 16)
             timeSection.padding(.horizontal, 24).padding(.top, 12)
         }
     }
@@ -871,7 +730,7 @@ extension FootprintModalView {
                                         withAnimation {
                                             footprint.photoAssetIDs = assets.map { $0.localIdentifier }
                                             hasChanged = true
-                                            try? modelContext.save()
+                                            if !isDraft { try? modelContext.save() }
                                         }
                                     }
                                 }
@@ -1066,7 +925,7 @@ struct AddToFavoriteModal: View {
         Section(header: Text("位置预览")) {
             MiniMapView(
                 coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude),
-                title: placeName.isEmpty ? footprint.title : placeName,
+                title: placeName.isEmpty ? (footprint.address ?? "新地点") : placeName,
                 radius: Double(radius)
             )
             .frame(height: 180)
@@ -1120,7 +979,7 @@ struct AddToFavoriteModal: View {
     }
 
     private func setupInitialData() {
-        placeName = footprint.title
+        placeName = footprint.address ?? ""
         
         // Resolve address
         let geocoder = CLGeocoder()
@@ -1144,7 +1003,7 @@ struct AddToFavoriteModal: View {
     }
 
     private func savePlace() {
-        let finalName = placeName.trimmingCharacters(in: .whitespaces).isEmpty ? footprint.title : placeName.trimmingCharacters(in: .whitespaces)
+        let finalName = placeName.trimmingCharacters(in: .whitespaces).isEmpty ? (footprint.address ?? "未知地点") : placeName.trimmingCharacters(in: .whitespaces)
         
         // (Exclusive category logic removed: user can have multiple Home/Work/School places)
         

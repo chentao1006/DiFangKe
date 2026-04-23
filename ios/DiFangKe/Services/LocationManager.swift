@@ -1035,7 +1035,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         for fp in all {
             // 删除时长过短的记录
             // 保护用户手动编辑过、有备注或有照片的足迹，即使时长很短也不删除
-            let hasUserEdits = fp.isTitleEditedByHand || !(fp.reason ?? "").isEmpty || !fp.photoAssetIDs.isEmpty || (fp.isHighlight ?? false)
+            let hasUserEdits = fp.isAddressEditedByHand || !(fp.reason ?? "").isEmpty || !fp.photoAssetIDs.isEmpty || (fp.isHighlight ?? false)
             if fp.duration < minKeepDuration && !hasUserEdits {
                 context.delete(fp)
                 continue
@@ -1108,9 +1108,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                         if fp.placeID != bestPlace.placeID {
                             fp.placeID = bestPlace.placeID
                             if (fp.address ?? "").isEmpty { fp.address = bestPlace.name }
-                            if Footprint.isGenericTitle(fp.title) {
-                                fp.title = Footprint.generateRandomTitle(for: bestPlace.name, seed: Int(fp.startTime.timeIntervalSince1970))
-                            }
                         }
                     }
                 }
@@ -1127,7 +1124,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let coords = fp.footprintLocations
         // 核心：基于位置聚类寻找多个“停留点”
         // 安全保护：不自动处理用户手动编辑过、有照片、或者是已确认的足迹，避免干扰用户已有工作
-        let hasUserEdits = fp.isTitleEditedByHand || !(fp.reason ?? "").isEmpty || !fp.photoAssetIDs.isEmpty || fp.status == .confirmed
+        let hasUserEdits = fp.isAddressEditedByHand || !(fp.reason ?? "").isEmpty || !fp.photoAssetIDs.isEmpty || fp.status == .confirmed
         if hasUserEdits { return }
         
         guard coords.count > 15 else { return } // 略微增加密度要求
@@ -1206,7 +1203,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                             footprintLocations: subCoords,
                             locationHash: "SPLIT_FIXED",
                             duration: eTime.timeIntervalSince(sTime),
-                            title: fp.title,
                             address: nil
                         )
                         context.insert(newFp)
@@ -1517,40 +1513,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     private func analyzeOngoingStay(at location: CLLocation) {
-        let now = Date()
-        guard let startTs = potentialStopStartLocation?.timestamp else { return }
-        let duration = now.timeIntervalSince(startTs)
-        
-        lastAIAnalysisTime = now
-        
+        guard potentialStopStartLocation != nil else { return }
         let place = matchedPlace
-        isAnalyzingOngoing = true
         
-        // --- 尝试获取该地点历史上的“习惯”活动类型供 AI 参考 ---
-        var activityName: String? = nil
-        if let pid = place?.placeID, let context = modelContext {
-            if let habitValue = self.findFrequentActivityType(for: pid, at: startTs, context: context) {
-                let activityFetch = FetchDescriptor<ActivityType>()
-                activityName = (try? context.fetch(activityFetch))?.first(where: { $0.id.uuidString == habitValue || $0.name == habitValue })?.name
-            }
-        }
-        
-        Task { @MainActor in
-            OpenAIService.shared.enqueueOngoingAnalysis(
-                locations: [(location.coordinate.latitude, location.coordinate.longitude)],
-                duration: duration,
-                startTime: startTs,
-                endTime: now,
-                placeName: place?.address ?? place?.name, // Use original name for title
-                address: currentAddress,
-                activityName: activityName
-            ) { title in
-                self.isAnalyzingOngoing = false
-                self.ongoingTitle = title
-                self.saveOngoingTitle()
-                self.triggerNotificationSummaryRefresh()
-            }
-        }
+        // Set title immediately based on location instead of calling AI
+        self.isAnalyzingOngoing = false
+        self.ongoingTitle = place?.name ?? currentAddress
+        self.saveOngoingTitle()
+        self.triggerNotificationSummaryRefresh()
     }
     
     private func saveOngoingTitle() {
@@ -1686,7 +1656,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 // 2. 检查是否需要 AI 辅助生成标题及备注 (跳过已分析过和用户手动编辑过的)
                 // 同时也跳过已经确定不需要 AI 的 (aiAnalyzed == true)
-                if !fp.aiAnalyzed && !fp.isTitleEditedByHand {
+                if !fp.aiAnalyzed && !fp.isAddressEditedByHand {
                     footprintsToAnalyze.append(fp.persistentModelID)
                 }
             }
@@ -1762,7 +1732,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 footprintLocations: candidate.rawLocations.map { $0.coordinate },
                 locationHash: "TBD",
                 duration: candidate.duration,
-                title: Footprint.generateRandomTitle(for: "此处", seed: Int(candidate.startTime.timeIntervalSince1970)), 
                 status: .confirmed,
                 address: (isHistorical || currentAddress == "正在解析位置..." || currentAddress == "未知位置") ? nil : currentAddress
             )
@@ -1779,7 +1748,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 newFootprint.address = mPlace.name
                 
                 // Title uses the custom name (User preference: "Title uses name")
-                newFootprint.title = Footprint.generateRandomTitle(for: mPlace.name, seed: Int(newFootprint.startTime.timeIntervalSince1970))
                 
                 // --- 自动补充地点分类 ---
                 if mPlace.category == nil {
@@ -1889,16 +1857,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         linkPhotos(to: footprint, context: context)
 
         // --- 逻辑重构：立即进行本地 POI 丰富 ---
-        // 无论 AI 是否开启，都先尝试通过本地已存地点来校准标题和地址
-        if !footprint.isTitleEditedByHand {
+        // 不再调用 AI，仅尝试通过本地已存地点或反地理编码来校准地址
+        if !footprint.isAddressEditedByHand {
             let fpCoord = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
             if let matchedPOI = matchedPlaceFor(coordinate: fpCoord) {
                 // 1. 优先使用本地已匹配的地点
-                let baseName = matchedPOI.name
-                if Footprint.isGenericTitle(footprint.title) || !footprint.title.contains(baseName) {
-                    footprint.title = Footprint.generateRandomTitle(for: baseName, seed: Int(footprint.startTime.timeIntervalSince1970))
-                }
-                footprint.address = baseName
+                footprint.address = matchedPOI.name
             } else if (footprint.address ?? "").isEmpty || footprint.address == "地点记录" || footprint.address == "正在解析位置..." || footprint.address == "此处" {
                 // 2. 如果没有匹配地点，且地址是通用的，则尝试反地理编码
                 let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
@@ -1916,31 +1880,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                         if let mainContext = self.modelContext?.container.mainContext,
                            let mainFp = mainContext.model(for: footprintID) as? Footprint {
                             mainFp.address = name
-                            if !mainFp.isTitleEditedByHand {
-                                mainFp.title = Footprint.generateRandomTitle(for: name, seed: Int(mainFp.startTime.timeIntervalSince1970))
-                            }
                             try? mainContext.save()
                         }
                     }
                 }
-            } else if let addr = footprint.address {
-                // 3. 兜底逻辑：地址已存在（非通用），确保标题与之对齐
-                if Footprint.isGenericTitle(footprint.title) {
-                    footprint.title = Footprint.generateRandomTitle(for: addr, seed: Int(footprint.startTime.timeIntervalSince1970))
-                }
             }
         }
 
-        let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
-        if !isAiEnabled {
-            footprint.aiAnalyzed = true 
-            return
-        }
-        
-        // 使用统一队列进行异步分析
-        Task { @MainActor in
-            openAIService.analyzeFootprint(footprint)
-        }
+        footprint.aiAnalyzed = true
     }
 
     
@@ -1960,8 +1907,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // Filter out ignored footprints and include ongoing stay
         let validFootprints = todayFootprints.filter { $0.status != .ignored }
         let footprintCount = validFootprints.count
-        let footprintTitles = validFootprints.map { $0.title }
-            .filter { !Footprint.isGenericTitle($0) }
+        let footprintTitles = validFootprints.compactMap { $0.address }.filter { !$0.isEmpty }
         
         
         // Calculate points and mileage using TimelineBuilder logic
@@ -2261,14 +2207,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                                     locationHash: "GAP_STAY",
                                     duration: gap.duration
                                 )
-                                newFp.title = Footprint.generateRandomTitle(for: "某地", seed: Int(gap.start.timeIntervalSince1970))
                                 context.insert(newFp)
                                 
                                 if let mPlace = self.matchedPlaceFor(coordinate: gap.center) {
                                     let pid = mPlace.placeID
                                     newFp.placeID = pid
                                     newFp.address = mPlace.name
-                                    newFp.title = Footprint.generateRandomTitle(for: mPlace.name, seed: Int(gap.start.timeIntervalSince1970))
                                     
                                     // --- 自动关联历史习惯 ---
                                     newFp.activityTypeValue = self.findFrequentActivityType(for: pid, at: gap.start, context: context)
@@ -2609,6 +2553,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             fp.address = suggestion.name
             fp.placeID = targetPlace.placeID
+            fp.isAddressEditedByHand = true
             // 重新分析足迹内容
             analyzeFootprint(fp, context: context)
         }

@@ -39,4 +39,19 @@ final class Place {
         self.isUserDefined = isUserDefined
         self.category = category
     }
+
+    func convertToLite() -> PlaceLite {
+        PlaceLite(
+            placeID: placeID,
+            name: name,
+            latitude: latitude,
+            longitude: longitude,
+            radius: Int(radius),
+            isIgnored: isIgnored,
+            isUserDefined: isUserDefined,
+            isPriority: isPriority,
+            address: address,
+            category: category
+        )
+    }
 }

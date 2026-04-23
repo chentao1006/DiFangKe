@@ -216,8 +216,8 @@ class OpenAIService private constructor() {
             val score = resultJson.optDouble("score", 0.0).toFloat()
 
             val updatedFp = fp.copy(
-                title = newTitle,
-                reason = reason,
+                // title = newTitle,
+                // reason = reason,
                 aiScore = score,
                 aiAnalyzed = true
             )

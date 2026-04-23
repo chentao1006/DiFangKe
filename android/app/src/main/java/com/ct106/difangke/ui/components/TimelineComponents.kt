@@ -149,12 +149,20 @@ fun FootprintCardView(
                 )
 
                 Column(modifier = Modifier.padding(vertical = 18.dp).padding(end = 56.dp)) {
+                    val matchedPlace = allPlaces.find { it.placeID == footprint.placeID }
+                    val locationText = when {
+                        matchedPlace != null && matchedPlace.isUserDefined -> matchedPlace.name
+                        !footprint.address.isNullOrEmpty() && footprint.address != "null" && footprint.address != "[]" -> footprint.address!!
+                        matchedPlace != null -> matchedPlace.name
+                        else -> "未知位置"
+                    }
+
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = footprint.title.ifEmpty { "足迹记录" },
+                            text = locationText,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            color = titleColor,
+                            color = if (matchedPlace?.isUserDefined == true) Color(0xFFFF9800) else titleColor,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
@@ -168,32 +176,6 @@ fun FootprintCardView(
                                 modifier = Modifier.size(16.dp)
                             )
                         }
-                    }
-                    
-                    Spacer(modifier = Modifier.height(2.dp))
-                    
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        val matchedPlace = allPlaces.find { it.placeID == footprint.placeID }
-                        val locationText = when {
-                            !footprint.address.isNullOrEmpty() && footprint.address != "null" && footprint.address != "[]" -> footprint.address!!
-                            matchedPlace != null -> matchedPlace.name
-                            !footprint.aiAnalyzed -> FootprintTitles.extractLocation(footprint.title)
-                            else -> "寻迹此处"
-                        }.ifEmpty { "寻迹此处" }
-
-                        Text(
-                            text = locationText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (matchedPlace?.isUserDefined == true) Color(0xFFFF9800) else subtitleColor,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                        
-                        // Matched place name display removed, address is now colored instead
                     }
                     
                     Spacer(modifier = Modifier.height(6.dp))
@@ -812,12 +794,12 @@ fun MiniMapView(lat: Double? = null, lon: Double? = null, pointsJson: String? = 
 @Composable
 fun PlaceholderFootprintCard(trackingState: LocationTrackingService.TrackingState) {
     val phrases = listOf(
-        "今日份回忆正在后台悄悄酝酿...",
-        "正在捕捉第一段时光足迹...",
-        "别急，这一天的故事正在落笔...",
-        "时光正在被系统悉心收纳...",
-        "正在为您打磨今日的轨迹线...",
-        "第一段记忆正在慢慢发酵..."
+        "正在加载今日足迹...",
+        "正在同步位置记录...",
+        "正在生成记录卡片...",
+        "正在整理位置数据...",
+        "正在分析今日轨迹...",
+        "正在更新时间轴..."
     )
     val phrase by remember { mutableStateOf(phrases.random()) }
     val calendar = java.util.Calendar.getInstance()

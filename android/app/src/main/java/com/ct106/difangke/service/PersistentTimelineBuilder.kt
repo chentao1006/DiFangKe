@@ -130,10 +130,7 @@ class PersistentTimelineBuilder(private val context: Context) {
             latitudeJson = gson.toJson(candidate.rawLatitudes),
             longitudeJson = gson.toJson(candidate.rawLongitudes),
             locationHash = locationHash,
-            title = if (matchedPlace != null) FootprintTitles.generate(matchedPlace.name, candidate.startTime.time / 1000) else {
-                if (address != null) FootprintTitles.generate(address, candidate.startTime.time / 1000)
-                else FootprintTitles.generate("寻迹此处", candidate.startTime.time / 1000)
-            },
+            title = "",
             statusValue = "candidate",
             placeID = matchedPlace?.placeID,
             address = address
@@ -192,10 +189,8 @@ class PersistentTimelineBuilder(private val context: Context) {
             day = getStartOfDay(prevFp.endTime),
             startTime = prevFp.endTime,
             endTime = newFp.startTime,
-            startLocation = if (!prevFp.address.isNullOrEmpty() && !FootprintTitles.isGeneric(prevFp.address!!)) prevFp.address!! 
-                            else FootprintTitles.extractLocation(prevFp.title),
-            endLocation = if (!newFp.address.isNullOrEmpty() && !FootprintTitles.isGeneric(newFp.address!!)) newFp.address!! 
-                          else FootprintTitles.extractLocation(newFp.title),
+            startLocation = prevFp.address ?: "未知位置",
+            endLocation = newFp.address ?: "未知位置",
             typeRaw = TransportType.fromSpeed(avgSpeed).raw,
             distance = totalDist,
             averageSpeed = avgSpeed,

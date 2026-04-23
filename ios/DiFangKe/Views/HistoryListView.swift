@@ -97,6 +97,7 @@ struct HistoryListView: View {
     let initialDate: Date
     let showImportOnAppear: Bool
     @State private var viewMode: ViewMode = .week
+    @State private var selectedDate: Date
     @State private var cachedSummaries: [Date: DaySummary] = [:]
     @State private var showingDate: IdentifiableDate? = nil
     @State private var showingPhotoImportRange = false
@@ -127,14 +128,19 @@ struct HistoryListView: View {
     @State private var hasScrolledMonth = false
     
     init(initialDate: Date = Date(), showImportOnAppear: Bool = false) {
-        self.initialDate = Calendar.current.startOfDay(for: initialDate)
+        let normalizedDate = Calendar.current.startOfDay(for: initialDate)
+        self.initialDate = normalizedDate
         self.showImportOnAppear = showImportOnAppear
+        _selectedDate = State(initialValue: normalizedDate)
     }
     
     var body: some View {
         VStack(spacing: 0) {
             pickerSection
             contentArea
+                .overlay(alignment: .topTrailing) {
+                    yearJumpOverlay
+                }
         }
         .navigationTitle("往昔足迹")
         .navigationBarTitleDisplayMode(.inline)
@@ -177,11 +183,7 @@ struct HistoryListView: View {
                     // 尝试在后台进行保存（SwiftData 支持在异步上下文中调用 save）
                     try? modelContext.save()
                     
-                    // 获取 ID 列表用于后续 AI 分析（在 save 后获取 ID 更稳定）
-                    let identifiers = selectedFootprints.map { $0.footprintID }
-                    
                     await MainActor.run {
-                        OpenAIService.shared.enqueueFootprintsForAnalysis(identifiers)
                         scannedResults = []
                         updateSummaries()
                         self.successCount = selectedFootprints.count
@@ -241,14 +243,40 @@ struct HistoryListView: View {
         .background(Color.dfkBackground)
     }
     
+    private var yearJumpOverlay: some View {
+        Group {
+            if shouldShowYearJump, !footprintYears.isEmpty {
+                Menu {
+                    ForEach(footprintYears, id: \.year) { item in
+                        Button("\(String(item.year))年") {
+                            jumpToYear(item.date)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 36, height: 36)
+                        .background(
+                            Circle()
+                                .fill(Color.dfkAccent)
+                        )
+                        .shadow(color: .black.opacity(0.08), radius: 8, y: 2)
+                }
+                .padding(.top, 6)
+                .padding(.trailing, 20)
+            }
+        }
+    }
+    
     private var contentArea: some View {
         TabView(selection: $viewMode) {
-            HistoryWeekView(summaries: cachedSummaries, targetDate: initialDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledWeek, showingRawPointsDate: $showingRawPointsDate, requestSummary: ensureSummary) { date in
+            HistoryWeekView(summaries: cachedSummaries, targetDate: selectedDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledWeek, showingRawPointsDate: $showingRawPointsDate, requestSummary: ensureSummary) { date in
                 showingDate = IdentifiableDate(date: date)
             }
             .tag(ViewMode.week)
             
-            HistoryMonthView(summaries: cachedSummaries, targetDate: initialDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledMonth, showingRawPointsDate: $showingRawPointsDate, requestSummary: ensureSummary) { date in
+            HistoryMonthView(summaries: cachedSummaries, targetDate: selectedDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledMonth, showingRawPointsDate: $showingRawPointsDate, requestSummary: ensureSummary) { date in
                 showingDate = IdentifiableDate(date: date)
             }
             .tag(ViewMode.month)
@@ -266,6 +294,31 @@ struct HistoryListView: View {
     
     private var earliestFootprintDate: Date {
         allFootprints.last?.startTime ?? Calendar.current.startOfDay(for: Date())
+    }
+    
+    private var shouldShowYearJump: Bool {
+        viewMode == .week || viewMode == .month
+    }
+    
+    private var footprintYears: [(year: Int, date: Date)] {
+        let calendar = Calendar.current
+        let grouped = Dictionary(grouping: allFootprints) { footprint in
+            calendar.component(.year, from: footprint.startTime)
+        }
+        
+        return grouped.compactMap { year, footprints in
+            let earliestDateInYear = footprints
+                .map { calendar.startOfDay(for: $0.startTime) }
+                .min()
+            return earliestDateInYear.map { (year: year, date: $0) }
+        }
+        .sorted { $0.year > $1.year }
+    }
+    
+    private func jumpToYear(_ date: Date) {
+        selectedDate = Calendar.current.startOfDay(for: date)
+        hasScrolledWeek = false
+        hasScrolledMonth = false
     }
     
     private func updateSummaries() {
@@ -294,7 +347,7 @@ struct HistoryListView: View {
                 
                 let highlightCount = validFootprints.filter { $0.isHighlight == true }.count
                 let highlights = validFootprints.filter { $0.isHighlight == true }
-                let highlightTitle = highlights.first?.title
+                let highlightTitle = highlights.first?.address
                 let hasConfirmed = validFootprints.contains { $0.status == .confirmed }
                 let hasCandidate = validFootprints.contains { $0.status == .candidate }
                 let totalDuration = validFootprints.reduce(0) { $0 + $1.duration }
@@ -373,8 +426,11 @@ struct HistoryListView: View {
             let finalEnd = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: end) ?? end
             let activeFootprints = self.allFootprints.filter { $0.status != .ignored }
             let existingIDs = Set(activeFootprints.flatMap { $0.photoAssetIDs })
-            let existingBriefs = activeFootprints.map { ($0.startTime, $0.endTime, $0.latitude, $0.longitude) }
-            PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: allPlacesForScan, excludedAssetIDs: existingIDs, existingFootprints: existingBriefs, onProgress: { current, total in
+            let liteHistory = activeFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
+            let litePlaces = allPlacesForScan.map { $0.convertToLite() }
+            let liteActivities = allActivityTypes.map { $0.convertToLite() }
+            
+            PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: litePlaces, allActivities: liteActivities, excludedAssetIDs: existingIDs, history: liteHistory, onProgress: { current, total in
                 self.scanProgress = current
                 self.scanTotal = total
             }) { results in
@@ -550,7 +606,6 @@ struct DayCell: View {
             VStack(alignment: .leading, spacing: 6) {
                 if let summary = summary, hasData {
                     DayStatsView(
-                        trajectoryCount: summary.trajectoryCount,
                         footprintCount: summary.footprintCount,
                         mileage: summary.mileage,
                         photoCount: summary.photoCount
@@ -607,14 +662,12 @@ struct TimelineIconsView: View {
 }
 
 struct DayStatsView: View {
-    let trajectoryCount: Int
     let footprintCount: Int
     let mileage: Double
     let photoCount: Int
     
     var body: some View {
         FlowLayout(spacing: 8) {
-            if trajectoryCount > 0 { statItem(icon: "dot.radiowaves.left.and.right", value: "\(trajectoryCount)") }
             if footprintCount > 0 { statItem(icon: "mappin.and.ellipse", value: "\(footprintCount)") }
             if mileage > 0 { statItem(icon: "figure.walk", value: formatMileage(mileage)) }
             if photoCount > 0 { statItem(icon: "photo.on.rectangle", value: "\(photoCount)") }
@@ -965,8 +1018,27 @@ struct PhotoImportRangePicker: View {
 
 struct PhotoImportResultsView: View {
     @Environment(LocationManager.self) private var locationManager
-    let results: [Footprint]; let onConfirm: ([Footprint]) -> Void
-    @Environment(\.dismiss) var dismiss; @Query private var allPlaces: [Place]; @State private var selectedIDs: Set<UUID> = []
+    @Environment(\.dismiss) var dismiss
+    @Query private var allPlaces: [Place]
+    @Query private var allActivityTypes: [ActivityType]
+    @State private var selectedIDs: Set<UUID> = []
+    @State private var selectedFootprintForEdit: Footprint?
+    
+    let results: [Footprint]
+    let onConfirm: ([Footprint]) -> Void
+    
+    private var groupedResults: [(Date, [Footprint])] {
+        let grouped = Dictionary(grouping: results) { fp in
+            Calendar.current.startOfDay(for: fp.startTime)
+        }
+        return grouped.sorted { $0.key < $1.key }
+    }
+    
+    private var scanYear: String {
+        guard let firstDate = results.first?.startTime else { return "" }
+        let year = Calendar.current.component(.year, from: firstDate)
+        return "\(year)年"
+    }
     
     init(results: [Footprint], onConfirm: @escaping ([Footprint]) -> Void) { 
         self.results = results
@@ -1014,31 +1086,44 @@ struct PhotoImportResultsView: View {
                 
                 Divider().padding(.horizontal, 16).opacity(0.5)
 
-                List(results, id: \.footprintID) { fp in
-                    HStack(spacing: 0) {
-                        Image(systemName: selectedIDs.contains(fp.footprintID) ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 20))
-                            .foregroundColor(selectedIDs.contains(fp.footprintID) ? .dfkAccent : .secondary.opacity(0.3))
-                            .frame(width: 40)
-                        
-                        FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false, disableContextMenu: true) { _, _ in 
-                            toggleSelection(fp.footprintID)
+                ScrollView {
+                    LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                        ForEach(groupedResults, id: \.0) { date, dateResults in
+                            Section(header: dateHeader(for: date)) {
+                                VStack(spacing: 0) {
+                                    ForEach(dateResults, id: \.footprintID) { fp in
+                                        HStack(spacing: 0) {
+                                            Image(systemName: selectedIDs.contains(fp.footprintID) ? "checkmark.circle.fill" : "circle")
+                                                .font(.system(size: 20))
+                                                .foregroundColor(selectedIDs.contains(fp.footprintID) ? .dfkAccent : .secondary.opacity(0.3))
+                                                .frame(width: 40)
+                                                .onTapGesture {
+                                                    toggleSelection(fp.footprintID)
+                                                }
+                                            
+                                            FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false, disableContextMenu: true) { f, _ in 
+                                                selectedFootprintForEdit = f
+                                            }
+                                            .padding(.vertical, 4)
+                                        }
+                                        .padding(.trailing, 16)
+                                        .contentShape(Rectangle())
+                                    }
+                                }
+                                .padding(.top, 4)
+                                .padding(.bottom, 12)
+                            }
                         }
-                        .padding(.vertical, 4)
-                    }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 16))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        toggleSelection(fp.footprintID)
                     }
                 }
-                .listStyle(.plain)
             }
             .background(Color.dfkBackground)
-            .navigationTitle("寻回的记忆")
+            .navigationTitle("\(scanYear)的足迹")
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(item: $selectedFootprintForEdit) { fp in
+                FootprintModalView(footprint: fp, isDraft: true)
+                    .environment(locationManager)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") { dismiss() }
@@ -1052,6 +1137,19 @@ struct PhotoImportResultsView: View {
                 }
             }
         }
+    }
+    
+    private func dateHeader(for date: Date) -> some View {
+        HStack {
+            Text(date.formatted(.dateTime.month().day().weekday()))
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+        .background(Color.dfkBackground.opacity(0.95))
     }
     
     private func toggleSelection(_ id: UUID) {

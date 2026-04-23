@@ -495,8 +495,7 @@ struct TimelinePageView: View {
                 }
                 
                 // 2. 解析缺失的地址/标题
-                let needsResolution = Footprint.isGenericTitle(footprint.title) 
-                    && (footprint.address == nil || footprint.address!.isEmpty || footprint.address == "正在解析位置...")
+                let needsResolution = (footprint.address == nil || footprint.address!.isEmpty || footprint.address == "正在解析位置...")
                 
                 if needsResolution && !footprint.footprintLocations.isEmpty {
                     let avgLat = footprint.footprintLocations.map { $0.latitude }.reduce(0, +) / Double(footprint.footprintLocations.count)
@@ -522,7 +521,6 @@ struct TimelinePageView: View {
                 timelineItems[index] = .transport(updated)
             case .footprint(let footprint):
                 if type == .stay {
-                    footprint.title = Footprint.generateRandomTitle(for: name, seed: Int(footprint.startTime.timeIntervalSince1970))
                     footprint.address = name
                     
                     if let context = footprint.modelContext {

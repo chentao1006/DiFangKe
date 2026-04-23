@@ -95,28 +95,28 @@ enum TimelineItem: Identifiable {
 }
 
 // Lite versions for thread-safe background building
-struct FootprintLite {
+struct FootprintLite: Sendable {
     let startTime: Date
     let endTime: Date
     let latitude: Double
     let longitude: Double
     let footprintID: UUID
     let placeID: UUID?
-    let title: String
     let address: String?
     let status: FootprintStatus
     let footprintLocations: [CLLocationCoordinate2D]
-    let isTitleEditedByHand: Bool
+    let isAddressEditedByHand: Bool
     let date: Date
     let duration: TimeInterval
     let photoAssetIDs: [String]
     let reason: String?
     let isHighlight: Bool?
+    let maxDiameter: Double
     let aiAnalyzed: Bool
     let activityTypeValue: String?
 }
 
-struct PlaceLite {
+struct PlaceLite: Sendable {
     let placeID: UUID
     let name: String
     let latitude: Double
@@ -126,15 +126,24 @@ struct PlaceLite {
     let isUserDefined: Bool
     let isPriority: Bool
     let address: String?
+    let category: String?
 }
 
-struct OverrideLite {
+struct OverrideLite: Sendable {
     let startTime: Date
     let endTime: Date
     let isDeleted: Bool
     let vehicleType: String
     let startLocationOverride: String?
     let endLocationOverride: String?
+}
+
+struct ActivityTypeLite: Sendable {
+    let id: UUID
+    let name: String
+    let icon: String
+    let colorHex: String
+    let sortOrder: Int
 }
 
 class TimelineBuilder {
@@ -147,16 +156,16 @@ class TimelineBuilder {
             longitude: fp.longitude,
             footprintID: fp.footprintID,
             placeID: fp.placeID,
-            title: fp.title,
             address: fp.address,
             status: fp.status,
             footprintLocations: fp.footprintLocations,
-            isTitleEditedByHand: fp.isTitleEditedByHand,
+            isAddressEditedByHand: fp.isAddressEditedByHand,
             date: fp.date,
             duration: fp.duration,
             photoAssetIDs: fp.photoAssetIDs,
             reason: fp.reason,
             isHighlight: fp.isHighlight,
+            maxDiameter: calculateMaxDiameter(fp.footprintLocations.map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }), // Added for better merging
             aiAnalyzed: fp.aiAnalyzed,
             activityTypeValue: fp.activityTypeValue
         )
@@ -172,7 +181,8 @@ class TimelineBuilder {
             isIgnored: p.isIgnored,
             isUserDefined: p.isUserDefined,
             isPriority: p.isPriority,
-            address: p.address
+            address: p.address,
+            category: p.category
         )
     }
 
@@ -224,16 +234,16 @@ class TimelineBuilder {
                         longitude: avgLon,
                         footprintID: last.footprintID,
                         placeID: last.placeID,
-                        title: last.title,
-                        address: last.address,
+                        address: (last.placeID != nil || last.isAddressEditedByHand) ? last.address : ((fp.placeID != nil || fp.isAddressEditedByHand) ? fp.address : last.address),
                         status: last.status,
                         footprintLocations: combinedLocations,
-                        isTitleEditedByHand: last.isTitleEditedByHand,
+                        isAddressEditedByHand: last.isAddressEditedByHand || fp.isAddressEditedByHand,
                         date: last.date,
                         duration: max(last.endTime, fp.endTime).timeIntervalSince(last.startTime),
                         photoAssetIDs: Array(Set(last.photoAssetIDs + fp.photoAssetIDs)),
                         reason: last.reason ?? fp.reason,
                         isHighlight: (last.isHighlight == true || fp.isHighlight == true),
+                        maxDiameter: 0, // Not strictly needed for UI Lite objects
                         aiAnalyzed: last.aiAnalyzed || fp.aiAnalyzed,
                         activityTypeValue: last.activityTypeValue ?? fp.activityTypeValue
                     )
@@ -267,7 +277,6 @@ class TimelineBuilder {
                     footprintLocations: fp.footprintLocations,
                     locationHash: "UI_LITE",
                     duration: fp.duration,
-                    title: fp.title,
                     reason: fp.reason,
                     status: fp.status,
                     isHighlight: fp.isHighlight,
@@ -277,7 +286,7 @@ class TimelineBuilder {
                     activityTypeValue: fp.activityTypeValue
                 )
                 model.placeID = fp.placeID
-                model.isTitleEditedByHand = fp.isTitleEditedByHand
+                model.isAddressEditedByHand = fp.isAddressEditedByHand
                 
                 // --- 衔接修复：防止足迹与其前面的交通/足迹重叠 ---
                 if model.startTime < currentTime {
@@ -336,27 +345,27 @@ class TimelineBuilder {
 
     private static func shouldPerformUiMerge(_ f1: FootprintLite, _ f2: FootprintLite) -> Bool {
         return checkMergeCondition(
-            start1: f1.startTime, end1: f1.endTime, lat1: f1.latitude, lon1: f1.longitude, title1: f1.title, place1: f1.placeID, activity1: f1.activityTypeValue,
-            start2: f2.startTime, end2: f2.endTime, lat2: f2.latitude, lon2: f2.longitude, title2: f2.title, place2: f2.placeID, activity2: f2.activityTypeValue
+            start1: f1.startTime, end1: f1.endTime, lat1: f1.latitude, lon1: f1.longitude, addr1: f1.address, place1: f1.placeID, activity1: f1.activityTypeValue,
+            start2: f2.startTime, end2: f2.endTime, lat2: f2.latitude, lon2: f2.longitude, addr2: f2.address, place2: f2.placeID, activity2: f2.activityTypeValue
         )
     }
 
     private static func shouldPerformUiMerge(_ f1: Footprint, _ f2: Footprint) -> Bool {
         return checkMergeCondition(
-            start1: f1.startTime, end1: f1.endTime, lat1: f1.latitude, lon1: f1.longitude, title1: f1.title, place1: f1.placeID, activity1: f1.activityTypeValue,
-            start2: f2.startTime, end2: f2.endTime, lat2: f2.latitude, lon2: f2.longitude, title2: f2.title, place2: f2.placeID, activity2: f2.activityTypeValue
+            start1: f1.startTime, end1: f1.endTime, lat1: f1.latitude, lon1: f1.longitude, addr1: f1.address, place1: f1.placeID, activity1: f1.activityTypeValue,
+            start2: f2.startTime, end2: f2.endTime, lat2: f2.latitude, lon2: f2.longitude, addr2: f2.address, place2: f2.placeID, activity2: f2.activityTypeValue
         )
     }
 
     private static func checkMergeCondition(
-        start1: Date, end1: Date, lat1: Double, lon1: Double, title1: String, place1: UUID?, activity1: String?,
-        start2: Date, end2: Date, lat2: Double, lon2: Double, title2: String, place2: UUID?, activity2: String?
+        start1: Date, end1: Date, lat1: Double, lon1: Double, addr1: String?, place1: UUID?, activity1: String?,
+        start2: Date, end2: Date, lat2: Double, lon2: Double, addr2: String?, place2: UUID?, activity2: String?
     ) -> Bool {
         if start2.timeIntervalSince(end1) > AppConfig.shared.stayMergeGapThreshold { return false }
         if let p1 = place1, let p2 = place2, p1 == p2 && activity1 == activity2 { return true }
         let loc1 = CLLocation(latitude: lat1, longitude: lon1)
         let loc2 = CLLocation(latitude: lat2, longitude: lon2)
-        if loc1.distance(from: loc2) < AppConfig.shared.stayDistanceThreshold && title1 == title2 && activity1 == activity2 { return true }
+        if loc1.distance(from: loc2) < AppConfig.shared.stayDistanceThreshold && addr1 == addr2 && activity1 == activity2 { return true }
         return false
     }
 
@@ -378,11 +387,11 @@ class TimelineBuilder {
                             footprintLocations: f1.footprintLocations + f2.footprintLocations,
                             locationHash: "UI_MERGE_FINAL",
                             duration: max(f1.endTime, f2.endTime).timeIntervalSince(f1.startTime),
-                            title: (f1.placeID != nil || f1.isTitleEditedByHand) ? f1.title : ((f2.placeID != nil || f2.isTitleEditedByHand) ? f2.title : f1.title),
                             status: (f1.status == .confirmed || f2.status == .confirmed) ? .confirmed : f1.status,
-                            address: f1.address ?? f2.address,
+                            address: (f1.placeID != nil || f1.isAddressEditedByHand) ? f1.address : ((f2.placeID != nil || f2.isAddressEditedByHand) ? f2.address : f1.address),
                             activityTypeValue: f1.activityTypeValue ?? f2.activityTypeValue
                         )
+                        combined.isAddressEditedByHand = f1.isAddressEditedByHand || f2.isAddressEditedByHand
                         combined.placeID = f1.placeID ?? f2.placeID
                         merged[merged.count - 1] = .footprint(combined)
                     } else {
@@ -656,10 +665,6 @@ class TimelineBuilder {
         if let place = getPlaceForCoordinate(midpoint, allPlaces: allPlaces) {
             let name = place.name
             fp.address = name
-            fp.title = Footprint.generateRandomTitle(for: name, seed: Int(start.timeIntervalSince1970))
-            fp.placeID = place.placeID
-        } else {
-            fp.title = Footprint.generateRandomTitle(for: "此处", seed: Int(start.timeIntervalSince1970))
         }
         
         items.append(.footprint(fp))
@@ -709,11 +714,9 @@ class TimelineBuilder {
            let place = allPlaces.first(where: { $0.placeID == placeID }) {
             return place.name
         }
-        if footprint.isTitleEditedByHand { return footprint.title }
         if let nearbyPlace = getPlaceForCoordinate(CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), allPlaces: allPlaces) {
             return nearbyPlace.name
         }
-        if !footprint.title.isEmpty && footprint.title != "地点记录" && footprint.title != "正在获取位置..." { return footprint.title }
         if let addr = footprint.address, !addr.isEmpty { return addr }
         return "未知位置"
     }
@@ -1196,7 +1199,6 @@ class PersistentTimelineBuilder {
                 duration: gap,
                 status: .confirmed
             )
-            bridgeFp.title = previousFp?.title ?? Footprint.generateRandomTitle(for: "某地", seed: Int(lastEndTime.timeIntervalSince1970))
             bridgeFp.address = previousFp?.address
             bridgeFp.placeID = previousFp?.placeID
             context.insert(bridgeFp)
@@ -1401,13 +1403,8 @@ class PersistentTimelineBuilder {
         if let placeID = footprint.placeID, let place = allPlaces.first(where: { $0.placeID == placeID }) {
             return place.name
         }
-        if footprint.isTitleEditedByHand { return footprint.title }
         if let addr = footprint.address, !addr.isEmpty { return addr }
-        // Fallback to title only if it's not generic, and try to avoid the labels
-        if !Footprint.isGenericTitle(footprint.title) {
-            return footprint.title
-        }
-        return "某地"
+        return "未知位置"
     }
 
 
@@ -1470,10 +1467,7 @@ class PersistentTimelineBuilder {
                 }
 
                 // 如果当前没有名字但下一个有，继承名字
-                if Footprint.isGenericTitle(current.title) && !Footprint.isGenericTitle(next.title) {
-                    current.title = next.title
                     current.placeID = next.placeID
-                }
                 
                 // 标记下一个为忽略 (逻辑上合并了)
                 next.statusValue = "ignored"
@@ -1543,11 +1537,8 @@ class PersistentTimelineBuilder {
                     loc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude)) <
                     loc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
                 }), loc.distance(from: CLLocation(latitude: matched.latitude, longitude: matched.longitude)) < Double(matched.radius) + 50 {
-                    fp.title = Footprint.generateRandomTitle(for: matched.name, seed: Int(fp.startTime.timeIntervalSince1970))
                     fp.placeID = matched.placeID
                     fp.address = matched.address
-                } else {
-                    fp.title = Footprint.generateRandomTitle(for: "某地", seed: Int(fp.startTime.timeIntervalSince1970))
                 }
                 context.insert(fp)
                 i = j // 跳过该簇
@@ -1651,7 +1642,7 @@ class PersistentTimelineBuilder {
             })
             let recentFps = (try? context.fetch(fpDesc)) ?? []
             let pendingFps = recentFps.filter { 
-                $0.address == nil || $0.address == "" || Footprint.isGenericTitle($0.title)
+                $0.address == nil || $0.address == ""
             }
             
             // 2. 获取最近一周的所有交通记录
@@ -1669,9 +1660,6 @@ class PersistentTimelineBuilder {
                 let addr = await resolveSingleAddress(coordinate: coord)
                 if !addr.isEmpty {
                     fp.address = addr
-                    if Footprint.isGenericTitle(fp.title) {
-                        fp.title = Footprint.generateRandomTitle(for: addr, seed: Int(fp.startTime.timeIntervalSince1970))
-                    }
                     try? context.save()
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000) // 每 2 秒查一个

@@ -116,7 +116,7 @@ struct ActivityTypeEditorView: View {
     
     @State private var name: String = ""
     @State private var icon: String = "tag.fill"
-    @State private var color: Color = .blue
+    @State private var selectedColor: Color = .blue
     
     struct IconCategory: Identifiable {
         let id = UUID()
@@ -173,7 +173,7 @@ struct ActivityTypeEditorView: View {
         self.activity = activity
         self._name = State(initialValue: activity?.name ?? "")
         self._icon = State(initialValue: activity?.icon ?? "tag.fill")
-        self._color = State(initialValue: activity?.color ?? .blue)
+        self._selectedColor = State(initialValue: activity?.color ?? .blue)
     }
     
     var body: some View {
@@ -183,11 +183,11 @@ struct ActivityTypeEditorView: View {
                     HStack(spacing: 16) {
                         ZStack {
                             Circle()
-                                .fill(color.opacity(0.15))
+                                .fill(selectedColor.opacity(0.15))
                                 .frame(width: 52, height: 52)
                             Image(systemName: icon)
                                 .font(.system(size: 28, weight: .bold))
-                                .foregroundColor(color)
+                                .foregroundColor(selectedColor)
                         }
                         
                         TextField("活动名称", text: $name)
@@ -199,14 +199,14 @@ struct ActivityTypeEditorView: View {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 12) {
                         ForEach(colors, id: \.self) { colorOption in
                             Button {
-                                self.color = colorOption
+                                self.selectedColor = colorOption
                             } label: {
                                 Circle()
                                     .fill(colorOption)
                                     .frame(width: 30, height: 30)
                                     .overlay(
                                         Circle()
-                                            .stroke(Color.primary, lineWidth: color == colorOption ? 2 : 0)
+                                            .stroke(Color.primary, lineWidth: selectedColor == colorOption ? 2 : 0)
                                             .padding(-4)
                                     )
                             }
@@ -233,8 +233,8 @@ struct ActivityTypeEditorView: View {
                                             Image(systemName: iconName)
                                                 .font(.system(size: 21))
                                                 .frame(width: 40, height: 40)
-                                                .background(icon == iconName ? color.opacity(0.15) : Color.clear)
-                                                .foregroundColor(icon == iconName ? color : .secondary.opacity(0.8))
+                                                .background(icon == iconName ? selectedColor.opacity(0.15) : Color.clear)
+                                                .foregroundColor(icon == iconName ? selectedColor : .secondary.opacity(0.8))
                                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                                         }
                                         .buttonStyle(.plain)
@@ -268,7 +268,7 @@ struct ActivityTypeEditorView: View {
                 if let activity = activity {
                     name = activity.name
                     icon = activity.icon
-                    color = activity.color
+                    selectedColor = activity.color
                 }
             }
         }
@@ -278,9 +278,9 @@ struct ActivityTypeEditorView: View {
         if let activity = activity {
             activity.name = name
             activity.icon = icon
-            activity.colorHex = color.toHex()
+            activity.colorHex = selectedColor.toHex()
         } else {
-            let newActivity = ActivityType(name: name, icon: icon, colorHex: color.toHex())
+            let newActivity = ActivityType(name: name, icon: icon, colorHex: selectedColor.toHex(), sortOrder: 99)
             modelContext.insert(newActivity)
         }
         try? modelContext.save()

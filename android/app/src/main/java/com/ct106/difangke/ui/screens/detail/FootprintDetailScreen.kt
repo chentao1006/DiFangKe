@@ -154,21 +154,34 @@ fun FootprintDetailScreen(
                 // 1. 标题和活动类型
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = title,
-                            onValueChange = { title = it },
-                            placeholder = { Text("有什么值得记住的") },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
-                                unfocusedBorderColor = Color.Transparent,
-                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
-                            ),
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
-                        )
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { showLocationPicker = true }
+                                .padding(vertical = 8.dp)
+                        ) {
+                            val mPlace = matchedPlace
+                            val locationText = mPlace?.name ?: addressText.ifEmpty { "未知位置" }
+                            
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = locationText,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (mPlace?.isUserDefined == true) Color(0xFFFF9800) else MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = "修改地点",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = Color.Gray.copy(alpha = 0.5f)
+                                )
+                            }
+                        }
                         
                         Spacer(modifier = Modifier.width(12.dp))
                         
@@ -199,40 +212,7 @@ fun FootprintDetailScreen(
                     colors = CardDefaults.elevatedCardColors(containerColor = if (isDark) Color(0xFF1C1C1E) else Color.White)
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                             Icon(
-                                 imageVector = Icons.Default.Place, 
-                                 contentDescription = null, 
-                                 modifier = Modifier.size(16.dp), 
-                                 tint = if (matchedPlace?.isUserDefined == true) importantColor else MaterialTheme.colorScheme.primary
-                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                             Column(
-                                  modifier = Modifier
-                                      .weight(1f)
-                                      .clickable { showLocationPicker = true }
-                              ) {
-                                  val mPlace = matchedPlace
-                                  Row(verticalAlignment = Alignment.CenterVertically) {
-                                      Text(
-                                          text = addressText.ifEmpty { "未记录位置" },
-                                          style = MaterialTheme.typography.bodyMedium,
-                                          fontWeight = FontWeight.Medium,
-                                          color = if (mPlace?.isUserDefined == true) importantColor else MaterialTheme.colorScheme.onSurface,
-                                          maxLines = 1,
-                                          overflow = TextOverflow.Ellipsis,
-                                          modifier = Modifier.weight(1f, fill = false)
-                                      )
-                                      Spacer(modifier = Modifier.width(4.dp))
-                                      Icon(
-                                          imageVector = Icons.Default.Edit,
-                                          contentDescription = null,
-                                          modifier = Modifier.size(12.dp),
-                                          tint = Color.Gray.copy(alpha = 0.5f)
-                                      )
-                                  }
-                              }
-                        }
+                        // Time display
 
                         if (showLocationPicker) {
                             ModalBottomSheet(

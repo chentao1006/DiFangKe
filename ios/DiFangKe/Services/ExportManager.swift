@@ -12,12 +12,12 @@ class ExportManager {
             let date: Date
             let start: Date
             let end: Date
-            let title: String
+            let address: String?
             let reason: String?
             let locations: [CLLocationCoordinate2D]
             
             enum CodingKeys: String, CodingKey {
-                case id, date, start, end, title, reason, locations
+                case id, date, start, end, address, reason, locations
             }
             
             // Re-define Codable for Coordinate
@@ -32,7 +32,7 @@ class ExportManager {
                 try container.encode(date, forKey: .date)
                 try container.encode(start, forKey: .start)
                 try container.encode(end, forKey: .end)
-                try container.encode(title, forKey: .title)
+                try container.encode(address, forKey: .address)
                 try container.encode(reason, forKey: .reason)
                 let coords = locations.map { Coordinate(lat: $0.latitude, lon: $0.longitude) }
                 try container.encode(coords, forKey: .locations)
@@ -40,7 +40,7 @@ class ExportManager {
         }
         
         let dtos = footprints.map { f in
-            FootprintDTO(id: f.footprintID, date: f.date, start: f.startTime, end: f.endTime, title: f.title, reason: f.reason, locations: f.coordinates)
+            FootprintDTO(id: f.footprintID, date: f.date, start: f.startTime, end: f.endTime, address: f.address, reason: f.reason, locations: f.coordinates)
         }
         
         guard let data = try? encoder.encode(dtos) else { return nil }

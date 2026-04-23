@@ -183,11 +183,10 @@ struct DataManagerView: View {
     
     private func deleteAllData() {
         do {
-            // Delete all records via query to avoid potential SwiftData 1.0 compiler confusion with delete(model:)
-            try modelContext.delete(model: Footprint.self, where: #Predicate<Footprint> { _ in true })
-            try modelContext.delete(model: Place.self, where: #Predicate<Place> { _ in true })
-            try modelContext.delete(model: ActivityType.self, where: #Predicate<ActivityType> { _ in true })
-            try modelContext.delete(model: TransportRecord.self, where: #Predicate<TransportRecord> { _ in true })
+            try modelContext.delete(model: Footprint.self)
+            try modelContext.delete(model: Place.self)
+            try modelContext.delete(model: ActivityType.self)
+            try modelContext.delete(model: TransportRecord.self)
             
             try modelContext.save()
             CloudSettingsManager.shared.triggerDataSyncPulse()
@@ -271,7 +270,6 @@ struct BackupDTO: Codable {
         let end: Date
         let lats: [Double]
         let lngs: [Double]
-        let title: String
         let reason: String?
         let status: String
         let score: Float
@@ -281,14 +279,13 @@ struct BackupDTO: Codable {
         let isHighlight: Bool?
         let activityType: String?
         
-        init(id: String, date: Date, start: Date, end: Date, lats: [Double], lngs: [Double], title: String, reason: String?, status: String, score: Float, placeID: String?, photos: [String], addr: String?, isHighlight: Bool?, activityType: String?) {
+        init(id: String, date: Date, start: Date, end: Date, lats: [Double], lngs: [Double], reason: String?, status: String, score: Float, placeID: String?, photos: [String], addr: String?, isHighlight: Bool?, activityType: String?) {
             self.id = id
             self.date = date
             self.start = start
             self.end = end
             self.lats = lats
             self.lngs = lngs
-            self.title = title
             self.reason = reason
             self.status = status
             self.score = score
@@ -300,7 +297,7 @@ struct BackupDTO: Codable {
         }
         
         enum CodingKeys: String, CodingKey {
-            case id, date, start, end, lats, lngs, title, reason, status, score, photos, addr, placeID, activityType
+            case id, date, start, end, lats, lngs, reason, status, score, photos, addr, placeID, activityType
             case isHighlight = "isHighlight"
         }
     }
@@ -310,6 +307,7 @@ struct BackupDTO: Codable {
         let name: String
         let icon: String
         let colorHex: String
+        let sortOrder: Int?
     }
     
     struct TransportDTO: Codable {
@@ -343,7 +341,6 @@ final class BackupService {
                     end: f.endTime,
                     lats: f.latitudeArray,
                     lngs: f.longitudeArray,
-                    title: f.title,
                     reason: f.reason,
                     status: f.statusValue,
                     score: f.aiScore,
@@ -354,7 +351,7 @@ final class BackupService {
                     activityType: f.activityTypeValue
                 )
             },
-            activityTypes: activities.map { BackupDTO.ActivityTypeDTO(id: $0.id.uuidString, name: $0.name, icon: $0.icon, colorHex: $0.colorHex) },
+            activityTypes: activities.map { BackupDTO.ActivityTypeDTO(id: $0.id.uuidString, name: $0.name, icon: $0.icon, colorHex: $0.colorHex, sortOrder: $0.sortOrder) },
             transports: transports.map { t in
                 BackupDTO.TransportDTO(
                     id: t.recordID.uuidString,
@@ -438,7 +435,6 @@ final class BackupService {
                         footprintLocations: zip(f.lats, f.lngs).map { CLLocationCoordinate2D(latitude: $0, longitude: $1) },
                         locationHash: "RESTORED",
                         duration: f.end.timeIntervalSince(f.start),
-                        title: f.title,
                         reason: f.reason,
                         status: FootprintStatus(rawValue: f.status) ?? .confirmed,
                         aiScore: f.score,
@@ -459,11 +455,17 @@ final class BackupService {
         // 4. Restore Activity Types
         var newActivityTypes = 0
         if let activityDTOs = backup.activityTypes {
-            for a in activityDTOs {
+            for (index, a) in activityDTOs.enumerated() {
                 if let uuid = UUID(uuidString: a.id) {
                     let descriptor = FetchDescriptor<ActivityType>(predicate: #Predicate { $0.id == uuid })
                     if (try? context.fetch(descriptor).first) == nil {
-                        let activity = ActivityType(id: uuid, name: a.name, icon: a.icon, colorHex: a.colorHex)
+                        let activity = ActivityType(
+                            id: uuid,
+                            name: a.name,
+                            icon: a.icon,
+                            colorHex: a.colorHex,
+                            sortOrder: a.sortOrder ?? index
+                        )
                         context.insert(activity)
                         newActivityTypes += 1
                     }
@@ -517,4 +519,3 @@ final class BackupService {
         )
     }
 }
-

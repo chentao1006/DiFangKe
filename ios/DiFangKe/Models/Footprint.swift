@@ -27,7 +27,6 @@ final class Footprint {
         get { max(0, endTime.timeIntervalSince(startTime)) }
         set { /* No-op: duration is derived from start/end times */ }
     }
-    var title: String = ""
     var reason: String?
     var statusValue: String = "candidate"
     var aiScore: Float = 0.0
@@ -39,7 +38,7 @@ final class Footprint {
     var isHighlight: Bool?
     var isPlaceSuggestionIgnored: Bool = false
     var aiAnalyzed: Bool = false
-    var isTitleEditedByHand: Bool = false
+    var isAddressEditedByHand: Bool = false
     var activityTypeValue: String?
     
     // Health metrics
@@ -75,7 +74,7 @@ final class Footprint {
     @Transient private var _cachedLatitudes: [Double]?
     @Transient private var _cachedLongitudes: [Double]?
     @Transient private var _cachedPhotoIDs: [String]?
-
+ 
     var latitudeArray: [Double] {
         get { 
             if let cached = _cachedLatitudes { return cached }
@@ -88,7 +87,7 @@ final class Footprint {
             latitudeData = (try? JSONEncoder().encode(newValue)) ?? Data() 
         }
     }
-
+ 
     var longitudeArray: [Double] {
         get { 
             if let cached = _cachedLongitudes { return cached }
@@ -101,7 +100,7 @@ final class Footprint {
             longitudeData = (try? JSONEncoder().encode(newValue)) ?? Data() 
         }
     }
-
+ 
     var photoAssetIDs: [String] {
         get { 
             if let cached = _cachedPhotoIDs { return cached }
@@ -114,7 +113,7 @@ final class Footprint {
             photoAssetIDsData = (try? JSONEncoder().encode(newValue)) ?? Data() 
         }
     }
-
+ 
     
     var footprintLocations: [CLLocationCoordinate2D] {
         get {
@@ -133,7 +132,6 @@ final class Footprint {
          footprintLocations: [CLLocationCoordinate2D],
          locationHash: String,
          duration: TimeInterval,
-         title: String? = nil,
          reason: String? = nil,
          status: FootprintStatus = .candidate,
          aiScore: Float = 0.0,
@@ -143,7 +141,7 @@ final class Footprint {
          address: String? = nil,
          isPlaceSuggestionIgnored: Bool = false,
          aiAnalyzed: Bool = false,
-         isTitleEditedByHand: Bool = false,
+         isAddressEditedByHand: Bool = false,
          activityType: ActivityType? = nil,
          activityTypeValue: String? = nil,
          stepCount: Int? = nil,
@@ -164,60 +162,15 @@ final class Footprint {
         self.address = address
         self.isPlaceSuggestionIgnored = isPlaceSuggestionIgnored
         self.aiAnalyzed = aiAnalyzed
-        self.isTitleEditedByHand = isTitleEditedByHand
+        self.isAddressEditedByHand = isAddressEditedByHand
         self.activityTypeValue = activityTypeValue ?? activityType?.id.uuidString
         self.stepCount = stepCount
         self.walkingDistance = walkingDistance
         self.floorsAscended = floorsAscended
         
-        // Use provided title, or address, or default to generic poetic title
-        if let title = title, !title.isEmpty {
-            self.title = title
-        } else if let address = address, !address.isEmpty {
-            self.title = Footprint.generateRandomTitle(for: address, seed: Int(startTime.timeIntervalSince1970))
-        } else {
-            self.title = Footprint.generateRandomTitle(for: "此处", seed: Int(startTime.timeIntervalSince1970))
-        }
-        
         // Use setters for computed properties
         self.latitudeArray = footprintLocations.map { $0.latitude }
         self.longitudeArray = footprintLocations.map { $0.longitude }
         self.photoAssetIDs = photoAssetIDs
-    }
-    
-    static let titleTemplates = [
-        "在%@停留",
-        "在%@驻足",
-        "寻迹于%@",
-        "漫步于%@",
-        "徘徊在%@",
-        "身处%@",
-        "栖息于%@",
-        "在%@的一段时光"
-    ]
-    
-    /// 判断标题是否为系统生成的通用占位符
-    static func isGenericTitle(_ title: String) -> Bool {
-        let placeholders = ["地点记录", "正在获取位置...", "未知地点", "点位记录", "发现足迹", "寻迹此处", "在某地停留", "此处", "某地", ""]
-        if placeholders.contains(title) { return true }
-        
-        // 核心：检查是否符合随机模板中的“某地”或“此处”
-        for word in ["此处", "某地"] {
-            for template in titleTemplates {
-                if title == String(format: template, word) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-
-    /// 生成随机但确定（基于 seed 或名称）的、带有“地方客”风格的足迹标题
-    static func generateRandomTitle(for locationName: String, seed: Int? = nil) -> String {
-        // Use provided seed (e.g., startTime) or a stable hash of the name to ensure reproducibility
-        let stableSeed = seed ?? locationName.utf8.reduce(0) { ($0 &* 31) &+ Int($1) }
-        let index = abs(stableSeed) % titleTemplates.count
-        let template = titleTemplates[index]
-        return String(format: template, locationName)
     }
 }

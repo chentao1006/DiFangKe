@@ -322,8 +322,13 @@ struct RecordingStatusCard: View {
             }
         }
         
+        // 优先显示重要地点名称
+        if let place = locationManager.matchedPlace, place.isUserDefined {
+            return "正在\(place.name)停留"
+        }
+        
         if let ongoing = locationManager.ongoingTitle {
-            return ongoing
+            return "正在\(ongoing)停留"
         } else {
             return "正在此处停留"
         }
@@ -363,29 +368,13 @@ struct RecordingStatusCard: View {
                 // Top Section: Info
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
+                        let isImportantPlace = locationManager.matchedPlace?.isUserDefined == true
                         Text(summary ?? displayTitle)
                             .font(.system(.headline, design: .rounded))
-                            .foregroundColor(!locationManager.isTracking && summary == nil ? .secondary : Color.dfkMainText)
+                            .foregroundColor(!locationManager.isTracking && summary == nil ? .secondary : (isImportantPlace ? .orange : Color.dfkMainText))
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                         
-                        // 地址与地点行
-                        HStack(spacing: 6) {
-                            if locationManager.isTracking {
-                                let matchedName = locationManager.matchedPlace?.isUserDefined == true ? locationManager.matchedPlace?.name : nil
-                                let displayText = matchedName ?? locationManager.currentAddress
-                                
-                                if !displayText.isEmpty && displayText != "正在解析位置..." {
-                                    Text(displayText)
-                                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                                        .foregroundColor(matchedName != nil ? .orange : Color.dfkMainText.opacity(0.85))
-                                        .lineLimit(1)
-                                }
-                            }
-                            
-
-                        }
-                        .padding(.top, 1)
                         
                         HStack(spacing: 4) {                            
                             if !locationManager.isTracking {
@@ -547,27 +536,14 @@ struct FootprintCardView: View {
                         }
                         
                         HStack(spacing: 6) {
-                            Text(footprint.title.isEmpty ? "地点记录" : footprint.title)
+                            let matchedPlace = allPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })
+                            let displayText = matchedPlace?.name ?? footprint.address ?? "未知地点"
+                            
+                            Text(displayText)
                                 .font(.system(.headline, design: .rounded))
-                                .foregroundColor(Color.dfkMainText)
+                                .foregroundColor(matchedPlace != nil ? .orange : Color.dfkMainText)
                                 .lineLimit(1)
                         }
-                        
-
-                        HStack(spacing: 6) {
-                            let matchedPlace = allPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })
-                            let displayText = matchedPlace?.name ?? footprint.address
-                            
-                            if let text = displayText, !text.isEmpty {
-                                Text(text)
-                                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                                    .foregroundColor(matchedPlace != nil ? .orange : Color.dfkMainText.opacity(0.85))
-                                    .lineLimit(1)
-                            }
-                            
-
-                        }
-                        .padding(.top, 1)
                         
                         HStack(spacing: 4) {
                             Text(timeRangeString)
@@ -583,34 +559,6 @@ struct FootprintCardView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                         .layoutPriority(1)
-                        
-                        // Health Metrics Row
-                        if let steps = footprint.stepCount, steps > 10 {
-                            HStack(spacing: 8) {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "figure.walk")
-                                    Text("\(steps) 步")
-                                }
-                                
-                                if let dist = footprint.walkingDistance, dist > 0 {
-                                    HStack(spacing: 3) {
-                                        Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
-                                            .font(.system(size: 10))
-                                        Text(formatDistance(dist))
-                                    }
-                                }
-                                
-                                if let floors = footprint.floorsAscended, floors > 0 {
-                                    HStack(spacing: 3) {
-                                        Image(systemName: "stairs")
-                                        Text("\(floors) 层")
-                                    }
-                                }
-                            }
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundColor(.orange.opacity(0.9))
-                            .padding(.top, 1)
-                        }
                         
                         if let reason = footprint.reason, !reason.isEmpty {
                             Text(reason)
@@ -726,9 +674,6 @@ struct FootprintCardView: View {
             if !addressStr.isEmpty {
                 DispatchQueue.main.async {
                     footprint.address = addressStr
-                    if !footprint.isTitleEditedByHand {
-                        footprint.title = Footprint.generateRandomTitle(for: addressStr, seed: Int(footprint.startTime.timeIntervalSince1970))
-                    }
                     try? footprint.modelContext?.save()
                 }
             }
@@ -848,12 +793,12 @@ struct FootprintCardView: View {
 // MARK: - Placeholder Footprint Card
 struct PlaceholderFootprintCard: View {
     private let phrases = [
-        "今日份回忆正在后台悄悄酝酿...",
-        "正在捕捉第一段时光足迹...",
-        "别急，这一天的故事正在落笔...",
-        "时光正在被系统悉心收纳...",
-        "正在为您打磨今日的轨迹线...",
-        "第一段记忆正在慢慢发酵..."
+        "正在加载今日足迹...",
+        "正在同步位置记录...",
+        "正在生成记录卡片...",
+        "正在整理位置数据...",
+        "正在分析今日轨迹...",
+        "正在更新时间轴..."
     ]
     
     @Environment(LocationManager.self) private var locationManager

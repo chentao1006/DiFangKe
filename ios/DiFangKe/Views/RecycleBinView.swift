@@ -28,7 +28,7 @@ struct RecycleBinView: View {
                     ForEach(ignoredFootprints) { footprint in
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(footprint.title)
+                                Text(footprint.address ?? "未知位置")
                                     .font(.headline)
                                     .lineLimit(1)
                                 HStack {

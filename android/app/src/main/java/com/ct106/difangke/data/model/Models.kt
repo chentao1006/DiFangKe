@@ -194,24 +194,12 @@ data class DaySummary(
 
 // ── 足迹标题生成（对应 iOS Footprint.titleTemplates）──────────────
 object FootprintTitles {
-    val templates = listOf(
-        "在%s停留",
-        "在%s驻足",
-        "寻迹于%s",
-        "漫步于%s",
-        "徘徊在%s",
-        "身处%s",
-        "栖息于%s",
-        "在%s的一段时光"
-    )
-
     fun generate(locationName: String, seed: Long): String {
-        val index = Math.abs(seed.toInt()) % templates.size
-        return String.format(templates[index], locationName)
+        return locationName
     }
 
     fun isGeneric(title: String): Boolean {
-        val generics = setOf("地点记录", "正在获取位置...", "未知地点", "点位记录", "发现足迹", "寻迹此处", "在某地停留", "此处", "某地", "")
+        val generics = setOf("地点记录", "正在获取位置...", "未知地点", "点位记录", "发现足迹", "在某地停留", "此处", "某地", "")
         if (title in generics) return true
         for (w in listOf("此处", "某地")) {
             for (t in templates) {
@@ -222,23 +210,7 @@ object FootprintTitles {
     }
 
     fun extractLocation(title: String): String {
-        var clean = title
-        val prefixes = listOf("在", "寻迹于", "漫步于", "徘徊在", "身处", "栖息于")
-        val suffixes = listOf("停留", "驻足", "的一段时光")
-        
-        for (p in prefixes) {
-            if (clean.startsWith(p)) {
-                clean = clean.substring(p.length)
-                break
-            }
-        }
-        for (s in suffixes) {
-            if (clean.endsWith(s)) {
-                clean = clean.substring(0, clean.length - s.length)
-                break
-            }
-        }
-        return clean.trim().ifEmpty { title }
+        return title.trim().ifEmpty { "未知位置" }
     }
 }
 
