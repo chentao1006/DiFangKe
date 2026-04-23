@@ -106,6 +106,46 @@
             --card-shadow: 0 20px 40px rgba(0,0,0,0.06);
         }
 
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --text-main: #F5F5F7;
+                --text-sub: #A1A1A6;
+                --bg-gradient: linear-gradient(-45deg, #1c1c1e 0%, #000000 100%);
+                --card-shadow: 0 40px 80px rgba(0,0,0,0.4);
+                --accent-soft: rgba(79, 179, 165, 0.2);
+            }
+            body { background: #1c1c1e !important; }
+            body::before {
+                background: 
+                    radial-gradient(circle at 20% 30%, rgba(79, 179, 165, 0.12) 0%, transparent 40%),
+                    radial-gradient(circle at 80% 70%, rgba(79, 179, 165, 0.18) 0%, transparent 40%),
+                    linear-gradient(135deg, #1c1c1e 0%, #111111 100%) !important;
+            }
+            body::after {
+                background-image: 
+                    linear-gradient(rgba(79, 179, 165, 0.08) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(79, 179, 165, 0.08) 1px, transparent 1px) !important;
+            }
+            header { 
+                background: rgba(28, 28, 30, 0.8) !important; 
+                border-bottom: 1px solid rgba(255,255,255,0.08) !important;
+            }
+            .phone-container { background: #111; box-shadow: 0 40px 80px rgba(0,0,0,0.5); }
+            .phone-screen { background: #000; }
+            .slider-arrow { background: rgba(44, 44, 46, 0.6) !important; border-color: rgba(255,255,255,0.15) !important; color: #FFF !important; }
+            .phone-mockup:hover .slider-arrow { background: rgba(58, 58, 60, 0.9) !important; }
+            .card, .tag, .philosophy-item { 
+                background: rgba(255, 255, 255, 0.04) !important; 
+                border-color: rgba(255,255,255,0.08) !important; 
+            }
+            .card:hover { background: rgba(255, 255, 255, 0.08) !important; }
+            .philosophy { background: rgba(79, 179, 165, 0.1) !important; }
+            .btn-download-nav { background: #F5F5F7 !important; color: #000 !important; }
+            .btn-android-download { border-color: rgba(255,255,255,0.3) !important; }
+            .qr-download { background: #F5F5F7 !important; padding: 10px !important; box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important; }
+            #toast { background-color: rgba(44, 44, 46, 0.9) !important; border-color: rgba(255,255,255,0.15) !important; }
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
