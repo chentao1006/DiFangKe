@@ -14,7 +14,7 @@ struct TimelinePageView: View {
     let locationManager: LocationManager
     let pastLimitOffset: Int
     let isFromHistory: Bool
-    let summaryContent: String?
+    @Query private var pageInsights: [DailyInsight]
     
     @State private var selectedFootprint: Footprint?
     @State private var selectedTransport: Transport?
@@ -44,8 +44,13 @@ struct TimelinePageView: View {
     @State private var totalDailyMileage: Double = 0
     @State private var dayPhotoAssets: [PHAsset] = []
     
-    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isFromHistory: Bool = false, summaryContent: String? = nil) {
+    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isFromHistory: Bool = false) {
         self.date = date
+        let start = Calendar.current.startOfDay(for: date)
+        _pageInsights = Query(filter: #Predicate<DailyInsight> { insight in
+            insight.date == start
+        })
+        
         self.footprints = footprints
         self.manualSelections = manualSelections
         self.allPlaces = allPlaces
@@ -53,7 +58,6 @@ struct TimelinePageView: View {
         self.locationManager = locationManager
         self.pastLimitOffset = pastLimitOffset
         self.isFromHistory = isFromHistory
-        self.summaryContent = summaryContent
         
         let cached = TimelineBuilder.timelineCache[date] ?? []
         // 初始化时立即执行重链接，确保首次渲染就是数据库真实模型
@@ -86,21 +90,17 @@ struct TimelinePageView: View {
                 // 即使已有缓存数据，也要执行刷新任务以加载原始轨迹路径（Trajectory Points）和照片
                 refreshTimeline()
                 
-                // AI 每日摘要检查
-                if isAiAssistantEnabled && !footprints.isEmpty {
-                    if summaryContent == nil {
-                        // 只为过去日期生成
-                        let startOfDate = Calendar.current.startOfDay(for: date)
-                        let isPast = startOfDate < Calendar.current.startOfDay(for: Date())
-                        
-                        if isPast {
-                            let endOfDate = Calendar.current.date(byAdding: .day, value: 1, to: startOfDate)!
-                            let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                                $0.startTime >= startOfDate && $0.startTime < endOfDate && $0.statusRaw == "active"
-                            })
-                            let transports = (try? modelContext.fetch(tpDesc)) ?? []
-                            OpenAIService.shared.enqueueDailySummary(for: date, footprints: footprints, transports: transports)
-                        }
+                // AI 每日摘要检查：仅在缺失时静默生成，不强制刷新
+                let currentSummary = pageInsights.first?.content
+                if isAiAssistantEnabled && !footprints.isEmpty && (currentSummary == nil || currentSummary?.isEmpty == true) {
+                    let startOfDate = Calendar.current.startOfDay(for: date)
+                    if startOfDate < Calendar.current.startOfDay(for: Date()) {
+                        let endOfDate = Calendar.current.date(byAdding: .day, value: 1, to: startOfDate)!
+                        let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                            $0.startTime >= startOfDate && $0.startTime < endOfDate && $0.statusRaw == "active"
+                        })
+                        let transports = (try? modelContext.fetch(tpDesc)) ?? []
+                        OpenAIService.shared.enqueueDailySummary(for: date, footprints: footprints, transports: transports)
                     }
                 }
                 
@@ -117,10 +117,10 @@ struct TimelinePageView: View {
             self.timelineItems = items
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
-            // 当后台完成活动匹配或 AI 分析时，触发完整刷新以展示最新状态
-            refreshTimeline(force: true)
+            // 当后台完成活动匹配时，仅刷新 UI，不触发 AI 重新总结
+            refreshTimeline(force: false)
         }
-        .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in refreshTimeline(force: true) }
+        .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in refreshTimeline(force: false) }
         .sheet(item: $selectedFootprint) { footprint in
             FootprintModalView(
                 footprint: footprint, 
@@ -128,8 +128,12 @@ struct TimelinePageView: View {
                 onDismiss: { didChange in
                     autoFocusOnOpen = false
                     refreshTimeline(force: didChange)
-                }
-            )
+                    if didChange && isAiAssistantEnabled {
+                        Task {
+                            await refreshAiSummary(force: true)
+                        }
+                    }
+                })
             .environment(locationManager)
         }
         .sheet(isPresented: $showingAddPlaceSheet) {
@@ -243,7 +247,7 @@ struct TimelinePageView: View {
                     timelineItems: filteredTimelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
                     photoAssets: dayPhotoAssets,
-                    summary: summaryContent
+                    summary: pageInsights.first?.content,
                 )
                 .padding(.horizontal, 16)
             } else {
@@ -256,7 +260,7 @@ struct TimelinePageView: View {
                     timelineItems: filteredTimelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
                     photoAssets: dayPhotoAssets,
-                    summary: summaryContent,
+                    summary: pageInsights.first?.content,
                     isLoading: isLoadingTimeline
                 )
                 .padding(.horizontal, 16)
@@ -312,6 +316,7 @@ struct TimelinePageView: View {
                 case .transport(let transport):
                     TransportCardView(
                         transport: transport,
+                        allPlaces: allPlaces,
                         isFirst: index == 0,
                         isLast: index == count - 1,
                         isToday: isToday,
@@ -448,20 +453,6 @@ struct TimelinePageView: View {
         
         locationManager.backfillGaps(for: targetDate)
         resolveTimelineAddresses(for: self.timelineItems)
-        
-        // 触发摘要重新生成：如果是由足迹/交通修改引发的强制刷新，且启用了 AI，则强制重新生成当日概览
-        if force && isAiAssistantEnabled && !footprints.isEmpty {
-            let startOfDate = Calendar.current.startOfDay(for: targetDate)
-            let isPast = startOfDate < Calendar.current.startOfDay(for: Date())
-            if isPast {
-                let endOfDate = Calendar.current.date(byAdding: .day, value: 1, to: startOfDate)!
-                let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                    $0.startTime >= startOfDate && $0.startTime < endOfDate && $0.statusRaw == "active"
-                })
-                let transports = (try? modelContext.fetch(tpDesc)) ?? []
-                OpenAIService.shared.enqueueDailySummary(for: targetDate, footprints: footprints, transports: transports, force: true)
-            }
-        }
         
         // 扫一遍该日期的足迹，自动补齐缺失活动或加入 AI 生成队列
         locationManager.autoFillMissingActivityTypes(for: targetDate)
@@ -633,17 +624,45 @@ struct TimelinePageView: View {
                 OpenAIService.shared.enqueueDailySummary(for: date, footprints: footprints, transports: transports, force: true)
             }
         } else {
-            // 1. 同步远程原始轨迹
-            await locationManager.performRawDataSync()
+            let isToday = Calendar.current.isDateInToday(date)
             
-            // 2. 触发位置碎片合并计算
-            await locationManager.triggerTimelineSift()
+            if isToday {
+                // 1. 仅针对今天：同步远程原始轨迹（耗时操作）
+                await locationManager.performRawDataSync()
+                
+                // 2. 仅针对今天：触发位置碎片合并计算（耗时操作）
+                await locationManager.triggerTimelineSift()
+            }
             
-            // 3. 强制异步刷新当前页面的时间线显示
+            // 3. 异步刷新并强制重新同步当前页面的时间轴记录（本地操作，较快）
             await refreshTimelineAsync(force: true)
+            
+            // 4. 手动触发 AI 摘要强制重新生成（仅针对当前拉下的日期）
+            if isAiAssistantEnabled {
+                await refreshAiSummary(force: true)
+            }
         }
         
         // 触感反馈
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+    
+    private func refreshAiSummary(force: Bool = false) async {
+        let startOfDay = Calendar.current.startOfDay(for: date)
+        let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
+        
+        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+        })
+        let latestFootprints = (try? modelContext.fetch(descriptor)) ?? []
+        
+        let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw == "active"
+        })
+        let latestTransports = (try? modelContext.fetch(tpDesc)) ?? []
+        
+        if !latestFootprints.isEmpty {
+            OpenAIService.shared.enqueueDailySummary(for: date, footprints: latestFootprints, transports: latestTransports, force: force)
+        }
     }
 }

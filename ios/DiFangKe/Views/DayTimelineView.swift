@@ -32,6 +32,7 @@ struct DayTimelineView: View {
     @State private var showingCalendar = false
     @State private var updateTask: Task<Void, Never>?
     @State private var preLoadTask: Task<Void, Never>?
+    
 
     init(selectedDate: Date = Calendar.current.startOfDay(for: Date())) {
         self._selectedDate = State(initialValue: selectedDate)
@@ -42,196 +43,23 @@ struct DayTimelineView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 dateNavigator
-                
-                ZStack(alignment: .top) {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 0) {
-                        ForEach(cachedDates, id: \.self) { date in
-                            timelinePage(for: date)
-                        }
-                    }
-                    .scrollTargetLayout()
-                }
-                .scrollTargetBehavior(.paging)
-                .scrollPosition(id: $scrollID)
-                .onChange(of: scrollID) { oldValue, newValue in
-                    if let newValue {
-                        if newValue != oldValue {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        }
-                        selectedDate = newValue
-                        // 如果滑动到了非今天的日期，记录已学会滑动
-                        if !Calendar.current.isDate(newValue, inSameDayAs: Date()) {
-                            UserDefaults.standard.set(true, forKey: "hasSwiped")
-                        }
-                        
-                        // Optimized: Debounced neighborhood pre-loading to avoid lagging during rapid swiping
-                        preLoadTask?.cancel()
-                        preLoadTask = Task { @MainActor in
-                            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms stable delay
-                            if Task.isCancelled { return }
-                            preLoadNeighborDates(around: newValue)
-                        }
-                    }
-                }
-                
-                // Date Switcher Bottom Gradient Fade
-                LinearGradient(
-                    stops: [
-                        .init(color: .dfkBackground, location: 0),
-                        .init(color: .dfkBackground.opacity(0), location: 1)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: 32)
-                .allowsHitTesting(false)
-            } // ZStack
+                pagedTimelineScrollView
+            }
             .navigationTitle("地方客")
             .navigationBarTitleDisplayMode(.inline)
             .background(
                 LinearGradient(
-                    colors: [
-                        .dfkBackground,
-                        .dfkAccent.opacity(0.1)
-                    ],
+                    colors: [.dfkBackground, .dfkAccent.opacity(0.1)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
                 .ignoresSafeArea()
             )
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    NavigationLink(destination: HistoryListView(initialDate: selectedDate)) {
-                        Image(systemName: "calendar.badge.clock")
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(destination: SettingsView()) {
-                        Image(systemName: "gearshape")
-                    }
-                }
-                
-                // AI 活动指示器
-                ToolbarItem(placement: .principal) {
-                    HStack(spacing: 8) {
-                        Text("地方客")
-                            .font(.headline)
-                            .foregroundColor(.primary)
-                        
-                        if OpenAIService.shared.isNetworkRequesting {
-                            ProgressView()
-                                .controlSize(.small)
-                                .transition(.opacity.combined(with: .scale))
-                        }
-                    }
-                }
-            }
-            .onAppear {
-                locationManager.modelContext = modelContext
-                locationManager.allPlaces = allPlaces
-                if UserDefaults.standard.bool(forKey: "isTrackingEnabled") && !locationManager.isTracking {
-                    locationManager.startTracking()
-                }
-                locationManager.refreshAvailableRawDates()
-                updateData()
-                
-                // 探测重装/首次同步
-                if !UserDefaults.standard.bool(forKey: "didInitialSyncAfterInstall") {
-                    if locationManager.hasExistingCloudData() {
-                        locationManager.showSyncInquiry = true
-                    } else {
-                        // 如果云端也没数据，直接标记同步完成
-                        UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
-                    }
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DFKDeepLinkNotification"))) { notification in
-                if let footprintID = notification.userInfo?["footprintID"] as? UUID,
-                   let date = notification.userInfo?["date"] as? Date {
-                    
-                    let dayStart = Calendar.current.startOfDay(for: date)
-                    
-                    // 1. 设置 deepLink 目标
-                    locationManager.deepLinkFootprintID = footprintID
-                    locationManager.deepLinkDate = dayStart
-                    
-                    // 2. 尝试让滚动容器直接跳转到目标日期
-                    withAnimation(.spring()) {
-                        self.selectedDate = dayStart
-                        self.scrollID = dayStart
-                    }
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
-                // 后台完成活动匹配或重置数据后，刷新主视图数据分组
-                updateData()
-            }
-            .overlay {
-                if locationManager.showSyncInquiry {
-                    syncInquiryOverlay
-                } else if locationManager.isSyncingInitialData {
-                    ZStack {
-                        Color.black.opacity(0.4)
-                            .ignoresSafeArea()
-                        
-                        VStack(spacing: 24) {
-                            Text(locationManager.syncStatusMessage)
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            
-                            VStack(spacing: 12) {
-                                ProgressView(value: locationManager.syncProgress, total: 1.0)
-                                    .progressViewStyle(.linear)
-                                    .tint(.white)
-                                    .frame(width: 240)
-                                    .scaleEffect(x: 1, y: 1.5, anchor: .center)
-                                
-                                Text("\(Int(locationManager.syncProgress * 100))%")
-                                    .font(.caption)
-                                    .foregroundColor(.white.opacity(0.7))
-                            }
-                            
-                            Text("正在为您处理数据\n这可能需要一点时间")
-                                .font(.caption)
-                                .multilineTextAlignment(.center)
-                                .foregroundColor(.white.opacity(0.8))
-                        }
-                        .padding(32)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(28)
-                        .shadow(radius: 20)
-                    }
-                    .transition(.opacity.combined(with: .scale))
-                }
-                
-                if locationManager.isResettingData {
-                    ZStack {
-                        Color.black.opacity(0.35)
-                            .ignoresSafeArea()
-                        
-                        VStack(spacing: 20) {
-                            ProgressView()
-                                .scaleEffect(1.5)
-                                .tint(.primary)
-                            
-                            Text("正在重置数据...")
-                                .font(.headline)
-                                .foregroundColor(.primary)
-                            
-                            Text("正在重新分析原始轨迹点\n这可能需要几十秒时间")
-                                .font(.caption)
-                                .multilineTextAlignment(.center)
-                                .foregroundColor(.primary.opacity(0.8))
-                        }
-                        .padding(32)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(28)
-                        .shadow(color: .black.opacity(0.2), radius: 20)
-                    }
-                    .transition(.opacity.combined(with: .scale))
-                }
-            }
+            .toolbar { toolbarContent }
+            .onAppear { setupView() }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DFKDeepLinkNotification"))) { handleDeepLink($0) }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in updateData() }
+            .overlay { statusOverlays }
             .sheet(item: $showingRawPointsDate) { item in
                 RawPointsListView(date: item.date)
                     .environment(locationManager)
@@ -262,18 +90,156 @@ struct DayTimelineView: View {
             } message: {
                 Text("这将删除已手动修正或确认的足迹记录，并基于原始轨迹点重新分析生成时间线。")
             }
-            } // VStack
-        } // NavigationStack
-    } // body
+        }
+    }
+    
+    @ViewBuilder
+    private var pagedTimelineScrollView: some View {
+        ZStack(alignment: .top) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 0) {
+                    ForEach(cachedDates, id: \.self) { date in
+                        timelinePage(for: date)
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .scrollTargetBehavior(.paging)
+            .scrollPosition(id: $scrollID)
+            .onChange(of: scrollID) { oldValue, newValue in
+                handleScrollChange(oldValue: oldValue, newValue: newValue)
+            }
+            
+            // Date Switcher Bottom Gradient Fade
+            LinearGradient(
+                stops: [
+                    .init(color: .dfkBackground, location: 0),
+                    .init(color: .dfkBackground.opacity(0), location: 1)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 32)
+            .allowsHitTesting(false)
+        }
+    }
+    
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            NavigationLink(destination: HistoryListView(initialDate: selectedDate)) {
+                Image(systemName: "calendar.badge.clock")
+            }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            NavigationLink(destination: SettingsView()) {
+                Image(systemName: "gearshape")
+            }
+        }
+        ToolbarItem(placement: .principal) {
+            HStack(spacing: 8) {
+                Text("地方客").font(.headline).foregroundColor(.primary)
+                if OpenAIService.shared.isNetworkRequesting {
+                    ProgressView().controlSize(.small).transition(.opacity.combined(with: .scale))
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var statusOverlays: some View {
+        if locationManager.showSyncInquiry {
+            syncInquiryOverlay
+        } else if locationManager.isSyncingInitialData {
+            syncingOverlay
+        } else if locationManager.isResettingData {
+            resettingOverlay
+        }
+    }
+    
+    private var syncingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.4).ignoresSafeArea()
+            VStack(spacing: 24) {
+                Text(locationManager.syncStatusMessage).font(.headline).foregroundColor(.white)
+                VStack(spacing: 12) {
+                    ProgressView(value: locationManager.syncProgress, total: 1.0)
+                        .progressViewStyle(.linear).tint(.white).frame(width: 240).scaleEffect(x: 1, y: 1.5, anchor: .center)
+                    Text("\(Int(locationManager.syncProgress * 100))%").font(.caption).foregroundColor(.white.opacity(0.7))
+                }
+                Text("正在为您处理数据\n这可能需要一点时间").font(.caption).multilineTextAlignment(.center).foregroundColor(.white.opacity(0.8))
+            }
+            .padding(32).background(.ultraThinMaterial).cornerRadius(28).shadow(radius: 20)
+        }
+        .transition(.opacity.combined(with: .scale))
+    }
+    
+    private var resettingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.35).ignoresSafeArea()
+            VStack(spacing: 20) {
+                ProgressView().scaleEffect(1.5).tint(.primary)
+                Text("正在重置数据...").font(.headline).foregroundColor(.primary)
+                Text("正在重新分析原始轨迹点\n这可能需要几十秒时间").font(.caption).multilineTextAlignment(.center).foregroundColor(.primary.opacity(0.8))
+            }
+            .padding(32).background(.ultraThinMaterial).cornerRadius(28).shadow(color: .black.opacity(0.2), radius: 20)
+        }
+        .transition(.opacity.combined(with: .scale))
+    }
+    
+    private func setupView() {
+        locationManager.modelContext = modelContext
+        locationManager.allPlaces = allPlaces
+        if UserDefaults.standard.bool(forKey: "isTrackingEnabled") && !locationManager.isTracking {
+            locationManager.startTracking()
+        }
+        locationManager.refreshAvailableRawDates()
+        updateData()
+        
+        if !UserDefaults.standard.bool(forKey: "didInitialSyncAfterInstall") {
+            if locationManager.hasExistingCloudData() {
+                locationManager.showSyncInquiry = true
+            } else {
+                UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
+            }
+        }
+    }
+    
+    private func handleScrollChange(oldValue: Date?, newValue: Date?) {
+        guard let newValue = newValue else { return }
+        if newValue != oldValue {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+        selectedDate = newValue
+        if !Calendar.current.isDate(newValue, inSameDayAs: Date()) {
+            UserDefaults.standard.set(true, forKey: "hasSwiped")
+        }
+        preLoadTask?.cancel()
+        preLoadTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            if Task.isCancelled { return }
+            preLoadNeighborDates(around: newValue)
+        }
+    }
+    
+    private func handleDeepLink(_ notification: Notification) {
+        if let footprintID = notification.userInfo?["footprintID"] as? UUID,
+           let date = notification.userInfo?["date"] as? Date {
+            let dayStart = Calendar.current.startOfDay(for: date)
+            locationManager.deepLinkFootprintID = footprintID
+            locationManager.deepLinkDate = dayStart
+            withAnimation(.spring()) {
+                self.selectedDate = dayStart
+                self.scrollID = dayStart
+            }
+        }
+    }
 
     @ViewBuilder
     private func timelinePage(for date: Date) -> some View {
         let offset = latestOffsetIn(date: date)
         let dayFootprints = groupedFootprints[date] ?? []
         let dayManualSelections = groupedManualSelections[date] ?? []
-        let daySummary = groupedInsights[date]?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedDaySummary = daySummary?.isEmpty == false ? daySummary : nil
-        
         TimelinePageView(
             date: date, 
             footprints: dayFootprints, 
@@ -281,8 +247,7 @@ struct DayTimelineView: View {
             allPlaces: allPlaces, 
             offset: offset, 
             locationManager: locationManager, 
-            pastLimitOffset: pastLimitOffset,
-            summaryContent: normalizedDaySummary
+            pastLimitOffset: pastLimitOffset
         )
         .frame(width: UIScreen.main.bounds.width)
         .id(date)

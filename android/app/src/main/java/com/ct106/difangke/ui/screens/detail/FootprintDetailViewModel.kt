@@ -39,10 +39,13 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
             val fp = db.footprintDao().getById(id)
             _footprint.value = fp
             
-            if (fp?.placeID != null) {
-                _matchedPlace.value = db.placeDao().getById(fp.placeID)
-            } else {
-                _matchedPlace.value = null
+            val allPlaces = db.placeDao().getAll()
+            _matchedPlace.value = allPlaces.find { place ->
+                (place.placeID == fp?.placeID && place.isUserDefined) ||
+                (place.isUserDefined && (
+                    place.name.trim() == (fp?.address ?: "").trim() ||
+                    (place.address?.trim() ?: "") == (fp?.address ?: "").trim()
+                ))
             }
 
             // 加载周边 POI

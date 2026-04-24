@@ -177,11 +177,16 @@ fun FootprintCardView(
                         .padding(vertical = 14.dp)
                         .padding(end = if (photoIds.isNotEmpty()) 84.dp else 16.dp)
                 ) {
-                    val matchedPlace = allPlaces.find { it.placeID == footprint.placeID }
+                    val matchedPlace = allPlaces.find { place ->
+                        (place.placeID == footprint.placeID && place.isUserDefined) ||
+                        (place.isUserDefined && (
+                            place.name.trim() == (footprint.address ?: "").trim() ||
+                            (place.address?.trim() ?: "") == (footprint.address ?: "").trim()
+                        ))
+                    }
                     val locationText = when {
-                        matchedPlace != null && matchedPlace.isUserDefined -> matchedPlace.name
-                        !footprint.address.isNullOrEmpty() && footprint.address != "null" && footprint.address != "[]" -> footprint.address!!
                         matchedPlace != null -> matchedPlace.name
+                        !footprint.address.isNullOrEmpty() && footprint.address != "null" && footprint.address != "[]" -> footprint.address!!
                         else -> "未知位置"
                     }
 

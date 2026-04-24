@@ -39,20 +39,8 @@ struct SimpleDayTimelineView: View {
     @Query(sort: \Footprint.startTime, order: .reverse) private var allFootprints: [Footprint]
     @Query private var allManualSelections: [TransportManualSelection]
     @Query(sort: \Place.name) private var allPlaces: [Place]
-    @Query private var allInsights: [DailyInsight]
     @Environment(LocationManager.self) private var locationManager
     @Environment(\.dismiss) private var dismiss
-    
-    private var summary: String? {
-        let dayStart = Calendar.current.startOfDay(for: date)
-        let content = allInsights.first { 
-            if let d = $0.date {
-                return Calendar.current.isDate(d, inSameDayAs: dayStart)
-            }
-            return false
-        }?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return content?.isEmpty == false ? content : nil
-    }
     
     var body: some View {
         NavigationStack {
@@ -64,8 +52,7 @@ struct SimpleDayTimelineView: View {
                 offset: Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: Date()), to: date).day ?? 0,
                 locationManager: locationManager,
                 pastLimitOffset: -3650,
-                isFromHistory: true,
-                summaryContent: summary
+                isFromHistory: true
             )
             .navigationTitle(date.formatted(.dateTime.year().month().day()))
             .navigationBarTitleDisplayMode(.inline)

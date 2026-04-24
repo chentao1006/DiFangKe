@@ -30,21 +30,25 @@ struct DaySummaryCard: View {
             VStack(spacing: 0) {
                 Spacer().frame(height: 18)
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 14))
+                    .font(.system(size: 22, weight: .bold))
                     .foregroundColor(Color.dfkAccent)
-                    .frame(width: 24, height: 24)
+                    .frame(width: 32, height: 32)
                 Spacer()
-            }.frame(width: 40)
+            }.frame(width: 54)
             
             VStack(alignment: .leading, spacing: 0) {
                 // Top Section: Info
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(summary ?? "当日概览")
+                        let isGenerating = OpenAIService.shared.currentlyProcessingDate != nil && 
+                                          Calendar.current.isDate(OpenAIService.shared.currentlyProcessingDate!, inSameDayAs: date)
+                        
+                        Text(summary ?? (isGenerating ? "正在生成概览..." : "当日概览"))
                             .font(.system(.headline, design: .rounded))
                             .foregroundColor(Color.dfkMainText)
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
+                            .breathing(isActive: isGenerating)
                         
                         HStack(spacing: 12) {
                             DayStatItem(value: "\(footprintCount)", label: "足迹")
@@ -56,7 +60,7 @@ struct DaySummaryCard: View {
                     
                 }
                 .padding(.vertical, 16)
-                .padding(.leading, 8)
+                .padding(.leading, 0)
                 .padding(.trailing, 16)
                 
                  // Mini Map Section
@@ -80,7 +84,7 @@ struct DaySummaryCard: View {
                     .onChange(of: points.count) { _, _ in updateCameraPosition() }
                     .onChange(of: photoAssets.count) { _, _ in updateCameraPosition() }
                     .onChange(of: timelineItems.count) { _, _ in updateCameraPosition() }
-                    .padding(.leading, 8)
+                    .padding(.leading, 0)
                     .padding(.trailing, 12)
                     .padding(.bottom, 12)
                 } else {
@@ -98,7 +102,7 @@ struct DaySummaryCard: View {
                                     .foregroundColor(.secondary)
                             }
                         )
-                        .padding(.leading, 8)
+                        .padding(.leading, 0)
                         .padding(.trailing, 12)
                         .padding(.bottom, 12)
                 }
@@ -362,7 +366,7 @@ struct RecordingStatusCard: View {
                     .frame(width: 1.5)
                     .frame(maxHeight: .infinity)
                     .padding(.bottom, -20)
-            }.frame(width: 40)
+            }.frame(width: 54)
             
             VStack(alignment: .leading, spacing: 0) {
                 // Top Section: Info
@@ -391,6 +395,7 @@ struct RecordingStatusCard: View {
                         .font(.system(.headline, design: .rounded))
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
+                        .breathing(isActive: OpenAIService.shared.currentlyProcessingDate != nil && Calendar.current.isDate(OpenAIService.shared.currentlyProcessingDate!, inSameDayAs: Date()))
                         
                         
                         HStack(spacing: 4) {                            
@@ -410,7 +415,7 @@ struct RecordingStatusCard: View {
                     Spacer()
                 }
                 .padding(.vertical, 16)
-                .padding(.leading, 8)
+                .padding(.leading, 0)
                 .padding(.trailing, 16)
                 
                 // DFKMapView Section
@@ -425,7 +430,7 @@ struct RecordingStatusCard: View {
                 )
                 .frame(height: 160)
                 .cornerRadius(12)
-                .padding(.leading, 8)
+                .padding(.leading, 0)
                 .padding(.trailing, 12)
                 .padding(.bottom, 12)
                 .contentShape(Rectangle())
@@ -538,7 +543,14 @@ struct FootprintCardView: View {
                         }
                         
                         HStack(spacing: 6) {
-                            let matchedPlace = allPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })
+                            let matchedPlace = allPlaces.first(where: { place in
+                                if place.placeID == footprint.placeID && place.isUserDefined { return true }
+                                guard place.isUserDefined else { return false }
+                                let fpAddr = (footprint.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !fpAddr.isEmpty else { return false }
+                                return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr || 
+                                       (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr)
+                            })
                             let displayText = matchedPlace?.name ?? footprint.address ?? "未知地点"
                             
                             Text(displayText)
@@ -1033,5 +1045,41 @@ extension View {
         } else {
             self
         }
+    }
+}
+// MARK: - Animations
+struct BreathingOpacityModifier: ViewModifier {
+    let isActive: Bool
+    @State private var opacity: Double = 1.0
+    
+    func body(content: Content) -> some View {
+        content
+            .opacity(isActive ? opacity : 1.0)
+            .onAppear {
+                if isActive {
+                    startAnimation()
+                }
+            }
+            .onChange(of: isActive) { oldValue, newValue in
+                if newValue {
+                    startAnimation()
+                } else {
+                    withAnimation(.easeInOut(duration: 0.5)) {
+                        opacity = 1.0
+                    }
+                }
+            }
+    }
+    
+    private func startAnimation() {
+        withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+            opacity = 0.4
+        }
+    }
+}
+
+extension View {
+    func breathing(isActive: Bool) -> some View {
+        self.modifier(BreathingOpacityModifier(isActive: isActive))
     }
 }

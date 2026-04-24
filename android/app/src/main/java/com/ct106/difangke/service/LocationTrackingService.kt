@@ -486,28 +486,27 @@ class LocationTrackingService : Service() {
         val lat2 = if (newLats.isNotEmpty()) newLats.average() else 0.0
         val lon2 = if (newLons.isNotEmpty()) newLons.average() else 0.0
 
+        val pts = mutableListOf<List<Double>>()
+        if (lat1 != 0.0) pts.add(listOf(lat1, lon1))
+        if (rawPoints.isNotEmpty()) {
+            pts.addAll(rawPoints.map { listOf(it.latitude, it.longitude) })
+        }
+        if (lat2 != 0.0) pts.add(listOf(lat2, lon2))
+
+        totalDist = pts.zipWithNext { a, b ->
+            processor.haversineMeters(a[0], a[1], b[0], b[1])
+        }.sum()
+
         if (rawPoints.isEmpty()) {
-            totalDist = processor.haversineMeters(lat1, lon1, lat2, lon2)
             if (totalDist > 200.0 && gapSec > 120.0) {
                 avgSpeed = totalDist / gapSec
-                pointsJson = gson.toJson(listOf(listOf(lat1, lon1), listOf(lat2, lon2)))
+                pointsJson = gson.toJson(pts)
             } else {
                 return
             }
         } else {
-            totalDist = rawPoints.zipWithNext { a, b ->
-                processor.haversineMeters(a.latitude, a.longitude, b.latitude, b.longitude)
-            }.sum()
-
             if (totalDist < AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD) return
-
             avgSpeed = totalDist / gapSec
-            
-            val pts = mutableListOf<List<Double>>()
-            if (lat1 != 0.0) pts.add(listOf(lat1, lon1))
-            pts.addAll(rawPoints.map { listOf(it.latitude, it.longitude) })
-            if (lat2 != 0.0) pts.add(listOf(lat2, lon2))
-            
             pointsJson = gson.toJson(pts)
         }
 

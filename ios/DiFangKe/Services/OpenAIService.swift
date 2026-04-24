@@ -53,12 +53,21 @@ class OpenAIService {
     var taskQueue: [AITask] = []
     var isProcessing = false
     var lastError: String? = nil
+    var lastAiResponse: String? = nil
+    var currentlyProcessingDate: Date? = nil
+    private var lastRequestTime: Date = .distantPast
+    private var cooldownRetryTask: Task<Void, Never>?
     
     private var isNetworkRequestingCount = 0
-    var isNetworkRequesting: Bool = false {
-        didSet {
-            // Allow listening for changes if needed
+    var isNetworkRequesting: Bool = false
+    
+    private func updateNetworkRequesting(_ requesting: Bool) {
+        if requesting {
+            isNetworkRequestingCount += 1
+        } else {
+            isNetworkRequestingCount = max(0, isNetworkRequestingCount - 1)
         }
+        self.isNetworkRequesting = isNetworkRequestingCount > 0
     }
     
     var modelContainer: ModelContainer?
@@ -203,14 +212,31 @@ class OpenAIService {
 
     func enqueueDailySummary(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], force: Bool = false) {
         let startOfDate = Calendar.current.startOfDay(for: date)
+        
+        // 如果不是强制刷新，且已经在队列中或已处理过，则跳过
         if !force && dailySummaryDateSet.contains(startOfDate) { return }
         
-        // 使用 UUID，避免 PersistentIdentifier 跨线程/跨 Context 的各种坑
+        // 移除队列中已有的同日期任务（如果有）
+        taskQueue.removeAll { task in
+            if case .dailySummary(let d, _, _, _) = task {
+                return Calendar.current.isDate(d, inSameDayAs: startOfDate)
+            }
+            return false
+        }
+        
         let fpIds = footprints.map { $0.footprintID }
         let tpIds = transports.map { $0.recordID }
         
         dailySummaryDateSet.insert(startOfDate)
-        self.taskQueue.append(.dailySummary(startOfDate, fpIds, tpIds, force))
+        
+        let newTask = AITask.dailySummary(startOfDate, fpIds, tpIds, force)
+        if force {
+            // 强制刷新：插队到最前面
+            self.taskQueue.insert(newTask, at: 0)
+        } else {
+            self.taskQueue.append(newTask)
+        }
+        
         self.processQueue()
     }
     
@@ -262,20 +288,41 @@ class OpenAIService {
     private func processQueue() {
         guard !isProcessing, !taskQueue.isEmpty, let container = modelContainer else { return }
         
+        let now = Date()
+        let interval = currentInterval
+        
+        // 检查下一个任务是否是强制任务
+        var nextTaskIsForced = false
+        if case .dailySummary(_, _, _, let force) = taskQueue.first {
+            nextTaskIsForced = force
+        }
+        
+        let timeSinceLast = now.timeIntervalSince(lastRequestTime)
+        // 强制任务允许更短的间隔（1秒），普通任务遵循配置间隔
+        let requiredInterval = nextTaskIsForced ? 1.0 : interval
+        
+        if timeSinceLast < requiredInterval {
+            // 即使在冷却中，只要队列有任务，也显示正在请求状态
+            self.isNetworkRequesting = true
+            
+            // 还在冷却中，取消之前的重试任务并重新预约
+            cooldownRetryTask?.cancel()
+            let delay = requiredInterval - timeSinceLast
+            cooldownRetryTask = Task {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                self.processQueue()
+            }
+            return
+        }
+        
         isProcessing = true
         let nextTask = taskQueue.removeFirst()
         
-        // 当任务移出队列时，从快速查找集合中移除（以便未来可以再次排队，如果需要的话，比如失败重试）
-        // 这里的逻辑可以根据需求调整：如果分析过了就不再加入，那么不移除；如果要允许重复排队，则移除。
-        // 目前我们的 processTask 内部有 aiAnalyzed 检查，所以这里移不移除都行。
-        // 为了严格防止重复排队，我们只在任务“完成”且“未过”时才保留在 Set 中？ 
-        // 实际上，目前的设计是 enqueue 时查重。
-        
-        let interval = currentInterval
-        
         Task {
             let context = ModelContext(container)
-            self.isNetworkRequesting = true
+            self.updateNetworkRequesting(true)
+            self.lastRequestTime = Date()
             
             switch nextTask {
             case .dailySummary(let date, let fpIds, let tpIds, let force):
@@ -290,11 +337,10 @@ class OpenAIService {
                 await self.processOngoingTask(data: data)
             }
             
-            self.isNetworkRequesting = false
-            
-            try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-            
+            self.updateNetworkRequesting(false)
             self.isProcessing = false
+            
+            // 任务完成后，尝试处理下一个
             self.processQueue()
         }
     }
@@ -310,13 +356,14 @@ class OpenAIService {
     
     private func processDailySummaryTask(date: Date, fpIds: [UUID], tpIds: [UUID], context: ModelContext, force: Bool = false) async {
         let startOfDate = Calendar.current.startOfDay(for: date)
+        self.currentlyProcessingDate = startOfDate
+        defer { self.currentlyProcessingDate = nil }
         
         // 提前预加载已有的 Insight 以便比对 Fingerprint
-        let descriptor = FetchDescriptor<DailyInsight>()
-        let existing = (try? context.fetch(descriptor))?.first(where: { 
-            guard let d = $0.date else { return false }
-            return Calendar.current.isDate(d, inSameDayAs: startOfDate) 
+        let descriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate { 
+            $0.date == startOfDate 
         })
+        let existing = (try? context.fetch(descriptor))?.first
         let existingContent = existing?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasMeaningfulExistingContent = !(existingContent?.isEmpty ?? true)
 
@@ -392,6 +439,10 @@ class OpenAIService {
             if !name.isEmpty {
                 parts.append("活动：\(name)")
             }
+        }
+        
+        if let reason = footprint.reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
+            parts.append("备注：\(reason)")
         }
         
         if footprint.isHighlight == true {
@@ -530,6 +581,7 @@ class OpenAIService {
                     completion(nil); return
                 }
                 let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.lastAiResponse = trimmed
                 completion(trimmed.isEmpty ? nil : trimmed)
             }
         }.resume()

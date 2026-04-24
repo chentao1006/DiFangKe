@@ -324,13 +324,20 @@ extension FootprintModalView {
                                     .font(.system(.title3, design: .rounded).bold())
                                     .foregroundColor(Color.dfkMainText.opacity(0.5))
                             } else {
-                                let matchedName = allPlaces.first(where: { $0.placeID == footprint.placeID && $0.isUserDefined })?.name
-                                let displayText = matchedName ?? footprint.address ?? "未知位置"
+                                let matchedPlace = savedPlaces.first(where: { place in
+                                    if place.placeID == footprint.placeID && place.isUserDefined { return true }
+                                    guard place.isUserDefined else { return false }
+                                    let fpAddr = (footprint.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                    guard !fpAddr.isEmpty else { return false }
+                                    return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr || 
+                                           (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr)
+                                })
+                                let displayText = matchedPlace?.name ?? footprint.address ?? "未知位置"
                                 
                                 HStack(spacing: 8) {
                                     Text(displayText)
                                         .font(.system(.title3, design: .rounded).bold())
-                                        .foregroundColor(matchedName != nil ? .orange : Color.dfkMainText)
+                                        .foregroundColor(matchedPlace != nil ? .orange : Color.dfkMainText)
                                         .lineLimit(2)
                                         .multilineTextAlignment(.leading)
                                     

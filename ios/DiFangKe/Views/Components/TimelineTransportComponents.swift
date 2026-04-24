@@ -6,6 +6,7 @@ import Photos
 
 struct TransportCardView: View {
     let transport: Transport
+    let allPlaces: [Place]
     var isFirst: Bool = false
     var isLast: Bool = false
     var isToday: Bool = false
@@ -16,20 +17,20 @@ struct TransportCardView: View {
         Button {
             onSelect?(transport)
         } label: {
-            HStack(alignment: .top, spacing: 0) {
-                // 1. Timeline Indicator (Aligned with FootprintCardView)
+            HStack(alignment: .center, spacing: 0) {
+                // 1. Timeline Indicator
                 VStack(spacing: 0) {
                     Rectangle().fill(Color.secondary.opacity(0.15))
                         .frame(width: 1.5)
-                        .frame(height: 12)
+                        .frame(height: 8) // Reduced from 12
                         .opacity(isFirst && !isToday ? 0 : 1)
                     
                     ZStack {
                         Image(systemName: transport.currentType.sfSymbol)
-                            .font(.system(size: 20, weight: .bold))
+                            .font(.system(size: 18, weight: .bold))
                             .foregroundColor(Color.dfkAccent)
                             .frame(width: 32, height: 32)
-                            .background(Color(uiColor: .secondarySystemGroupedBackground))
+                            .offset(y: -2) // Move icon up further
                     }.frame(width: 32, height: 32)
                     
                     Rectangle().fill(Color.secondary.opacity(0.15))
@@ -39,70 +40,61 @@ struct TransportCardView: View {
                         .opacity(isLast ? 0 : 1)
                 }.frame(width: 54)
                 
-                // 2. Card Content
-                VStack(alignment: .center, spacing: 0) {
-                    HStack(alignment: .center, spacing: 2) {
-                        // Left: Start
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(transport.startLocation)
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundColor(.primary)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                            
-                            Text(transport.startTime.formatted(.dateTime.hour().minute()))
-                                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                // 2. Minimalist Content
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 5) { // Narrowed slightly
+                        // 时间范围
+                        Text("\(transport.startTime.formatted(.dateTime.hour().minute()))-\(transport.endTime.formatted(.dateTime.hour().minute()))")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.secondary)
                         
-                        // Middle: Arrow & Distance
-                        VStack(spacing: 4) {
-                            Image(systemName: transport.startLocation == transport.endLocation ? "arrow.right.arrow.left" : "arrow.right")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundColor(.secondary.opacity(0.4))
-                            
-                            Text(distanceString)
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(.secondary.opacity(0.6))
-                            
-                            if let steps = transport.stepCount, steps > 0 {
-                                HStack(spacing: 2) {
-                                    Image(systemName: "figure.walk")
-                                        .font(.system(size: 8))
-                                    Text("\(steps)")
-                                        .font(.system(size: 8, weight: .bold))
-                                }
-                                .foregroundColor(.orange.opacity(0.7))
+                        Text("·")
+                            .foregroundColor(.secondary.opacity(0.3))
+                        
+                        // 总时长
+                        Text(durationString)
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                        
+                        Text("·")
+                            .foregroundColor(.secondary.opacity(0.3))
+                        
+                        // 里程/距离
+                        Text(distanceString)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.dfkAccent)
+                        
+                        Text("·")
+                            .foregroundColor(.secondary.opacity(0.3))
+                        
+                        // 速度
+                        Text(String(format: "%.1fkm/h", transport.averageSpeed * 3.6))
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                        
+                        // 步数 (如果有)
+                        if let steps = transport.stepCount, steps > 0 {
+                            Text("·")
+                                .foregroundColor(.secondary.opacity(0.3))
+                                
+                            HStack(spacing: 2) {
+                                Image(systemName: "figure.walk")
+                                    .font(.system(size: 11))
+                                Text("\(steps)")
+                                    .font(.system(size: 11, weight: .bold))
                             }
+                            .foregroundColor(.orange.opacity(0.8))
                         }
-                        .frame(width: 70)
-                        
-                        // Right: End
-                        VStack(alignment: .trailing, spacing: 4) {
-                            Text(transport.endLocation)
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundColor(.primary)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                            
-                            Text(transport.endTime.formatted(.dateTime.hour().minute()))
-                                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-                    .padding(.vertical, 14)
-                    .padding(.trailing, 16)
+                    .padding(.vertical, 8)
                 }
+                .padding(.leading, 4)
+                
+                Spacer()
             }
-            .frame(maxWidth: .infinity, minHeight: 70)
-            .background(
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Color(uiColor: .secondarySystemGroupedBackground))
-                    .shadow(color: .black.opacity(0.04), radius: 6, x: 0, y: 3)
-            )
-            .padding(.bottom, 12)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
+            .padding(.bottom, 8)
             .contextMenu {
                 Button {
                     onSelect?(transport)
@@ -142,6 +134,21 @@ struct TransportCardView: View {
             return String(format: "%.1f公里", transport.distance / 1000.0)
         }
     }
+    
+    private var durationString: String {
+        let seconds = transport.duration
+        if seconds < 60 {
+            return "1分钟内"
+        }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 {
+            return "\(minutes)分钟"
+        } else {
+            let hours = minutes / 60
+            let mins = minutes % 60
+            return mins > 0 ? "\(hours)小时\(mins)分" : "\(hours)小时"
+        }
+    }
 }
 
 // MARK: - TransportModalView
@@ -153,6 +160,7 @@ struct TransportModalView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     
+    @Query(sort: \Place.name) private var allPlaces: [Place]
     @State private var position: MapCameraPosition = .automatic
     @State private var localManualType: TransportType? = nil
     @State private var selectedMarker: LocationType? = nil
@@ -188,6 +196,13 @@ struct TransportModalView: View {
             ZStack(alignment: .top) {
                 // 1. Map View
                 Map(position: $position) {
+                    // Important Places Circles (isUserDefined)
+                    ForEach(allPlaces.filter { $0.isUserDefined }) { place in
+                        MapCircle(center: place.coordinate, radius: Double(place.radius))
+                            .foregroundStyle(Color.orange.opacity(0.1))
+                            .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                    }
+
                     // Start Marker (Physical Look & Title)
                     if let start = transport.points.first {
                         Marker(currentStartLocation, coordinate: start)
@@ -197,21 +212,13 @@ struct TransportModalView: View {
                     // Start Interaction Layer
                     if let start = transport.points.first {
                         Annotation("", coordinate: start, anchor: .top) {
-                            Menu {
-                                SuggestionsMenuContent(locationManager: locationManager, coordinate: start, forOngoing: false) {
-                                    showingSearchSheet = .start
-                                } onCustomSelection: { newName in
-                                    saveLocationOverride(type: .start, name: newName)
-                                }
-                            } label: {
-                                Text(currentStartLocation)
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundColor(.primary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
-                                    .overlay(Capsule().stroke(Color.green, lineWidth: 1))
-                            }
+                            Text(currentStartLocation)
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.primary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
+                                .overlay(Capsule().stroke(Color.green, lineWidth: 1))
                         }
                     }
                     
@@ -224,21 +231,13 @@ struct TransportModalView: View {
                     // End Interaction Layer
                     if let end = transport.points.last {
                         Annotation("", coordinate: end, anchor: .top) {
-                            Menu {
-                                SuggestionsMenuContent(locationManager: locationManager, coordinate: end, forOngoing: false) {
-                                    showingSearchSheet = .end
-                                } onCustomSelection: { newName in
-                                    saveLocationOverride(type: .end, name: newName)
-                                }
-                            } label: {
-                                Text(currentEndLocation)
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundColor(.primary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
-                                    .overlay(Capsule().stroke(Color.blue, lineWidth: 1))
-                            }
+                            Text(currentEndLocation)
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.primary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
+                                .overlay(Capsule().stroke(Color.blue, lineWidth: 1))
                         }
                     }
                     
@@ -297,24 +296,16 @@ struct TransportModalView: View {
                                     .font(.system(size: 8))
                                     .foregroundColor(.green)
                                 
-                                Menu {
-                                    SuggestionsMenuContent(locationManager: locationManager, coordinate: transport.points.first, forOngoing: false) {
-                                        showingSearchSheet = .start
-                                    } onCustomSelection: { newName in
-                                        saveLocationOverride(type: .start, name: newName)
-                                    }
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Text("起点: " + currentStartLocation)
-                                            .font(.system(size: 16, weight: .semibold))
-                                            .foregroundColor(.primary)
-                                            .lineLimit(1)
-                                        Image(systemName: "pencil")
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.secondary.opacity(0.6))
-                                    }
-                                }
-                                .buttonStyle(.plain)
+                                let matchedStart = allPlaces.first(where: { place in
+                                    guard place.isUserDefined else { return false }
+                                    let startAddr = currentStartLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == startAddr || 
+                                           (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == startAddr)
+                                })
+                                Text("起点: " + currentStartLocation)
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(matchedStart != nil ? .orange : .primary)
+                                    .lineLimit(1)
                             }
                             
                             HStack(spacing: 12) {
@@ -322,24 +313,16 @@ struct TransportModalView: View {
                                     .font(.system(size: 8))
                                     .foregroundColor(.blue)
                                 
-                                Menu {
-                                    SuggestionsMenuContent(locationManager: locationManager, coordinate: transport.points.last, forOngoing: false) {
-                                        showingSearchSheet = .end
-                                    } onCustomSelection: { newName in
-                                        saveLocationOverride(type: .end, name: newName)
-                                    }
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Text("终点: " + currentEndLocation)
-                                            .font(.system(size: 16, weight: .semibold))
-                                            .foregroundColor(.primary)
-                                            .lineLimit(1)
-                                        Image(systemName: "pencil")
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.secondary.opacity(0.6))
-                                    }
-                                }
-                                .buttonStyle(.plain)
+                                let matchedEnd = allPlaces.first(where: { place in
+                                    guard place.isUserDefined else { return false }
+                                    let endAddr = currentEndLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == endAddr || 
+                                           (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == endAddr)
+                                })
+                                Text("终点: " + currentEndLocation)
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(matchedEnd != nil ? .orange : .primary)
+                                    .lineLimit(1)
                             }
                         }
                         .padding(.bottom, 4)
@@ -415,12 +398,18 @@ struct TransportModalView: View {
                 }
             }
             .onAppear {
+                // 默认范围不要变：显式设置 camera 为交通路径的范围，避免被 allPlaces 的 MapCircle 撑开
+                if let region = transport.points.boundingRegion() {
+                    position = .region(region)
+                }
+
                 // 为交通路线地图获取照片，同样限制显示 10 张，避免图标堆叠
                 PhotoService.shared.fetchAssets(startTime: transport.startTime, endTime: transport.endTime) { assets in
                     let filtered = assets.filter { $0.location != nil }
                     self.mapPhotos = Array(filtered.suffix(10))
                 }
             }
+
             .sheet(item: $selectedPhotoAsset) { item in
                 let assetIDs = mapPhotos.map { $0.localIdentifier }
                 let index = assetIDs.firstIndex(of: item.value) ?? 0

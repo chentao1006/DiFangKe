@@ -6,6 +6,7 @@ import SwiftUI
 import MapKit
 import CloudKit
 import Photos
+import Network
 
 // MARK: - 位置建议结构体
 struct LocationSuggestion: Identifiable, Equatable {
@@ -601,6 +602,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var lastLocation: CLLocation?
     var accuracy: CLLocationAccuracy?
     var currentAddress: String = "正在解析位置..."
+    private var pathMonitor: NWPathMonitor?
+    private var lastInterfaceType: NWInterface.InterfaceType?
+    
     var trackingPoints: [CLLocation] = [] // 用于足迹识别的内存滑动窗口
     var allTodayPoints: [CLLocation] = [] { // 本日流水缓存，从 RawLocationStore 加载
         didSet {
@@ -714,6 +718,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         setupTimers()
         setupSubscribers()
+        setupNetworkMonitoring()
+        
+        // Start visit monitoring
+        locationManager.startMonitoringVisits()
         
         // Move heavy disk I/O to background to avoid blocking app launch
         Task(priority: .userInitiated) { [weak self] in
@@ -777,12 +785,44 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             .store(in: &cancellables)
     }
     
-    /// 强制激活高精度模式（通常由计步器或运动传感器触发，早于 GPS 位移）
+    /// 强制激活高精度模式（通常由计步器、运动传感器或网络变化触发，早于 GPS 位移）
     private func forceHighAccuracyBoost() {
-        print("🚀 Motion detected! Forcing high accuracy boost...")
+        print("🚀 Status change detected! Forcing high accuracy boost...")
+        
+        // 1. 确保背景模式配置正确（防止被系统意外重置）
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.pausesLocationUpdatesAutomatically = false
+        
+        // 2. 提升精度与频率至最高
         locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         locationManager.distanceFilter = kCLDistanceFilterNone
         locationManager.activityType = .fitness
+        
+        // 3. 核心补救：立即请求一次单次精确定位，强制拉高硬件功率
+        locationManager.requestLocation()
+        
+        // 4. 尝试重启持续更新，确保背景任务刷新
+        locationManager.stopUpdatingLocation()
+        locationManager.startUpdatingLocation()
+    }
+    
+    private func setupNetworkMonitoring() {
+        pathMonitor = NWPathMonitor()
+        pathMonitor?.pathUpdateHandler = { [weak self] path in
+            guard let self = self else { return }
+            let currentType = path.availableInterfaces.first?.type
+            
+            Task { @MainActor in
+                // 核心逻辑：如果从 WiFi 切换到蜂窝数据，大概率是出门了
+                if self.lastInterfaceType == .wifi && currentType == .cellular {
+                    print("🌐 Network switched from WiFi to Cellular! Likely leaving home/office.")
+                    self.forceHighAccuracyBoost()
+                }
+                self.lastInterfaceType = currentType
+            }
+        }
+        let queue = DispatchQueue(label: "NetworkMonitor")
+        pathMonitor?.start(queue: queue)
     }
     
     /// 遍历原始轨迹存储目录，找出所有有记录的日期并缓存
@@ -1546,6 +1586,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         print("Location manager error: \(error.localizedDescription)")
     }
     
+    func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
+        // 核心唤醒逻辑：只要检测到“离开”某个地方，立即拉高精度，不等 GPS 位移
+        if visit.departureDate != Date.distantFuture {
+            print("🚀 Visit departure detected! Waking up GPS immediately...")
+            forceHighAccuracyBoost()
+        }
+    }
+    
     // MARK: - Region Monitoring for Immediate Wakeup
     
     private func updateRegionMonitoring(isStationary: Bool) {
@@ -1565,8 +1613,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
             
-            // 使用150米半径离开触发唤醒（受硬件限制，通常最小有效的圆在100~200m左右）
-            let radius: CLLocationDistance = 150.0
+            // 使用100米半径离开触发唤醒（这是 iOS 硬件支持的最小可靠半径）
+            // 配合 Visit Monitoring 和 NWPathMonitor，实现三重保险
+            let radius: CLLocationDistance = 100.0
             let region = CLCircularRegion(center: center, radius: radius, identifier: identifier)
             region.notifyOnEntry = false
             region.notifyOnExit = true
@@ -1681,28 +1730,38 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 辅助方法：判断特定坐标匹配到的地点
      private func matchedPlaceFor(coordinate: CLLocationCoordinate2D) -> Place? {
          let loc = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-         let validMatches = allPlaces.filter { place in
-             if place.isIgnored { return false }
+         
+         // 第一波：优先寻找重要地点，匹配门槛放宽至 radius + 150m 以应对 GPS 漂移
+         let importantMatches = allPlaces.filter { place in
+             guard place.isUserDefined && !place.isIgnored else { return false }
              let placeLocation = CLLocation(latitude: place.latitude, longitude: place.longitude)
              let distance = loc.distance(from: placeLocation)
-             return distance <= Double(place.radius) + 100.0
-         }
-         
-         // 严格优先级策略：isUserDefined > isPriority > 最近距离
-         let sortedMatches = validMatches.sorted { p1, p2 in
-             if p1.isUserDefined != p2.isUserDefined {
-                 return p1.isUserDefined // True (UserDefined) comes first
-             }
-             if p1.isPriority != p2.isPriority {
-                 return p1.isPriority
-             }
-             
+             return distance <= Double(place.radius) + 150.0
+         }.sorted { p1, p2 in
              let d1 = loc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude))
              let d2 = loc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
              return d1 < d2
          }
          
-         return sortedMatches.first
+         if let bestImportant = importantMatches.first {
+             return bestImportant
+         }
+         
+         // 第二波：普通地点，半径门槛从严 (radius + 50m)
+         let otherMatches = allPlaces.filter { place in
+             guard !place.isUserDefined && !place.isIgnored else { return false }
+             let placeLocation = CLLocation(latitude: place.latitude, longitude: place.longitude)
+             let distance = loc.distance(from: placeLocation)
+             return distance <= Double(place.radius) + 50.0
+         }.sorted { p1, p2 in
+             // 在普通地点中，依然可以考虑 isPriority 权重
+             if p1.isPriority != p2.isPriority { return p1.isPriority }
+             let d1 = loc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude))
+             let d2 = loc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
+             return d1 < d2
+         }
+         
+         return otherMatches.first
      }
 
     /// 核心算法：识别习惯活动 (基于时间窗口或历史频率)
@@ -2054,7 +2113,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // Filter out ignored footprints and include ongoing stay
         let validFootprints = todayFootprints.filter { $0.status != .ignored }
         let footprintCount = validFootprints.count
-        let footprintTitles = validFootprints.compactMap { $0.address }.filter { !$0.isEmpty }
+        let footprintTitles = validFootprints.map { fp in
+            var title = fp.address ?? "未知地点"
+            if let reason = fp.reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
+                title += " (备注: \(reason))"
+            }
+            return title
+        }.filter { !$0.isEmpty }
         
         
         // Calculate points and mileage using TimelineBuilder logic

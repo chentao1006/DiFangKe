@@ -44,11 +44,29 @@ class PersistentTimelineBuilder(private val context: Context) {
         }.time
 
         // 1. 加载轨迹点
-        val points = rawStore.loadLocations(date, filtered = true)
-        if (points.isEmpty()) {
+        val rawPoints = rawStore.loadLocations(date, filtered = true)
+        if (rawPoints.isEmpty()) {
             Log.w(TAG, "No raw points found for $date, skipping.")
             return@withContext
         }
+
+        // --- 核心修复：剔除 GPS 跳点 (Spike) ---
+        // 比如 1秒内漂移 100+ 米的噪音
+        val points = mutableListOf<RawLocationStore.RawPoint>()
+        if (rawPoints.isNotEmpty()) points.add(rawPoints[0])
+        for (k in 1 until rawPoints.size) {
+            val p1 = rawPoints[k-1]
+            val p2 = rawPoints[k]
+            val d = processor.haversineMeters(p1.latitude, p1.longitude, p2.latitude, p2.longitude)
+            val t = (p2.timestamp.time - p1.timestamp.time) / 1000.0
+            // 如果速度超过 150m/s (540km/h) 且时间极短，判定为跳点
+            if (t > 0 && t < 5 && (d / t) > 150) {
+                continue 
+            }
+            points.add(p2)
+        }
+        
+        if (points.isEmpty()) return@withContext
 
         // 2. 清理旧数据（仅限自动生成的，Confirmed 的保留？）
         // iOS 逻辑是全清，因为这是“重新生成”
@@ -133,7 +151,7 @@ class PersistentTimelineBuilder(private val context: Context) {
             title = "",
             statusValue = "candidate",
             placeID = matchedPlace?.placeID,
-            address = address
+            address = if (matchedPlace?.isUserDefined == true) matchedPlace.name else address
         )
 
         // 自动关联照片
@@ -163,24 +181,25 @@ class PersistentTimelineBuilder(private val context: Context) {
         val lat2 = gson.fromJson(newFp.latitudeJson, Array<Double>::class.java).average()
         val lon2 = gson.fromJson(newFp.longitudeJson, Array<Double>::class.java).average()
 
+        val pts = mutableListOf<List<Double>>()
+        pts.add(listOf(lat1, lon1))
+        if (segmentPoints.isNotEmpty()) {
+            pts.addAll(segmentPoints.map { listOf(it.latitude, it.longitude) })
+        }
+        pts.add(listOf(lat2, lon2))
+
+        totalDist = pts.zipWithNext { a, b ->
+            processor.haversineMeters(a[0], a[1], b[0], b[1])
+        }.sum()
+
         if (segmentPoints.isEmpty()) {
-            totalDist = processor.haversineMeters(lat1, lon1, lat2, lon2)
             if (totalDist > 200.0 && gapSec > 120.0) {
                 avgSpeed = totalDist / gapSec
-                pointsJson = gson.toJson(listOf(listOf(lat1, lon1), listOf(lat2, lon2)))
+                pointsJson = gson.toJson(pts)
             } else return
         } else {
-            totalDist = segmentPoints.zipWithNext { a, b ->
-                processor.haversineMeters(a.latitude, a.longitude, b.latitude, b.longitude)
-            }.sum()
-            
             if (totalDist < AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD) return
             avgSpeed = totalDist / gapSec
-            
-            val pts = mutableListOf<List<Double>>()
-            pts.add(listOf(lat1, lon1))
-            pts.addAll(segmentPoints.map { listOf(it.latitude, it.longitude) })
-            pts.add(listOf(lat2, lon2))
             pointsJson = gson.toJson(pts)
         }
 

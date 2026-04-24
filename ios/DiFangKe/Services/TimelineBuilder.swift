@@ -311,10 +311,14 @@ class TimelineBuilder {
         let resolvedItems = resolveTimelineOverlaps(items)
         
         // Final merge of adjacent stationary items if any were created during resolution
-        return mergeAdjacentItems(resolvedItems).reversed()
+        let mergedItems = mergeAdjacentItems(resolvedItems)
+        
+        // --- 衔接优化：将交通的起止点名称与坐标对齐到前后足迹 ---
+        let alignedItems = alignTransportLocations(mergedItems, allPlaces: allPlaces)
+        
+        return alignedItems.reversed()
     }
 
-    /// 核心修复：强制解决所有时间轴项之间的重叠问题，确保“衔接”且“无交叉”
     private static func resolveTimelineOverlaps(_ items: [TimelineItem]) -> [TimelineItem] {
         guard !items.isEmpty else { return [] }
         
@@ -342,6 +346,73 @@ class TimelineBuilder {
         }
         
         return resolved
+    }
+
+    /// 核心优化：遍历时间轴，将所有交通段的起点设置为上一个足迹点，终点设置为下一个足迹点
+    static func alignTransportLocations(_ items: [TimelineItem], allPlaces: [PlaceLite]) -> [TimelineItem] {
+        var result = items
+        for i in 0..<result.count {
+            guard case .transport(let t) = result[i] else { continue }
+            
+            var updatedT = t
+            
+            // 向前寻找最近的足迹点作为起点
+            var prevFp: Footprint?
+            for j in (0..<i).reversed() {
+                if case .footprint(let fp) = result[j] {
+                    prevFp = fp
+                    break
+                }
+            }
+            
+            if let fp = prevFp {
+                // 优先使用地点名称，其次是足迹自身的地址
+                let matchedPlace = allPlaces.first(where: { $0.placeID == fp.placeID && $0.isUserDefined })
+                let startName = matchedPlace?.name ?? fp.address ?? "未知地点"
+                updatedT = updatedT.updatingStart(startName)
+                
+                // 强制对齐坐标
+                var newPoints = updatedT.points
+                let startCoord = CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
+                if newPoints.isEmpty {
+                    newPoints = [startCoord]
+                } else {
+                    newPoints[0] = startCoord
+                }
+                updatedT = updatedT.updatingPoints(newPoints)
+            }
+            
+            // 向后寻找最近的足迹点作为终点
+            var nextFp: Footprint?
+            for j in (i+1)..<result.count {
+                if case .footprint(let fp) = result[j] {
+                    nextFp = fp
+                    break
+                }
+            }
+            
+            if let fp = nextFp {
+                // 优先使用地点名称，其次是足迹自身的地址
+                let matchedPlace = allPlaces.first(where: { $0.placeID == fp.placeID && $0.isUserDefined })
+                let endName = matchedPlace?.name ?? fp.address ?? "未知地点"
+                updatedT = updatedT.updatingEnd(endName)
+                
+                // 强制对齐坐标
+                var newPoints = updatedT.points
+                let endCoord = CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
+                if newPoints.isEmpty {
+                    newPoints.append(endCoord)
+                } else if newPoints.count == 1 {
+                    newPoints.append(endCoord)
+                } else {
+                    newPoints[newPoints.count - 1] = endCoord
+                }
+                updatedT = updatedT.updatingPoints(newPoints)
+            }
+            
+            result[i] = .transport(updatedT)
+        }
+        return result
     }
 
     private static func shouldPerformUiMerge(_ f1: FootprintLite, _ f2: FootprintLite) -> Bool {
@@ -673,8 +744,8 @@ class TimelineBuilder {
         )
         
         if let place = getPlaceForCoordinate(midpoint, allPlaces: allPlaces) {
-            let name = place.name
-            fp.address = name
+            fp.placeID = place.placeID
+            fp.address = place.name
         }
         
         items.append(.footprint(fp))
@@ -720,32 +791,40 @@ class TimelineBuilder {
     }
     
     private static func getLocationName(for footprint: FootprintLite, allPlaces: [PlaceLite]) -> String {
-        if let placeID = footprint.placeID, 
-           let place = allPlaces.first(where: { $0.placeID == placeID }) {
-            return place.name
-        }
-        if let nearbyPlace = getPlaceForCoordinate(CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), allPlaces: allPlaces) {
-            return nearbyPlace.name
-        }
-        if let addr = footprint.address, !addr.isEmpty { return addr }
-        return "未知位置"
+        let matchedPlace = allPlaces.first(where: { place in
+            (place.placeID == footprint.placeID && place.isUserDefined) ||
+            (place.isUserDefined && !footprint.isAddressEditedByHand && (place.name == footprint.address || place.address == footprint.address))
+        })
+        let displayText = matchedPlace?.name ?? footprint.address ?? "未知地点"
+        return displayText
     }
     
-    private static func getPlaceForCoordinate(_ coordinate: CLLocationCoordinate2D, allPlaces: [PlaceLite]) -> PlaceLite? {
+    static func getPlaceForCoordinate(_ coordinate: CLLocationCoordinate2D, allPlaces: [PlaceLite]) -> PlaceLite? {
         let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
         struct Match { let place: PlaceLite; let distance: Double }
-        let validMatches: [Match] = allPlaces.compactMap { place in
-            if place.isIgnored { return nil }
+        
+        // 分两波匹配，第一波只看重要地点，且半径门槛稍微宽松一点以对抗 GPS 漂移
+        let importantMatches: [Match] = allPlaces.compactMap { place in
+            guard place.isUserDefined && !place.isIgnored else { return nil }
             let d = location.distance(from: CLLocation(latitude: place.latitude, longitude: place.longitude))
-            if d <= Double(place.radius) + 100.0 { return Match(place: place, distance: d) }
+            // 重要地点：只要在半径 + 150m 漂移补偿范围内就算
+            if d <= Double(place.radius) + 150.0 { return Match(place: place, distance: d) }
             return nil
+        }.sorted { $0.distance < $1.distance }
+        
+        if let bestImportant = importantMatches.first {
+            return bestImportant.place
         }
-        let sorted = validMatches.sorted { p1, p2 in
-            if p1.place.isUserDefined != p2.place.isUserDefined { return p1.place.isUserDefined }
-            if p1.place.isPriority != p2.place.isPriority { return p1.place.isPriority }
-            return p1.distance < p2.distance
-        }
-        return sorted.first?.place
+        
+        // 如果没有重要地点，再看普通地点，半径门槛从严 (radius + 50m)
+        let otherMatches: [Match] = allPlaces.compactMap { place in
+            guard !place.isUserDefined && !place.isIgnored else { return nil }
+            let d = location.distance(from: CLLocation(latitude: place.latitude, longitude: place.longitude))
+            if d <= Double(place.radius) + 50.0 { return Match(place: place, distance: d) }
+            return nil
+        }.sorted { $0.distance < $1.distance }
+        
+        return otherMatches.first?.place
     }
     
     private static func extractTransports(_ points: [CLLocation]) -> [Transport] {
@@ -921,7 +1000,7 @@ class TimelineBuilder {
         return p1.distance(from: p2)
     }
     
-    private static func calculateDistance(_ points: [CLLocation]) -> Double {
+    static func calculateDistance(_ points: [CLLocation]) -> Double {
         var distance: Double = 0
         guard points.count >= 2 else { return 0 }
         for i in 0..<points.count - 1 {
@@ -1044,7 +1123,8 @@ class TimelineBuilder {
         
         // 1. 检查直径（判定大跨度位移）
         let diameter = calculateMaxDiameter(points.map { $0.coordinate })
-        if diameter > AppConfig.shared.transportMinDistanceThreshold { return true }
+        // 增加容忍度：50-100m 的直径对于室内漂移非常常见，提升至 150m 以避免错误切分足迹
+        if diameter > max(AppConfig.shared.transportMinDistanceThreshold, 150.0) { return true }
         
         // 2. 检查是否有任何点位脱离了两者的核心停留区
         let loc1 = CLLocation(latitude: f1.latitude, longitude: f1.longitude)
@@ -1074,6 +1154,22 @@ class TimelineBuilder {
             }
         }
     }
+    
+    static func calculatePathDistance(_ points: [CodableCoordinate]) -> Double {
+        var distance: Double = 0
+        guard points.count >= 2 else { return 0 }
+        for i in 0..<points.count - 1 {
+            let p1 = CLLocation(latitude: points[i].lat, longitude: points[i].lon)
+            let p2 = CLLocation(latitude: points[i+1].lat, longitude: points[i+1].lon)
+            distance += p1.distance(from: p2)
+        }
+        return distance
+    }
+}
+
+struct CodableCoordinate: Codable {
+    let lat: Double
+    let lon: Double
 }
 
 class PersistentTimelineBuilder {
@@ -1161,7 +1257,7 @@ class PersistentTimelineBuilder {
         
         // --- Added for Transport Merging and Gap Bridging ---
         await mergeConsecutiveTransports(for: date, in: context)
-        await fillGapsBetweenItems(for: date, in: context)
+        await fillGapsBetweenItems(for: date, in: context, allRawPoints: allRawPoints)
         await snapTransportsToFootprints(for: date, in: context)
         try? context.save()
         // ----------------------------------------------------
@@ -1284,7 +1380,7 @@ class PersistentTimelineBuilder {
     }
 
     @MainActor
-    private static func fillGapsBetweenItems(for date: Date, in context: ModelContext) async {
+    private static func fillGapsBetweenItems(for date: Date, in context: ModelContext, allRawPoints: [CLLocation] = []) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
@@ -1318,13 +1414,26 @@ class PersistentTimelineBuilder {
                 
                 let loc1 = CLLocation(latitude: currentFp.latitude, longitude: currentFp.longitude)
                 let loc2 = CLLocation(latitude: nextFp.latitude, longitude: nextFp.longitude)
-                let distance = loc1.distance(from: loc2)
+                let straightDist = loc1.distance(from: loc2)
                 
-                if !hasTransport && distance > 200 {
-                    let pts = [CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude),
-                               CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)]
+                // --- 核心修复：桥接缝隙时，优先查看该时段是否有原始轨迹点 ---
+                let gapPoints = allRawPoints.filter { $0.timestamp >= gapStart && $0.timestamp <= gapEnd }
+                let pathDist: Double
+                let pts: [CodableCoordinate]
+                
+                if !gapPoints.isEmpty {
+                    pathDist = TimelineBuilder.calculateDistance(gapPoints)
+                    pts = gapPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) }
+                } else {
+                    pathDist = straightDist
+                    pts = [CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude),
+                           CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)]
+                }
+
+                // 使用配置中的阈值
+                if !hasTransport && pathDist > AppConfig.shared.transportMinDistanceThreshold {
                     let ptsData = (try? JSONEncoder().encode(pts)) ?? Data()
-                    let speed = distance / duration
+                    let speed = pathDist / duration
                     let currentLocName = getSimplifiedLocationName(for: currentFp, allPlaces: allPlaces)
                     let nextLocName = getSimplifiedLocationName(for: nextFp, allPlaces: allPlaces)
                     
@@ -1335,7 +1444,7 @@ class PersistentTimelineBuilder {
                         startLocation: currentLocName,
                         endLocation: nextLocName,
                         typeRaw: TransportType.from(speed: speed).rawValue,
-                        distance: distance,
+                        distance: pathDist,
                         averageSpeed: speed,
                         pointsData: ptsData
                     )
@@ -1407,6 +1516,7 @@ class PersistentTimelineBuilder {
                 if let newPtsData = try? JSONEncoder().encode(decodedPoints) {
                     tp.pointsData = newPtsData
                 }
+                tp.distance = TimelineBuilder.calculatePathDistance(decodedPoints)
                 let duration = tp.endTime.timeIntervalSince(tp.startTime)
                 if duration > 0 {
                     tp.averageSpeed = tp.distance / duration
@@ -1417,9 +1527,18 @@ class PersistentTimelineBuilder {
     }
 
     private static func getSimplifiedLocationName(for footprint: Footprint, allPlaces: [Place]) -> String {
+        // 1. 优先使用已绑定的 PlaceID
         if let placeID = footprint.placeID, let place = allPlaces.first(where: { $0.placeID == placeID }) {
             return place.name
         }
+        
+        // 2. 如果没绑定 ID，但在重要地点范围内，也要优先使用地点名
+        let coord = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+        let litePlaces = allPlaces.map { TimelineBuilder.convertToPlaceLite($0) }
+        if let matched = TimelineBuilder.getPlaceForCoordinate(coord, allPlaces: litePlaces) {
+            return matched.name
+        }
+        
         if let addr = footprint.address, !addr.isEmpty { return addr }
         return "未知位置"
     }
@@ -1438,6 +1557,7 @@ class PersistentTimelineBuilder {
         }, sortBy: [SortDescriptor(\.startTime)])
         
         let fps = (try? context.fetch(descriptor)) ?? []
+        let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
         guard fps.count >= 2 else { return }
         
         var i = 0
@@ -1450,9 +1570,13 @@ class PersistentTimelineBuilder {
             let dist = currentLoc.distance(from: nextLoc)
             let gap = next.startTime.timeIntervalSince(current.endTime)
             
+            // 确定是否为同一逻辑地点
+            let isSameLogicalPlace = (current.placeID != nil && current.placeID == next.placeID)
             // 如果两个足迹距离小于阈值，且间隔小于配置的合并时长，则视作同一地点
-            // 改进：如果要合并，必须确保中间没有明显的原始轨迹位移
-            if dist < threshold && gap < AppConfig.shared.stayMergeGapThreshold {
+            let mergeThreshold = isSameLogicalPlace ? max(threshold, 500.0) : threshold
+            let mergeGapLimit = isSameLogicalPlace ? 3600.0 : AppConfig.shared.stayMergeGapThreshold
+
+            if dist < mergeThreshold && gap < mergeGapLimit {
                 // 核心修复：使用传入的原始点位检查是否有交通位移 (使用 Lite 转换进行更精细判定)
                 let gapPoints = TimelineBuilder.extractPoints(from: allRawPoints, start: current.endTime, end: next.startTime)
                 let currentLite = TimelineBuilder.convertToFootprintLite(current)
@@ -1483,9 +1607,31 @@ class PersistentTimelineBuilder {
                     current.photoAssetIDs = combinedPhotos
                 }
 
-                // 如果当前没有名字但下一个有，继承名字
+                // 继承/合并地点信息
+                if current.placeID == nil && next.placeID != nil {
                     current.placeID = next.placeID
-                
+                    current.address = next.address
+                } else if current.placeID != nil && next.placeID == nil {
+                    // Keep current
+                }
+
+                // 如果当前名称不包含地点名，但已知地点，同步名称
+                if let pid = current.placeID, let matched = allPlaces.first(where: { $0.placeID == pid }) {
+                    current.address = matched.name
+                }
+
+                // --- 核心修复：既然合并了，中间夹杂的任何微小交通（通常是漂移产生的）都应被清理 ---
+                let midStart = current.endTime.addingTimeInterval(-10)
+                let midEnd = next.startTime.addingTimeInterval(10)
+                let tDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                    $0.startTime >= midStart && $0.endTime <= midEnd
+                })
+                if let overlappingTransports = try? context.fetch(tDesc) {
+                    for t in overlappingTransports {
+                        t.statusRaw = "ignored"
+                    }
+                }
+
                 // 标记下一个为忽略 (逻辑上合并了)
                 next.statusValue = "ignored"
                 
@@ -1496,11 +1642,6 @@ class PersistentTimelineBuilder {
             }
             i += 1
         }
-    }
-    
-    struct CodableCoordinate: Codable {
-        let lat: Double
-        let lon: Double
     }
     
     @MainActor
@@ -1523,6 +1664,20 @@ class PersistentTimelineBuilder {
                     clusterPoints.append(points[j])
                     j += 1
                 } else {
+                    // --- 核心修复：GPS 跳点容错 ---
+                    // 如果这只是一个瞬时的跳点（例如 1秒内跳出 100米又立刻跳回来），不应打断当前的停留簇
+                    var isSpike = false
+                    if j + 1 < points.count {
+                        let nextDist = points[j+1].distance(from: points[i])
+                        if nextDist < AppConfig.shared.stayDistanceThreshold {
+                            isSpike = true
+                        }
+                    }
+                    
+                    if isSpike {
+                        j += 1 // 视为异常跳点，跳过它继续维持当前簇
+                        continue
+                    }
                     // 点 j 已经离远了，分水岭出现
                     break
                 }
@@ -1550,12 +1705,10 @@ class PersistentTimelineBuilder {
                 fp.floorsAscended = metrics.floors
                 
                 let loc = clusterPoints.first!
-                if let matched = allPlaces.min(by: { p1, p2 in
-                    loc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude)) <
-                    loc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
-                }), loc.distance(from: CLLocation(latitude: matched.latitude, longitude: matched.longitude)) < Double(matched.radius) + 50 {
+                let litePlaces = allPlaces.map { TimelineBuilder.convertToPlaceLite($0) }
+                if let matched = TimelineBuilder.getPlaceForCoordinate(loc.coordinate, allPlaces: litePlaces) {
                     fp.placeID = matched.placeID
-                    fp.address = matched.address
+                    fp.address = matched.name
                 }
                 context.insert(fp)
                 i = j // 跳过该簇
@@ -1607,16 +1760,16 @@ class PersistentTimelineBuilder {
                     let sLoc = transportPoints.first!
                     let eLoc = transportPoints.last!
                     
-                    if let sMatch = allPlaces.min(by: { p1, p2 in sLoc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude)) < sLoc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude)) }),
-                       sLoc.distance(from: CLLocation(latitude: sMatch.latitude, longitude: sMatch.longitude)) < 200 {
+                    let litePlaces = allPlaces.map { TimelineBuilder.convertToPlaceLite($0) }
+                    if let sMatch = TimelineBuilder.getPlaceForCoordinate(sLoc.coordinate, allPlaces: litePlaces) {
                         startName = sMatch.name
                     }
-                    if let eMatch = allPlaces.min(by: { p1, p2 in eLoc.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude)) < eLoc.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude)) }),
-                       eLoc.distance(from: CLLocation(latitude: eMatch.latitude, longitude: eMatch.longitude)) < 200 {
+                    if let eMatch = TimelineBuilder.getPlaceForCoordinate(eLoc.coordinate, allPlaces: litePlaces) {
                         endName = eMatch.name
                     }
 
-                    let avgSpeed = tEnd.timeIntervalSince(tStart) > 0 ? diameter / tEnd.timeIntervalSince(tStart) : 0
+                    let pathDist = TimelineBuilder.calculateDistance(transportPoints)
+                    let avgSpeed = tEnd.timeIntervalSince(tStart) > 0 ? pathDist / tEnd.timeIntervalSince(tStart) : 0
                     let tp = TransportRecord(
                         day: startOfDay,
                         startTime: tStart,
@@ -1624,7 +1777,7 @@ class PersistentTimelineBuilder {
                         startLocation: startName,
                         endLocation: endName,
                         typeRaw: TransportType.from(speed: avgSpeed).rawValue,
-                        distance: diameter,
+                        distance: pathDist,
                         averageSpeed: avgSpeed,
                         pointsData: ptsData
                     )
@@ -1764,12 +1917,14 @@ extension PersistentTimelineBuilder {
         }
         
         items.sort { a, b in
-            let aStart: Date
-            let bStart: Date
-            switch a { case .footprint(let fp): aStart = fp.startTime; case .transport(let tp): aStart = tp.startTime }
-            switch b { case .footprint(let fp): bStart = fp.startTime; case .transport(let tp): bStart = tp.startTime }
-            return aStart > bStart
+            a.startTime < b.startTime
         }
-        return items
+        
+        let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
+        let litePlaces = allPlaces.map { TimelineBuilder.convertToPlaceLite($0) }
+        
+        let alignedItems = TimelineBuilder.alignTransportLocations(items, allPlaces: litePlaces)
+        
+        return alignedItems.sorted { $0.startTime > $1.startTime }
     }
 }
