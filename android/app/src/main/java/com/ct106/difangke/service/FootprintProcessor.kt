@@ -64,12 +64,12 @@ class FootprintProcessor private constructor() {
             }
 
             // B. 精度断崖
-            if (dist > 300 && location.accuracy > last.accuracy * 3 && location.accuracy > 150) {
+            if (dist > AppConfig.DRIFT_DISTANCE_GAP && location.accuracy > last.accuracy * 3 && location.accuracy > 150) {
                 return null
             }
 
             // C. 基础漂移
-            if (dist > stayRadius && location.speed > 45.0) {
+            if (dist > stayRadius && location.speed > AppConfig.DRIFT_SPEED_THRESHOLD) {
                 return null
             }
         }

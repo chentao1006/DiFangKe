@@ -322,7 +322,7 @@ class LocationTrackingService : Service() {
             val startTimeDate = Date(startTime)
             val places = db.placeDao().getAll()
             val matchedPlace = places.firstOrNull { place ->
-                processor.haversineMeters(place.latitude, place.longitude, lat, lon) <= place.radius + 100.0
+                processor.haversineMeters(place.latitude, place.longitude, lat, lon) <= place.radius + AppConfig.TAG_INHERITANCE_DISTANCE
             }
 
             var lastVisit: FootprintEntity? = null
@@ -371,7 +371,7 @@ class LocationTrackingService : Service() {
             
             if (lat != null && lon != null && time != null) {
                 // 校验时间是否在 24 小时内（防止跨天且没结算的错误状态）
-                if (System.currentTimeMillis() - (time as Long) < 24 * 3600 * 1000) {
+                if (System.currentTimeMillis() - (time as Long) < AppConfig.LOCATION_LOOKBACK_MAX_HOURS * 3600 * 1000) {
                     val recoveredPoint = RawLocationStore.RawPoint(
                         timestamp = Date(time as Long),
                         latitude = lat,
@@ -428,7 +428,7 @@ class LocationTrackingService : Service() {
         val locationHash = FootprintEntity.generateLocationHash(candidate.latitude, candidate.longitude)
         val places = db.placeDao().getAll()
         val matchedPlace = places.firstOrNull { place ->
-            processor.haversineMeters(place.latitude, place.longitude, candidate.latitude, candidate.longitude) <= place.radius + 100.0
+            processor.haversineMeters(place.latitude, place.longitude, candidate.latitude, candidate.longitude) <= place.radius + AppConfig.TAG_INHERITANCE_DISTANCE
         }
 
         val entity = FootprintEntity(
@@ -464,11 +464,11 @@ class LocationTrackingService : Service() {
         val gapSec = (newFp.startTime.time - prevFp.endTime.time) / 1000.0
         if (gapSec < AppConfig.TRANSPORT_MIN_DURATION_THRESHOLD) return
 
-        var rawPoints = rawStore.loadRecentLocations(lookbackHours = 4.0)
+        var rawPoints = rawStore.loadRecentLocations(lookbackHours = AppConfig.LOCATION_LOOKBACK_HOURS * 2) // 稍微多拿点点
             .filter { it.timestamp >= prevFp.endTime && it.timestamp <= newFp.startTime }
         
         if (rawPoints.isEmpty() && gapSec > 14400) {
-            rawPoints = rawStore.loadRecentLocations(lookbackHours = 8.0)
+            rawPoints = rawStore.loadRecentLocations(lookbackHours = AppConfig.LOCATION_LOOKBACK_MAX_HOURS / 3) // 1/3 of max
                 .filter { it.timestamp >= prevFp.endTime && it.timestamp <= newFp.startTime }
         }
 
@@ -498,7 +498,7 @@ class LocationTrackingService : Service() {
         }.sum()
 
         if (rawPoints.isEmpty()) {
-            if (totalDist > 200.0 && gapSec > 120.0) {
+            if (totalDist > 200.0 && gapSec > AppConfig.LIVE_STAY_MIN_DURATION_THRESHOLD / 2) {
                 avgSpeed = totalDist / gapSec
                 pointsJson = gson.toJson(pts)
             } else {

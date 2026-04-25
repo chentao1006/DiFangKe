@@ -42,6 +42,7 @@ fun TransportDetailScreen(
     viewModel: TransportDetailViewModel = viewModel()
 ) {
     val transport by viewModel.transport.collectAsState()
+    val allPlaces by viewModel.allPlaces.collectAsState()
     val isDark = isSystemInDarkTheme()
     
     var localStartName by remember { mutableStateOf("") }
@@ -76,7 +77,10 @@ fun TransportDetailScreen(
         TransportDetailMapView(
             points = points, 
             isDark = isDark,
-            primaryColor = MaterialTheme.colorScheme.primary.toArgb()
+            primaryColor = MaterialTheme.colorScheme.primary.toArgb(),
+            startLocation = t.startLocation,
+            endLocation = t.endLocation,
+            allPlaces = allPlaces
         )
 
         // 2. Scrim (Optional: Top bar readability)
@@ -341,7 +345,10 @@ fun TransportTypeChip(type: TransportType, onSelect: (TransportType) -> Unit) {
 fun TransportDetailMapView(
     points: List<com.amap.api.maps.model.LatLng>,
     isDark: Boolean,
-    primaryColor: Int
+    primaryColor: Int,
+    startLocation: String? = null,
+    endLocation: String? = null,
+    allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity> = emptyList()
 ) {
     AndroidView(
         factory = { ctx ->
@@ -409,6 +416,31 @@ fun TransportDetailMapView(
                     } catch (e: Exception) {
                         Log.e("TransportDetail", "Bounds fit failed", e)
                     }
+                }
+            }
+            
+            // 重要地点文字标识 (Orange Text Labels)
+            val orangeColor = 0xFFFF9800.toInt()
+            if (startLocation != null && points.isNotEmpty()) {
+                val matched = allPlaces.find { it.isUserDefined && it.name == startLocation }
+                if (matched != null) {
+                    amap.addText(com.amap.api.maps.model.TextOptions()
+                        .position(points.first())
+                        .text(startLocation)
+                        .fontColor(orangeColor)
+                        .fontSize(34)
+                        .align(com.amap.api.maps.model.Text.ALIGN_CENTER_BOTTOM))
+                }
+            }
+            if (endLocation != null && points.size > 1) {
+                val matched = allPlaces.find { it.isUserDefined && it.name == endLocation }
+                if (matched != null) {
+                    amap.addText(com.amap.api.maps.model.TextOptions()
+                        .position(points.last())
+                        .text(endLocation)
+                        .fontColor(orangeColor)
+                        .fontSize(34)
+                        .align(com.amap.api.maps.model.Text.ALIGN_CENTER_BOTTOM))
                 }
             }
         }

@@ -404,12 +404,33 @@ class OpenAIService {
         
         var lines: [String] = []
         
-        for (index, id) in fpIds.enumerated() {
+        var events: [(Date, String)] = []
+        
+        for id in fpIds {
             let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
-            guard let fp = (try? context.fetch(fpDescriptor))?.first else { continue }
-            let factLine = dailySummaryFactLine(for: fp, places: allPlaces, activities: allActivities)
-            guard !factLine.isEmpty else { continue }
-            lines.append("\(index + 1). \(factLine)")
+            if let fp = (try? context.fetch(fpDescriptor))?.first {
+                let factLine = dailySummaryFactLine(for: fp, places: allPlaces, activities: allActivities)
+                if !factLine.isEmpty {
+                    events.append((fp.startTime, factLine))
+                }
+            }
+        }
+        
+        for id in tpIds {
+            let tpDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == id })
+            if let tp = (try? context.fetch(tpDescriptor))?.first {
+                let factLine = dailySummaryTransportLine(for: tp)
+                if !factLine.isEmpty {
+                    events.append((tp.startTime, factLine))
+                }
+            }
+        }
+        
+        // 按时间排序
+        events.sort { $0.0 < $1.0 }
+        
+        for (index, event) in events.enumerated() {
+            lines.append("\(index + 1). \(event.1)")
         }
         
         guard !lines.isEmpty else { return nil }
@@ -447,6 +468,26 @@ class OpenAIService {
         
         if footprint.isHighlight == true {
             parts.append("重点")
+        }
+        
+        return parts.joined(separator: "｜")
+    }
+
+    private func dailySummaryTransportLine(for transport: TransportRecord) -> String {
+        let start = transport.startTime.formatted(.dateTime.hour().minute())
+        let end = transport.endTime.formatted(.dateTime.hour().minute())
+        let type = transport.manualTypeRaw ?? transport.typeRaw
+        let typeName = TransportType(rawValue: type)?.localizedName ?? "交通"
+        
+        var parts: [String] = ["\(start)-\(end)", "移动（\(typeName)）"]
+        
+        if transport.startLocation != "起点" || transport.endLocation != "终点" {
+            parts.append("\(transport.startLocation) ➔ \(transport.endLocation)")
+        }
+        
+        if transport.distance > 0 {
+            let distStr = transport.distance > 1000 ? String(format: "%.1fkm", transport.distance / 1000) : "\(Int(transport.distance))m"
+            parts.append("距离：\(distStr)")
         }
         
         return parts.joined(separator: "｜")
@@ -540,9 +581,9 @@ class OpenAIService {
         3. 只做归纳，不要输出标签名、编号、括号说明或字段名，也不要照搬片段里的表达。
         4. 只写能从片段直接推出的客观内容，不要补写感受、氛围、节奏、心情或状态判断。
         5. 语气自然一点，像日常顺口说的话，但不要像通报、监控记录或工作汇报。
-        6. 不要主动提交通、外出、缺失说明或推断过程。
+        6. 如果当天有多次交通出行但地点变化不大，可以概括为“出门走走”或“多次往返”。
         7. 如果信息零散，就总结整体状态，不要编造细节。
-        8. 尽量控制在 10 字以内。
+        8. 尽量控制在 15 字以内。
 
         事实片段：
         \(list)

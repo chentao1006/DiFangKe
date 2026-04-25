@@ -279,6 +279,7 @@ fun TransportCardView(
     transport: TransportRecordEntity, 
     isFirst: Boolean, 
     isLast: Boolean,
+    allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity> = emptyList(),
     showTimeline: Boolean = true,
     onClick: () -> Unit = {}
 ) {
@@ -336,11 +337,12 @@ fun TransportCardView(
             ) {
                 // 起点
                 Column(modifier = Modifier.weight(1f)) {
+                    val startIsImportant = allPlaces.any { it.isUserDefined && it.name == transport.startLocation }
                     Text(
                         text = transport.startLocation,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
-                        color = titleColor,
+                        color = if (startIsImportant) Color(0xFFFF9800) else titleColor,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -380,11 +382,12 @@ fun TransportCardView(
 
                 // 终点
                 Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                    val endIsImportant = allPlaces.any { it.isUserDefined && it.name == transport.endLocation }
                     Text(
                         text = transport.endLocation,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
-                        color = titleColor,
+                        color = if (endIsImportant) Color(0xFFFF9800) else titleColor,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         textAlign = androidx.compose.ui.text.style.TextAlign.End
@@ -429,7 +432,6 @@ fun RecordingStatusCard(
     footprintCount: Int,
     mileage: Double = 0.0,
     pointCount: Int = 0,
-    summary: String? = null,
     pointsJson: String? = null,
     markersJson: String? = null,
     onNavigateToMap: () -> Unit,
@@ -548,7 +550,7 @@ fun RecordingStatusCard(
                         is LocationTrackingService.TrackingState.Tracking -> "正在寻找位置..."
                         is LocationTrackingService.TrackingState.OngoingStay -> "正在此处停留"
                     }
-                    Text(summary ?: displayTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = titleColor, maxLines = 2)
+                    Text(displayTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = titleColor, maxLines = 2)
                     
                     val ongoing = trackingState as? LocationTrackingService.TrackingState.OngoingStay
                     val tracking = trackingState as? LocationTrackingService.TrackingState.Tracking
@@ -960,6 +962,7 @@ fun TimelineRow(
         is com.ct106.difangke.data.model.TimelineItem.TransportItem -> {
             TransportCardView(
                 transport = item.transport,
+                allPlaces = allPlaces,
                 isFirst = isFirst,
                 isLast = isLast,
                 showTimeline = showTimeline,

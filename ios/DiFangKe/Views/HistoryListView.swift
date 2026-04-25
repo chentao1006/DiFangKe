@@ -56,6 +56,14 @@ struct SimpleDayTimelineView: View {
             )
             .navigationTitle(date.formatted(.dateTime.year().month().day()))
             .navigationBarTitleDisplayMode(.inline)
+            .background(
+                LinearGradient(
+                    colors: [.dfkBackground, .dfkAccent.opacity(0.1)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+            )
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {

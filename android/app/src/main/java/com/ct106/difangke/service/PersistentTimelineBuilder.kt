@@ -59,8 +59,8 @@ class PersistentTimelineBuilder(private val context: Context) {
             val p2 = rawPoints[k]
             val d = processor.haversineMeters(p1.latitude, p1.longitude, p2.latitude, p2.longitude)
             val t = (p2.timestamp.time - p1.timestamp.time) / 1000.0
-            // 如果速度超过 150m/s (540km/h) 且时间极短，判定为跳点
-            if (t > 0 && t < 5 && (d / t) > 150) {
+            // 如果速度超过阈值 (约 540km/h) 且时间极短，判定为跳点
+            if (t > 0 && t < AppConfig.TINY_STAY_THRESHOLD && (d / t) > AppConfig.RIDICULOUS_SPEED_THRESHOLD * 1.5) {
                 continue 
             }
             points.add(p2)
@@ -137,7 +137,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         
         // 尝试匹配已知地点
         val matchedPlace = db.placeDao().getAll().firstOrNull { place ->
-            processor.haversineMeters(place.latitude, place.longitude, candidate.latitude, candidate.longitude) <= place.radius + 100.0
+            processor.haversineMeters(place.latitude, place.longitude, candidate.latitude, candidate.longitude) <= place.radius + AppConfig.TAG_INHERITANCE_DISTANCE
         }
 
         val entity = FootprintEntity(
@@ -193,7 +193,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         }.sum()
 
         if (segmentPoints.isEmpty()) {
-            if (totalDist > 200.0 && gapSec > 120.0) {
+            if (totalDist > 200.0 && gapSec > AppConfig.STAY_DURATION_THRESHOLD / 2) {
                 avgSpeed = totalDist / gapSec
                 pointsJson = gson.toJson(pts)
             } else return

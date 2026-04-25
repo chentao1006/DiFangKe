@@ -15,6 +15,9 @@ class TransportDetailViewModel(application: Application) : AndroidViewModel(appl
     private val _transport = MutableStateFlow<TransportRecordEntity?>(null)
     val transport: StateFlow<TransportRecordEntity?> = _transport.asStateFlow()
 
+    val allPlaces: StateFlow<List<com.ct106.difangke.data.db.entity.PlaceEntity>> = db.placeDao().observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     fun loadTransport(id: String) {
         viewModelScope.launch {
             val record = db.transportRecordDao().getById(id)

@@ -10,6 +10,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -56,7 +57,7 @@ fun DailyTimelineScreen(
     }
 
     Scaffold(
-        containerColor = bgColor,
+        containerColor = Color.Transparent,
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text(dateTitle, fontWeight = FontWeight.Bold) },
@@ -95,12 +96,23 @@ fun DailyTimelineScreen(
                     }
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = bgColor
+                    containerColor = Color.Transparent
                 )
             )
         }
     ) { padding ->
-        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+        Box(modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        bgColor,
+                        com.ct106.difangke.ui.theme.DfkAccent.copy(alpha = 0.1f)
+                    )
+                )
+            )
+            .padding(padding)
+        ) {
             TimelinePage(
                 date = date,
                 viewModel = viewModel,

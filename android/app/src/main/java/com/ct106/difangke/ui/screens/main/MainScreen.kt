@@ -28,6 +28,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -212,7 +213,7 @@ fun MainScreen(
     }
 
     Scaffold(
-        containerColor = bgColor,
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { 
@@ -240,17 +241,25 @@ fun MainScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = bgColor,
-                    scrolledContainerColor = bgColor
+                    containerColor = Color.Transparent,
+                    scrolledContainerColor = Color.Transparent
                 )
             )
         }
     ) { padding ->
         Box(modifier = Modifier
             .fillMaxSize()
-            .background(bgColor)
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        bgColor,
+                        com.ct106.difangke.ui.theme.DfkAccent.copy(alpha = 0.1f)
+                    )
+                )
+            )
+            .padding(padding)
         ) {
-            Column(modifier = Modifier.padding(padding)) {
+            Column {
                 DateNavigator(
                     currentDate = currentDate,
                     canGoBack = pagerState.currentPage > 0,
@@ -492,12 +501,12 @@ fun TimelineContent(
                     is TimelineItem.FootprintItem -> {
                         // 如果地点相近且时间重合，隐藏
                         val dist = haversine(item.latitude, item.longitude, ongoing.lat, ongoing.lon)
-                        val isOverlap = item.footprint.endTime.time > ongoing.since.time - 60000
-                        !(dist < 200 && isOverlap)
+                        val isOverlap = item.footprint.endTime.time > ongoing.since.time - (AppConfig.TIMELINE_OVERLAP_TIME_TOLERANCE * 1000).toLong()
+                        !(dist < AppConfig.TIMELINE_OVERLAP_DISTANCE_TOLERANCE && isOverlap)
                     }
                     is TimelineItem.TransportItem -> {
                         // 移除在当前停留开始之后结束的交通段
-                        item.transport.endTime.time < ongoing.since.time + 30000
+                        item.transport.endTime.time < ongoing.since.time + (AppConfig.TIMELINE_OVERLAP_TIME_TOLERANCE / 2 * 1000).toLong()
                     }
                 }
             }
@@ -518,7 +527,6 @@ fun TimelineContent(
                         footprintCount = items.filterIsInstance<TimelineItem.FootprintItem>().size,
                         mileage = totalMileage,
                         pointCount = totalPoints,
-                        summary = dailyInsight,
                         pointsJson = dailyPoints,
                         markersJson = dailyMarkers,
                         onNavigateToMap = onMapClick,

@@ -304,7 +304,6 @@ struct RecordingStatusCard: View {
     var timelineItems: [TimelineItem] = []
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     var photoAssets: [PHAsset] = []
-    var summary: String? = nil
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
     
@@ -369,93 +368,87 @@ struct RecordingStatusCard: View {
             }.frame(width: 54)
             
             VStack(alignment: .leading, spacing: 0) {
-                // Top Section: Info
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Group {
-                            let isImportantPlace = locationManager.matchedPlace?.isUserDefined == true
-                            if let summary = summary {
-                                Text(summary)
-                                    .foregroundColor(isImportantPlace ? .orange : Color.dfkMainText)
-                            } else if !locationManager.isTracking {
-                                Text(displayTitle)
-                                    .foregroundColor(.secondary)
-                            } else if let place = locationManager.matchedPlace, place.isUserDefined {
-                                Text("正在")
-                                    .foregroundColor(Color.dfkMainText) +
-                                Text(place.name)
-                                    .foregroundColor(.orange) +
-                                Text("停留")
-                                    .foregroundColor(Color.dfkMainText)
-                            } else {
-                                Text(displayTitle)
-                                    .foregroundColor(Color.dfkMainText)
-                            }
+                VStack(alignment: .leading, spacing: 6) {
+                    // Title Section
+                    Group {
+                        if !locationManager.isTracking {
+                            Text(displayTitle)
+                                .foregroundColor(.secondary)
+                        } else if let place = locationManager.matchedPlace, place.isUserDefined {
+                            Text("正在")
+                                .foregroundColor(Color.dfkMainText) +
+                            Text(place.name)
+                                .foregroundColor(.orange) +
+                            Text("停留")
+                                .foregroundColor(Color.dfkMainText)
+                        } else {
+                            Text(displayTitle)
+                                .foregroundColor(Color.dfkMainText)
                         }
-                        .font(.system(.headline, design: .rounded))
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .breathing(isActive: OpenAIService.shared.currentlyProcessingDate != nil && Calendar.current.isDate(OpenAIService.shared.currentlyProcessingDate!, inSameDayAs: Date()))
-                        
-                        
-                        HStack(spacing: 4) {                            
-                            if !locationManager.isTracking {
-                                Text("点击开启或查看说明")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(.orange.opacity(0.8))
-                            } else if let durationStr = locationManager.stayDuration {
-                                Text("已停留 \(durationStr)")
-                                    .font(.system(size: 14))
-                                    .foregroundColor(.secondary)
-                                    .id("duration-\(durationStr)")
+                    }
+                    .font(.system(.headline, design: .rounded))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .breathing(isActive: OpenAIService.shared.currentlyProcessingDate != nil && Calendar.current.isDate(OpenAIService.shared.currentlyProcessingDate!, inSameDayAs: Date()))
+
+                    // Duration/Status Section
+                    HStack(spacing: 4) {
+                        if !locationManager.isTracking {
+                            Text("点击开启或查看说明")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.orange.opacity(0.8))
+                        } else if let durationStr = locationManager.stayDuration {
+                            Text("已停留 \(durationStr)")
+                                .font(.system(size: 14))
+                                .foregroundColor(.secondary)
+                                .id("duration-\(durationStr)")
+                        }
+                    }
+                }
+                    
+                    Spacer()
+                    
+                    // DFKMapView Section
+                    DFKMapView(
+                        cameraPosition: $cameraPosition,
+                        isInteractive: false,
+                        showsUserLocation: true,
+                        points: locationManager.allTodayCoordinates,
+                        timelineItems: timelineItems,
+                        photoAssets: photoAssets,
+                        onTimelineItemTap: onTimelineItemTap
+                    )
+                    .frame(height: 160)
+                    .cornerRadius(12)
+                    .padding(.leading, 0)
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 12)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        showFullscreenMap = true
+                    }
+                    .onAppear {
+                        updateTodayCamera()
+                    }
+                    .onChange(of: locationManager.allTodayCoordinates.count) { _, _ in
+                        updateTodayCamera()
+                    }
+                    .onChange(of: timelineItems.count) { _, _ in
+                        updateTodayCamera()
+                    }
+                    .onChange(of: locationManager.lastLocation) { _, newLoc in
+                        // If no points yet, keep tracking current position
+                        if locationManager.allTodayPoints.isEmpty, let newLoc {
+                            withAnimation {
+                                cameraPosition = .region(MKCoordinateRegion(center: newLoc.coordinate, latitudinalMeters: 500, longitudinalMeters: 500))
                             }
                         }
                     }
-                    
-                    Spacer()
                 }
                 .padding(.vertical, 16)
                 .padding(.leading, 0)
                 .padding(.trailing, 16)
-                
-                // DFKMapView Section
-                DFKMapView(
-                    cameraPosition: $cameraPosition,
-                    isInteractive: false,
-                    showsUserLocation: true,
-                    points: locationManager.allTodayCoordinates,
-                    timelineItems: timelineItems,
-                    photoAssets: photoAssets,
-                    onTimelineItemTap: onTimelineItemTap
-                )
-                .frame(height: 160)
-                .cornerRadius(12)
-                .padding(.leading, 0)
-                .padding(.trailing, 12)
-                .padding(.bottom, 12)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    showFullscreenMap = true
-                }
-                .onAppear {
-                    updateTodayCamera()
-                }
-                .onChange(of: locationManager.allTodayCoordinates.count) { _, _ in
-                    updateTodayCamera()
-                }
-                .onChange(of: timelineItems.count) { _, _ in
-                    updateTodayCamera()
-                }
-                .onChange(of: locationManager.lastLocation) { _, newLoc in
-                    // If no points yet, keep tracking current position
-                    if locationManager.allTodayPoints.isEmpty, let newLoc {
-                        withAnimation {
-                            cameraPosition = .region(MKCoordinateRegion(center: newLoc.coordinate, latitudinalMeters: 500, longitudinalMeters: 500))
-                        }
-                    }
-                }
             }
-        }
         .background(
             RoundedRectangle(cornerRadius: 16)
                 .fill(Color(uiColor: .secondarySystemGroupedBackground))
@@ -880,14 +873,14 @@ struct PlaceholderFootprintCard: View {
                         .frame(width: 1.5, height: 22)
                     
                     ZStack {
-                        Circle().stroke(Color.secondary.opacity(0.2), lineWidth: 1.5)
-                            .frame(width: 8, height: 8)
+                        Circle().stroke(Color.secondary.opacity(0.2), lineWidth: 2)
+                            .frame(width: 12, height: 12)
                             .background(Circle().fill(Color(uiColor: .systemBackground)))
                     }.frame(width: 24, height: 24)
                     
                     Spacer()
                 }
-                .frame(width: 40)
+                .frame(width: 54)
                 
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 4) {

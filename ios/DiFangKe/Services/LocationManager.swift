@@ -136,13 +136,14 @@ final class RawLocationStore {
     }
     
     /// 获取最近一段的点。如果提供了 since，则至少获取到 since 那个时间点。
-    func loadRecentLocations(lookbackHours: Double = 2.0, since: Date? = nil) -> [CLLocation] {
+    func loadRecentLocations(lookbackHours: Double? = nil, since: Date? = nil) -> [CLLocation] {
         let now = Date()
-        let defaultThreshold = now.addingTimeInterval(-lookbackHours * 3600)
+        let lookback = lookbackHours ?? AppConfig.shared.locationLookbackHours
+        let defaultThreshold = now.addingTimeInterval(-lookback * 3600)
         let threshold = since.map { min($0, defaultThreshold) } ?? defaultThreshold
         
-        // 限制回溯至 24 小时内，防止数据量过大导致崩溃
-        let finalThreshold = max(threshold, now.addingTimeInterval(-24 * 3600))
+        // 限制回溯至最大限制内，防止数据量过大导致崩溃
+        let finalThreshold = max(threshold, now.addingTimeInterval(-AppConfig.shared.locationLookbackMaxHours * 3600))
         
         let today = loadLocations(for: now)
         var recent = today.filter { $0.timestamp >= finalThreshold }
@@ -349,26 +350,47 @@ final class RawLocationStore {
 
     private let cloudDatabase = CKContainer(identifier: "iCloud.com.ct106.difangke").privateCloudDatabase
 
-    func syncToiCloud() async throws -> Int {
+    func syncToiCloud(onlyRecent: Bool = true, skipUpload: Bool = false) async throws -> Int {
         let localFiles = try fileManager.contentsOfDirectory(at: baseDirectory, includingPropertiesForKeys: nil)
         var totalCount = 0
 
-        // 1. 上传本地文件 (带上当前设备 ID)
-        for localURL in localFiles {
-            let fileName = localURL.lastPathComponent
-            // 只要文件名长度正好是 14 位 (例如 2026-04-04.csv)，就视为本地待上传文件
-            guard fileName.hasSuffix(".csv") && fileName.count == 14 else { continue }
-            
-            let dateStr = fileName.replacingOccurrences(of: ".csv", with: "")
-            let recordID = CKRecord.ID(recordName: "\(dateStr)-\(deviceID)")
-            
-            let record = CKRecord(recordType: "RawTrajectory", recordID: recordID)
-            record["date"] = dateStr
-            record["deviceID"] = deviceID
-            record["file"] = CKAsset(fileURL: localURL)
-            
-            // 使用 CKModifyRecordsOperation 进行覆盖保存
-            let modifyOp = CKModifyRecordsOperation(recordsToSave: [record], recordIDsToDelete: nil)
+        let calendar = Calendar.current
+        let lookbackDays = AppConfig.shared.cloudSyncLookbackDays
+        let cutoffDate = calendar.date(byAdding: .day, value: -lookbackDays, to: Date())! // 默认只同步最近 N 天
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let cutoffStr = formatter.string(from: cutoffDate)
+
+        var recordsToSave: [CKRecord] = []
+
+        // 1. 收集本地待上传文件 (带上当前设备 ID)
+        if !skipUpload {
+            for localURL in localFiles {
+                let fileName = localURL.lastPathComponent
+                // 只要文件名长度正好是 14 位 (例如 2026-04-04.csv)，就视为本地待上传文件
+                guard fileName.hasSuffix(".csv") && fileName.count == 14 else { continue }
+                
+                let dateStr = fileName.replacingOccurrences(of: ".csv", with: "")
+                
+                // 如果是增量同步，且文件早于截止日期，则跳过
+                if onlyRecent && dateStr < cutoffStr { continue }
+                
+                let recordID = CKRecord.ID(recordName: "\(dateStr)-\(deviceID)")
+                
+                let record = CKRecord(recordType: "RawTrajectory", recordID: recordID)
+                record["date"] = dateStr
+                record["deviceID"] = deviceID
+                record["file"] = CKAsset(fileURL: localURL)
+                recordsToSave.append(record)
+            }
+        }
+        
+        // 批量分段上传 (每 5 个一组，防止 Assets 过大导致请求超时)
+        let batchSize = 5
+        var uploadIndex = 0
+        while uploadIndex < recordsToSave.count {
+            let chunk = Array(recordsToSave[uploadIndex..<min(uploadIndex + batchSize, recordsToSave.count)])
+            let modifyOp = CKModifyRecordsOperation(recordsToSave: chunk, recordIDsToDelete: nil)
             modifyOp.savePolicy = .allKeys
             
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -380,7 +402,8 @@ final class RawLocationStore {
                 }
                 cloudDatabase.add(modifyOp)
             }
-            totalCount += 1
+            totalCount += chunk.count
+            uploadIndex += batchSize
         }
 
         // 2. 下载最近 7 天其他设备的文件
@@ -457,7 +480,7 @@ final class FootprintProcessor {
     private let minAccuracy: CLLocationAccuracy = 100.0   // 精度过滤
     private let minTimeInterval: TimeInterval = 5.0       // 时间间隔过滤
     private var driftDistanceThreshold: CLLocationDistance { AppConfig.shared.stayDistanceThreshold }
-    private let driftSpeedThreshold: CLLocationSpeed = 45.0 // m/s，异常飘移速度（约162km/h，兼顾高铁环境）
+    private var driftSpeedThreshold: CLLocationSpeed { AppConfig.shared.driftSpeedThreshold } // m/s，异常飘移速度
     
     // 1.3 停留点识别参数
     private var stayRadiusThreshold: Double { AppConfig.shared.stayDistanceThreshold }
@@ -486,13 +509,13 @@ final class FootprintProcessor {
             let distance = location.distance(from: lastLoc)
             let calculatedSpeed = distance / timeInterval // m/s
             
-            // A: 物理不可能性判断：时速超过 220km/h (约 61m/s) 且精度不佳，判定为漂移数据
-            if calculatedSpeed > 60.0 && location.horizontalAccuracy > 65.0 {
+            // A: 物理不可能性判断：时速超过阈值 (约 220km/h) 且精度不佳，判定为漂移数据
+            if calculatedSpeed > AppConfig.shared.driftSpeedMaxPossible && location.horizontalAccuracy > AppConfig.shared.driftAccuracyThreshold {
                 return nil
             }
             
-            // B: 精度断崖式下降判断：如果位移很大 (>300m) 且当前精度比上一点差很多 (>3倍且绝对值>150m)，判定为漂移
-            if distance > 300 && location.horizontalAccuracy > lastLoc.horizontalAccuracy * 3 && location.horizontalAccuracy > 150 {
+            // B: 精度断崖式下降判断：如果位移很大 且当前精度比上一点差很多 (>3倍且绝对值>150m)，判定为漂移
+            if distance > AppConfig.shared.driftDistanceGap && location.horizontalAccuracy > lastLoc.horizontalAccuracy * 3 && location.horizontalAccuracy > 150 {
                 return nil
             }
             
@@ -693,8 +716,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private let geocoder = CLGeocoder()
     private var lastGeocodedLocation: CLLocation?
     
-    // 标签继承距离阈值：150米
-    private let tagInheritanceDistance: CLLocationDistance = 150.0
+    // 标签继承距离阈值
+    private var tagInheritanceDistance: CLLocationDistance { AppConfig.shared.tagInheritanceDistance }
     
     // 习惯匹配参数 (从 Config 加载)
     private var habitTimeWindow: Int { AppConfig.shared.habitTimeWindow }
@@ -2806,7 +2829,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     /// 执行原始轨迹数据的 iCloud 同步
-    func performRawDataSync(showOverlay: Bool = false) async {
+    func performRawDataSync(showOverlay: Bool = false, onlyRecent: Bool = true, skipUpload: Bool = false) async {
         guard UserDefaults.standard.bool(forKey: "isICloudSyncEnabled") || showOverlay else { return }
         
         if showOverlay {
@@ -2829,7 +2852,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
             
-            let count = try await RawLocationStore.shared.syncToiCloud()
+            let count = try await RawLocationStore.shared.syncToiCloud(onlyRecent: onlyRecent, skipUpload: skipUpload)
             
             if showOverlay {
                 await MainActor.run {

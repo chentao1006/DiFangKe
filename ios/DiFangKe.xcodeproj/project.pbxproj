@@ -400,7 +400,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = DiFangKe/DiFangKe.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = DiFangKe/Info.plist;
@@ -411,7 +411,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke;
 				PRODUCT_NAME = "地方客";
 				SDKROOT = iphoneos;
@@ -490,7 +490,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = DiFangKe/DiFangKe.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = DiFangKe/Info.plist;
@@ -501,7 +501,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke;
 				PRODUCT_NAME = "地方客";
 				SDKROOT = iphoneos;

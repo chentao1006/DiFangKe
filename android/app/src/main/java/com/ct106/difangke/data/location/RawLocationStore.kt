@@ -98,12 +98,12 @@ class RawLocationStore private constructor(context: Context) {
             val gap = haversineMeters(prev.latitude, prev.longitude, next.latitude, next.longitude)
             
             // 跳出 > 1km 且 跳回 > 1km，且起终点差距不大 -> 判定为坐标突跳
-            if (d1 > 1000 && d2 > 1000 && gap < 500) {
+            if (d1 > AppConfig.RIDICULOUS_DISTANCE_THRESHOLD / 2 && d2 > AppConfig.RIDICULOUS_DISTANCE_THRESHOLD / 2 && gap < AppConfig.RIDICULOUS_ACCURACY_THRESHOLD) {
                 continue
             }
             
             // 基础精度/速度过滤
-            if (curr.accuracy > 500 && d1 > 2000) continue
+            if (curr.accuracy > AppConfig.RIDICULOUS_ACCURACY_THRESHOLD && d1 > AppConfig.RIDICULOUS_DISTANCE_THRESHOLD) continue
             
             result.add(curr)
         }
@@ -198,7 +198,7 @@ class RawLocationStore private constructor(context: Context) {
             val dist = haversineMeters(p1.latitude, p1.longitude, p2.latitude, p2.longitude)
             // 过滤单点漂移引起的路程暴涨（如果两点间速度超过 150km/h，可能是漂移，除非是飞机）
             val dt = (p2.timestamp.time - p1.timestamp.time) / 1000.0
-            if (dt > 0 && dist / dt < 45.0) { // 约 160km/h
+            if (dt > 0 && dist / dt < AppConfig.DRIFT_SPEED_THRESHOLD) {
                 total += dist
             }
         }

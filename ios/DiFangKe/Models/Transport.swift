@@ -150,9 +150,21 @@ struct Transport: Identifiable {
     }
 
     func updatingPoints(_ newPoints: [CLLocationCoordinate2D]) -> Transport {
-        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: newPoints, manualType: manualType, stepCount: stepCount)
+        var newDistance: Double = 0
+        if newPoints.count >= 2 {
+            for i in 0..<newPoints.count - 1 {
+                let p1 = CLLocation(latitude: newPoints[i].latitude, longitude: newPoints[i].longitude)
+                let p2 = CLLocation(latitude: newPoints[i+1].latitude, longitude: newPoints[i+1].longitude)
+                newDistance += p1.distance(from: p2)
+            }
+        }
+        let duration = endTime.timeIntervalSince(startTime)
+        let newSpeed = duration > 0 ? newDistance / duration : 0
+        
+        return Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: endLocation, type: type, distance: newDistance, averageSpeed: newSpeed, points: newPoints, manualType: manualType, stepCount: stepCount)
     }
 }
+
 
 @Model
 final class TransportRecord {

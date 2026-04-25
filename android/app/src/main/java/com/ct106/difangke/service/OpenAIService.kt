@@ -269,15 +269,26 @@ class OpenAIService private constructor() {
 
         for (fp in footprints) {
             if (FootprintTitles.isGeneric(fp.title)) continue
-            var desc = fp.title
-            if (fp.isHighlight == true) desc = "【重点收藏】$desc"
+            val start = TIME_FMT.format(fp.startTime)
+            val end = TIME_FMT.format(fp.endTime)
+            var desc = "$start-$end｜${fp.title}"
+            if (fp.isHighlight == true) desc += "｜重点"
             items.add(SimpleItem(fp.startTime, desc))
         }
 
         for (tp in transports) {
             if (tp.statusRaw == "ignored") continue
+            val start = TIME_FMT.format(tp.startTime)
+            val end = TIME_FMT.format(tp.endTime)
             val typeName = com.ct106.difangke.data.model.TransportType.from(tp.typeRaw).localizedName
-            val desc = "通过${typeName}从${tp.startLocation}前往${tp.endLocation}"
+            val distStr = if (tp.distance > 0) {
+                if (tp.distance > 1000) String.format("%.1fkm", tp.distance / 1000) else "${tp.distance.toInt()}m"
+            } else ""
+            
+            val desc = "$start-$end｜移动（$typeName）" + 
+                (if (tp.startLocation != "起点" || tp.endLocation != "终点") "｜${tp.startLocation} ➔ ${tp.endLocation}" else "") +
+                (if (distStr.isNotEmpty()) "｜距离：$distStr" else "")
+            
             items.add(SimpleItem(tp.startTime, desc))
         }
 
@@ -297,12 +308,26 @@ class OpenAIService private constructor() {
         if (force && existing?.dataFingerprint == fingerprint) return@withContext true
 
         val dateStr = DATE_FMT.format(startOfDay)
-        val prompt = "今天是 $dateStr。请根据以下足迹编写一段极简晚间回顾（15字以内）。要求：作为一位善于发现生活之美的观察者，语气温润且富有洞察力，将碎片化的记录串联成有温度的文字，绝对不要使用生硬的模板：\n$fingerprint"
+        val prompt = """
+        今天是 $dateStr。下面是当天足迹的事实片段，请你先自己归纳出一天的主线和状态，再用一句话总结今天。
+        要求：
+        1. 只输出一句中文。
+        2. 不要逐条复述，不要写时间线，不要把片段照搬成流水账。
+        3. 只做归纳，不要输出标签名、编号、括号说明或字段名，也不要照搬片段里的表达。
+        4. 只写能从片段直接推出的客观内容，不要补写感受、氛围、节奏、心情或状态判断。
+        5. 语气自然一点，像日常顺口说的话，但不要像通报、监控记录或工作汇报。
+        6. 如果当天有多次交通出行但地点变化不大，可以概括为“出门走走”或“多次往返”。
+        7. 如果信息零散，就总结整体状态，不要编造细节。
+        8. 尽量控制在 15 字以内。
+
+        事实片段：
+        $fingerprint
+        """.trimIndent()
 
         val body = mapOf(
-            "temperature" to 0.85,
+            "temperature" to 0.2,
             "messages" to listOf(
-                mapOf("role" to "system", "content" to "你是一位文字优美、情感细腻的散文作家。请用中文回答，保持简洁、深远且充满创意的风格，避免重复和套路。"),
+                mapOf("role" to "system", "content" to "你是一位只做事实概括的中文助手。输出要自然、口语化，像日常顺口说一句；不要虚构，不要抒情，不要修辞，不要使用报表口吻、监控口吻或生硬表达，也不要补写感受、氛围、节奏、心情或状态判断。"),
                 mapOf("role" to "user", "content" to prompt)
             )
         )

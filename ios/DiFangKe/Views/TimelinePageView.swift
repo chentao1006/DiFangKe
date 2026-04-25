@@ -80,7 +80,7 @@ struct TimelinePageView: View {
             appearanceTask?.cancel()
             appearanceTask = Task { @MainActor in
                 // 只有停留超过 400ms 才开始业务逻辑，防止快速划过时的卡顿
-                try? await Task.sleep(nanoseconds: 400_000_000)
+                try? await Task.sleep(nanoseconds: AppConfig.shared.uiDebounceIntervalNS)
                 if Task.isCancelled { return }
                 
                 NotificationManager.shared.getAuthorizationStatus { status in
@@ -181,13 +181,13 @@ struct TimelinePageView: View {
             switch item {
             case .footprint(let fp):
                 // 1. 时间：如果足迹结束时间晚于当前停留开始时间（容错 60s）
-                let isTimeOverlap = fp.endTime > ongoingStart.addingTimeInterval(60)
+                let isTimeOverlap = fp.endTime > ongoingStart.addingTimeInterval(AppConfig.shared.timelineOverlapTimeTolerance)
                 
                 // 2. 地点：如果位置重合（200米内，认为属于同一个停留）
                 var isLocationOverlap = false
                 if let ol = ongoingLoc {
                     let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
-                    isLocationOverlap = fpLoc.distance(from: ol) < 200
+                    isLocationOverlap = fpLoc.distance(from: ol) < AppConfig.shared.timelineOverlapDistanceTolerance
                 }
                 
                 // 如果时间和地点都重合，说明它是正在进行的停留的“前身”或者重复，在列表中隐藏它
@@ -246,8 +246,7 @@ struct TimelinePageView: View {
                     footprintCount: footprints.count,
                     timelineItems: filteredTimelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
-                    photoAssets: dayPhotoAssets,
-                    summary: pageInsights.first?.content,
+                    photoAssets: dayPhotoAssets
                 )
                 .padding(.horizontal, 16)
             } else {
@@ -627,18 +626,19 @@ struct TimelinePageView: View {
             let isToday = Calendar.current.isDateInToday(date)
             
             if isToday {
-                // 1. 仅针对今天：同步远程原始轨迹（耗时操作）
-                await locationManager.performRawDataSync()
+                // 并行执行耗时操作：仅下载远程数据（不上传本地轨迹） 与 整理本地足迹
+                async let syncTask: () = locationManager.performRawDataSync(onlyRecent: true, skipUpload: true)
+                async let siftTask: () = locationManager.triggerTimelineSift()
                 
-                // 2. 仅针对今天：触发位置碎片合并计算（耗时操作）
-                await locationManager.triggerTimelineSift()
+                // 等待两者完成
+                _ = await (syncTask, siftTask)
             }
             
             // 3. 异步刷新并强制重新同步当前页面的时间轴记录（本地操作，较快）
             await refreshTimelineAsync(force: true)
             
-            // 4. 手动触发 AI 摘要强制重新生成（仅针对当前拉下的日期）
-            if isAiAssistantEnabled {
+            // 4. 手动触发 AI 摘要强制重新生成（仅针对过去日期，今日不重复生成）
+            if isAiAssistantEnabled && !isToday {
                 await refreshAiSummary(force: true)
             }
         }

@@ -292,7 +292,7 @@ class TimelineBuilder {
                 // --- 衔接修复：防止足迹与其前面的交通/足迹重叠 ---
                 if model.startTime < currentTime {
                     model.startTime = currentTime
-                    if model.endTime < model.startTime { model.endTime = model.startTime.addingTimeInterval(60) }
+                    if model.endTime < model.startTime { model.endTime = model.startTime.addingTimeInterval(AppConfig.shared.minStayDurationCorrection) }
                 }
                 
                 items.append(.footprint(model))
@@ -337,7 +337,7 @@ class TimelineBuilder {
                     current.updateStartTime(last.endTime)
                     
                     // 如果对齐后，当前项的持续时间变成了负数或极短，则跳过此项
-                    if current.endTime <= current.startTime.addingTimeInterval(5) {
+                    if current.endTime <= current.startTime.addingTimeInterval(AppConfig.shared.tinyStayThreshold) {
                         continue
                     }
                 }
@@ -360,7 +360,11 @@ class TimelineBuilder {
             var prevFp: Footprint?
             for j in (0..<i).reversed() {
                 if case .footprint(let fp) = result[j] {
-                    prevFp = fp
+                    // 核心修复：只有时间上足够接近，才认为是衔接关系
+                    // 避免中间的足迹被删除后，前后的交通直接对跳衔接
+                    if abs(t.startTime.timeIntervalSince(fp.endTime)) < AppConfig.shared.transportAlignmentThreshold {
+                        prevFp = fp
+                    }
                     break
                 }
             }
@@ -386,7 +390,10 @@ class TimelineBuilder {
             var nextFp: Footprint?
             for j in (i+1)..<result.count {
                 if case .footprint(let fp) = result[j] {
-                    nextFp = fp
+                    // 核心修复：只有时间上足够接近，才认为是衔接关系
+                    if abs(fp.startTime.timeIntervalSince(t.endTime)) < AppConfig.shared.transportAlignmentThreshold {
+                        nextFp = fp
+                    }
                     break
                 }
             }
@@ -563,8 +570,8 @@ class TimelineBuilder {
                 }
             }
             
-            // --- 核心修复：处理交通末尾与下一个足迹的衔接 ---
-            let isOngoing = isTodayView && end >= now.addingTimeInterval(-120)
+            // --- 核心修复：处理交通末尾与下一个足迹的衔接
+            let isOngoing = isTodayView && end >= now.addingTimeInterval(-AppConfig.shared.ongoingStayGracePeriod)
             if !isOngoing && end.timeIntervalSince(lastProcessedTime) > 0 {
                 addStationaryStay(from: lastProcessedTime, to: end, gapPoints: gapPoints, items: &items, allPlaces: allPlaces, forceAdd: true)
             }
@@ -603,7 +610,7 @@ class TimelineBuilder {
         
         if let l1 = loc1, let l2 = loc2 {
             let distance = l1.distance(from: l2)
-            if distance < 300 {
+            if distance < AppConfig.shared.gapFillingMaxDistance {
                 // 距离相近，认为是原地停留
                 addStationaryStay(from: start, to: end, gapPoints: [], items: &items, allPlaces: allPlaces, coordinateOverride: l1.coordinate)
             } else if isRawDataAvailable {
@@ -778,7 +785,7 @@ class TimelineBuilder {
                 if intersectDuration >= minDuration * 0.3 { return true }
             }
             let midTime = t.startTime.addingTimeInterval(t.duration / 2)
-            return (midTime >= ov.startTime.addingTimeInterval(-120) && midTime <= ov.endTime.addingTimeInterval(120))
+            return (midTime >= ov.startTime.addingTimeInterval(-AppConfig.shared.ongoingStayGracePeriod) && midTime <= ov.endTime.addingTimeInterval(AppConfig.shared.ongoingStayGracePeriod))
         }) {
             if override.isDeleted { return nil }
             var updated = t
@@ -829,7 +836,7 @@ class TimelineBuilder {
     
     private static func extractTransports(_ points: [CLLocation]) -> [Transport] {
         // 先对原始点进行初步过滤，剔除精度极差（>300m）的噪点，避免大幅拉伸段跨度
-        let filteredPoints = points.filter { $0.horizontalAccuracy > 0 && $0.horizontalAccuracy < 300 }
+        let filteredPoints = points.filter { $0.horizontalAccuracy > 0 && $0.horizontalAccuracy < AppConfig.shared.habitAnalysisAccuracyThreshold }
         guard filteredPoints.count >= 2 else { return [] }
         
         var transports: [Transport] = []
@@ -1237,7 +1244,7 @@ class PersistentTimelineBuilder {
         
         let newPoints = allRawPoints.filter { point in
             // 跳过已处理的时间
-            if point.timestamp <= lastEndTime.addingTimeInterval(1) { return false }
+            if point.timestamp <= lastEndTime.addingTimeInterval(AppConfig.shared.duplicatePointBuffer) { return false }
             
             // 如果有点位属于“正在进行的停留”，暂时排除，让其留在实时状态中
             if let os = ongoingStart, point.timestamp >= os { return false }
@@ -1422,13 +1429,18 @@ class PersistentTimelineBuilder {
                 let pts: [CodableCoordinate]
                 
                 if !gapPoints.isEmpty {
-                    pathDist = TimelineBuilder.calculateDistance(gapPoints)
-                    pts = gapPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) }
+                    // Include the footprint centers in the path to ensure correct mileage
+                    var combinedPoints = [CLLocation(latitude: currentFp.latitude, longitude: currentFp.longitude)]
+                    combinedPoints.append(contentsOf: gapPoints)
+                    combinedPoints.append(CLLocation(latitude: nextFp.latitude, longitude: nextFp.longitude))
+                    pathDist = TimelineBuilder.calculateDistance(combinedPoints)
+                    pts = combinedPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) }
                 } else {
                     pathDist = straightDist
                     pts = [CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude),
                            CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)]
                 }
+
 
                 // 使用配置中的阈值
                 if !hasTransport && pathDist > AppConfig.shared.transportMinDistanceThreshold {
@@ -1480,9 +1492,9 @@ class PersistentTimelineBuilder {
                 decodedPoints = decoded
             }
             
-            if let prevFp = fps.last(where: { $0.endTime <= tp.startTime + 60 }) {
+            if let prevFp = fps.last(where: { $0.endTime <= tp.startTime + AppConfig.shared.snapTimeBuffer }) {
                 let gap = tp.startTime.timeIntervalSince(prevFp.endTime)
-                if gap >= 0 && gap < 900 { 
+                if gap >= 0 && gap < AppConfig.shared.transportAlignmentThreshold { 
                     tp.startTime = prevFp.endTime
                     let locName = getSimplifiedLocationName(for: prevFp, allPlaces: allPlaces)
                     if !locName.isEmpty && locName != "某地" {
@@ -1496,9 +1508,9 @@ class PersistentTimelineBuilder {
                 }
             }
             
-            if let nextFp = fps.first(where: { $0.startTime >= tp.endTime - 60 }) {
+            if let nextFp = fps.first(where: { $0.startTime >= tp.endTime - AppConfig.shared.snapTimeBuffer }) {
                 let gap = nextFp.startTime.timeIntervalSince(tp.endTime)
-                if gap >= 0 && gap < 900 {
+                if gap >= 0 && gap < AppConfig.shared.transportAlignmentThreshold {
                     tp.endTime = nextFp.startTime
                     let locName = getSimplifiedLocationName(for: nextFp, allPlaces: allPlaces)
                     if !locName.isEmpty && locName != "某地" {
@@ -1573,7 +1585,7 @@ class PersistentTimelineBuilder {
             // 确定是否为同一逻辑地点
             let isSameLogicalPlace = (current.placeID != nil && current.placeID == next.placeID)
             // 如果两个足迹距离小于阈值，且间隔小于配置的合并时长，则视作同一地点
-            let mergeThreshold = isSameLogicalPlace ? max(threshold, 500.0) : threshold
+            let mergeThreshold = isSameLogicalPlace ? max(threshold, AppConfig.shared.samePlaceMergeBonusThreshold) : threshold
             let mergeGapLimit = isSameLogicalPlace ? 3600.0 : AppConfig.shared.stayMergeGapThreshold
 
             if dist < mergeThreshold && gap < mergeGapLimit {
@@ -1621,8 +1633,8 @@ class PersistentTimelineBuilder {
                 }
 
                 // --- 核心修复：既然合并了，中间夹杂的任何微小交通（通常是漂移产生的）都应被清理 ---
-                let midStart = current.endTime.addingTimeInterval(-10)
-                let midEnd = next.startTime.addingTimeInterval(10)
+                let midStart = current.endTime.addingTimeInterval(-AppConfig.shared.midPointSamplingOffset)
+                let midEnd = next.startTime.addingTimeInterval(AppConfig.shared.midPointSamplingOffset)
                 let tDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
                     $0.startTime >= midStart && $0.endTime <= midEnd
                 })
@@ -1651,6 +1663,7 @@ class PersistentTimelineBuilder {
         let startOfDay = Calendar.current.startOfDay(for: date)
         let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
         
+        var lastFp: Footprint? = nil
         var i = 0
         while i < points.count {
             // 1. 尝试寻找从 i 开始的一个“停留点簇”
@@ -1711,6 +1724,7 @@ class PersistentTimelineBuilder {
                     fp.address = matched.name
                 }
                 context.insert(fp)
+                lastFp = fp
                 i = j // 跳过该簇
             } else {
                 // i 及其后续一小段不足以构成停留，那么从 i 到下一个停留起始点之间就是交通
@@ -1768,8 +1782,24 @@ class PersistentTimelineBuilder {
                         endName = eMatch.name
                     }
 
-                    let pathDist = TimelineBuilder.calculateDistance(transportPoints)
+                    // Calculate distance including footprint connections if available
+                    var augmentedPoints = transportPoints
+                    if let last = lastFp {
+                        augmentedPoints.insert(CLLocation(latitude: last.latitude, longitude: last.longitude), at: 0)
+                        if startName == "起点" {
+                            startName = last.address ?? "起点"
+                        }
+                    }
+                    if k < points.count {
+                        // Include the first point of the next cluster to complete the path
+                        augmentedPoints.append(points[k])
+                    }
+
+                    let pathDist = TimelineBuilder.calculateDistance(augmentedPoints)
                     let avgSpeed = tEnd.timeIntervalSince(tStart) > 0 ? pathDist / tEnd.timeIntervalSince(tStart) : 0
+                    
+                    let augmentedPtsData = (try? JSONEncoder().encode(augmentedPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) })) ?? ptsData
+
                     let tp = TransportRecord(
                         day: startOfDay,
                         startTime: tStart,
@@ -1779,7 +1809,7 @@ class PersistentTimelineBuilder {
                         typeRaw: TransportType.from(speed: avgSpeed).rawValue,
                         distance: pathDist,
                         averageSpeed: avgSpeed,
-                        pointsData: ptsData
+                        pointsData: augmentedPtsData
                     )
                     
                     // --- 异步获取健康数据 (仅步数对交通段有辅助意义) ---
@@ -1804,7 +1834,8 @@ class PersistentTimelineBuilder {
         isResolving = true
         
         Task {
-            let sevenDaysAgo = Date().addingTimeInterval(-7 * 24 * 3600)
+            let lookback = Double(AppConfig.shared.habitAnalysisLookbackDays)
+            let sevenDaysAgo = Date().addingTimeInterval(-lookback * 24 * 3600)
             
             // 1. 获取最近一周的所有足迹，然后在内存中精细化过滤，避开复杂的 #Predicate 宏
             let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {

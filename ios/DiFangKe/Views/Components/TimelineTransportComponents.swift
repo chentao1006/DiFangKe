@@ -191,6 +191,24 @@ struct TransportModalView: View {
         localManualType ?? transport.currentType
     }
     
+    private var isStartImportantPlace: Bool {
+        allPlaces.contains { place in
+            guard place.isUserDefined else { return false }
+            let addr = currentStartLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+            return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == addr || 
+                   (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == addr)
+        }
+    }
+    
+    private var isEndImportantPlace: Bool {
+        allPlaces.contains { place in
+            guard place.isUserDefined else { return false }
+            let addr = currentEndLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+            return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == addr || 
+                   (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == addr)
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
@@ -214,7 +232,7 @@ struct TransportModalView: View {
                         Annotation("", coordinate: start, anchor: .top) {
                             Text(currentStartLocation)
                                 .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(.primary)
+                                .foregroundColor(isStartImportantPlace ? .orange : .primary)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
                                 .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
@@ -233,7 +251,7 @@ struct TransportModalView: View {
                         Annotation("", coordinate: end, anchor: .top) {
                             Text(currentEndLocation)
                                 .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(.primary)
+                                .foregroundColor(isEndImportantPlace ? .orange : .primary)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
                                 .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))

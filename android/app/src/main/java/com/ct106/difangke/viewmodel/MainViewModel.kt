@@ -159,8 +159,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 db.footprintDao().observeBetween(start, end),
                 db.transportRecordDao().observeForDay(start, end)
             ) { fps, tps ->
-                (fps.map { TimelineItem.FootprintItem(it) } + tps.map { TimelineItem.TransportItem(it) })
+                val visibleFps = fps.filter { it.statusRaw != "ignored" }
+                val rawItems = (fps.map { TimelineItem.FootprintItem(it) } + tps.map { TimelineItem.TransportItem(it) })
                     .sortedByDescending { it.startTime }
+                
+                alignTransportItems(rawItems, visibleFps)
             }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
         }
     }
@@ -502,4 +505,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             DiFangKeApp.instance.preferences.setHasSwiped(true)
         }
     }
+
+    private fun alignTransportItems(items: List<TimelineItem>, visibleFps: List<com.ct106.difangke.data.db.entity.FootprintEntity>): List<TimelineItem> {
+        val sortedFps = visibleFps.sortedBy { it.startTime }
+        
+        return items.map { item ->
+            if (item is TimelineItem.TransportItem) {
+                val transport = item.transport
+                
+                // 找到时间最接近且衔接的 visible footprint
+                // 1. 查找起点足迹 (endTime 接近 transport.startTime)
+                val prevFp = sortedFps.lastOrNull { 
+                    it.endTime.time <= transport.startTime.time + (AppConfig.SNAP_TIME_BUFFER * 1000).toLong() &&
+                    Math.abs(it.endTime.time - transport.startTime.time) < (AppConfig.TRANSPORT_ALIGNMENT_THRESHOLD * 1000).toLong()
+                }
+                
+                // 2. 查找终点足迹 (startTime 接近 transport.endTime)
+                val nextFp = sortedFps.firstOrNull { 
+                    it.startTime.time >= transport.endTime.time - (AppConfig.SNAP_TIME_BUFFER * 1000).toLong() &&
+                    Math.abs(it.startTime.time - transport.endTime.time) < (AppConfig.TRANSPORT_ALIGNMENT_THRESHOLD * 1000).toLong()
+                }
+                
+                if (prevFp != null || nextFp != null) {
+                    // 创建一个新的 TransportRecordEntity 副本来应用对齐 (仅用于显示)
+                    val aligned = transport.copy(
+                        startLocation = prevFp?.address ?: transport.startLocation,
+                        endLocation = nextFp?.address ?: transport.endLocation
+                    )
+                    TimelineItem.TransportItem(aligned)
+                } else {
+                    item
+                }
+            } else {
+                item
+            }
+        }
+    }
 }
+
