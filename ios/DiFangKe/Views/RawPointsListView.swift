@@ -177,8 +177,8 @@ struct RawPointsListView: View {
     private func loadPoints() {
         isLoading = true
         Task.detached(priority: .userInitiated) {
-            // 加载未经过滤的原始点位，方便用户看见跳点并手动删除
-            let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date, filtered: false)
+            // 核心修复：原始轨迹页默认也应用过滤机制，剔除离谱跳变点
+            let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date, filtered: true)
             await MainActor.run {
                 self.points = rawPoints
                 self.isLoading = false
@@ -211,8 +211,9 @@ struct RawPointsListView: View {
             let time = max(0.1, point.timestamp.timeIntervalSince(prev.timestamp))
             let speed = dist / time // m/s
             
-            if speed > 70 { return true } // 时速超过 250km/h
-            if dist > 2000 && point.horizontalAccuracy > 200 { return true }
+            if speed > 60 { return true } // 时速超过 216km/h
+            if dist > 1000 && point.horizontalAccuracy > 150 { return true }
+            if dist > 3000 { return true } // 哪怕精度好，单次跳跃 >3km 也很可疑
         }
         
         return false

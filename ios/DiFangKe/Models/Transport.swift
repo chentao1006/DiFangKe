@@ -68,16 +68,62 @@ enum TransportType: String, CaseIterable, Codable {
         }
     }
     
-    static func from(speed: Double) -> TransportType {
+    static func from(speed: Double, motionType: HealthManager.MotionType = .unknown, stepCount: Int = 0, duration: TimeInterval = 0, preferredAutomotive: TransportType = .car, preferredCycling: TransportType = .bicycle) -> TransportType {
         let kmh = speed * 3.6
-        if kmh < 2 { return .slow }      
-        if kmh < 3 { return .running }   
-        if kmh < 10 { return .bicycle }    
-        if kmh < 20 { return .ebike }       
-        if kmh < 40 { return .motorcycle }  
-        if kmh < 100 { return .car }       
-        if kmh < 300 { return .train }     
-        return .airplane                   
+        
+        // --- 物理常识铁律：最高速度约束 ---
+        var effectiveMotionType = motionType
+        if kmh > 15 && motionType == .walking {
+            effectiveMotionType = .unknown // 步行不可能超过 15km/h，传感器数据存疑，降级到兜底逻辑
+        }
+        if kmh > 35 && motionType == .running {
+            effectiveMotionType = .unknown // 跑步很难持续超过 35km/h
+        }
+        if kmh > 45 && (motionType == .walking || motionType == .running) {
+            effectiveMotionType = .automotive // 确定是车载
+        }
+        if kmh > 100 && motionType == .cycling {
+            effectiveMotionType = .automotive 
+        }
+
+        // 1. 优先使用传感器数据 (Core Motion)
+        switch effectiveMotionType {
+        case .walking:
+            return kmh > 7 ? .running : .slow
+        case .running:
+            return .running
+        case .cycling:
+            if kmh > 55 { return preferredAutomotive } 
+            return preferredCycling
+        case .automotive:
+            if kmh > 100 { return .train }
+            if kmh > 80 && preferredAutomotive == .bus { return .car } 
+            return preferredAutomotive
+        default:
+            break
+        }
+        
+        // 2. 结合步数判定 (HealthKit)
+        if stepCount > 100 && duration > 0 {
+            let stepsPerMinute = Double(stepCount) / (duration / 60)
+            if stepsPerMinute > 140 && kmh < 35 { return .running }
+            if stepsPerMinute > 30 && kmh < 15 { return .slow }
+        }
+        
+        // 3. 速度兜底 (传统逻辑)
+        if kmh < 4.5 { 
+            // 如果速度极低，但步数也很少（每分钟不到 5 步），说明大概率是在车里堵车，而不是真的在走
+            let stepsPerMin = duration > 0 ? Double(stepCount) / (duration / 60) : 0
+            if stepsPerMin < 5 && stepCount < 20 {
+                return preferredAutomotive 
+            }
+            return .slow 
+        }
+        if kmh < 12 { return .bicycle }
+        if kmh < 25 { return preferredCycling } 
+        if kmh < 120 { return preferredAutomotive }
+        if kmh < 350 { return .train }
+        return .airplane
     }
 
     

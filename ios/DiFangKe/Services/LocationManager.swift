@@ -123,7 +123,10 @@ final class RawLocationStore {
                     let time = loc.timestamp.timeIntervalSince(last.timestamp)
                     if time > 0 {
                         let calcSpeed = dist / time
-                        let isRidiculous = (accuracy > 500 && dist > 2000) || (calcSpeed > 100.0 && accuracy > 100)
+                        // 新增：物理不可能的速度直接过滤（如 5秒内 3公里 = 600m/s）
+                        if calcSpeed > AppConfig.shared.physicalMaxSpeedThreshold { return }
+                        
+                        let isRidiculous = (accuracy > 400 && dist > 1500) || (calcSpeed > 80.0 && accuracy > 80)
                         if isRidiculous { return } // 跳过该点，不加入列表，且不更新 lastValidPoint
                     }
                 }
@@ -213,7 +216,10 @@ final class RawLocationStore {
                     let time = loc.timestamp.timeIntervalSince(last.timestamp)
                     if time > 0 {
                         let calcSpeed = dist / time
-                        let isRidiculous = (accuracy > 500 && dist > 2000) || (calcSpeed > 100.0 && accuracy > 100)
+                        // 新增：物理不可能的速度直接过滤
+                        if calcSpeed > AppConfig.shared.physicalMaxSpeedThreshold { return }
+                        
+                        let isRidiculous = (accuracy > 400 && dist > 1500) || (calcSpeed > 80.0 && accuracy > 80)
                         if isRidiculous { return }
                     }
                 }
@@ -282,10 +288,17 @@ final class RawLocationStore {
             let dPrevToCurrent = current.distance(from: prev)
             let speedPrevToCurrent = dPrevToCurrent / tPrevToCurrent // m/s
             
-            // 如果瞬时时速超过 250km/h (约 70m/s)，触发跳变探测
-            if speedPrevToCurrent > 70 {
+            // --- NEW: Physical Impossibility Check (User Request: 5s/3km = 600m/s) ---
+            if speedPrevToCurrent > AppConfig.shared.physicalMaxSpeedThreshold {
+                i += 1
+                continue
+            }
+            
+            // 如果瞬时速度较快，或者位移较大（超过 800m）且速度也不低（超过 20m/s）
+            // 或者：只要位移巨大（超过 2000m），即使速度没那么快，也要触发跳变探测（对抗长间隔的大跳变）
+            if speedPrevToCurrent > 60 || (dPrevToCurrent > 800 && speedPrevToCurrent > 20) || dPrevToCurrent > 2000 {
                 var jumpReturnIndex = -1
-                let searchLimit = min(i + 20, points.count) // 扩大搜索窗口到 20 个点
+                let searchLimit = min(i + 15, points.count) 
                 
                 for j in (i + 1)..<searchLimit {
                     let next = points[j]
@@ -294,7 +307,7 @@ final class RawLocationStore {
                     let avgSpeedToNext = dPrevToNext / tPrevToNext
                     
                     // 如果点 j 相对于 prev 的平均速度是合理的（< 150km/h，约 42m/s）
-                    // 但 current 这一点是突发性的极速跳转，则说明 [i...j-1] 段是漂移
+                    // 但 current 这一点是突发性的跳转，则说明 [i...j-1] 段是漂移
                     if avgSpeedToNext < 42 && dPrevToCurrent > 800 {
                         // 且回归点 next 距离 current 也必须足够远，证明 current 是偏离轨迹的点
                         if current.distance(from: next) > 800 {
@@ -1303,8 +1316,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             let time = abs(location.timestamp.timeIntervalSince(last.timestamp))
             if time > 0 {
                 let calcSpeed = dist / time
+                
+                // 新增：物理不可能的速度直接过滤（如 5秒内 3公里 = 600m/s）
+                if calcSpeed > AppConfig.shared.physicalMaxSpeedThreshold {
+                    print("Detected impossible jump, skipping point. Speed: \(calcSpeed) m/s")
+                    return
+                }
+                
                 // 地铁/隧道环境常见的离谱漂移：精度骤降 (>500m) 且 瞬间位移巨大 (>2km) 且 速度不合理 (>80m/s)
-                let isRidiculous = (location.horizontalAccuracy > 500 && dist > 2000) || (calcSpeed > 80.0 && location.horizontalAccuracy > 100)
+                // 降低判定门槛：只要速度超过 60m/s (216km/h) 且精度不佳，就视为漂移
+                let isRidiculous = (location.horizontalAccuracy > 400 && dist > 1500) || (calcSpeed > 60.0 && location.horizontalAccuracy > 80)
                 if isRidiculous {
                     print("Detected ridiculous drift, skipping point. Dist: \(dist), Acc: \(location.horizontalAccuracy)")
                     return 

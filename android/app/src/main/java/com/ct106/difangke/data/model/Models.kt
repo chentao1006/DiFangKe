@@ -58,21 +58,70 @@ enum class TransportType(val raw: String) {
     }
 
     companion object {
-        fun fromSpeed(speedMs: Double): TransportType {
+        fun from(
+            speedMs: Double,
+            motionType: Int = 0, // 对应 Android DetectedActivity 类型
+            stepCount: Int = 0,
+            durationSec: Long = 0,
+            preferredAuto: TransportType = CAR,
+            preferredCycling: TransportType = BICYCLE
+        ): TransportType {
             val kmh = speedMs * 3.6
+            
+            // --- 物理常识铁律：最高速度约束 ---
+            var effectiveMotion = motionType
+            // 步行不可能超过 15km/h (约 4.2m/s)
+            if (kmh > 15.0 && motionType == 7 /* WALKING */) effectiveMotion = 4 /* UNKNOWN */
+            // 跑步不可能超过 35km/h
+            if (kmh > 35.0 && motionType == 8 /* RUNNING */) effectiveMotion = 4 /* UNKNOWN */
+            // 确定车载速度 (45km/h 以上)
+            if (kmh > 45.0 && (motionType == 7 || motionType == 8)) effectiveMotion = 0 /* IN_VEHICLE */
+
+            // 1. 优先使用传感器数据 (Google Play Services Activity Recognition)
+            when (effectiveMotion) {
+                7 /* WALKING */ -> return if (kmh > 7.0) RUNNING else SLOW
+                8 /* RUNNING */ -> return RUNNING
+                1 /* ON_BICYCLE */ -> return if (kmh > 55.0) preferredAuto else preferredCycling
+                0 /* IN_VEHICLE */ -> {
+                    if (kmh > 100.0) return TRAIN
+                    if (kmh > 80.0 && preferredAuto == BUS) return CAR
+                    return preferredAuto
+                }
+            }
+
+            // 2. 结合步数判定
+            if (stepCount > 100 && durationSec > 0) {
+                val stepsPerMin = stepCount / (durationSec / 60.0)
+                if (stepsPerMin > 140 && kmh < 35.0) return RUNNING
+                if (stepsPerMin > 30 && kmh < 15.0) return SLOW
+            }
+
+            // 3. 速度兜底 (及堵车判定)
+            if (kmh < 4.5) {
+                val stepsPerMin = if (durationSec > 0L) stepCount / (durationSec / 60.0) else 0.0
+                // 如果速度极低但步数很少，判定为车载堵车
+                if (stepsPerMin < 5.0 && stepCount < 20) return preferredAuto
+                return SLOW
+            }
+
             return when {
-                kmh < 2 -> SLOW
-                kmh < 3 -> RUNNING
-                kmh < 10 -> BICYCLE
-                kmh < 20 -> EBIKE
-                kmh < 40 -> MOTORCYCLE
-                kmh < 100 -> CAR
-                kmh < 300 -> TRAIN
+                kmh < 12.0 -> BICYCLE
+                kmh < 25.0 -> preferredCycling
+                kmh < 120.0 -> preferredAuto
+                kmh < 350.0 -> TRAIN
                 else -> AIRPLANE
             }
         }
 
         fun from(raw: String) = entries.firstOrNull { it.raw == raw } ?: CAR
+
+        // 用于合并逻辑的分类
+        fun getCategory(type: TransportType): Int = when (type) {
+            SLOW, RUNNING -> 1
+            BICYCLE, EBIKE -> 2
+            MOTORCYCLE, BUS, CAR -> 3
+            SUBWAY, TRAIN, AIRPLANE, SHIP -> 4
+        }
     }
 }
 

@@ -202,4 +202,49 @@ class AppConfig {
     var samePlaceMergeBonusThreshold: Double {
         double(forKey: "SAME_PLACE_MERGE_BONUS_THRESHOLD")
     }
+    
+    var physicalMaxSpeedThreshold: Double {
+        let val = double(forKey: "PHYSICAL_MAX_SPEED_THRESHOLD")
+        return val > 0 ? val : 600.0 // Default to user's example 600 m/s (3km/5s)
+    }
+
+    var stationaryDiameterThreshold: Double {
+        double(forKey: "STATIONARY_DIAMETER_THRESHOLD")
+    }
+
+    var stayExitDistanceThreshold: Double {
+        double(forKey: "STAY_EXIT_DISTANCE_THRESHOLD")
+    }
+
+    var stationaryDetectionMaxDiameter: Double {
+        double(forKey: "STATIONARY_DETECTION_MAX_DIAMETER")
+    }
+
+    var stationaryDetectionDurationThreshold: Double {
+        double(forKey: "STATIONARY_DETECTION_DURATION_THRESHOLD")
+    }
+
+    var transportFinalizeMinDistance: Double {
+        double(forKey: "TRANSPORT_FINALIZE_MIN_DISTANCE")
+    }
+
+    var speedThresholdStationary: Double {
+        double(forKey: "SPEED_THRESHOLD_STATIONARY")
+    }
+
+    var transportGapBreakThreshold: Double {
+        double(forKey: "TRANSPORT_GAP_BREAK_THRESHOLD")
+    }
+
+    var driftRatioThreshold: Double {
+        double(forKey: "DRIFT_RATIO_THRESHOLD")
+    }
+
+    var transportDetectionSegmentDuration: Double {
+        double(forKey: "TRANSPORT_DETECTION_SEGMENT_DURATION")
+    }
+
+    var transportTypeChangeDurationThreshold: Double {
+        double(forKey: "TRANSPORT_TYPE_CHANGE_DURATION_THRESHOLD")
+    }
 }

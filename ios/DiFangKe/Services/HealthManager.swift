@@ -15,13 +15,13 @@ class HealthManager: ObservableObject {
     @Published var isMoving = false
     @Published var currentMotionType: MotionType = .stationary
     
-    enum MotionType {
-        case stationary
-        case walking
-        case running
-        case cycling
-        case automotive
-        case unknown
+    enum MotionType: String {
+        case stationary = "stationary"
+        case walking = "walking"
+        case running = "running"
+        case cycling = "cycling"
+        case automotive = "automotive"
+        case unknown = "unknown"
     }
     
     private init() {
@@ -42,6 +42,11 @@ class HealthManager: ObservableObject {
         ]
         
         healthStore.requestAuthorization(toShare: nil, read: typesToRead) { success, error in
+            // Trigger a dummy activity update to prompt for motion permission if not already granted
+            if CMMotionActivityManager.isActivityAvailable() {
+                self.activityManager.queryActivityStarting(from: Date().addingTimeInterval(-60), to: Date(), to: .main) { _, _ in }
+            }
+            
             DispatchQueue.main.async {
                 self.isAuthorized = success
                 completion(success)
@@ -106,7 +111,49 @@ class HealthManager: ObservableObject {
         pedometer.stopUpdates()
     }
     
-    // MARK: - HealthKit (Historical Data for Footprints)
+    // MARK: - Historical Data
+    
+    /// Queries historical motion activities for a given period and returns the most frequent one.
+    func queryMostFrequentActivity(from start: Date, to end: Date) async -> MotionType {
+        guard CMMotionActivityManager.isActivityAvailable() else { return .unknown }
+        
+        return await withCheckedContinuation { continuation in
+            activityManager.queryActivityStarting(from: start, to: end, to: .main) { activities, error in
+                guard let activities = activities, error == nil else {
+                    continuation.resume(returning: .unknown)
+                    return
+                }
+                
+                var counts: [MotionType: TimeInterval] = [:]
+                
+                for i in 0..<activities.count {
+                    let activity = activities[i]
+                    let nextTime = (i + 1 < activities.count) ? activities[i+1].startDate : end
+                    let duration = nextTime.timeIntervalSince(activity.startDate)
+                    
+                    let type: MotionType
+                    if activity.automotive { type = .automotive }
+                    else if activity.cycling { type = .cycling }
+                    else if activity.running { type = .running }
+                    else if activity.walking { type = .walking }
+                    else if activity.stationary { type = .stationary }
+                    else { type = .unknown }
+                    
+                    counts[type, default: 0] += duration
+                }
+                
+                // Exclude unknown and stationary to find the active transport type
+                let activeCounts = counts.filter { $0.key != .unknown && $0.key != .stationary }
+                if let top = activeCounts.max(by: { $0.value < $1.value }) {
+                    continuation.resume(returning: top.key)
+                } else if let topStationary = counts.max(by: { $0.value < $1.value }) {
+                    continuation.resume(returning: topStationary.key)
+                } else {
+                    continuation.resume(returning: .unknown)
+                }
+            }
+        }
+    }
     
     func fetchMetrics(from start: Date, to end: Date) async -> (steps: Int, distance: Double, floors: Int) {
         guard HKHealthStore.isHealthDataAvailable() else { return (0, 0, 0) }

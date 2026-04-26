@@ -575,9 +575,17 @@ class TimelineBuilder {
             if !isOngoing && end.timeIntervalSince(lastProcessedTime) > 0 {
                 addStationaryStay(from: lastProcessedTime, to: end, gapPoints: gapPoints, items: &items, allPlaces: allPlaces, forceAdd: true)
             }
-        } else {
             // No transports: fill the whole gap as a stay
-            addStationaryStay(from: lastProcessedTime, to: end, gapPoints: gapPoints, items: &items, allPlaces: allPlaces, forceAdd: true)
+            // --- 增强修复：如果虽然没识别出交通，但位移跨度很大，不应将其作为 Stay 填补，
+            // 否则会造成前后的足迹被错误合并。此时应合成一段虚线交通。
+            let diameter = calculateMaxDiameter(gapPoints)
+            if diameter > max(AppConfig.shared.transportMinDistanceThreshold, AppConfig.shared.mergeDistanceThreshold) {
+                if let startCoord = gapPoints.first?.coordinate, let endCoord = gapPoints.last?.coordinate {
+                    addSynthesizedTransport(from: start, to: end, l1: startCoord, l2: endCoord, items: &items)
+                }
+            } else {
+                addStationaryStay(from: lastProcessedTime, to: end, gapPoints: gapPoints, items: &items, allPlaces: allPlaces, forceAdd: true)
+            }
         }
     }
 
@@ -848,9 +856,9 @@ class TimelineBuilder {
             let prevP = filteredPoints[i-1]
             let timeGap = p.timestamp.timeIntervalSince(prevP.timestamp)
             
-            // 只要时间点间隔超过 30 分钟，强行打断，进入下一段判断
+            // 只要时间点间隔超过配置的打断门槛，强行打断，进入下一段判断
             // 提高门槛是为了应对后台定位点变稀疏的情况，避免长距离移动被切碎抛弃
-            if timeGap > 30 * 60 {
+            if timeGap > AppConfig.shared.transportGapBreakThreshold {
                 if let transport = finalizeTransport(currentPoints) { transports.append(transport) }
                 currentPoints = [p]; currentSegmentType = nil; continue
             }
@@ -859,12 +867,12 @@ class TimelineBuilder {
             // 如果已经在当前段累积了一定时间，且之前一直处于静止状态，而当前点突然拉开了距离
             if currentPoints.count >= 2 {
                 let segmentDuration = p.timestamp.timeIntervalSince(currentPoints.first!.timestamp)
-                if segmentDuration > 60 { // 进一步降低至 60s
+                if segmentDuration > AppConfig.shared.transportDetectionSegmentDuration {
                     let diameter = calculateMaxDiameter(currentPoints)
                     let distFromStart = p.distance(from: currentPoints.first!)
 
-                    // 允许更紧凑的停留范围（70m）和更短的跳出距离（120m）
-                    if diameter < 70 && distFromStart > 120 {
+                    // 允许更紧凑的停留范围和更短的跳出距离
+                    if diameter < AppConfig.shared.stationaryDiameterThreshold && distFromStart > AppConfig.shared.stayExitDistanceThreshold {
                         if let transport = finalizeTransport(currentPoints) { transports.append(transport) }
                         currentPoints = [prevP, p]; currentSegmentType = nil; continue
                     }
@@ -875,9 +883,9 @@ class TimelineBuilder {
             if currentPoints.count > 8 && i % 5 == 0 {
                 let recentWindow = Array(currentPoints[max(0, currentPoints.count-20)...(currentPoints.count-1)])
                 let windowDuration = p.timestamp.timeIntervalSince(recentWindow.first!.timestamp)
-                if windowDuration > 480 { // 8 分钟内
+                if windowDuration > AppConfig.shared.stationaryDetectionDurationThreshold {
                     let diameter = calculateMaxDiameter(recentWindow + [p])
-                    if diameter < 160 { // 静止半径进一步收紧
+                    if diameter < AppConfig.shared.stationaryDetectionMaxDiameter { // 静止半径进一步收紧
                         if let transport = finalizeTransport(currentPoints) { transports.append(transport) }
                         // 将触发点 p 保留在下一段的起点
                         currentPoints = [p]; currentSegmentType = nil; continue
@@ -896,7 +904,7 @@ class TimelineBuilder {
                     let wd = calculateDistance(window)
                     let wt = window.last!.timestamp.timeIntervalSince(window.first!.timestamp)
                     let wType = TransportType.from(speed: wt > 0 ? wd / wt : 0)
-                    if let segType = currentSegmentType, isSignificantTypeChange(from: segType, to: wType) && wt > 180 {
+                    if let segType = currentSegmentType, isSignificantTypeChange(from: segType, to: wType) && wt > AppConfig.shared.transportTypeChangeDurationThreshold {
                         if let transport = finalizeTransport(currentPoints) { transports.append(transport) }
                         currentPoints = [prevP, p]; currentSegmentType = nil; continue
                     }
@@ -932,12 +940,28 @@ class TimelineBuilder {
     
     private static func finalizeTransport(_ points: [CLLocation]) -> Transport? {
         let distance = calculateDistance(points)
-        if points.count < 3 && distance < 150 { return nil }
+        if points.count < 3 && distance < AppConfig.shared.transportFinalizeMinDistance { return nil }
         guard points.count >= 2 else { return nil }
         
-        let start = points.first!.timestamp
-        let end = points.last!.timestamp
+        let startLoc = points.first!
+        let endLoc = points.last!
+        let start = startLoc.timestamp
+        let end = endLoc.timestamp
         let duration = end.timeIntervalSince(start)
+        
+        // --- 核心增强：路径鲁棒性校验 (Ratio Check) ---
+        let displacement = endLoc.distance(from: startLoc)
+        let ratio = displacement > 0 ? distance / displacement : distance
+        
+        // 如果路径总长度是直线位移的 10 倍以上，且位移本身很小（< 500m），大概率中间有点位发生了剧烈跳变
+        if displacement < 500 && ratio > 10 && distance > 1000 {
+            // 这种情况下，极有可能是 GPS 尖峰。
+            // 我们尝试使用鲁棒距离（即只计算那些没有发生剧烈跳变的段落，或者直接改用位移作为估算）
+            // 这里我们选择直接放弃这段极其可疑的交通，或者后续通过更精细的逻辑处理。
+            // 暂时策略：如果漂移太严重，判定为无效交通（可能是原地停留时的巨大跳变）
+            return nil
+        }
+
         let averageSpeed = duration > 0 ? distance / duration : 0
         let kmh = averageSpeed * 3.6
         
@@ -948,14 +972,14 @@ class TimelineBuilder {
         if duration < 60 && kmh < 3 { return nil } // 保持原有的极短距离高速过滤
         
         let maxDiameter = calculateMaxDiameter(points)
-        // 增加对“室内漂移”的过滤：如果最大跨度极小且路径绕圈特别严重（比值 > 3），判定为原地漂移
-        if maxDiameter < AppConfig.shared.transportMinDistanceThreshold && distance > maxDiameter * 3.0 { return nil }
+        // 增加对“室内漂移”的过滤：如果最大跨度极小且路径绕圈特别严重（比值 > 阈值），判定为原地漂移
+        if maxDiameter < AppConfig.shared.transportMinDistanceThreshold && distance > maxDiameter * AppConfig.shared.driftRatioThreshold { return nil }
         
         // 如果虽然时间超过几分钟，但位移还是极小（小于 15 米），大概率是 GPS 抖动
         if distance < 15 { return nil }
         
         // 移除原有的 0.4 km/h 强制门槛，以便捕捉极慢的动作
-        if kmh < 0.2 { return nil } // 调低至 0.2 km/h，几乎只要在走动就能捕捉到
+        if averageSpeed < (AppConfig.shared.speedThresholdStationary / 3.6) { return nil } // 只要在走动就能捕捉到
         
         return Transport(
             startTime: start,
@@ -1130,8 +1154,8 @@ class TimelineBuilder {
         
         // 1. 检查直径（判定大跨度位移）
         let diameter = calculateMaxDiameter(points.map { $0.coordinate })
-        // 增加容忍度：50-100m 的直径对于室内漂移非常常见，提升至 150m 以避免错误切分足迹
-        if diameter > max(AppConfig.shared.transportMinDistanceThreshold, 150.0) { return true }
+        // 只要中间轨迹的直径超过了交通识别的最低门槛，就认为有显著位移
+        if diameter > AppConfig.shared.transportMinDistanceThreshold { return true }
         
         // 2. 检查是否有任何点位脱离了两者的核心停留区
         let loc1 = CLLocation(latitude: f1.latitude, longitude: f1.longitude)
@@ -1140,7 +1164,7 @@ class TimelineBuilder {
         for p in points {
             let d1 = p.distance(from: loc1)
             let d2 = p.distance(from: loc2)
-            // 如果点位距离两个足迹中心都超过了停留判定阈值（通常 50-100m），说明中间有外出动作
+            // 如果点位距离两个足迹中心都超过了停留判定阈值，说明中间有外出动作
             if d1 > AppConfig.shared.stayDistanceThreshold && d2 > AppConfig.shared.stayDistanceThreshold {
                 return true
             }
@@ -1182,6 +1206,55 @@ struct CodableCoordinate: Codable {
 class PersistentTimelineBuilder {
     @MainActor
     private static var syncingDates: Set<Date> = []
+    
+    /// 分析历史数据，判断用户更习惯哪种车载/轨道方式（汽车、公交、摩托车、轨交）
+    /// 排除目标日期，防止因用户正在修改当前数据而导致判定结果在“临界点”反复跳变
+    private static func getPreferredAutomotiveType(in context: ModelContext, excluding date: Date) -> TransportType {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+        
+        var descriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate { 
+                $0.statusRaw != "ignored" && ($0.startTime < startOfDay || $0.startTime >= endOfDay)
+            },
+            sortBy: [SortDescriptor(\.startTime, order: .reverse)]
+        )
+        descriptor.fetchLimit = 150 
+        
+        let recent = (try? context.fetch(descriptor)) ?? []
+        
+        var counts: [TransportType: Int] = [.car: 0, .bus: 0, .motorcycle: 0, .subway: 0]
+        for record in recent {
+            let typeString = record.manualTypeRaw ?? record.typeRaw
+            if let type = TransportType(rawValue: typeString), counts.keys.contains(type) {
+                counts[type, default: 0] += 1
+            }
+        }
+        
+        return counts.max(by: { $0.value < $1.value })?.key ?? .car
+    }
+    
+    /// 分析历史数据，判断用户更习惯自行车还是电动车
+    private static func getPreferredCyclingType(in context: ModelContext, excluding date: Date) -> TransportType {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+        
+        var descriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate { 
+                $0.statusRaw != "ignored" && ($0.startTime < startOfDay || $0.startTime >= endOfDay)
+            },
+            sortBy: [SortDescriptor(\.startTime, order: .reverse)]
+        )
+        descriptor.fetchLimit = 150
+        
+        let recent = (try? context.fetch(descriptor)) ?? []
+        let bikeCount = recent.filter { $0.typeRaw == TransportType.bicycle.rawValue || $0.manualTypeRaw == TransportType.bicycle.rawValue }.count
+        let ebikeCount = recent.filter { $0.typeRaw == TransportType.ebike.rawValue || $0.manualTypeRaw == TransportType.ebike.rawValue }.count
+        
+        return bikeCount >= ebikeCount ? .bicycle : .ebike
+    }
 
     @MainActor
     static func syncDay(date: Date, in context: ModelContext) async {
@@ -1193,88 +1266,85 @@ class PersistentTimelineBuilder {
         syncingDates.insert(startOfDay)
         defer { syncingDates.remove(startOfDay) }
         
+        let preferredAuto = getPreferredAutomotiveType(in: context, excluding: date)
+        let preferredCycling = getPreferredCyclingType(in: context, excluding: date)
+        
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
         let isToday = calendar.isDateInToday(date)
         
-        // 0. 核心修复：删除之前生成的“填充型”临时足迹，以便重新计算锚点并加载新点位
-        let oldFillsDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.locationHash == "stationary_fill"
-        })
-        if let oldFills = try? context.fetch(oldFillsDesc) {
-            for fill in oldFills {
-                fill.statusValue = "ignored"
-                fill.locationHash = "stationary_fill_invalid"
-            }
-            try? context.save()
-        }
-        
-        // 1. 获取当天的最后一条真实记录作为起始锚点 (排除已删除的填充项)
+        // 1. 获取当天所有的真实记录并排序（包括自动填充的记录，以防止无限循环）
         let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.locationHash != "stationary_fill"
-        }, sortBy: [SortDescriptor(\.endTime, order: .reverse)])
-        let lastFp = (try? context.fetch(fpDesc))?.first
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let allFps = (try? context.fetch(fpDesc)) ?? []
         
         let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay
-        }, sortBy: [SortDescriptor(\.endTime, order: .reverse)])
-        let lastTp = (try? context.fetch(tpDesc))?.first
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let allTps = (try? context.fetch(tpDesc)) ?? []
         
-        var lastEndTime = startOfDay
-        if let lf = lastFp, let lt = lastTp {
-            lastEndTime = max(lf.endTime, lt.endTime)
-        } else if let lf = lastFp {
-            lastEndTime = lf.endTime
-        } else if let lt = lastTp {
-            lastEndTime = lt.endTime
-        }
+        // 合并并排序所有记录的时间区间
+        struct TimeRange { let start: Date; let end: Date }
+        var sortedRanges: [TimeRange] = []
+        for fp in allFps { sortedRanges.append(TimeRange(start: fp.startTime, end: fp.endTime)) }
+        for tp in allTps { sortedRanges.append(TimeRange(start: tp.startTime, end: tp.endTime)) }
+        sortedRanges.sort { $0.start < $1.start }
         
         // 2. 加载锚点之后的原始点位
         let allRawPoints = await Task.detached {
             RawLocationStore.shared.loadAllDevicesLocations(for: date)
         }.value
         
-        // 核心防护：如果没有原始轨迹点且不是今天，不要自动生成任何内容（防止产生虚假交通）
-        if allRawPoints.isEmpty && !isToday {
-            return
-        }
+        // 3. 核心改进：寻找未覆盖的缺口并填补，而不仅仅是追加
+        var gaps: [TimeRange] = []
+        var currentTime = startOfDay
+        let now = Date()
+        let upperLimit = isToday ? now : endOfDay
         
-        // 核心防护：如果当前设备正在记录一个停留，暂时不要将其自动生成为正式足迹，
-        // 除非停留已经结束（离开了）。这样可以避免“正在记录”卡片与列表足迹重复显示。
+        // 如果是今天，获取正在进行的停留开始时间，避免将其作为正式记录生成
         let ongoingStart = isToday ? LocationManager.shared.potentialStopStartLocation?.timestamp : nil
         
-        let newPoints = allRawPoints.filter { point in
-            // 跳过已处理的时间
-            if point.timestamp <= lastEndTime.addingTimeInterval(AppConfig.shared.duplicatePointBuffer) { return false }
-            
-            // 如果有点位属于“正在进行的停留”，暂时排除，让其留在实时状态中
-            if let os = ongoingStart, point.timestamp >= os { return false }
-            
-            return true
-        }.sorted(by: { $0.timestamp < $1.timestamp })
-        
-        // 3. 执行增量处理逻辑（仅追加）
-        if !newPoints.isEmpty {
-            await processPoints(points: newPoints, date: date, context: context)
-            try? context.save() // 阶段一存盘：新识别的点位立刻可见
+        for range in sortedRanges {
+            // 如果缺口大于门槛时间（例如 5 分钟），则视为需要填补的缺口
+            if range.start > currentTime.addingTimeInterval(AppConfig.shared.gapFillingThreshold) {
+                gaps.append(TimeRange(start: currentTime, end: range.start))
+            }
+            currentTime = max(currentTime, range.end)
         }
         
-        // 4. 合并可能因分片产生的小碎块 (从配置读取阈值)
-        await mergeConsecutiveFootprints(for: date, in: context, allRawPoints: allRawPoints, threshold: AppConfig.shared.mergeDistanceThreshold)
-        try? context.save() // 阶段二存盘：合并后的结果
+        // 补齐末尾缺口
+        if currentTime < upperLimit.addingTimeInterval(-AppConfig.shared.gapFillingThreshold) {
+            gaps.append(TimeRange(start: currentTime, end: upperLimit))
+        }
         
-        // --- Added for Transport Merging and Gap Bridging ---
-        await mergeConsecutiveTransports(for: date, in: context)
-        await fillGapsBetweenItems(for: date, in: context, allRawPoints: allRawPoints)
+        // 4. 对每个缺口进行处理
+        for gap in gaps {
+            if Task.isCancelled { break }
+            
+            // 过滤该缺口内的点位
+            let gapPoints = allRawPoints.filter { point in
+                if point.timestamp < gap.start || point.timestamp > gap.end { return false }
+                // 核心防护：如果点位处于实时进行的停留时间之后，先跳过，让其留在实时状态中
+                if let os = ongoingStart, point.timestamp >= os { return false }
+                return true
+            }
+            
+            if gapPoints.count >= 2 {
+                await processPoints(points: gapPoints.sorted(by: { $0.timestamp < $1.timestamp }), date: date, context: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
+            }
+        }
+        
+        try? context.save()
+        
+        // 5. 后置清理：合并可能因分片产生的小碎块，补齐微小缝隙
+        await mergeConsecutiveFootprints(for: date, in: context, allRawPoints: allRawPoints, threshold: AppConfig.shared.mergeDistanceThreshold)
+        await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
+        await fillGapsBetweenItems(for: date, in: context, allRawPoints: allRawPoints, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
         await snapTransportsToFootprints(for: date, in: context)
         try? context.save()
         // ----------------------------------------------------
         
-        // 5. 缝隙嗅探器：处理长时间不动的情况（如全天在家）
-        let hasAnyPoints = !allRawPoints.isEmpty
-        if hasAnyPoints || isToday {
-            await fillGapAfterLastItem(for: date, lastEndTime: lastEndTime, in: context)
-        }
-        try? context.save() // 阶段三存盘：填补的空白
+        try? context.save()
         
         startControlledAddressResolution(in: context)
     }
@@ -1326,7 +1396,7 @@ class PersistentTimelineBuilder {
     }
 
     @MainActor
-    private static func mergeConsecutiveTransports(for date: Date, in context: ModelContext) async {
+    private static func mergeConsecutiveTransports(for date: Date, in context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
@@ -1354,13 +1424,46 @@ class PersistentTimelineBuilder {
             })
             let hasFpBetween = ((try? context.fetch(fpDesc))?.count ?? 0) > 0
             
+            // --- 核心修复：基于“分类兼容性”的智能合并 ---
+            // 不再死板地要求 typeRaw 完全一致，而是看它们是否属于同一个大类
+            func getCategory(_ type: TransportType) -> Int {
+                switch type {
+                case .slow, .running: return 1 // 步行/跑步类
+                case .bicycle, .ebike: return 2 // 骑行类
+                case .motorcycle, .bus, .car: return 3 // 车载类
+                case .subway, .train, .airplane, .ship: return 4 // 长途/轨道类
+                }
+            }
+            
+            let currentType = TransportType(rawValue: current.typeRaw) ?? .slow
+            let nextType = TransportType(rawValue: next.typeRaw) ?? .slow
+            
+            // --- 铁律保护：如果其中任一段是手动设置的，且两段类型不同，严禁自动合并 ---
+            if (current.manualTypeRaw != nil || next.manualTypeRaw != nil) && current.typeRaw != next.typeRaw {
+                i += 1
+                continue
+            }
+            
+            let isCompatible = getCategory(currentType) == getCategory(nextType)
+            
             // If they are less than 15 minutes apart and no footprint in between, merge them!
-            if gap >= -60 && gap <= 900 && !hasFpBetween {
+            if gap >= -60 && gap <= 900 && !hasFpBetween && isCompatible {
                 current.endTime = max(current.endTime, next.endTime)
                 current.distance += next.distance
                 let duration = current.endTime.timeIntervalSince(current.startTime)
                 current.averageSpeed = duration > 0 ? current.distance / duration : 0
-                current.typeRaw = TransportType.from(speed: current.averageSpeed).rawValue
+                // --- 异步获取合并段的健康和传感器数据 ---
+                let mergedMetrics = await HealthManager.shared.fetchMetrics(from: current.startTime, to: current.endTime)
+                let mergedMotionType = await HealthManager.shared.queryMostFrequentActivity(from: current.startTime, to: current.endTime)
+                
+                // 核心修复：如果其中一段有手动设置的类型，合并后优先继承手动类型，防止被自动识别覆盖
+                if current.manualTypeRaw == nil && next.manualTypeRaw != nil {
+                    current.manualTypeRaw = next.manualTypeRaw
+                    current.typeRaw = next.typeRaw
+                } else if current.manualTypeRaw == nil {
+                    // 只有在两段都没有手动干预的情况下，才重新自动识别
+                    current.typeRaw = TransportType.from(speed: current.averageSpeed, motionType: mergedMotionType, stepCount: mergedMetrics.steps, duration: current.endTime.timeIntervalSince(current.startTime), preferredAutomotive: preferredAuto, preferredCycling: preferredCycling).rawValue
+                }
                 
                 if let decodedCurrent = try? JSONDecoder().decode([CodableCoordinate].self, from: current.pointsData),
                    let decodedNext = try? JSONDecoder().decode([CodableCoordinate].self, from: next.pointsData) {
@@ -1377,9 +1480,11 @@ class PersistentTimelineBuilder {
                 }
                 
                 next.statusRaw = "ignored"
-                try? context.save()
+                // 移除此处 save，统一在 syncDay 末尾 save，大幅减少 UI 抖动
+                // try? context.save()
                 
-                await mergeConsecutiveTransports(for: date, in: context)
+                // 递归调用时必须透传偏好参数，否则会使用默认值导致类型“乱掉”
+                await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
                 return
             }
             i += 1
@@ -1387,7 +1492,7 @@ class PersistentTimelineBuilder {
     }
 
     @MainActor
-    private static func fillGapsBetweenItems(for date: Date, in context: ModelContext, allRawPoints: [CLLocation] = []) async {
+    private static func fillGapsBetweenItems(for date: Date, in context: ModelContext, allRawPoints: [CLLocation] = [], preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
@@ -1449,16 +1554,22 @@ class PersistentTimelineBuilder {
                     let currentLocName = getSimplifiedLocationName(for: currentFp, allPlaces: allPlaces)
                     let nextLocName = getSimplifiedLocationName(for: nextFp, allPlaces: allPlaces)
                     
+                    // --- 异步获取健康和传感器数据 ---
+                    let metrics = await HealthManager.shared.fetchMetrics(from: gapStart, to: gapEnd)
+                    let motionType = await HealthManager.shared.queryMostFrequentActivity(from: gapStart, to: gapEnd)
+                    let determinedType = TransportType.from(speed: speed, motionType: motionType, stepCount: metrics.steps, duration: duration, preferredAutomotive: preferredAuto, preferredCycling: preferredCycling)
+                    
                     let tp = TransportRecord(
                         day: startOfDay,
                         startTime: gapStart,
                         endTime: gapEnd,
                         startLocation: currentLocName,
                         endLocation: nextLocName,
-                        typeRaw: TransportType.from(speed: speed).rawValue,
+                        typeRaw: determinedType.rawValue,
                         distance: pathDist,
                         averageSpeed: speed,
-                        pointsData: ptsData
+                        pointsData: ptsData,
+                        stepCount: metrics.steps
                     )
                     context.insert(tp)
                 }
@@ -1599,9 +1710,9 @@ class PersistentTimelineBuilder {
                     continue
                 }
                 
-                // 如果两个都有照片且地点稍有不同，建议保留独立性，除非距离极近（<50m）
+                // 如果两个都有照片且地点稍有不同，建议保留独立性，除非距离极近
                 let bothHavePhotos = !current.photoAssetIDs.isEmpty && !next.photoAssetIDs.isEmpty
-                if bothHavePhotos && dist > 50 {
+                if bothHavePhotos && dist > AppConfig.shared.stayDistanceThreshold {
                     i += 1
                     continue
                 }
@@ -1657,7 +1768,7 @@ class PersistentTimelineBuilder {
     }
     
     @MainActor
-    private static func processPoints(points: [CLLocation], date: Date, context: ModelContext) async {
+    private static func processPoints(points: [CLLocation], date: Date, context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle) async {
         guard points.count >= 2 else { return }
         
         let startOfDay = Calendar.current.startOfDay(for: date)
@@ -1800,21 +1911,23 @@ class PersistentTimelineBuilder {
                     
                     let augmentedPtsData = (try? JSONEncoder().encode(augmentedPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) })) ?? ptsData
 
+                    // --- 异步获取健康和传感器数据 ---
+                    let metrics = await HealthManager.shared.fetchMetrics(from: tStart, to: tEnd)
+                    let motionType = await HealthManager.shared.queryMostFrequentActivity(from: tStart, to: tEnd)
+                    let determinedType = TransportType.from(speed: avgSpeed, motionType: motionType, stepCount: metrics.steps, duration: tEnd.timeIntervalSince(tStart), preferredAutomotive: preferredAuto, preferredCycling: preferredCycling)
+                    
                     let tp = TransportRecord(
                         day: startOfDay,
                         startTime: tStart,
                         endTime: tEnd,
                         startLocation: startName,
                         endLocation: endName,
-                        typeRaw: TransportType.from(speed: avgSpeed).rawValue,
+                        typeRaw: determinedType.rawValue,
                         distance: pathDist,
                         averageSpeed: avgSpeed,
-                        pointsData: augmentedPtsData
+                        pointsData: augmentedPtsData,
+                        stepCount: metrics.steps
                     )
-                    
-                    // --- 异步获取健康数据 (仅步数对交通段有辅助意义) ---
-                    let metrics = await HealthManager.shared.fetchMetrics(from: tStart, to: tEnd)
-                    tp.stepCount = metrics.steps
                     
                     context.insert(tp)
                 }

@@ -127,7 +127,7 @@ struct TimelinePageView: View {
                 autoFocus: autoFocusOnOpen,
                 onDismiss: { didChange in
                     autoFocusOnOpen = false
-                    refreshTimeline(force: didChange)
+                    refreshTimeline(force: false)
                     if didChange && isAiAssistantEnabled {
                         Task {
                             await refreshAiSummary(force: true)
@@ -146,16 +146,17 @@ struct TimelinePageView: View {
         }
         .sheet(item: $selectedTransport) { transport in
             TransportModalView(transport: transport) { newType in
-                if let index = timelineItems.firstIndex(where: { 
-                    if case .transport(let t) = $0, t.id == transport.id { return true }
-                    return false
-                }) {
-                    if case .transport(let t) = timelineItems[index] {
-                        let updated = t.updatingType(newType)
-                        timelineItems[index] = .transport(updated)
-                    }
+                // --- 核心修复：直接将修改持久化到数据库，而不是仅修改内存 ---
+                let targetId = transport.id
+                let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == targetId })
+                if let records = try? modelContext.fetch(descriptor), let record = records.first {
+                    record.manualTypeRaw = newType.rawValue
+                    record.typeRaw = newType.rawValue
+                    try? modelContext.save()
                 }
-                refreshTimeline(force: true)
+                
+                // 仅刷新 UI 展示，严禁 force: true 触发算法重整全天
+                refreshTimeline(force: false)
             } onLocationUpdate: {
                 refreshTimeline(force: true)
             }
@@ -379,10 +380,14 @@ struct TimelinePageView: View {
         
         if Task.isCancelled { return }
         
-        // 执行彻底的持久化时间线同步算法
-        // 增量同步逻辑：只有在【主页】模式且有点位/是今天，或者明确【强制刷新】时，才触发 syncDay
-        // 历史视图（isFromHistory == true）点开时应直接读库，不应自动触发重新计算，除非用户手动下拉刷新
-        let shouldSync = force || (!isFromHistory && (hasRawData || isToday))
+        // 增量同步逻辑调整：
+        // 1. 如果是【强制刷新】（如下拉刷新或重置），必然同步
+        // 2. 如果是【今天】，因为数据在实时增加，需要自动同步以显示最新足迹
+        // 3. 如果是【过去某天】且数据库【完全没有记录】但有原始轨迹，说明是首次访问该日期，自动同步一次
+        // 4. 其他情况（已有记录的历史日期）严禁自动同步，必须由用户手动下拉刷新触发，以保护人工修改结果
+        let isDayEmpty = !hasExistingFootprints
+        let shouldSync = force || isToday || (isDayEmpty && hasRawData && !isFromHistory)
+        
         if shouldSync {
             await PersistentTimelineBuilder.syncDay(date: targetDate, in: modelContext)
         }
