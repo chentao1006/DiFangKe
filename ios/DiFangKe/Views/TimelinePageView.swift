@@ -639,8 +639,8 @@ struct TimelinePageView: View {
                 _ = await (syncTask, siftTask)
             }
             
-            // 3. 异步刷新并强制重新同步当前页面的时间轴记录（本地操作，较快）
-            await refreshTimelineAsync(force: true)
+            // 3. 异步刷新，仅从数据库获取最新记录，绝对不触发重新同步构建
+            await refreshTimelineAsync(force: false)
             
             // 4. 手动触发 AI 摘要强制重新生成（仅针对过去日期，今日不重复生成）
             if isAiAssistantEnabled && !isToday {

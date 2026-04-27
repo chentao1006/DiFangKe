@@ -931,21 +931,27 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // This is called on triggers: position change, app start, hourly
         // Since TimelineBuilder works on the footprints in DB, we mainly need to ensure 
         // the footprints are consolidated and analyzed.
+        /*
         let container = modelContext?.container
         guard let container = container else { return }
         let context = ModelContext(container)
-        await self.consolidateFootprints(in: context)
+        */
+        // 用户强烈要求：下拉刷新和常规追踪不要再去动时间线（不要执行合并）。合并改到重置的最后统一执行。
+        // await self.consolidateFootprints(in: context)
     }
     
     private func siftYesterday() {
+        /*
         let container = modelContext?.container
         Task.detached(priority: .background) { [weak self] in
             guard let self = self, let container = container else { return }
             let context = ModelContext(container)
             // Sifting yesterday involves ensuring the last segment is closed
             // Consolidate handles recent 7 days, so it will cover yesterday.
-            await self.consolidateFootprints(in: context)
+            // 用户要求：不要在此处合并
+            // await self.consolidateFootprints(in: context)
         }
+        */
     }
     
     private func updateAuthStatus() {
@@ -1095,17 +1101,27 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 合并数据库中已有的碎片足迹（必须在主线程执行）
     /// 第一步：删除时长 < 5分钟的噪点记录
     /// 第二步：合并间隔 < 30分钟 且 距离 < 200m 的相邻记录
-    public func consolidateFootprints(in context: ModelContext) async {
+    public func consolidateFootprints(in context: ModelContext, targetDate: Date? = nil) async {
         let mergeTime: TimeInterval = AppConfig.shared.liveStayMergeTimeThreshold
         let mergeDist: CLLocationDistance = AppConfig.shared.liveStayMergeDistanceThreshold
         let minKeepDuration: TimeInterval = AppConfig.shared.liveStayMinDurationThreshold
 
-        // 为了性能，自动维护只针对最近 7 天的数据，避免每次全量扫库导致卡顿
-        let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? .distantPast
-        let descriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate { $0.statusValue != "ignored" && $0.startTime > sevenDaysAgo },
-            sortBy: [SortDescriptor(\.startTime, order: .forward)]
-        )
+        let descriptor: FetchDescriptor<Footprint>
+        if let target = targetDate {
+            let startOfDay = Calendar.current.startOfDay(for: target)
+            let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
+            descriptor = FetchDescriptor<Footprint>(
+                predicate: #Predicate { $0.statusValue != "ignored" && $0.startTime >= startOfDay && $0.startTime < endOfDay },
+                sortBy: [SortDescriptor(\.startTime, order: .forward)]
+            )
+        } else {
+            // 为了性能，自动维护只针对最近 7 天的数据，避免每次全量扫库导致卡顿
+            let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? .distantPast
+            descriptor = FetchDescriptor<Footprint>(
+                predicate: #Predicate { $0.statusValue != "ignored" && $0.startTime > sevenDaysAgo },
+                sortBy: [SortDescriptor(\.startTime, order: .forward)]
+            )
+        }
         guard let all = try? context.fetch(descriptor) else { return }
 
         // ── 第一步：清理噪点（时长 < 5分钟 或 完全重复的记录）──
@@ -2439,7 +2455,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             let now = Date()
             let isToday = Calendar.current.isDateInToday(date)
-            let dayLimit = isToday ? now : min(endOfDay, now)
+            let lastDataTime = rawPoints.last?.timestamp
+            let dayLimit: Date
+            if isToday {
+                dayLimit = now
+            } else {
+                // 对于历史日期，止于最后一条数据的时间点，不再强行补齐到翌日0点
+                dayLimit = lastDataTime.map { min(endOfDay, $0) } ?? currentTime
+            }
             
             // 严格遵循“离场结算制”：如果是今天且是最后一段间隙（直至当前时间），不要持久化生成足迹，由 UI 状态卡片负责呈现。
             if !isToday && dayLimit > currentTime.addingTimeInterval(120) {

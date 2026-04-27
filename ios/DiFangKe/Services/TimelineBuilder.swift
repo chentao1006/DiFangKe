@@ -207,7 +207,22 @@ class TimelineBuilder {
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
         let now = Date()
-        let dayLimit = min(endOfDay, now)
+        
+        // Calculate the actual end of available data for this day
+        let lastRawTimestamp = allRawPoints.last?.timestamp
+        let lastFootprintEndTime = footprints.map { $0.endTime }.max()
+        let lastOverrideEndTime = overrides.map { $0.endTime }.max()
+        let latestDataTime = [lastRawTimestamp, lastFootprintEndTime, lastOverrideEndTime]
+            .compactMap { $0 }
+            .max()
+        
+        let dayLimit: Date
+        if calendar.isDateInToday(date) {
+            dayLimit = min(endOfDay, now)
+        } else {
+            // For historical days, if there's data, stop at the last point; otherwise don't fill at all.
+            dayLimit = latestDataTime.map { min(endOfDay, $0) } ?? startOfDay
+        }
         
         let sortedFootprints = footprints
             .sorted { $0.startTime < $1.startTime }
@@ -1299,7 +1314,18 @@ class PersistentTimelineBuilder {
         var gaps: [TimeRange] = []
         var currentTime = startOfDay
         let now = Date()
-        let upperLimit = isToday ? now : endOfDay
+        
+        let lastRawTimestamp = allRawPoints.last?.timestamp
+        let lastRangeEnd = sortedRanges.last?.end
+        let latestDataTime = [lastRawTimestamp, lastRangeEnd].compactMap { $0 }.max()
+        
+        let upperLimit: Date
+        if isToday {
+            upperLimit = now
+        } else {
+            // 对于历史日期，如果没有数据，则不应有任何填充；如果有数据，则止于最后一条数据的时间点
+            upperLimit = latestDataTime.map { min(endOfDay, $0) } ?? currentTime
+        }
         
         // 如果是今天，获取正在进行的停留开始时间，避免将其作为正式记录生成
         let ongoingStart = isToday ? LocationManager.shared.potentialStopStartLocation?.timestamp : nil
@@ -1345,6 +1371,9 @@ class PersistentTimelineBuilder {
         // ----------------------------------------------------
         
         try? context.save()
+        
+        // 按用户要求：在此处（重置最后）调用合并逻辑
+        await LocationManager.shared.consolidateFootprints(in: context, targetDate: date)
         
         startControlledAddressResolution(in: context)
     }
