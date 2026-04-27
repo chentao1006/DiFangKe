@@ -201,7 +201,7 @@ class TimelineBuilder {
     @MainActor static var timelineCache: [Date: [TimelineItem]] = [:]
     
     static func buildTimeline(for date: Date, footprints: [FootprintLite], allRawPoints: [CLLocation], allPlaces: [PlaceLite] = [], overrides: [OverrideLite] = []) -> [TimelineItem] {
-        let isRawDataAvailable = !allRawPoints.isEmpty
+        let isRawDataAvailable = allRawPoints.contains { $0.horizontalAccuracy > 0 && $0.horizontalAccuracy < AppConfig.shared.habitAnalysisAccuracyThreshold }
         var items: [TimelineItem] = []
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -593,9 +593,11 @@ class TimelineBuilder {
             // No transports: fill the whole gap as a stay
             // --- 增强修复：如果虽然没识别出交通，但位移跨度很大，不应将其作为 Stay 填补，
             // 否则会造成前后的足迹被错误合并。此时应合成一段虚线交通。
-            let diameter = calculateMaxDiameter(gapPoints)
+            // 使用精度过滤后的点计算直径，防止 GPS 噪点干扰
+            let filteredGapPoints = gapPoints.filter { $0.horizontalAccuracy > 0 && $0.horizontalAccuracy < AppConfig.shared.habitAnalysisAccuracyThreshold }
+            let diameter = calculateMaxDiameter(filteredGapPoints)
             if diameter > max(AppConfig.shared.transportMinDistanceThreshold, AppConfig.shared.mergeDistanceThreshold) {
-                if let startCoord = gapPoints.first?.coordinate, let endCoord = gapPoints.last?.coordinate {
+                if let startCoord = filteredGapPoints.first?.coordinate, let endCoord = filteredGapPoints.last?.coordinate {
                     addSynthesizedTransport(from: start, to: end, l1: startCoord, l2: endCoord, items: &items)
                 }
             } else {
@@ -1324,7 +1326,8 @@ class PersistentTimelineBuilder {
             upperLimit = now
         } else {
             // 对于历史日期，如果没有数据，则不应有任何填充；如果有数据，则止于最后一条数据的时间点
-            upperLimit = latestDataTime.map { min(endOfDay, $0) } ?? currentTime
+            guard let latest = latestDataTime else { return } // 核心防护：历史日期若完全无点，直接结束同步
+            upperLimit = min(endOfDay, latest)
         }
         
         // 如果是今天，获取正在进行的停留开始时间，避免将其作为正式记录生成
@@ -1352,6 +1355,8 @@ class PersistentTimelineBuilder {
                 if point.timestamp < gap.start || point.timestamp > gap.end { return false }
                 // 核心防护：如果点位处于实时进行的停留时间之后，先跳过，让其留在实时状态中
                 if let os = ongoingStart, point.timestamp >= os { return false }
+                // 核心修复：过滤精度极差或无效的点，防止 GPS 漂移产生虚假交通
+                if point.horizontalAccuracy <= 0 || point.horizontalAccuracy > AppConfig.shared.habitAnalysisAccuracyThreshold { return false }
                 return true
             }
             
@@ -1577,7 +1582,8 @@ class PersistentTimelineBuilder {
 
 
                 // 使用配置中的阈值
-                if !hasTransport && pathDist > AppConfig.shared.transportMinDistanceThreshold {
+                // 使用配置中的阈值。核心修复：桥接缝隙必须有原始轨迹点支撑，严禁在无点情况下凭空合成交通
+                if !hasTransport && !gapPoints.isEmpty && pathDist > AppConfig.shared.transportMinDistanceThreshold {
                     let ptsData = (try? JSONEncoder().encode(pts)) ?? Data()
                     let speed = pathDist / duration
                     let currentLocName = getSimplifiedLocationName(for: currentFp, allPlaces: allPlaces)

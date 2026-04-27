@@ -399,8 +399,27 @@ struct TimelinePageView: View {
         
         let result = await Task.detached(priority: .userInitiated) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
+            var totalMileage = LocationManager.calculatePathDistance(rawPoints)
+            
+            // 核心改进：如果没有原始轨迹点（如仅导入了照片），则尝试通过所有足迹点（包含照片生成的足迹）计算直线距离之和
+            if totalMileage < 50 && items.count >= 2 {
+                var estimatedDist: Double = 0
+                let sortedItems = items.sorted { $0.startTime < $1.startTime }
+                let fpCoords = sortedItems.compactMap { item -> CLLocation? in
+                    if case .footprint(let fp) = item {
+                        return CLLocation(latitude: fp.latitude, longitude: fp.longitude)
+                    }
+                    return nil
+                }
+                if fpCoords.count >= 2 {
+                    for i in 0..<fpCoords.count - 1 {
+                        estimatedDist += fpCoords[i].distance(from: fpCoords[i+1])
+                    }
+                    totalMileage = estimatedDist
+                }
+            }
+            
             let rawCoords = rawPoints.map { $0.coordinate }
-            let totalMileage = LocationManager.calculatePathDistance(rawPoints)
             let simplified = LocationManager.simplifyCoordinates(rawCoords, tolerance: 0.00005)
             return (simplified, rawPoints.count, totalMileage)
         }.value

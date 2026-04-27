@@ -269,7 +269,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // 获取指定日期的里程
     fun getMileage(date: Date): Flow<Double> {
-        return flow {
+        val start = zeroTime(date)
+        val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
+        
+        val rawMileageFlow = flow {
             val store = RawLocationStore.getInstance(getApplication())
             emit(withContext(Dispatchers.IO) { store.calculateTotalDistance(date) })
             
@@ -278,6 +281,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 trackingState.collect {
                     emit(withContext(Dispatchers.IO) { store.calculateTotalDistance(date) })
                 }
+            }
+        }
+
+        return combine(rawMileageFlow, db.footprintDao().observeBetween(start, end)) { rawMileage, footprints ->
+            // 如果轨迹点记录的里程非常小（如 < 50米）且存在多个足迹（可能是照片导入的），则通过足迹点估算里程
+            if (rawMileage < 50.0 && footprints.size >= 2) {
+                var estimatedDist = 0.0
+                val sortedFps = footprints.sortedBy { it.startTime }
+                val results = FloatArray(1)
+                for (i in 0 until sortedFps.size - 1) {
+                    android.location.Location.distanceBetween(
+                        sortedFps[i].latitude, sortedFps[i].longitude,
+                        sortedFps[i+1].latitude, sortedFps[i+1].longitude,
+                        results
+                    )
+                    estimatedDist += results[0]
+                }
+                estimatedDist
+            } else {
+                rawMileage
             }
         }
     }
