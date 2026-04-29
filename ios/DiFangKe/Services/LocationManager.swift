@@ -1,3 +1,4 @@
+import WidgetKit
 import Foundation
 import CoreLocation
 import SwiftData
@@ -36,7 +37,11 @@ final class RawLocationStore {
     }
     
     private var documentsDirectory: URL {
-        fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        if !AppConfig.shared.appGroupID.isEmpty,
+           let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppConfig.shared.appGroupID) {
+            return containerURL
+        }
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
     
     private var baseDirectory: URL {
@@ -617,6 +622,7 @@ final class FootprintProcessor {
     }
 }
 
+#if !WIDGET_EXTENSION
 // MARK: - LocationManager
 @MainActor
 @Observable
@@ -1447,6 +1453,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         // 1. 永久保存原始点（RawLocationStore 内部已实现异步队列写入，不会阻塞主线程）
         RawLocationStore.shared.saveLocation(location)
+        // 同步最后位置给小组件
+        if let sharedDefaults = UserDefaults(suiteName: AppConfig.shared.appGroupID) {
+            sharedDefaults.set(location.coordinate.latitude, forKey: "lastLat")
+            sharedDefaults.set(location.coordinate.longitude, forKey: "lastLon")
+            sharedDefaults.set(Date().timeIntervalSince1970, forKey: "lastLocationTime")
+        }
         
         // 2. 更新内存数据并处理足迹分析
         self.updateTodayTotalPoints()
@@ -3079,3 +3091,5 @@ extension TimeInterval {
         }
     }
 }
+
+#endif

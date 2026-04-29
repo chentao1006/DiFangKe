@@ -4,11 +4,9 @@
 <dict>
 	<key>aps-environment</key>
 	<string>development</string>
+	<key>com.apple.developer.healthkit</key>
+	<true/>
 	<key>com.apple.developer.icloud-container-identifiers</key>
-	<array>
-		<string>iCloud.com.ct106.difangke</string>
-	</array>
-	<key>com.apple.developer.ubiquity-container-identifiers</key>
 	<array>
 		<string>iCloud.com.ct106.difangke</string>
 	</array>
@@ -17,9 +15,15 @@
 		<string>CloudKit</string>
 		<string>CloudDocuments</string>
 	</array>
+	<key>com.apple.developer.ubiquity-container-identifiers</key>
+	<array>
+		<string>iCloud.com.ct106.difangke</string>
+	</array>
 	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
 	<string>$(TeamIdentifierPrefix)$(CFBundleIdentifier)</string>
-	<key>com.apple.developer.healthkit</key>
-	<true/>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.ct106.difangke</string>
+	</array>
 </dict>
 </plist>

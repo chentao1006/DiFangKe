@@ -30,6 +30,21 @@
 		C64D3DA42F81434600BB3C3F /* DFKMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3DA32F81434600BB3C3F /* DFKMapView.swift */; };
 		C65E583B2F8241350030A766 /* TimelineBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C65E583A2F8241350030A766 /* TimelineBuilder.swift */; };
 		C65E583D2F8241420030A766 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C65E583C2F8241420030A766 /* Transport.swift */; };
+		C67848162FA24C0D002DF823 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C67848152FA24C0C002DF823 /* WidgetKit.framework */; };
+		C67848182FA24C0D002DF823 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C67848172FA24C0D002DF823 /* SwiftUI.framework */; };
+		C67848272FA24C10002DF823 /* DiFangKeWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C67848132FA24C0C002DF823 /* DiFangKeWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		C67848322FA25669002DF823 /* Footprint.swift in Sources */ = {isa = PBXBuildFile; fileRef = A49FF8D1053B68159E4D2EEC /* Footprint.swift */; };
+		C67848332FA25672002DF823 /* Place.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7338D01A9D36898197763A48 /* Place.swift */; };
+		C67848342FA25677002DF823 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C65E583C2F8241420030A766 /* Transport.swift */; };
+		C67848352FA2567E002DF823 /* ActivityType.swift in Sources */ = {isa = PBXBuildFile; fileRef = C68544432F85457800C605E9 /* ActivityType.swift */; };
+		C67848362FA25686002DF823 /* DailyInsight.swift in Sources */ = {isa = PBXBuildFile; fileRef = C685444B2F86BDFC00C605E9 /* DailyInsight.swift */; };
+		C67848372FA25696002DF823 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C68EFC112F8AA05900C1F901 /* AppConfig.swift */; };
+		C67848382FA2569E002DF823 /* LocationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F466FD610098E71DB17C54D /* LocationManager.swift */; };
+		C67848392FA256A5002DF823 /* TimelineBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C65E583A2F8241350030A766 /* TimelineBuilder.swift */; };
+		C678483A2FA256B2002DF823 /* Config.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8406ACF5012D1DB8F428AB9C /* Config.plist */; };
+		C678483C2FA258DE002DF823 /* MotionType.swift in Sources */ = {isa = PBXBuildFile; fileRef = C678483B2FA258DE002DF823 /* MotionType.swift */; };
+		C678483D2FA258DE002DF823 /* MotionType.swift in Sources */ = {isa = PBXBuildFile; fileRef = C678483B2FA258DE002DF823 /* MotionType.swift */; };
+		C678483E2FA258F8002DF823 /* OpenAIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */; };
 		C685442C2F84E77700C605E9 /* TimelinePageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C685442B2F84E77700C605E9 /* TimelinePageView.swift */; };
 		C68544332F84E84200C605E9 /* TimelineComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = C68544302F84E84200C605E9 /* TimelineComponents.swift */; };
 		C68544342F84E84200C605E9 /* LocationSelectionComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = C685442F2F84E84200C605E9 /* LocationSelectionComponents.swift */; };
@@ -52,6 +67,30 @@
 		E59B828958C2254FFEEE593D /* LocationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F466FD610098E71DB17C54D /* LocationManager.swift */; };
 		E5CF6588D5181064FB5CB42D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 76746EBFA55AE24E965803B1 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		C67848252FA24C10002DF823 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 22478D1FFB0A8791BF88398D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C67848122FA24C0C002DF823;
+			remoteInfo = DiFangKeWidgetExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C67848282FA24C10002DF823 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				C67848272FA24C10002DF823 /* DiFangKeWidgetExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		0109B5C3A46C595F984A0148 /* 地方客.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "地方客.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -83,6 +122,11 @@
 		C651F9AF2F7F6CBF00217426 /* DiFangKe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = DiFangKe.entitlements; sourceTree = "<group>"; };
 		C65E583A2F8241350030A766 /* TimelineBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineBuilder.swift; sourceTree = "<group>"; };
 		C65E583C2F8241420030A766 /* Transport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transport.swift; sourceTree = "<group>"; };
+		C67848132FA24C0C002DF823 /* DiFangKeWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = DiFangKeWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		C67848152FA24C0C002DF823 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		C67848172FA24C0D002DF823 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		C678482D2FA24C21002DF823 /* DiFangKeWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = DiFangKeWidgetExtension.entitlements; sourceTree = "<group>"; };
+		C678483B2FA258DE002DF823 /* MotionType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionType.swift; sourceTree = "<group>"; };
 		C685442B2F84E77700C605E9 /* TimelinePageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelinePageView.swift; sourceTree = "<group>"; };
 		C685442E2F84E84200C605E9 /* FlowLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowLayout.swift; sourceTree = "<group>"; };
 		C685442F2F84E84200C605E9 /* LocationSelectionComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationSelectionComponents.swift; sourceTree = "<group>"; };
@@ -103,11 +147,45 @@
 		FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		C678482B2FA24C10002DF823 /* Exceptions for "DiFangKeWidget" folder in "DiFangKeWidgetExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		C67848192FA24C0D002DF823 /* DiFangKeWidget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				C678482B2FA24C10002DF823 /* Exceptions for "DiFangKeWidget" folder in "DiFangKeWidgetExtension" target */,
+			);
+			path = DiFangKeWidget;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C67848102FA24C0C002DF823 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C67848182FA24C0D002DF823 /* SwiftUI.framework in Frameworks */,
+				C67848162FA24C0D002DF823 /* WidgetKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
 /* Begin PBXGroup section */
 		060C5744364D60F6DF54D207 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				0109B5C3A46C595F984A0148 /* 地方客.app */,
+				C67848132FA24C0C002DF823 /* DiFangKeWidgetExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -184,6 +262,7 @@
 		A0CC0B6B3717D956A36B0F02 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				C678483B2FA258DE002DF823 /* MotionType.swift */,
 				C685444B2F86BDFC00C605E9 /* DailyInsight.swift */,
 				C68544432F85457800C605E9 /* ActivityType.swift */,
 				C65E583C2F8241420030A766 /* Transport.swift */,
@@ -191,6 +270,15 @@
 				7338D01A9D36898197763A48 /* Place.swift */,
 			);
 			path = Models;
+			sourceTree = "<group>";
+		};
+		C67848142FA24C0C002DF823 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				C67848152FA24C0C002DF823 /* WidgetKit.framework */,
+				C67848172FA24C0D002DF823 /* SwiftUI.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		C68544322F84E84200C605E9 /* Components */ = {
@@ -208,7 +296,10 @@
 		CE21BCBC42E9B032C1E986C7 = {
 			isa = PBXGroup;
 			children = (
+				C678482D2FA24C21002DF823 /* DiFangKeWidgetExtension.entitlements */,
 				06DEB163665CC9F5D06ED225 /* DiFangKe */,
+				C67848192FA24C0D002DF823 /* DiFangKeWidget */,
+				C67848142FA24C0C002DF823 /* Frameworks */,
 				060C5744364D60F6DF54D207 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -216,16 +307,40 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C678482C2FA24C10002DF823 /* Build configuration list for PBXNativeTarget "DiFangKeWidgetExtension" */;
+			buildPhases = (
+				C678480F2FA24C0C002DF823 /* Sources */,
+				C67848102FA24C0C002DF823 /* Frameworks */,
+				C67848112FA24C0C002DF823 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C67848192FA24C0D002DF823 /* DiFangKeWidget */,
+			);
+			name = DiFangKeWidgetExtension;
+			packageProductDependencies = (
+			);
+			productName = DiFangKeWidgetExtension;
+			productReference = C67848132FA24C0C002DF823 /* DiFangKeWidgetExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		D8BD734948CCEF7A2C9FAA84 /* DiFangKe */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 63946DFD7278E77B91FAE5C4 /* Build configuration list for PBXNativeTarget "DiFangKe" */;
 			buildPhases = (
 				A23D6FADAE18AE6B2791A4EE /* Sources */,
 				402F6E6DF86D9DE22D1B34EF /* Resources */,
+				C67848282FA24C10002DF823 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				C67848262FA24C10002DF823 /* PBXTargetDependency */,
 			);
 			name = DiFangKe;
 			productName = DiFangKe;
@@ -239,7 +354,13 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
+				LastSwiftUpdateCheck = 2640;
 				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					C67848122FA24C0C002DF823 = {
+						CreatedOnToolsVersion = 26.4.1;
+					};
+				};
 			};
 			buildConfigurationList = A4C9CFFD682E947343B0C99F /* Build configuration list for PBXProject "DiFangKe" */;
 			developmentRegion = zh_CN;
@@ -258,6 +379,7 @@
 			projectRoot = "";
 			targets = (
 				D8BD734948CCEF7A2C9FAA84 /* DiFangKe */,
+				C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -270,6 +392,14 @@
 				C6FC95012F9A67B2004E1FE6 /* AppIcon.icon in Resources */,
 				E5CF6588D5181064FB5CB42D /* Assets.xcassets in Resources */,
 				C199604340369E777F064D7B /* Config.plist in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C67848112FA24C0C002DF823 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C678483A2FA256B2002DF823 /* Config.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -309,6 +439,7 @@
 				B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */,
 				71F2E5B397A918D6AD287D07 /* OpenAIService.swift in Sources */,
 				AA4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift in Sources */,
+				C678483C2FA258DE002DF823 /* MotionType.swift in Sources */,
 				C68544462F854DB400C605E9 /* ActivityTypeSettingsView.swift in Sources */,
 				C64D3DA42F81434600BB3C3F /* DFKMapView.swift in Sources */,
 				C64D3DA02F8111A800BB3C3F /* RawLogsManagerView.swift in Sources */,
@@ -324,7 +455,32 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C678480F2FA24C0C002DF823 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C67848342FA25677002DF823 /* Transport.swift in Sources */,
+				C67848332FA25672002DF823 /* Place.swift in Sources */,
+				C67848322FA25669002DF823 /* Footprint.swift in Sources */,
+				C67848352FA2567E002DF823 /* ActivityType.swift in Sources */,
+				C67848392FA256A5002DF823 /* TimelineBuilder.swift in Sources */,
+				C678483E2FA258F8002DF823 /* OpenAIService.swift in Sources */,
+				C67848362FA25686002DF823 /* DailyInsight.swift in Sources */,
+				C67848372FA25696002DF823 /* AppConfig.swift in Sources */,
+				C678483D2FA258DE002DF823 /* MotionType.swift in Sources */,
+				C67848382FA2569E002DF823 /* LocationManager.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C67848262FA24C10002DF823 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */;
+			targetProxy = C67848252FA24C10002DF823 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		5B10AD8112E2603AE6D4DBC2 /* Debug */ = {
@@ -482,6 +638,88 @@
 			};
 			name = Release;
 		};
+		C67848292FA24C10002DF823 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_ENTITLEMENTS = DiFangKeWidgetExtension.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = U2NEAJ73J2;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = DiFangKeWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DiFangKeWidget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.1.3;
+				"OTHER_SWIFT_FLAGS[arch=*]" = "-D WIDGET_EXTENSION";
+				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.DiFangKeWidget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C678482A2FA24C10002DF823 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_ENTITLEMENTS = DiFangKeWidgetExtension.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = U2NEAJ73J2;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = DiFangKeWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DiFangKeWidget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.1.3;
+				"OTHER_SWIFT_FLAGS[arch=*]" = "-D WIDGET_EXTENSION";
+				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.DiFangKeWidget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 		FA24A8DB5BA7B847E494E913 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -531,6 +769,15 @@
 			buildConfigurations = (
 				5B10AD8112E2603AE6D4DBC2 /* Debug */,
 				C090984780C0D1C0ECE0B719 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C678482C2FA24C10002DF823 /* Build configuration list for PBXNativeTarget "DiFangKeWidgetExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C67848292FA24C10002DF823 /* Debug */,
+				C678482A2FA24C10002DF823 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

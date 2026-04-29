@@ -101,7 +101,7 @@ class AppConfig {
     var liveStayMinDurationThreshold: Double {
         double(forKey: "LIVE_STAY_MIN_DURATION_THRESHOLD")
     }
-
+    
     var transportAlignmentThreshold: Double {
         double(forKey: "TRANSPORT_ALIGNMENT_THRESHOLD")
     }
@@ -246,5 +246,10 @@ class AppConfig {
 
     var transportTypeChangeDurationThreshold: Double {
         double(forKey: "TRANSPORT_TYPE_CHANGE_DURATION_THRESHOLD")
+    }
+    
+    var appGroupID: String {
+        let val = string(forKey: "APP_GROUP_ID")
+        return val.isEmpty ? "group.com.ct106.difangke" : val
     }
 }

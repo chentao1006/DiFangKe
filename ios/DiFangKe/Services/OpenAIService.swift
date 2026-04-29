@@ -12,11 +12,13 @@ class OpenAIService {
     static let shared = OpenAIService()
     
     private init() {
+#if !WIDGET_EXTENSION
         NotificationCenter.default.addObserver(forName: UIApplication.significantTimeChangeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshQuotesIfDayChanged()
             }
         }
+#endif
     }
     
     private func refreshQuotesIfDayChanged() {

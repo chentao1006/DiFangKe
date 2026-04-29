@@ -80,6 +80,7 @@ struct DiFangKeApp: App {
             "dfk_v5_stable",
             schema: schema, 
             isStoredInMemoryOnly: false,
+            groupContainer: AppConfig.shared.appGroupID.isEmpty ? .none : .identifier(AppConfig.shared.appGroupID),
             cloudKitDatabase: shouldPauseSync ? .none : .automatic
         )
         
@@ -147,6 +148,7 @@ struct DiFangKeApp: App {
             "dfk_v5_stable",
             schema: schema, 
             isStoredInMemoryOnly: false,
+            groupContainer: AppConfig.shared.appGroupID.isEmpty ? .none : .identifier(AppConfig.shared.appGroupID),
             cloudKitDatabase: .automatic
         )
         if let newContainer = try? ModelContainer(for: schema, configurations: [modelConfiguration]) {

@@ -68,7 +68,7 @@ enum TransportType: String, CaseIterable, Codable {
         }
     }
     
-    static func from(speed: Double, motionType: HealthManager.MotionType = .unknown, stepCount: Int = 0, duration: TimeInterval = 0, preferredAutomotive: TransportType = .car, preferredCycling: TransportType = .bicycle) -> TransportType {
+    static func from(speed: Double, motionType: MotionType = .unknown, stepCount: Int = 0, duration: TimeInterval = 0, preferredAutomotive: TransportType = .car, preferredCycling: TransportType = .bicycle) -> TransportType {
         let kmh = speed * 3.6
         
         // --- 物理常识铁律：最高速度约束 ---

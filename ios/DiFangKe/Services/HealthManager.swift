@@ -15,14 +15,7 @@ class HealthManager: ObservableObject {
     @Published var isMoving = false
     @Published var currentMotionType: MotionType = .stationary
     
-    enum MotionType: String {
-        case stationary = "stationary"
-        case walking = "walking"
-        case running = "running"
-        case cycling = "cycling"
-        case automotive = "automotive"
-        case unknown = "unknown"
-    }
+    
     
     private init() {
     }

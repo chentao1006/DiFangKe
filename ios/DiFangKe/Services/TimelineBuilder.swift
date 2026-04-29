@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import SwiftData
+import MapKit
 
 // Add TimelineItem enum
 enum TimelineItem: Identifiable {
@@ -1190,19 +1191,19 @@ class TimelineBuilder {
         return false
     }
 
-    static func resolveAddress(coordinate: CLLocationCoordinate2D, completion: @escaping (String) -> Void) {
-        let geocoder = CLGeocoder()
-        let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-        geocoder.reverseGeocodeLocation(location) { placemarks, _ in
-            if let placemark = placemarks?.first {
-                let name = placemark.name ?? placemark.thoroughfare ?? placemark.subLocality ?? placemark.locality ?? "位置"
-                completion(name)
-            } else {
+        static func resolveAddress(coordinate: CLLocationCoordinate2D, completion: @escaping (String) -> Void) {
+        Task {
+            do {
+                let request = MKLocalSearch.Request()
+                request.naturalLanguageQuery = "\(coordinate.latitude), \(coordinate.longitude)"
+                let search = MKLocalSearch(request: request)
+                let response = try await search.start()
+                completion(response.mapItems.first?.name ?? "未知位置")
+            } catch {
                 completion("未知位置")
             }
         }
     }
-    
     static func calculatePathDistance(_ points: [CodableCoordinate]) -> Double {
         var distance: Double = 0
         guard points.count >= 2 else { return 0 }
@@ -1331,7 +1332,11 @@ class PersistentTimelineBuilder {
         }
         
         // 如果是今天，获取正在进行的停留开始时间，避免将其作为正式记录生成
+#if !WIDGET_EXTENSION
         let ongoingStart = isToday ? LocationManager.shared.potentialStopStartLocation?.timestamp : nil
+#else
+        let ongoingStart: Date? = nil
+#endif
         
         for range in sortedRanges {
             // 如果缺口大于门槛时间（例如 5 分钟），则视为需要填补的缺口
@@ -1377,9 +1382,11 @@ class PersistentTimelineBuilder {
         
         try? context.save()
         
-        // 按用户要求：在此处（重置最后）调用合并逻辑
-        await LocationManager.shared.consolidateFootprints(in: context, targetDate: date)
         
+        // 按用户要求：在此处（重置最后）调用合并逻辑
+#if !WIDGET_EXTENSION
+        await LocationManager.shared.consolidateFootprints(in: context, targetDate: date)
+#endif
         startControlledAddressResolution(in: context)
     }
 
@@ -1393,7 +1400,11 @@ class PersistentTimelineBuilder {
         
         // 缝隙嗅探器的截止点：除了受限于当前时间，还要受限于本设备当前的“实时停留”起始点。
         // 如果正在停留，缝隙填充不应跨越到停留时间段内，否则会造成双重视图。
+#if !WIDGET_EXTENSION
         let ongoingStart = calendar.isDateInToday(date) ? LocationManager.shared.potentialStopStartLocation?.timestamp : nil
+#else
+        let ongoingStart: Date? = nil
+#endif
         
         var syncLimit = min(now, endOfTargetDay)
         if let os = ongoingStart {
@@ -1487,8 +1498,16 @@ class PersistentTimelineBuilder {
                 let duration = current.endTime.timeIntervalSince(current.startTime)
                 current.averageSpeed = duration > 0 ? current.distance / duration : 0
                 // --- 异步获取合并段的健康和传感器数据 ---
+                #if !WIDGET_EXTENSION
                 let mergedMetrics = await HealthManager.shared.fetchMetrics(from: current.startTime, to: current.endTime)
+#else
+                let mergedMetrics = (steps: 0, distance: 0.0, floors: 0)
+#endif
+                #if !WIDGET_EXTENSION
                 let mergedMotionType = await HealthManager.shared.queryMostFrequentActivity(from: current.startTime, to: current.endTime)
+#else
+                let mergedMotionType = MotionType.unknown
+#endif
                 
                 // 核心修复：如果其中一段有手动设置的类型，合并后优先继承手动类型，防止被自动识别覆盖
                 if current.manualTypeRaw == nil && next.manualTypeRaw != nil {
@@ -1590,8 +1609,16 @@ class PersistentTimelineBuilder {
                     let nextLocName = getSimplifiedLocationName(for: nextFp, allPlaces: allPlaces)
                     
                     // --- 异步获取健康和传感器数据 ---
-                    let metrics = await HealthManager.shared.fetchMetrics(from: gapStart, to: gapEnd)
-                    let motionType = await HealthManager.shared.queryMostFrequentActivity(from: gapStart, to: gapEnd)
+                    #if !WIDGET_EXTENSION
+                let metrics = await HealthManager.shared.fetchMetrics(from: gapStart, to: gapEnd)
+#else
+                let metrics = (steps: 0, distance: 0.0, floors: 0)
+#endif
+                    #if !WIDGET_EXTENSION
+                let motionType = await HealthManager.shared.queryMostFrequentActivity(from: gapStart, to: gapEnd)
+#else
+                let motionType = MotionType.unknown
+#endif
                     let determinedType = TransportType.from(speed: speed, motionType: motionType, stepCount: metrics.steps, duration: duration, preferredAutomotive: preferredAuto, preferredCycling: preferredCycling)
                     
                     let tp = TransportRecord(
@@ -1858,7 +1885,11 @@ class PersistentTimelineBuilder {
                 )
                 
                 // --- 异步获取健康数据 ---
+                #if !WIDGET_EXTENSION
                 let metrics = await HealthManager.shared.fetchMetrics(from: fp.startTime, to: fp.endTime)
+#else
+                let metrics = (steps: 0, distance: 0.0, floors: 0)
+#endif
                 fp.stepCount = metrics.steps
                 fp.walkingDistance = metrics.distance
                 fp.floorsAscended = metrics.floors
@@ -1947,8 +1978,16 @@ class PersistentTimelineBuilder {
                     let augmentedPtsData = (try? JSONEncoder().encode(augmentedPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) })) ?? ptsData
 
                     // --- 异步获取健康和传感器数据 ---
-                    let metrics = await HealthManager.shared.fetchMetrics(from: tStart, to: tEnd)
-                    let motionType = await HealthManager.shared.queryMostFrequentActivity(from: tStart, to: tEnd)
+                    #if !WIDGET_EXTENSION
+                let metrics = await HealthManager.shared.fetchMetrics(from: tStart, to: tEnd)
+#else
+                let metrics = (steps: 0, distance: 0.0, floors: 0)
+#endif
+                    #if !WIDGET_EXTENSION
+                let motionType = await HealthManager.shared.queryMostFrequentActivity(from: tStart, to: tEnd)
+#else
+                let motionType = MotionType.unknown
+#endif
                     let determinedType = TransportType.from(speed: avgSpeed, motionType: motionType, stepCount: metrics.steps, duration: tEnd.timeIntervalSince(tStart), preferredAutomotive: preferredAuto, preferredCycling: preferredCycling)
                     
                     let tp = TransportRecord(
@@ -1973,7 +2012,6 @@ class PersistentTimelineBuilder {
     
     // --- 地理编码限频解析器 ---
     @MainActor
-    private static let geocoder = CLGeocoder()
     private static var isResolving = false
 
     @MainActor
@@ -2037,18 +2075,19 @@ class PersistentTimelineBuilder {
         }
     }
 
-    private static func resolveSingleAddress(coordinate: CLLocationCoordinate2D) async -> String {
-        return await withCheckedContinuation { continuation in
-            let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-            CLGeocoder().reverseGeocodeLocation(location) { placemarks, error in
-                if let placemark = placemarks?.first {
-                    let name = placemark.name ?? placemark.thoroughfare ?? placemark.subLocality ?? "未知地点"
-                    continuation.resume(returning: name)
-                } else {
-                    continuation.resume(returning: "")
-                }
+        private static func resolveSingleAddress(coordinate: CLLocationCoordinate2D) async -> String {
+        do {
+            let request = MKLocalSearch.Request()
+            request.naturalLanguageQuery = "\(coordinate.latitude), \(coordinate.longitude)"
+            let search = MKLocalSearch(request: request)
+            let response = try await search.start()
+            if let first = response.mapItems.first {
+                return first.name ?? "未知位置"
             }
+        } catch {
+            print("MKLocalSearch geocode failed: \(error)")
         }
+        return ""
     }
 }
 
