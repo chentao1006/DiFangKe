@@ -169,37 +169,7 @@ struct TimelinePageView: View {
     
     // 过滤掉与当前正在进行的实时停留重合的足迹，避免双重视图
     private var filteredTimelineItems: [TimelineItem] {
-        let items = self.timelineItems
-        let isToday = Calendar.current.isDateInToday(date)
-        guard isToday, let ongoingStart = locationManager.potentialStopStartLocation?.timestamp else {
-            return items
-        }
-        
-        // 我们只过滤列表顶部的、可能与实时状态卡片冲突的记录
-        let ongoingLoc = locationManager.potentialStopStartLocation
-        
-        return items.filter { item in
-            switch item {
-            case .footprint(let fp):
-                // 1. 时间：如果足迹结束时间晚于当前停留开始时间（容错 60s）
-                let isTimeOverlap = fp.endTime > ongoingStart.addingTimeInterval(AppConfig.shared.timelineOverlapTimeTolerance)
-                
-                // 2. 地点：如果位置重合（200米内，认为属于同一个停留）
-                var isLocationOverlap = false
-                if let ol = ongoingLoc {
-                    let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
-                    isLocationOverlap = fpLoc.distance(from: ol) < AppConfig.shared.timelineOverlapDistanceTolerance
-                }
-                
-                // 如果时间和地点都重合，说明它是正在进行的停留的“前身”或者重复，在列表中隐藏它
-                if isTimeOverlap && isLocationOverlap { return false }
-                
-            case .transport(let tp):
-                // 如果交通段结束于实时停留开始之后，可能是位移漂移导致，也暂时隐藏
-                if tp.endTime > ongoingStart.addingTimeInterval(30) { return false }
-            }
-            return true
-        }
+        self.timelineItems
     }
     
     private var timelineScrollView: some View {
@@ -266,7 +236,7 @@ struct TimelinePageView: View {
                 .padding(.horizontal, 16)
             }
             
-            if timelineItems.isEmpty && !isLoadingTimeline {
+            if isToday && timelineItems.isEmpty && !isLoadingTimeline {
                 PlaceholderFootprintCard()
                     .padding(.horizontal, 0)
             }

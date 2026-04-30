@@ -3,6 +3,7 @@ import SwiftData
 import CoreData
 import Photos
 import PhotosUI
+import WidgetKit
 
 // Brand Theme Extensions
 extension Color {
@@ -51,6 +52,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 @main
 struct DiFangKeApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
     @State private var locationManager = LocationManager.shared
     @AppStorage("isFirstLaunch") private var isFirstLaunch = true
     @State private var showSplash = true
@@ -120,6 +122,14 @@ struct DiFangKeApp: App {
                             }
                             
                             setupDefaultData(context: context)
+                            
+                            // 更新同步管理器的容器
+                            WidgetDataSyncManager.shared.updateContainer(modelContainer)
+                            
+                            // 打开 App 时主动同步小组件数据
+                            Task {
+                                await WidgetDataSyncManager.shared.syncAll()
+                            }
                         }
                         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RefreshModelContainer"))) { _ in
                             refreshContainer()
@@ -128,6 +138,13 @@ struct DiFangKeApp: App {
                 }
             }
             .animation(.easeInOut(duration: 0.8), value: showSplash)
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .background || newPhase == .active {
+                    Task {
+                        await WidgetDataSyncManager.shared.syncAll()
+                    }
+                }
+            }
             .task {
                 // 给初始化一点缓冲时间，让首页数据在后台能加载出一部分，避免首屏瞬间白屏或卡顿
                 try? await Task.sleep(nanoseconds: 1_200_000_000) // 1.2s 缓冲

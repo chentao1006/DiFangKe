@@ -37,11 +37,8 @@ final class RawLocationStore {
     }
     
     private var documentsDirectory: URL {
-        if !AppConfig.shared.appGroupID.isEmpty,
-           let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppConfig.shared.appGroupID) {
-            return containerURL
-        }
-        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        // 彻底回退：直接使用标准 Documents 目录，确保能读到用户已有的存量文件
+        return fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
     
     private var baseDirectory: URL {
@@ -95,7 +92,8 @@ final class RawLocationStore {
     /// 读取指定日期的所有坐标点
     func loadLocations(for date: Date, filtered: Bool = true) -> [CLLocation] {
         let url = getFileURL(for: date)
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return [] }
+        // 核心：移除 .mappedIfSafe，防止读取实时写入的文件时失败
+        guard let data = try? Data(contentsOf: url) else { return [] }
         guard let content = String(data: data, encoding: .utf8) else { return [] }
         
         var locations: [CLLocation] = []
@@ -188,7 +186,7 @@ final class RawLocationStore {
     }
     
     private func loadLocations(fromURL url: URL, filtered: Bool = true) -> [CLLocation] {
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+        guard let data = try? Data(contentsOf: url),
               let content = String(data: data, encoding: .utf8) else { return [] }
         
         var locations: [CLLocation] = []
@@ -1458,7 +1456,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             sharedDefaults.set(location.coordinate.latitude, forKey: "lastLat")
             sharedDefaults.set(location.coordinate.longitude, forKey: "lastLon")
             sharedDefaults.set(Date().timeIntervalSince1970, forKey: "lastLocationTime")
+            
+            // 提醒小组件更新位置
+            Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
         }
+        
+        // 同步今日地图显示区域给小组件
+        self.updateSharedWidgetRegion()
         
         // 2. 更新内存数据并处理足迹分析
         self.updateTodayTotalPoints()
@@ -2208,8 +2212,45 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     pointsCount: rawPoints.count,
                     mileage: mileage
                 )
+                
+                // 同时提醒小组件更新统计数据
+                Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
+            }
+            
+            // 同时更新共享区域
+            await MainActor.run {
+                self.updateSharedWidgetRegion()
             }
         }
+    }
+    
+    /// 同步今日所有点位的包围盒给小组件，避免小组件去读 CSV 导致超时
+    private func updateSharedWidgetRegion() {
+        let groupID = AppConfig.shared.appGroupID
+        guard let sharedDefaults = UserDefaults(suiteName: groupID) else { return }
+        
+        let allCoords = self.allTodayPoints.map { $0.coordinate }
+        guard !allCoords.isEmpty else { return }
+        
+        var minLat = allCoords[0].latitude
+        var maxLat = allCoords[0].latitude
+        var minLon = allCoords[0].longitude
+        var maxLon = allCoords[0].longitude
+        
+        for p in allCoords {
+            minLat = min(minLat, p.latitude)
+            maxLat = max(maxLat, p.latitude)
+            minLon = min(minLon, p.longitude)
+            maxLon = max(maxLon, p.longitude)
+        }
+        
+        let latDelta = max(0.005, (maxLat - minLat) * 1.4)
+        let lonDelta = max(0.005, (maxLon - minLon) * 1.4)
+        
+        sharedDefaults.set((minLat + maxLat) / 2, forKey: "widgetRegionCenterLat")
+        sharedDefaults.set((minLon + maxLon) / 2, forKey: "widgetRegionCenterLon")
+        sharedDefaults.set(latDelta, forKey: "widgetRegionLatDelta")
+        sharedDefaults.set(lonDelta, forKey: "widgetRegionLonDelta")
     }
 
 
@@ -2476,10 +2517,32 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 dayLimit = lastDataTime.map { min(endOfDay, $0) } ?? currentTime
             }
             
-            // 严格遵循“离场结算制”：如果是今天且是最后一段间隙（直至当前时间），不要持久化生成足迹，由 UI 状态卡片负责呈现。
-            if !isToday && dayLimit > currentTime.addingTimeInterval(120) {
+            // 4. 处理最后一个间隙（直至当前时间点）
+            if dayLimit > currentTime.addingTimeInterval(AppConfig.shared.ongoingStayGracePeriod) {
                 if let gap = identifyGapStay(from: currentTime, to: dayLimit, rawPoints: rawPoints) {
-                    gapsToInsert.append(gap)
+                    // 核心改进：如果最后一段也是停留，尝试将其与上一段 GAP_STAY 合并（如果是同一个地方），避免产生碎片
+                    var descriptor = FetchDescriptor<Footprint>(
+                        predicate: #Predicate { $0.locationHash == "GAP_STAY" },
+                        sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+                    )
+                    descriptor.fetchLimit = 1
+                    let existingLast = (try? self.modelContext?.fetch(descriptor))?.first
+                    
+                    if let lastFp = existingLast, 
+                       abs(lastFp.endTime.timeIntervalSince(gap.start)) < AppConfig.shared.stayMergeGapThreshold {
+                        let lastLoc = CLLocation(latitude: lastFp.latitude, longitude: lastFp.longitude)
+                        let gapLoc = CLLocation(latitude: gap.center.latitude, longitude: gap.center.longitude)
+                        if lastLoc.distance(from: gapLoc) < AppConfig.shared.stayDistanceThreshold {
+                            await MainActor.run {
+                                lastFp.endTime = gap.end
+                                try? lastFp.modelContext?.save()
+                            }
+                        } else {
+                            gapsToInsert.append(gap)
+                        }
+                    } else {
+                        gapsToInsert.append(gap)
+                    }
                 }
             }
             
@@ -2517,6 +2580,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                             for fp in insertedFootprints {
                                 self.analyzeFootprint(fp, context: context)
                             }
+                            
+                            // 提醒小组件更新历史回填数据
+                            Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
                         }
                     }
         }
@@ -2653,6 +2719,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 self.isResettingData = false
                 // 显式触动 UI 刷新，重置是用户主动发起的，安全可控
                 self.lastRawDataUpdateTrigger = Date()
+                
+                // 提醒小组件重置数据
+                Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
             }
         }
     }

@@ -1,78 +1,241 @@
 import WidgetKit
 import SwiftUI
 import MapKit
-import SwiftData
+import AppIntents
+
+// MARK: - App Intent for Manual Refresh
+public struct RefreshWidgetIntent: AppIntent {
+    public static var title: LocalizedStringResource = "刷新足迹小组件"
+    public static var description = IntentDescription("重新加载今日足迹数据。")
+
+    public init() {}
+
+    public func perform() async throws -> some IntentResult {
+        let groupID = "group.com.ct106.difangke"
+        let defaults = UserDefaults(suiteName: groupID)
+        defaults?.removeObject(forKey: "widgetDateOffset")
+        
+        let count = defaults?.integer(forKey: "widgetRefreshCount") ?? 0
+        defaults?.set(count + 1, forKey: "widgetRefreshCount")
+        defaults?.synchronize()
+        
+        WidgetCenter.shared.reloadAllTimelines()
+        return .result()
+    }
+}
+
+public struct SetOffsetIntent: AppIntent {
+    public static var title: LocalizedStringResource = "设置日期偏移"
+    
+    @Parameter(title: "Offset")
+    public var offset: Int
+
+    public init() {}
+    public init(offset: Int) {
+        self.offset = offset
+    }
+
+    public func perform() async throws -> some IntentResult {
+        let groupID = "group.com.ct106.difangke"
+        let defaults = UserDefaults(suiteName: groupID)
+        
+        var targetOffset = offset
+        if targetOffset > 0 { targetOffset = 0 }
+        
+        if targetOffset == 0 {
+            defaults?.removeObject(forKey: "widgetDateOffset")
+        } else {
+            defaults?.set(targetOffset, forKey: "widgetDateOffset")
+        }
+        
+        let count = defaults?.integer(forKey: "widgetRefreshCount") ?? 0
+        defaults?.set(count + 1, forKey: "widgetRefreshCount")
+        defaults?.synchronize()
+        
+        WidgetCenter.shared.reloadAllTimelines()
+        return .result()
+    }
+}
 
 struct DFKFootprintEntry: TimelineEntry {
     let date: Date
     let mapImage: UIImage?
-    let daySummary: String
+    let footprintCount: Int
+    let displayTitle: String
+    let targetDate: Date
+    let isToday: Bool
+    let dateOffset: Int
+    let debugInfo: String
 }
 
 struct DFKFootprintProvider: TimelineProvider {
+    let groupID = "group.com.ct106.difangke"
+    
     func placeholder(in context: Context) -> DFKFootprintEntry {
-        DFKFootprintEntry(date: Date(), mapImage: nil, daySummary: "读取中...")
+        DFKFootprintEntry(date: Date(), mapImage: nil, footprintCount: 0, displayTitle: "今日足迹", targetDate: Date(), isToday: true, dateOffset: 0, debugInfo: "Loading")
     }
     func getSnapshot(in context: Context, completion: @escaping (DFKFootprintEntry) -> ()) {
         completion(placeholder(in: context))
     }
     func getTimeline(in context: Context, completion: @escaping (Timeline<DFKFootprintEntry>) -> ()) {
-        Task { @MainActor in
-            let groupID = AppConfig.shared.appGroupID
-            let schema = Schema([Footprint.self, TransportRecord.self])
-            let config = ModelConfiguration(groupContainer: .identifier(groupID))
-            guard let container = try? ModelContainer(for: schema, configurations: [config]) else {
-                completion(Timeline(entries: [DFKFootprintEntry(date: Date(), mapImage: nil, daySummary: "配置错误")], policy: .atEnd))
-                return
-            }
-            let footprints = (try? container.mainContext.fetch(FetchDescriptor<Footprint>())) ?? []
-            let lastLat = UserDefaults(suiteName: groupID)?.double(forKey: "lastLat") ?? 39.9
-            let lastLon = UserDefaults(suiteName: groupID)?.double(forKey: "lastLon") ?? 116.4
-            
-            // 核心：使用 context.displaySize 获取系统分配的精确尺寸
-            let options = MKMapSnapshotter.Options()
-            options.region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: lastLat, longitude: lastLon), span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
-            options.size = context.displaySize
-            options.scale = 2.0
-            
-            let snapshotter = MKMapSnapshotter(options: options)
-            let snapshot = try? await snapshotter.start()
-            
-            let entry = DFKFootprintEntry(date: Date(), mapImage: snapshot?.image, daySummary: "今日: \(footprints.count) | 刷新: \(Date().description.suffix(13).prefix(8))")
-            completion(Timeline(entries: [entry], policy: .after(Date().addingTimeInterval(900))))
+        let now = Date()
+        let calendar = Calendar.current
+        let defaults = UserDefaults(suiteName: groupID)
+        let offset = (defaults?.value(forKey: "widgetDateOffset") as? Int) ?? 0
+        let refreshCount = defaults?.integer(forKey: "widgetRefreshCount") ?? 0
+        let isToday = (offset == 0)
+        
+        let startOfToday = calendar.startOfDay(for: now)
+        let targetDate = calendar.date(byAdding: .day, value: offset, to: startOfToday) ?? startOfToday
+        
+        // 标题
+        let displayTitle: String
+        if isToday { displayTitle = "今日足迹" }
+        else if calendar.isDateInYesterday(targetDate) { displayTitle = "昨日足迹" }
+        else {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "M月d日"
+            displayTitle = formatter.string(from: targetDate)
         }
+        
+        // 读取 App 预生成的图片和数据
+        var finalImage: UIImage? = nil
+        var footprintCount = 0
+        var status = "NoSync"
+        var lastSyncStr = "Never"
+        
+        // 根据小组件类型选择对应的图片 (sq: Small/Large, rt: Medium)
+        let sizeName = (context.family == .systemMedium) ? "rt" : "sq"
+        
+        // 尝试从共享目录读取图片
+        let manager = FileManager.default
+        if let containerURL = manager.containerURL(forSecurityApplicationGroupIdentifier: groupID) {
+            let fileURL = containerURL.appendingPathComponent("widget_snapshot_\(sizeName)_\(offset).jpg")
+            if let data = try? Data(contentsOf: fileURL) {
+                finalImage = UIImage(data: data)
+                status = "Synced"
+                
+                let lastSync = defaults?.double(forKey: "widgetUpdate_\(offset)") ?? 0
+                if lastSync > 0 {
+                    let syncDate = Date(timeIntervalSince1970: lastSync)
+                    let df = DateFormatter()
+                    df.dateFormat = "HH:mm"
+                    lastSyncStr = df.string(from: syncDate)
+                }
+            } else {
+                status = "NoFile"
+            }
+        }
+        footprintCount = defaults?.integer(forKey: "widgetCount_\(offset)") ?? 0
+        
+        if offset < -6 {
+            status = "Hist"
+        }
+        
+        let entry = DFKFootprintEntry(
+            date: now,
+            mapImage: finalImage,
+            footprintCount: footprintCount,
+            displayTitle: displayTitle,
+            targetDate: targetDate,
+            isToday: isToday,
+            dateOffset: offset,
+            debugInfo: "\(status) S:\(lastSyncStr) C:\(refreshCount)"
+        )
+        
+        let timeline = Timeline(entries: [entry], policy: .after(now.addingTimeInterval(900)))
+        completion(timeline)
     }
 }
 
 struct DFKFootprintWidgetView: View {
     var entry: DFKFootprintEntry
+    @Environment(\.widgetFamily) var family
+    @Environment(\.colorScheme) var colorScheme
+    
     var body: some View {
+        let isSmall = family == .systemSmall
+        let mainColor: Color = colorScheme == .dark ? .white : .accentColor
+        
         ZStack(alignment: .topLeading) {
-            // 背景地图：全屏铺满
-            if let image = entry.mapImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } else {
-                Color.blue.opacity(0.05)
+            GeometryReader { geo in
+                if let image = entry.mapImage {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                } else {
+                    ZStack {
+                        Color.blue.opacity(0.05)
+                        if entry.debugInfo.contains("Hist") {
+                            Text("请在 App 中查看往日足迹")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
             }
-            
-            // 悬浮文字卡片
+            .ignoresSafeArea()
+            // 顶部信息栏
             VStack(alignment: .leading, spacing: 2) {
-                Text("今日足迹")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(.blue)
-                Text(entry.daySummary)
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
+                Text(entry.displayTitle)
+                    .font(.system(size: isSmall ? 13 : 15, weight: .bold, design: .rounded))
+                    .foregroundColor(mainColor)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
             .background(.ultraThinMaterial)
-            .cornerRadius(8)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .padding(10)
+            
+            // 导航按钮
+            VStack {
+                Spacer()
+                HStack {
+                    // 左侧：往日 (最多支持到 -6，即 7 天内)
+                    if entry.dateOffset > -6 {
+                        Button(intent: SetOffsetIntent(offset: entry.dateOffset - 1)) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: isSmall ? 10 : 12, weight: .bold))
+                                .foregroundColor(mainColor)
+                                .frame(width: isSmall ? 28 : 32, height: isSmall ? 28 : 32)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    
+                    Spacer()
+                    
+                    if !entry.isToday {
+                        Button(intent: SetOffsetIntent(offset: entry.dateOffset + 1)) {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: isSmall ? 10 : 12, weight: .bold))
+                                .foregroundColor(mainColor)
+                                .frame(width: isSmall ? 28 : 32, height: isSmall ? 28 : 32)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(10)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            Button(intent: RefreshWidgetIntent()) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(mainColor)
+                    .frame(width: 28, height: 28)
+                    .background(.ultraThinMaterial)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
             .padding(10)
         }
-        .widgetURL(URL(string: "difangke://home"))
+        .widgetURL(URL(string: "difangke://timeline?offset=\(entry.dateOffset)"))
         .containerBackground(.background, for: .widget)
     }
 }

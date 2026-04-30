@@ -35,28 +35,16 @@ struct DFKMapView: View {
                 UserAnnotation()
             }
             
-            // 1. 轨迹线系统
-            if !points.isEmpty {
-                // 背景边框: 稍微粗一点，使用系统背景色
-                MapPolyline(coordinates: points)
-                    .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: (isInteractive ? 5 : 3) + 2.5, lineCap: .round, lineJoin: .round))
-                
-                // 主轨迹线 (由 GPS 点流形成的平滑轨迹)
-                MapPolyline(coordinates: points)
-                    .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: isInteractive ? 5 : 3, lineCap: .round, lineJoin: .round))
-            } else {
-                // 仅在主轨迹点（Raw GPS）为空时，显示交通轨迹段作为后备。
-                // 这能防止在已有点位流的情况下，再次绘制重复的交通线（交通线实质也是由这些点位组成的）。
-                ForEach(timelineItems) { item in
-                    if case .transport(let transport) = item {
-                        // 背景边框
-                        MapPolyline(coordinates: transport.points)
-                            .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: (isInteractive ? 5 : 3) + 2.5, lineCap: .round, lineJoin: .round))
-                        
-                        // 交通轨迹线
-                        MapPolyline(coordinates: transport.points)
-                            .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: isInteractive ? 5 : 3, lineCap: .round, lineJoin: .round))
-                    }
+            // 1. 轨迹线系统 (已修改为仅显示交通段路线，隐藏原始 GPS 噪点线)
+            ForEach(timelineItems) { item in
+                if case .transport(let transport) = item {
+                    // 背景边框
+                    MapPolyline(coordinates: transport.points)
+                        .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: (isInteractive ? 5 : 3) + 2.5, lineCap: .round, lineJoin: .round))
+                    
+                    // 交通轨迹线
+                    MapPolyline(coordinates: transport.points)
+                        .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: isInteractive ? 5 : 3, lineCap: .round, lineJoin: .round))
                 }
             }
             

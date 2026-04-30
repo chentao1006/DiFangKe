@@ -405,49 +405,50 @@ struct RecordingStatusCard: View {
                         }
                     }
                 }
-                    
-                    Spacer()
-                    
-                    // DFKMapView Section
-                    DFKMapView(
-                        cameraPosition: $cameraPosition,
-                        isInteractive: false,
-                        showsUserLocation: true,
-                        points: locationManager.allTodayCoordinates,
-                        timelineItems: timelineItems,
-                        photoAssets: photoAssets,
-                        onTimelineItemTap: onTimelineItemTap
-                    )
-                    .frame(height: 160)
-                    .cornerRadius(12)
-                    .padding(.leading, 0)
-                    .padding(.trailing, 12)
-                    .padding(.bottom, 12)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        showFullscreenMap = true
-                    }
-                    .onAppear {
-                        updateTodayCamera()
-                    }
-                    .onChange(of: locationManager.allTodayCoordinates.count) { _, _ in
-                        updateTodayCamera()
-                    }
-                    .onChange(of: timelineItems.count) { _, _ in
-                        updateTodayCamera()
-                    }
-                    .onChange(of: locationManager.lastLocation) { _, newLoc in
-                        // If no points yet, keep tracking current position
-                        if locationManager.allTodayPoints.isEmpty, let newLoc {
-                            withAnimation {
-                                cameraPosition = .region(MKCoordinateRegion(center: newLoc.coordinate, latitudinalMeters: 500, longitudinalMeters: 500))
-                            }
-                        }
-                    }
-                }
                 .padding(.vertical, 16)
                 .padding(.leading, 0)
                 .padding(.trailing, 16)
+                
+                // DFKMapView Section
+                DFKMapView(
+                    cameraPosition: $cameraPosition,
+                    isInteractive: false,
+                    showsUserLocation: true,
+                    points: locationManager.allTodayCoordinates,
+                    timelineItems: timelineItems,
+                    photoAssets: photoAssets,
+                    onTimelineItemTap: onTimelineItemTap
+                )
+                .frame(height: 140)
+                .cornerRadius(12)
+                .padding(.leading, 0)
+                .padding(.trailing, 12)
+                .padding(.bottom, 12)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    showFullscreenMap = true
+                }
+                .onAppear {
+                    updateTodayCamera()
+                }
+                .onChange(of: locationManager.allTodayCoordinates.count) { _, _ in
+                    updateTodayCamera()
+                }
+                .onChange(of: timelineItems.count) { _, _ in
+                    updateTodayCamera()
+                }
+                .onChange(of: locationManager.lastLocation) { _, newLoc in
+                    // If no points yet, keep tracking current position
+                    if locationManager.allTodayPoints.isEmpty, let newLoc {
+                        withAnimation {
+                            cameraPosition = .region(MKCoordinateRegion(center: newLoc.coordinate, latitudinalMeters: 500, longitudinalMeters: 500))
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 0)
+            .padding(.leading, 0)
+            .padding(.trailing, 0)
             }
         .background(
             RoundedRectangle(cornerRadius: 16)

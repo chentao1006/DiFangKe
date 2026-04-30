@@ -82,6 +82,9 @@ struct DayTimelineView: View {
                 locationManager.allPlaces = newValue
                 locationManager.forceRefreshOngoingAnalysis()
             }
+            .onOpenURL { url in
+                handleURL(url)
+            }
             .alert("重新生成本日数据", isPresented: $showingResetAlert) {
                 Button("确定重新生成", role: .destructive) {
                     locationManager.resetData(for: selectedDate)
@@ -231,6 +234,23 @@ struct DayTimelineView: View {
             withAnimation(.spring()) {
                 self.selectedDate = dayStart
                 self.scrollID = dayStart
+            }
+        }
+    }
+    
+    private func handleURL(_ url: URL) {
+        guard url.scheme == "difangke" && url.host == "timeline" else { return }
+        
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        if let offsetString = components?.queryItems?.first(where: { $0.name == "offset" })?.value,
+           let offset = Int(offsetString) {
+            let calendar = Calendar.current
+            let today = calendar.startOfDay(for: Date())
+            if let targetDate = calendar.date(byAdding: .day, value: offset, to: today) {
+                withAnimation(.spring()) {
+                    self.selectedDate = targetDate
+                    self.scrollID = targetDate
+                }
             }
         }
     }

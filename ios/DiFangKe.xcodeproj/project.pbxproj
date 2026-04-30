@@ -45,6 +45,7 @@
 		C678483C2FA258DE002DF823 /* MotionType.swift in Sources */ = {isa = PBXBuildFile; fileRef = C678483B2FA258DE002DF823 /* MotionType.swift */; };
 		C678483D2FA258DE002DF823 /* MotionType.swift in Sources */ = {isa = PBXBuildFile; fileRef = C678483B2FA258DE002DF823 /* MotionType.swift */; };
 		C678483E2FA258F8002DF823 /* OpenAIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */; };
+		C67848582FA3A082002DF823 /* WidgetDataSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C67848572FA3A082002DF823 /* WidgetDataSyncManager.swift */; };
 		C685442C2F84E77700C605E9 /* TimelinePageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C685442B2F84E77700C605E9 /* TimelinePageView.swift */; };
 		C68544332F84E84200C605E9 /* TimelineComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = C68544302F84E84200C605E9 /* TimelineComponents.swift */; };
 		C68544342F84E84200C605E9 /* LocationSelectionComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = C685442F2F84E84200C605E9 /* LocationSelectionComponents.swift */; };
@@ -127,6 +128,7 @@
 		C67848172FA24C0D002DF823 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		C678482D2FA24C21002DF823 /* DiFangKeWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = DiFangKeWidgetExtension.entitlements; sourceTree = "<group>"; };
 		C678483B2FA258DE002DF823 /* MotionType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionType.swift; sourceTree = "<group>"; };
+		C67848572FA3A082002DF823 /* WidgetDataSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetDataSyncManager.swift; sourceTree = "<group>"; };
 		C685442B2F84E77700C605E9 /* TimelinePageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelinePageView.swift; sourceTree = "<group>"; };
 		C685442E2F84E84200C605E9 /* FlowLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowLayout.swift; sourceTree = "<group>"; };
 		C685442F2F84E84200C605E9 /* LocationSelectionComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationSelectionComponents.swift; sourceTree = "<group>"; };
@@ -246,6 +248,7 @@
 		6C24D087F1ECA32C5EED5AC4 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				C67848572FA3A082002DF823 /* WidgetDataSyncManager.swift */,
 				C6D2DE392F90E39800466878 /* HealthManager.swift */,
 				C68EFC112F8AA05900C1F901 /* AppConfig.swift */,
 				C685443F2F85334A00C605E9 /* CloudSettingsManager.swift */,
@@ -412,6 +415,7 @@
 			files = (
 				C64D3DA22F81251E00BB3C3F /* AiSettingsView.swift in Sources */,
 				9F3F925B82CF4EEDED4E3AFF /* AddPlaceSheet.swift in Sources */,
+				C67848582FA3A082002DF823 /* WidgetDataSyncManager.swift in Sources */,
 				AC19D6437C18A309FE001E29 /* ContentView.swift in Sources */,
 				7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */,
 				08EBCFC9A52F3BC0EFC26A8F /* DayTimelineView.swift in Sources */,

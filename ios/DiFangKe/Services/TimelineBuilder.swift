@@ -456,11 +456,27 @@ class TimelineBuilder {
         start1: Date, end1: Date, lat1: Double, lon1: Double, addr1: String?, place1: UUID?, activity1: String?,
         start2: Date, end2: Date, lat2: Double, lon2: Double, addr2: String?, place2: UUID?, activity2: String?
     ) -> Bool {
+        // 1. 时间间隔检查
         if start2.timeIntervalSince(end1) > AppConfig.shared.stayMergeGapThreshold { return false }
+        
+        // 2. 核心合并逻辑：如果有相同的 PlaceID，且活动类型一致，则无视距离和地址强制合并
         if let p1 = place1, let p2 = place2, p1 == p2 && activity1 == activity2 { return true }
+        
+        // 3. 距离与地址检查
         let loc1 = CLLocation(latitude: lat1, longitude: lon1)
         let loc2 = CLLocation(latitude: lat2, longitude: lon2)
-        if loc1.distance(from: loc2) < AppConfig.shared.stayDistanceThreshold && addr1 == addr2 && activity1 == activity2 { return true }
+        let distance = loc1.distance(from: loc2)
+        
+        // 核心优化：如果距离非常近（小于合并阈值），即使地址文字有细微差别（比如门牌号变了），只要活动类型一致，就认为是在同一个地方
+        if distance < AppConfig.shared.mergeDistanceThreshold && activity1 == activity2 {
+            return true
+        }
+        
+        // 4. 降级逻辑：如果距离略远但地址完全一致，也可以合并
+        if distance < AppConfig.shared.stayDistanceThreshold * 1.5 && addr1 == addr2 && activity1 == activity2 {
+            return true
+        }
+        
         return false
     }
 
@@ -1170,25 +1186,31 @@ class TimelineBuilder {
     static func hasSignificantMovement(between f1: FootprintLite, and f2: FootprintLite, points: [CLLocation]) -> Bool {
         if points.isEmpty { return false }
         
-        // 1. 检查直径（判定大跨度位移）
-        let diameter = calculateMaxDiameter(points.map { $0.coordinate })
-        // 只要中间轨迹的直径超过了交通识别的最低门槛，就认为有显著位移
-        if diameter > AppConfig.shared.transportMinDistanceThreshold { return true }
+        // 1. 检查鲁棒直径（判定大跨度位移，忽略 10% 的离群点防止噪点干扰）
+        let diameter = calculateRobustDiameter(points)
+        // 显著放宽合并时的位移容忍度，只有当直径明显超过“交通门槛”的两倍时，才认为中间发生了不可忽略的位移
+        if diameter > AppConfig.shared.transportMinDistanceThreshold * 2.0 { return true }
         
         // 2. 检查是否有任何点位脱离了两者的核心停留区
         let loc1 = CLLocation(latitude: f1.latitude, longitude: f1.longitude)
         let loc2 = CLLocation(latitude: f2.latitude, longitude: f2.longitude)
         
+        // 增加缓冲区，防止因室内定位漂移（通常在 200m 左右）导致的切断
+        let bufferThreshold = AppConfig.shared.stayDistanceThreshold * 1.8
+        
+        var outlierCount = 0
         for p in points {
             let d1 = p.distance(from: loc1)
             let d2 = p.distance(from: loc2)
-            // 如果点位距离两个足迹中心都超过了停留判定阈值，说明中间有外出动作
-            if d1 > AppConfig.shared.stayDistanceThreshold && d2 > AppConfig.shared.stayDistanceThreshold {
-                return true
+            
+            // 如果点位距离两个足迹中心都超过了缓冲区，判定为潜在位移
+            if d1 > bufferThreshold && d2 > bufferThreshold {
+                outlierCount += 1
             }
         }
         
-        return false
+        // 只有当连续或多个点都偏离时，才判定为显著位移，防止单个跳点切断足迹
+        return outlierCount > 2
     }
 
         static func resolveAddress(coordinate: CLLocationCoordinate2D, completion: @escaping (String) -> Void) {
