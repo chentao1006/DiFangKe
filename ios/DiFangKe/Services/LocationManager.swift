@@ -181,7 +181,22 @@ final class RawLocationStore {
             let dayPoints = loadLocations(fromURL: fileURL, filtered: filtered)
             allPoints.append(contentsOf: dayPoints)
         }
-        let sorted = allPoints.sorted { $0.timestamp < $1.timestamp }
+        
+        // 核心修复：去重。不同设备可能同步了相同的时间点，或者同一设备多次上传。
+        // 使用 Dictionary 按时间戳去重，保留精度更高（accuracy 越小越好）的点。
+        var uniquePoints: [TimeInterval: CLLocation] = [:]
+        for p in allPoints {
+            let ts = p.timestamp.timeIntervalSince1970
+            if let existing = uniquePoints[ts] {
+                if p.horizontalAccuracy < existing.horizontalAccuracy {
+                    uniquePoints[ts] = p
+                }
+            } else {
+                uniquePoints[ts] = p
+            }
+        }
+        
+        let sorted = uniquePoints.values.sorted { $0.timestamp < $1.timestamp }
         return filtered ? RawLocationStore.filterRidiculousSpikes(sorted) : sorted
     }
     

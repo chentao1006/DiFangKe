@@ -327,9 +327,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         photoAssetIDs: captureClusterIDs,
                         address: t.isEmpty ? a : t
                     )
-                    let suggestions = ActivityType.getSuggestedActivities(for: fp, allActivities: allActivities, allPlaces: allPlaces, history: history)
-                    if let firstSuggestion = suggestions.first {
-                        fp.activityTypeValue = firstSuggestion.id.uuidString
+                    if let autoMatch = ActivityType.getAutoMatchActivity(for: fp, allActivities: allActivities, allPlaces: allPlaces, history: history) {
+                        fp.activityTypeValue = autoMatch.id.uuidString
                     }
                     scanResult.append(fp)
                     incrementProgress(captureClusterCount)

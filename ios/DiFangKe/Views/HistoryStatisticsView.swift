@@ -208,7 +208,6 @@ struct HistoryStatisticsView: View {
         self.aiSummary = nil
         
         // Prepare data for AI
-        let rangeStr = selectedRange.rawValue
         let rankData = getActivityRankData().prefix(3).map { "\($0.name)(\($0.count)次)" }.joined(separator: ", ")
         let topPlacesCount = getTopLocations(delta: 0.01).prefix(3).count
         

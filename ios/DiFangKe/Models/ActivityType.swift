@@ -48,38 +48,19 @@ final class ActivityType: Identifiable {
     static func getSuggestedActivities(for footprint: Footprint, allActivities: [ActivityTypeLite], allPlaces: [PlaceLite], history: [FootprintLite] = []) -> [ActivityTypeLite] {
         var suggested: [ActivityTypeLite] = []
         
+        // 1. Confident Matches (These can be used for auto-assignment)
+        if let autoMatch = getAutoMatchActivity(for: footprint, allActivities: allActivities, allPlaces: allPlaces, history: history) {
+            suggested.append(autoMatch)
+        }
+        
         let hour = Calendar.current.component(.hour, from: footprint.startTime)
-        let weekday = Calendar.current.component(.weekday, from: footprint.startTime)
-        let isWeekend = (weekday == 1 || weekday == 7)
         let durationHours = footprint.duration / 3600.0
         let matchedPlace = allPlaces.first { $0.placeID == footprint.placeID }
         let contextText = ((footprint.address ?? "") + (matchedPlace?.name ?? "")).lowercased()
+        let weekday = Calendar.current.component(.weekday, from: footprint.startTime)
+        let isWeekend = (weekday == 1 || weekday == 7)
 
-        // --- Confidence Layers ---
-        
-        // Layer 0: User-defined Place Specifics (Highest priority)
-        if let place = matchedPlace, place.isUserDefined {
-            let placeName = place.name.lowercased()
-            if placeName.contains("家") || placeName.contains("屋") || placeName.contains("公寓") || placeName.contains("住宅") {
-                if let a = allActivities.first(where: { $0.name == "居家" }) { suggested.append(a) }
-            } else if placeName.contains("公司") || placeName.contains("办公") || placeName.contains("单位") || placeName.contains("大厦") {
-                if let a = allActivities.first(where: { $0.name == "工作" }) { suggested.append(a) }
-            }
-        }
-        
-        // Layer 1: History-based Inference (Very high confidence)
-        if suggested.isEmpty, let pID = footprint.placeID {
-            let placeHistory = history.filter { $0.placeID == pID && $0.activityTypeValue != nil }
-            if !placeHistory.isEmpty {
-                let counts = Dictionary(grouping: placeHistory, by: { $0.activityTypeValue! }).mapValues { $0.count }
-                if let mostFrequent = counts.max(by: { $0.value < $1.value }),
-                   let a = allActivities.first(where: { $0.id.uuidString == mostFrequent.key }) {
-                    if !suggested.contains(where: { $0.id == a.id }) { suggested.append(a) }
-                }
-            }
-        }
-        
-        // Layer 2: POI Category Mapping (High precision)
+        // 2. POI Category Mapping (High precision but not always "certain")
         if let category = matchedPlace?.category {
             let catMap: [String: String] = [
                 "MKPOICategoryRestaurant": "美食", "MKPOICategoryCafe": "美食", "MKPOICategoryFoodMarket": "美食",
@@ -95,7 +76,7 @@ final class ActivityType: Identifiable {
             }
         }
         
-        // Layer 3: Keyword Pattern Matching (Standard Aggressive Keywords)
+        // 3. Keyword Pattern Matching (Standard Aggressive Keywords)
         let patterns: [(String, [String])] = [
             ("家庭", ["妈妈", "爸爸", "外婆", "奶奶", "爷爷", "亲戚", "父母", "老家", "儿子", "女儿", "父", "母"]),
             ("居家", ["家", "居", "屋", "公寓", "住宅", "苑", "府", "园", "里"]),
@@ -116,7 +97,7 @@ final class ActivityType: Identifiable {
             }
         }
 
-        // Layer 4: Time-based Heuristics (Lower priority, blocked by strong matches)
+        // 4. Time-based Heuristics (Lower priority)
         let isStrongMatch = suggested.contains(where: { $0.name == "居家" || $0.name == "工作" })
         if !isStrongMatch {
             if durationHours > 3 && (hour >= 21 || hour <= 4) {
@@ -141,6 +122,61 @@ final class ActivityType: Identifiable {
         
         return Array(suggested.prefix(5))
     }
+    
+    /// Only returns a match if it is highly certain (e.g. History or User-defined Place)
+    static func getAutoMatchActivity(for footprint: Footprint, allActivities: [ActivityTypeLite], allPlaces: [PlaceLite], history: [FootprintLite] = []) -> ActivityTypeLite? {
+        // Priority 1: User History (Highest confidence)
+        if let pID = footprint.placeID {
+            let placeHistory = history.filter { $0.placeID == pID && $0.activityTypeValue != nil }
+            if !placeHistory.isEmpty {
+                let calendar = Calendar.current
+                let targetMinutes = calendar.component(.hour, from: footprint.startTime) * 60 + calendar.component(.minute, from: footprint.startTime)
+                let windowMinutes = 120 // 2 hour window
+                
+                var countsInWindow: [String: Int] = [:]
+                var countsTotal: [String: Int] = [:]
+                
+                for fp in placeHistory {
+                    guard let type = fp.activityTypeValue else { continue }
+                    countsTotal[type, default: 0] += 1
+                    
+                    let fpMinutes = calendar.component(.hour, from: fp.startTime) * 60 + calendar.component(.minute, from: fp.startTime)
+                    let diff = abs(targetMinutes - fpMinutes)
+                    if min(diff, 1440 - diff) <= windowMinutes {
+                        countsInWindow[type, default: 0] += 1
+                    }
+                }
+                
+                // 1. If we have matches in the same time window, it's very likely the same activity
+                if let bestInWindow = countsInWindow.max(by: { $0.value < $1.value }),
+                   let a = allActivities.first(where: { $0.id.uuidString == bestInWindow.key }) {
+                    return a
+                }
+                
+                // 2. If we have a very frequent activity overall at this place (at least 3 times)
+                if let mostFrequent = countsTotal.max(by: { $0.value < $1.value }),
+                   mostFrequent.value >= 3,
+                   let a = allActivities.first(where: { $0.id.uuidString == mostFrequent.key }) {
+                    return a
+                }
+            }
+        }
+        
+        // Priority 2: User-defined Place Specifics (Very high confidence)
+        let matchedPlace = allPlaces.first { $0.placeID == footprint.placeID }
+        if let place = matchedPlace, place.isUserDefined {
+            let placeName = place.name.lowercased()
+            // Very strong keywords for home/work if the user explicitly named the place
+            if placeName.contains("家") || placeName.contains("屋") || placeName.contains("公寓") || placeName.contains("住宅") {
+                if let a = allActivities.first(where: { $0.name == "居家" }) { return a }
+            } else if placeName.contains("公司") || placeName.contains("办公") || placeName.contains("单位") || placeName.contains("大厦") {
+                if let a = allActivities.first(where: { $0.name == "工作" }) { return a }
+            }
+        }
+        
+        return nil
+    }
+
 }
 
 extension Color {

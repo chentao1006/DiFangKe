@@ -332,7 +332,7 @@ extension FootprintModalView {
                                     return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr || 
                                            (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr)
                                 })
-                                let displayText = matchedPlace?.name ?? footprint.address ?? "未知位置"
+                                let displayText = matchedPlace?.name ?? footprint.address ?? "未知地点"
                                 
                                 HStack(spacing: 8) {
                                     Text(displayText)
@@ -1003,7 +1003,7 @@ struct AddToFavoriteModal: View {
                 if let poi = poiOrName, !addr.contains(poi) {
                     self.address = addr + poi
                 } else {
-                    self.address = addr.isEmpty ? (pm.name ?? "未知位置") : addr
+                    self.address = addr.isEmpty ? (pm.name ?? "") : addr
                 }
             }
         }

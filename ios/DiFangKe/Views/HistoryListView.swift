@@ -1020,7 +1020,7 @@ struct PhotoImportResultsView: View {
     @Environment(LocationManager.self) private var locationManager
     @Environment(\.dismiss) var dismiss
     @Query private var allPlaces: [Place]
-    @Query private var allActivityTypes: [ActivityType]
+    @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
     @State private var selectedIDs: Set<UUID> = []
     @State private var selectedFootprintForEdit: Footprint?
     
@@ -1070,7 +1070,6 @@ struct PhotoImportResultsView: View {
                     
                     Spacer()
                 }
-                .padding(.leading, 12)
                 .padding(.vertical, 12)
                 .background(Color.dfkBackground)
                 .contentShape(Rectangle())
@@ -1089,7 +1088,7 @@ struct PhotoImportResultsView: View {
                 ScrollView {
                     LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                         ForEach(groupedResults, id: \.0) { date, dateResults in
-                            Section(header: dateHeader(for: date)) {
+                            Section(header: dateHeader(for: date, dateResults: dateResults)) {
                                 VStack(spacing: 0) {
                                     ForEach(dateResults, id: \.footprintID) { fp in
                                         HStack(spacing: 0) {
@@ -1139,14 +1138,48 @@ struct PhotoImportResultsView: View {
         }
     }
     
-    private func dateHeader(for date: Date) -> some View {
+    private func dateHeader(for date: Date, dateResults: [Footprint]) -> some View {
         HStack {
             Text(date.formatted(.dateTime.month().day().weekday()))
-                .font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundColor(.secondary)
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundColor(.primary)
                 .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .padding(.vertical, 10)
+            
             Spacer()
+            
+            Menu {
+                ForEach(allActivityTypes) { type in
+                    Button {
+                        withAnimation {
+                            for fp in dateResults {
+                                fp.activityTypeValue = type.id.uuidString
+                            }
+                        }
+                    } label: {
+                        Label(type.name, systemImage: type.icon)
+                    }
+                }
+                
+                Divider()
+                
+                Button(role: .destructive) {
+                    withAnimation {
+                        for fp in dateResults {
+                            fp.activityTypeValue = nil
+                        }
+                    }
+                } label: {
+                    Label("清除活动", systemImage: "xmark.circle")
+                }
+            } label: {
+                Image(systemName: "checklist.checked")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.dfkAccent)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(Color.dfkAccent.opacity(0.1)))
+            }
+            .padding(.trailing, 16)
         }
         .frame(maxWidth: .infinity)
         .background(Color.dfkBackground.opacity(0.95))
