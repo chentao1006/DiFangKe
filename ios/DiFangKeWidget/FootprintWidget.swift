@@ -59,7 +59,8 @@ public struct SetOffsetIntent: AppIntent {
 
 struct DFKFootprintEntry: TimelineEntry {
     let date: Date
-    let mapImage: UIImage?
+    let mapImageLight: UIImage?
+    let mapImageDark: UIImage?
     let footprintCount: Int
     let displayTitle: String
     let targetDate: Date
@@ -72,7 +73,7 @@ struct DFKFootprintProvider: TimelineProvider {
     let groupID = "group.com.ct106.difangke"
     
     func placeholder(in context: Context) -> DFKFootprintEntry {
-        DFKFootprintEntry(date: Date(), mapImage: nil, footprintCount: 0, displayTitle: "今日足迹", targetDate: Date(), isToday: true, dateOffset: 0, debugInfo: "Loading")
+        DFKFootprintEntry(date: Date(), mapImageLight: nil, mapImageDark: nil, footprintCount: 0, displayTitle: "今日足迹", targetDate: Date(), isToday: true, dateOffset: 0, debugInfo: "Loading")
     }
     func getSnapshot(in context: Context, completion: @escaping (DFKFootprintEntry) -> ()) {
         completion(placeholder(in: context))
@@ -99,22 +100,38 @@ struct DFKFootprintProvider: TimelineProvider {
         }
         
         // 读取 App 预生成的图片和数据
-        var finalImage: UIImage? = nil
+        var finalImageLight: UIImage? = nil
+        var finalImageDark: UIImage? = nil
         var footprintCount = 0
         var status = "NoSync"
         var lastSyncStr = "Never"
         
-        // 根据小组件类型选择对应的图片 (sq: Small/Large, rt: Medium)
-        let sizeName = (context.family == .systemMedium) ? "rt" : "sq"
+        // 根据小组件类型选择对应的图片
+        let sizeName: String = {
+            switch context.family {
+            case .systemSmall: return "small"
+            case .systemMedium: return "medium"
+            case .systemLarge: return "large"
+            default: return "small"
+            }
+        }()
         
-        // 尝试从共享目录读取图片
+        // 尝试从共享目录读取图片 (光色和暗色)
         let manager = FileManager.default
         if let containerURL = manager.containerURL(forSecurityApplicationGroupIdentifier: groupID) {
-            let fileURL = containerURL.appendingPathComponent("widget_snapshot_\(sizeName)_\(offset).jpg")
-            if let data = try? Data(contentsOf: fileURL) {
-                finalImage = UIImage(data: data)
+            let lightURL = containerURL.appendingPathComponent("widget_snapshot_\(sizeName)_light_\(offset).jpg")
+            let darkURL = containerURL.appendingPathComponent("widget_snapshot_\(sizeName)_dark_\(offset).jpg")
+            
+            if let data = try? Data(contentsOf: lightURL) {
+                finalImageLight = UIImage(data: data)
                 status = "Synced"
-                
+            }
+            if let data = try? Data(contentsOf: darkURL) {
+                finalImageDark = UIImage(data: data)
+                status = "Synced"
+            }
+            
+            if status == "Synced" {
                 let lastSync = defaults?.double(forKey: "widgetUpdate_\(offset)") ?? 0
                 if lastSync > 0 {
                     let syncDate = Date(timeIntervalSince1970: lastSync)
@@ -134,7 +151,8 @@ struct DFKFootprintProvider: TimelineProvider {
         
         let entry = DFKFootprintEntry(
             date: now,
-            mapImage: finalImage,
+            mapImageLight: finalImageLight,
+            mapImageDark: finalImageDark,
             footprintCount: footprintCount,
             displayTitle: displayTitle,
             targetDate: targetDate,
@@ -155,11 +173,12 @@ struct DFKFootprintWidgetView: View {
     
     var body: some View {
         let isSmall = family == .systemSmall
-        let mainColor: Color = colorScheme == .dark ? .white : .accentColor
+        let mainColor: Color = colorScheme == .dark ? .white : Color("AccentColor")
+        let mapImage = colorScheme == .dark ? (entry.mapImageDark ?? entry.mapImageLight) : entry.mapImageLight
         
         ZStack(alignment: .topLeading) {
             GeometryReader { geo in
-                if let image = entry.mapImage {
+                if let image = mapImage {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)

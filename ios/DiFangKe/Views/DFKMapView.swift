@@ -16,10 +16,18 @@ struct DFKMapView: View {
     
     // 热力图支持 (用于统计视图)
     struct HeatmapPoint: Identifiable {
-        let id = UUID()
+        let id: String
         let coordinate: CLLocationCoordinate2D
         let intensity: Int
         let maxIntensity: Int
+        
+        init(coordinate: CLLocationCoordinate2D, intensity: Int, maxIntensity: Int) {
+            // 使用坐标作为稳定 ID，避免每次刷新生成新 UUID 导致 MapKit 深度重新渲染
+            self.id = String(format: "%.5f,%.5f", coordinate.latitude, coordinate.longitude)
+            self.coordinate = coordinate
+            self.intensity = intensity
+            self.maxIntensity = maxIntensity
+        }
     }
     var heatmapPoints: [HeatmapPoint] = []
     
@@ -92,15 +100,9 @@ struct DFKMapView: View {
                         }
                     }
                 } else if case .transport(let transport) = item {
-                    // 获取更精确的中点：优先从主轨迹线中截取属于该交通段的子路段来计算中点
-                    // 这样可以确保图标既在“路线上”，又处于“路程的中心”
-                    let finalPoint: CLLocationCoordinate2D? = {
-                        if !points.isEmpty, let start = transport.points.first, let end = transport.points.last {
-                            let sub = points.subpath(from: start, to: end)
-                            if sub.count >= 2 { return sub.distanceMidpoint }
-                        }
-                        return transport.points.distanceMidpoint
-                    }()
+                    // 直接使用交通段自身的轨迹点序列计算“路程中点”
+                    // 这样可以确保图标既在“绘制的路线上”，又处于“实际行驶路程的中心”
+                    let finalPoint = transport.points.distanceMidpoint
 
                     if let coord = finalPoint {
                         Annotation("", coordinate: coord) {

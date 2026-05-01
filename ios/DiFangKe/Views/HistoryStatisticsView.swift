@@ -127,15 +127,26 @@ struct HistoryStatisticsView: View {
     private var aiSummarySection: some View {
         Group {
             if let summary = aiSummary {
-                Text(summary)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.8))
-                    .lineSpacing(6)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 10)
-                    .padding(.bottom, 4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .transition(.opacity)
+                HStack(alignment: .lastTextBaseline, spacing: 8) {
+                    Text(summary)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.primary.opacity(0.8))
+                        .lineSpacing(6)
+                    
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        generateAiSummary()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.secondary.opacity(0.6))
+                    }
+                    .padding(.bottom, 2)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 10)
+                .padding(.bottom, 12)
+                .transition(.opacity)
             } else if isGeneratingSummary {
                 HStack(spacing: 8) {
                     ProgressView().scaleEffect(0.6)
@@ -145,6 +156,7 @@ struct HistoryStatisticsView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 10)
+                .padding(.bottom, 12)
             }
         }
     }
@@ -212,27 +224,48 @@ struct HistoryStatisticsView: View {
         let weekdayNames = ["", "周日", "周一", "周二", "周三", "周四", "周五", "周六"]
         let peakDay = weekdayNames[busiestWeekdayNum]
         
-        let hourCounts = Dictionary(grouping: footprintsInScope) { calendar.component(.hour, from: $0.startTime) }
-            .mapValues { $0.count }
-        let peakHour = hourCounts.max(by: { $0.value < $1.value })?.key ?? 12
-        let timePeriod = peakHour < 6 ? "凌晨/深夜" : (peakHour < 12 ? "早晨/上午" : (peakHour < 18 ? "下午" : "傍晚/夜间"))
+        // 核心优化：计算活跃高峰时排除掉每天 0:00 自动生成的“初始/睡眠”足迹，并赋予带照片的足迹更高权重
+        let hourActivity = Dictionary(grouping: footprintsInScope) { calendar.component(.hour, from: $0.startTime) }
+            .mapValues { group -> Double in
+                group.reduce(0.0) { acc, fp in
+                    // 识别自动生成的 0 点足迹（通常是跨天睡眠）
+                    let isMidnightStart = calendar.component(.hour, from: fp.startTime) == 0 && 
+                                         calendar.component(.minute, from: fp.startTime) == 0
+                    
+                    let weight: Double = (isMidnightStart && fp.duration > 3600 * 4) ? 0.1 : 1.0
+                    let photoBonus = Double(fp.photoAssetIDs.count) * 3.0 // 每张照片显著增加权重
+                    return acc + weight + photoBonus
+                }
+            }
+            
+        let peakHour = hourActivity.max(by: { $0.value < $1.value })?.key ?? 12
+        let timePeriod: String
+        switch peakHour {
+        case 0...5: timePeriod = "凌晨/深夜"
+        case 6...8: timePeriod = "清晨/早起"
+        case 9...11: timePeriod = "上午"
+        case 12...13: timePeriod = "中午/午后"
+        case 14...17: timePeriod = "下午"
+        case 18...21: timePeriod = "傍晚/夜间"
+        default: timePeriod = "深夜"
+        }
         
         let prompt = """
-        请作为一位睿智的生活观察者，对用户在过去“\(rangeStr)”的足迹数据进行一次有深度且清晰的总结。
+        请作为一位敏锐的生活观察家，根据以下足迹数据，为用户写一段简短、真诚且富有洞察力的生活回顾。
         
-        数据概览：
-        - 记录密度：\(footprintsInScope.count)个生活片段，累计活跃时长约\(durationHours)小时
-        - 活动重心：\(rankData)
-        - 探索版图：在\(topPlacesCount)个核心区域留下了深度印记
-        - 行为习惯：最活跃于\(peakDay)，活动高峰出现在\(timePeriod)
-        - 记忆留存：期间共通过照片记录了\(totalPhotos)个瞬间
+        数据事实：
+        - 密度：\(footprintsInScope.count)次记录，约\(durationHours)小时的停留
+        - 偏好：主要活动包含\(rankData)
+        - 广度：在\(topPlacesCount)个区域活动频繁
+        - 节律：最活跃于\(peakDay)，\(timePeriod)是你的能量高峰
+        - 影像：捕捉了\(totalPhotos)张瞬间快照
         
-        要求：
-        1. 语气：客观睿智、理感平衡。不要过于文艺或晦涩，要让用户感到“你精准地捕捉到了他的生活规律”。
-        2. 内容维度：通过活动分布推断生活重心，通过空间分布感知生活节奏。
-        3. 洞察：总结出这段时间潜藏的“生活逻辑”或“情感底色”。
-        4. 篇幅：80字左右，表达清晰且具有现代感。
-        5. 杜绝数字罗列，将枯燥的统计转化为对生活步调的敏锐观察。
+        撰写要求：
+        1. **语言多样性**：绝对禁止使用“以...为锚点”、“围绕...展开”等陈词滥调。每句话的结构都要有变化。
+        2. **真实总结**：基于事实进行逻辑推演，不要凭空捏造。
+        3. **多维视角**：如果照片多，侧重“视觉留存”；如果地点分散，侧重“步履不停”；如果地点集中，侧重“专注与安稳”。
+        4. **篇幅与风格**：80字左右。风格要干练且带有现代感，既不是枯燥的报表，也不是矫情的散文。
+        5. **杜绝数字堆砌**：不要重复输出数据中的原始数字，要将其转化为对生活状态的描述（例如：将“50次记录”转化为“频繁的往返”或“充实的生活节奏”）。
         """
         
         OpenAIService.shared.getCustomSummary(prompt: prompt) { summary in
@@ -240,7 +273,7 @@ struct HistoryStatisticsView: View {
             guard rangeAtStart == self.selectedRange else { return }
             
             withAnimation {
-                let finalized = summary ?? "这段时间，你更倾向于在熟悉的领域深耕，生活步调稳健而有序。"
+                let finalized = summary ?? ""
                 self.aiSummary = finalized
                 
                 // Save to persistent cache

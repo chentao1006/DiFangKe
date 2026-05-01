@@ -23,8 +23,8 @@ final class WidgetDataSyncManager {
         print("[WidgetSync] Starting sync for last 7 days...")
         ensureContainer()
         
-        // 同步 0 (今天) 到 -6 (6天前)
-        for offset in -6...0 {
+        // 优先同步 0 (今天)，然后往回同步到 -6
+        for offset in ((-6)...0).reversed() {
             await syncData(forOffset: offset)
         }
         
@@ -79,142 +79,135 @@ final class WidgetDataSyncManager {
             let lastLat = defaults?.double(forKey: "lastLat") ?? 39.9042
             let lastLon = defaults?.double(forKey: "lastLon") ?? 116.4074
             
-            // 2. 为不同尺寸生成图片 (Square for Small/Large, Rect for Medium)
+            // 2. 为不同尺寸和主题生成图片
             let sizes: [(name: String, size: CGSize)] = [
-                ("sq", CGSize(width: 480, height: 480)),
-                ("rt", CGSize(width: 600, height: 300))
+                ("small", CGSize(width: 155, height: 155)),
+                ("medium", CGSize(width: 329, height: 155)),
+                ("large", CGSize(width: 329, height: 345))
             ]
+            let themes: [UIUserInterfaceStyle] = [.light, .dark]
             
             for s in sizes {
-                // 计算地图区域：始终以足迹为准，如果没足迹再用默认
-                let region: MKCoordinateRegion
-                let coords = footprints.map { $0.coordinates }.flatMap { $0 }
-                
-                if !coords.isEmpty {
-                    var minLat = coords[0].latitude; var maxLat = coords[0].latitude
-                    var minLon = coords[0].longitude; var maxLon = coords[0].longitude
-                    for p in coords {
-                        minLat = min(minLat, p.latitude); maxLat = max(maxLat, p.latitude)
-                        minLon = min(minLon, p.longitude); maxLon = max(maxLon, p.longitude)
+                for theme in themes {
+                    let themeName = theme == .dark ? "dark" : "light"
+                    
+                    // 计算地图区域
+                    let region: MKCoordinateRegion
+                    let coords = footprints.map { $0.coordinates }.flatMap { $0 }
+                    
+                    if !coords.isEmpty {
+                        var minLat = coords[0].latitude; var maxLat = coords[0].latitude
+                        var minLon = coords[0].longitude; var maxLon = coords[0].longitude
+                        for p in coords {
+                            minLat = min(minLat, p.latitude); maxLat = max(maxLat, p.latitude)
+                            minLon = min(minLon, p.longitude); maxLon = max(maxLon, p.longitude)
+                        }
+                        
+                        let spanLat = max(0.005, (maxLat - minLat) * 1.6)
+                        let spanLon = max(0.005, (maxLon - minLon) * 1.6)
+                        let finalSpanLon = s.name == "medium" ? spanLon * 1.5 : spanLon
+                        
+                        region = MKCoordinateRegion(
+                            center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2),
+                            span: MKCoordinateSpan(latitudeDelta: spanLat, longitudeDelta: finalSpanLon)
+                        )
+                    } else {
+                        region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: lastLat, longitude: lastLon), span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
                     }
                     
-                    // 根据宽长比稍微调整 span
-                    let spanLat = max(0.005, (maxLat - minLat) * 1.6)
-                    let spanLon = max(0.005, (maxLon - minLon) * 1.6)
+                    let options = MKMapSnapshotter.Options()
+                    options.region = region
+                    options.size = s.size
+                    options.scale = 2.0
+                    options.traitCollection = UITraitCollection(userInterfaceStyle: theme)
                     
-                    // 如果是长方形，经度跨度可能需要更大
-                    let finalSpanLon = s.name == "rt" ? spanLon * 1.5 : spanLon
-                    
-                    region = MKCoordinateRegion(
-                        center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2),
-                        span: MKCoordinateSpan(latitudeDelta: spanLat, longitudeDelta: finalSpanLon)
-                    )
-                } else {
-                    region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: lastLat, longitude: lastLon), span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
-                }
-                
-                let options = MKMapSnapshotter.Options()
-                options.region = region
-                options.size = s.size
-                options.scale = 2.0
-                
-                let snapshotter = MKMapSnapshotter(options: options)
-                if let snapshot = try? await snapshotter.start() {
-                    let format = UIGraphicsImageRendererFormat()
-                    format.scale = 2.0
-                    let renderer = UIGraphicsImageRenderer(size: snapshot.image.size, format: format)
-                    let image = renderer.image { ctx in
-                        snapshot.image.draw(at: .zero)
-                        
-                        // 绘制路线
-                        ctx.cgContext.setLineCap(.round)
-                        ctx.cgContext.setLineJoin(.round)
-                        let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
-                        let transportLineColor = themeColor.withAlphaComponent(0.8)
-                        
-                        for tr in transports {
-                            if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: tr.pointsData), !decoded.isEmpty {
-                                let clCoords = decoded.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-                                let points = clCoords.map { snapshot.point(for: $0) }
-                                
-                                if points.count >= 2 {
-                                    // 1. 绘制线条
-                                    ctx.cgContext.beginPath()
-                                    ctx.cgContext.move(to: points[0])
-                                    for i in 1..<points.count { ctx.cgContext.addLine(to: points[i]) }
-                                    ctx.cgContext.setStrokeColor(transportLineColor.cgColor)
-                                    ctx.cgContext.setLineWidth(5.0) // 线条加粗
-                                    ctx.cgContext.strokePath()
+                    let snapshotter = MKMapSnapshotter(options: options)
+                    if let snapshot = try? await snapshotter.start() {
+                        let format = UIGraphicsImageRendererFormat()
+                        format.scale = 2.0
+                        let renderer = UIGraphicsImageRenderer(size: snapshot.image.size, format: format)
+                        let image = renderer.image { ctx in
+                            snapshot.image.draw(at: .zero)
+                            
+                            // 绘制路线
+                            ctx.cgContext.setLineCap(.round)
+                            ctx.cgContext.setLineJoin(.round)
+                            let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
+                            let transportLineColor = themeColor.withAlphaComponent(0.8)
+                            
+                            for tr in transports {
+                                if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: tr.pointsData), !decoded.isEmpty {
+                                    let clCoords = decoded.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                                    let points = clCoords.map { snapshot.point(for: $0) }
                                     
-                                    // 2. 绘制交通图标 (在中点)
-                                    if let midCoord = clCoords.widgetMidpoint {
-                                        let midPoint = snapshot.point(for: midCoord)
-                                        let iconSize: CGFloat = 24
-                                        let rect = CGRect(x: midPoint.x - iconSize/2, y: midPoint.y - iconSize/2, width: iconSize, height: iconSize)
+                                    if points.count >= 2 {
+                                        ctx.cgContext.beginPath()
+                                        ctx.cgContext.move(to: points[0])
+                                        for i in 1..<points.count { ctx.cgContext.addLine(to: points[i]) }
+                                        ctx.cgContext.setStrokeColor(transportLineColor.cgColor)
+                                        ctx.cgContext.setLineWidth(4.0) // 尺寸调整，线稍微细一点
+                                        ctx.cgContext.strokePath()
+                                        
+                                        if let midCoord = clCoords.widgetMidpoint {
+                                            let midPoint = snapshot.point(for: midCoord)
+                                            let iconSize: CGFloat = 20
+                                            let rect = CGRect(x: midPoint.x - iconSize/2, y: midPoint.y - iconSize/2, width: iconSize, height: iconSize)
+                                            
+                                        let strokeColor = theme == .dark ? UIColor.black : UIColor.white
                                         
                                         // 背景框
-                                        let path = UIBezierPath(roundedRect: rect, cornerRadius: 6)
+                                        let path = UIBezierPath(roundedRect: rect, cornerRadius: 5)
                                         themeColor.setFill()
                                         path.fill()
-                                        UIColor.white.setStroke()
-                                        path.lineWidth = 1.5
+                                        strokeColor.setStroke()
+                                        path.lineWidth = 1.2
                                         path.stroke()
                                         
                                         // 图标
                                         let transportType = TransportType(rawValue: tr.manualTypeRaw ?? tr.typeRaw) ?? .slow
                                         if let iconImage = UIImage(systemName: transportType.sfSymbol) {
-                                            let symbolSize: CGFloat = 14
+                                            let symbolSize: CGFloat = 12
                                             let symbolRect = CGRect(x: midPoint.x - symbolSize/2, y: midPoint.y - symbolSize/2, width: symbolSize, height: symbolSize)
-                                            iconImage.withTintColor(.white).draw(in: symbolRect)
+                                            iconImage.withTintColor(strokeColor).draw(in: symbolRect)
+                                        }
                                         }
                                     }
                                 }
                             }
-                        }
-                        
-                        // 绘制足迹
-                        for fp in footprints {
-                            let point = snapshot.point(for: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude))
-                            let activity = allActivities.first { $0.id.uuidString == fp.activityTypeValue || $0.name == fp.activityTypeValue }
-                            let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
-                            let iconName = activity?.icon ?? "questionmark.circle.dashed"
                             
-                            // 图标显著加大 (从 28 改为 36)
-                            let hours = fp.duration / 3600.0
-                            let dotScale: CGFloat = 1.0 + (1.5 - 1.0) * min(1.0, max(0.0, (hours - 0.5) / (12.0 - 0.5)))
-                            let size = 36 * dotScale 
-                            
-                            ctx.cgContext.setFillColor(activityColor.cgColor)
-                            ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-                            ctx.cgContext.fillPath()
-                            ctx.cgContext.setStrokeColor(UIColor.white.cgColor)
-                            ctx.cgContext.setLineWidth(2.0)
-                            ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-                            ctx.cgContext.strokePath()
-                            if let iconImage = UIImage(systemName: iconName) {
-                                let iconSize = (size * 0.55) // 按比例缩放图标
-                                let iconRect = CGRect(x: point.x - iconSize/2, y: point.y - iconSize/2, width: iconSize, height: iconSize)
-                                iconImage.withTintColor(.white).draw(in: iconRect)
+                            // 绘制足迹
+                            for fp in footprints {
+                                let point = snapshot.point(for: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude))
+                                let activity = allActivities.first { $0.id.uuidString == fp.activityTypeValue || $0.name == fp.activityTypeValue }
+                                let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
+                                let iconName = activity?.icon ?? "questionmark.circle.dashed"
+                                
+                                let hours = fp.duration / 3600.0
+                                let dotScale: CGFloat = 1.0 + (1.5 - 1.0) * min(1.0, max(0.0, (hours - 0.5) / (12.0 - 0.5)))
+                                let size = 28 * dotScale // 尺寸调整，适应小尺寸
+                                
+                                ctx.cgContext.setFillColor(activityColor.cgColor)
+                                ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)
+                                ctx.cgContext.fillPath()
+                                
+                                let strokeColor = theme == .dark ? UIColor.black : UIColor.white
+                                ctx.cgContext.setStrokeColor(strokeColor.cgColor)
+                                ctx.cgContext.setLineWidth(1.5)
+                                ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)
+                                ctx.cgContext.strokePath()
+                                if let iconImage = UIImage(systemName: iconName) {
+                                    let iconSize = (size * 0.55)
+                                    let iconRect = CGRect(x: point.x - iconSize/2, y: point.y - iconSize/2, width: iconSize, height: iconSize)
+                                    iconImage.withTintColor(strokeColor).draw(in: iconRect)
+                                }
                             }
                         }
                         
-                        // 当前位置 (仅今日)
-                        if offset == 0 {
-                            let centerPoint = snapshot.point(for: CLLocationCoordinate2D(latitude: lastLat, longitude: lastLon))
-                            let currentLocColor = UIColor.systemBlue
-                            ctx.cgContext.setFillColor(UIColor.white.cgColor)
-                            ctx.cgContext.addArc(center: centerPoint, radius: 8, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-                            ctx.cgContext.fillPath()
-                            ctx.cgContext.setFillColor(currentLocColor.cgColor)
-                            ctx.cgContext.addArc(center: centerPoint, radius: 6, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-                            ctx.cgContext.fillPath()
+                        // 保存图片
+                        if let data = image.jpegData(compressionQuality: 0.8) {
+                            let fileURL = getFileURL(forOffset: offset, sizeName: s.name, themeName: themeName)
+                            try? data.write(to: fileURL)
                         }
-                    }
-                    
-                    // 保存图片：文件名区分尺寸
-                    if let data = image.jpegData(compressionQuality: 0.8) {
-                        let fileURL = getFileURL(forOffset: offset, sizeName: s.name)
-                        try? data.write(to: fileURL)
                     }
                 }
             }
@@ -229,10 +222,10 @@ final class WidgetDataSyncManager {
         }
     }
     
-    private func getFileURL(forOffset offset: Int, sizeName: String) -> URL {
+    private func getFileURL(forOffset offset: Int, sizeName: String, themeName: String) -> URL {
         let manager = FileManager.default
         let containerURL = manager.containerURL(forSecurityApplicationGroupIdentifier: groupID)
-        let fileName = "widget_snapshot_\(sizeName)_\(offset).jpg"
+        let fileName = "widget_snapshot_\(sizeName)_\(themeName)_\(offset).jpg"
         return containerURL!.appendingPathComponent(fileName)
     }
 }
