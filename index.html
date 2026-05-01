@@ -672,7 +672,7 @@
             <div class="modal-subtitle">也可以把页面发到手机里打开</div>
             <img class="modal-qr" src="assets/qrcode.png" alt="地方客下载二维码">
             <div class="modal-actions">
-                <a class="modal-btn" href="https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162" target="_blank" rel="noopener noreferrer">App Store</a>
+                <a class="modal-btn" href="https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162" rel="noopener noreferrer">App Store</a>
                 <a class="modal-btn" href="download/difangke.apk?v=8" target="_blank" rel="noopener noreferrer">下载 APK</a>
             </div>
         </div>
@@ -703,7 +703,7 @@
             <div style="margin-top: 30px;">
                 <div style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap;">
                     <div style="display: flex; flex-direction: column; gap: 12px;">
-                        <a href="https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162" target="_blank">
+                        <a href="https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162">
                             <img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/zh-cn?size=250x83&amp;releaseDate=1276560000&h=7914488fd5b3e64803716a5035e4e790" 
                                 alt="Download on the App Store" 
                                 style="height: 60px; cursor: pointer; display: block;">
@@ -892,6 +892,24 @@
                 });
             }
 
+            // In iOS WeChat, target=_blank (new window) is often blocked.
+            // Normalize ALL App Store links to same-tab navigation.
+            if (isIOS && isWeChat) {
+                document.querySelectorAll('a[href*="apps.apple.com"]').forEach((a) => {
+                    if (a.__difangkeAppStoreHandler) {
+                        a.removeEventListener('click', a.__difangkeAppStoreHandler);
+                        a.__difangkeAppStoreHandler = null;
+                    }
+                    a.target = "";
+                    const handler = (e) => {
+                        e.preventDefault();
+                        window.location.href = a.href || iosLink;
+                    };
+                    a.__difangkeAppStoreHandler = handler;
+                    a.addEventListener('click', handler);
+                });
+            }
+
             document.querySelectorAll('.dynamic-download').forEach(link => {
                 if (link.__difangkeDownloadHandler) {
                     link.removeEventListener('click', link.__difangkeDownloadHandler);
@@ -911,10 +929,23 @@
                     return;
                 }
 
+                // iOS WeChat: use same-tab navigation (target=_blank may be blocked)
+                if (isIOS && isWeChat) {
+                    link.href = iosLink;
+                    link.target = "";
+                    const handler = (e) => {
+                        e.preventDefault();
+                        window.location.href = iosLink;
+                    };
+                    link.__difangkeDownloadHandler = handler;
+                    link.addEventListener('click', handler);
+                    return;
+                }
+
                 // 1) iOS: go to App Store
                 if (isIOS) {
                     link.href = iosLink;
-                    link.target = "_blank";
+                    link.target = "";
                     return;
                 }
 
