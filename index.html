@@ -64,6 +64,157 @@
                 font-weight: 600;
                 white-space: nowrap;
             }
+
+            /* WeChat in-app browser tip (Android) */
+            #wechat-open-browser-tip {
+                display: none;
+                position: fixed;
+                inset: 0;
+                z-index: 3000;
+                background: rgba(0, 0, 0, 0.72);
+                backdrop-filter: blur(2px);
+                -webkit-backdrop-filter: blur(2px);
+                cursor: pointer;
+            }
+
+            #wechat-open-browser-tip .tip-content {
+                position: absolute;
+                top: 18px;
+                right: 18px;
+                max-width: 320px;
+                color: #fff;
+                font-size: 16px;
+                line-height: 1.6;
+                text-align: right;
+                user-select: none;
+                -webkit-user-select: none;
+            }
+
+            #wechat-open-browser-tip .tip-arrow {
+                display: inline-block;
+                width: 0;
+                height: 0;
+                border-left: 10px solid transparent;
+                border-right: 10px solid transparent;
+                border-bottom: 16px solid #fff;
+                transform: rotate(35deg);
+                margin-left: 8px;
+                opacity: 0.9;
+            }
+
+            #wechat-open-browser-tip .tip-sub {
+                margin-top: 8px;
+                font-size: 13px;
+                opacity: 0.85;
+            }
+
+            /* Desktop QR modal */
+            #desktop-qr-modal {
+                display: none;
+                position: fixed;
+                inset: 0;
+                z-index: 3000;
+                background: rgba(0, 0, 0, 0.6);
+                backdrop-filter: blur(6px);
+                -webkit-backdrop-filter: blur(6px);
+            }
+
+            #desktop-qr-modal .modal-card {
+                position: absolute;
+                left: 50%;
+                top: 50%;
+                transform: translate(-50%, -50%);
+                width: min(360px, calc(100vw - 32px));
+                background: rgba(255, 255, 255, 0.92);
+                border: 1px solid rgba(255, 255, 255, 0.5);
+                border-radius: 16px;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+                padding: 18px 18px 16px;
+                color: #1D1D1F;
+                text-align: center;
+            }
+
+            @media (prefers-color-scheme: dark) {
+                #desktop-qr-modal .modal-card {
+                    background: rgba(28, 28, 30, 0.92);
+                    border-color: rgba(255, 255, 255, 0.12);
+                    color: #F5F5F7;
+                }
+            }
+
+            #desktop-qr-modal .modal-title {
+                font-size: 16px;
+                font-weight: 700;
+                margin-bottom: 10px;
+            }
+
+            #desktop-qr-modal .modal-subtitle {
+                font-size: 13px;
+                opacity: 0.78;
+                margin-bottom: 14px;
+            }
+
+            #desktop-qr-modal .modal-qr {
+                width: 220px;
+                height: 220px;
+                border-radius: 12px;
+                background: #fff;
+                padding: 8px;
+                display: inline-block;
+                box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+            }
+
+            #desktop-qr-modal .modal-actions {
+                margin-top: 14px;
+                display: flex;
+                gap: 10px;
+                justify-content: center;
+                flex-wrap: wrap;
+            }
+
+            #desktop-qr-modal .modal-btn {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                height: 38px;
+                padding: 0 12px;
+                border-radius: 10px;
+                text-decoration: none;
+                font-size: 13px;
+                font-weight: 600;
+                border: 1px solid rgba(0,0,0,0.12);
+                background: rgba(255,255,255,0.8);
+                color: inherit;
+            }
+
+            @media (prefers-color-scheme: dark) {
+                #desktop-qr-modal .modal-btn {
+                    border-color: rgba(255,255,255,0.14);
+                    background: rgba(255,255,255,0.06);
+                }
+            }
+
+            #desktop-qr-modal .modal-close {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                width: 34px;
+                height: 34px;
+                border-radius: 10px;
+                border: 1px solid rgba(0,0,0,0.10);
+                background: rgba(255,255,255,0.9);
+                cursor: pointer;
+                font-size: 18px;
+                line-height: 32px;
+                color: inherit;
+            }
+
+            @media (prefers-color-scheme: dark) {
+                #desktop-qr-modal .modal-close {
+                    border-color: rgba(255,255,255,0.14);
+                    background: rgba(255,255,255,0.06);
+                }
+            }
         </style>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -498,6 +649,30 @@
 </head>
 <body>
 
+    <div id="wechat-open-browser-tip" aria-hidden="true">
+        <div class="tip-content">
+            <div>
+                请点击右上角 <span style="font-weight: 700;">···</span>
+                <span class="tip-arrow"></span>
+            </div>
+            <div>选择「在浏览器中打开」再下载</div>
+            <div class="tip-sub">（点击任意位置关闭）</div>
+        </div>
+    </div>
+
+    <div id="desktop-qr-modal" aria-hidden="true" role="dialog" aria-modal="true" aria-label="下载应用二维码">
+        <div class="modal-card" role="document">
+            <button type="button" class="modal-close" aria-label="关闭">×</button>
+            <div class="modal-title">用手机扫码下载</div>
+            <div class="modal-subtitle">也可以把页面发到手机里打开</div>
+            <img class="modal-qr" src="assets/qrcode.png" alt="地方客下载二维码">
+            <div class="modal-actions">
+                <a class="modal-btn" href="https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162" target="_blank" rel="noopener noreferrer">App Store</a>
+                <a class="modal-btn" href="download/difangke.apk?v=8" target="_blank" rel="noopener noreferrer">下载 APK</a>
+            </div>
+        </div>
+    </div>
+
     <header>
         <a href="#" class="logo">
             <img src="./assets/1024x1024bb.png" alt="地方客应用图标">
@@ -508,7 +683,7 @@
             <a href="#philosophy">理念</a>
             <a href="#people">人群</a>
             <a href="privacy.html">隐私</a>
-            <a href="https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162" target="_blank" class="btn-download-nav dynamic-download">下载应用</a>
+            <a href="#" class="btn-download-nav dynamic-download">下载应用</a>
         </nav>
     </header>
 
@@ -657,26 +832,115 @@
             startAutoSlide();
         }
 
+        function startAutoSlide() {
+            clearInterval(slideInterval);
+            slideInterval = setInterval(() => {
+                showSlide(currentSlide + 1);
+            }, 3500);
+        }
+
         // Device detection and download link adjustment
         function setupDynamicLinks() {
             const userAgent = navigator.userAgent || navigator.vendor || window.opera;
             const iosLink = "https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162";
             const androidLink = "download/difangke.apk?v=8";
-            
-            let targetLink = iosLink; // Default
-            if (/android/i.test(userAgent)) {
-                targetLink = androidLink;
-            } else if (/iPad|iPhone|iPod/.test(userAgent) && !window.MSStream) {
-                targetLink = iosLink;
+
+            const isAndroid = /android/i.test(userAgent);
+            const isIOS = /iPad|iPhone|iPod/.test(userAgent) && !window.MSStream;
+            const isWeChat = /MicroMessenger/i.test(userAgent);
+            const isMobile = isAndroid || isIOS;
+
+            const tipEl = document.getElementById('wechat-open-browser-tip');
+            function showWeChatTip() {
+                if (!tipEl) return;
+                tipEl.style.display = 'block';
+                tipEl.setAttribute('aria-hidden', 'false');
+            }
+            function hideWeChatTip() {
+                if (!tipEl) return;
+                tipEl.style.display = 'none';
+                tipEl.setAttribute('aria-hidden', 'true');
+            }
+            if (tipEl) {
+                tipEl.addEventListener('click', hideWeChatTip);
+            }
+
+            const desktopModalEl = document.getElementById('desktop-qr-modal');
+            function showDesktopQRModal() {
+                if (!desktopModalEl) return;
+                desktopModalEl.style.display = 'block';
+                desktopModalEl.setAttribute('aria-hidden', 'false');
+            }
+            function hideDesktopQRModal() {
+                if (!desktopModalEl) return;
+                desktopModalEl.style.display = 'none';
+                desktopModalEl.setAttribute('aria-hidden', 'true');
+            }
+            if (desktopModalEl) {
+                desktopModalEl.addEventListener('click', (e) => {
+                    if (e.target === desktopModalEl) hideDesktopQRModal();
+                });
+                const closeBtn = desktopModalEl.querySelector('.modal-close');
+                if (closeBtn) closeBtn.addEventListener('click', hideDesktopQRModal);
+                document.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape') hideDesktopQRModal();
+                });
             }
 
             document.querySelectorAll('.dynamic-download').forEach(link => {
-                link.href = targetLink;
+                if (link.__difangkeDownloadHandler) {
+                    link.removeEventListener('click', link.__difangkeDownloadHandler);
+                    link.__difangkeDownloadHandler = null;
+                }
+
+                // Desktop: show QR modal
+                if (!isMobile) {
+                    link.href = "#";
+                    link.target = "";
+                    const handler = (e) => {
+                        e.preventDefault();
+                        showDesktopQRModal();
+                    };
+                    link.__difangkeDownloadHandler = handler;
+                    link.addEventListener('click', handler);
+                    return;
+                }
+
+                // 1) iOS: go to App Store
+                if (isIOS) {
+                    link.href = iosLink;
+                    link.target = "_blank";
+                    return;
+                }
+
+                // 2) Android WeChat in-app: show tip overlay
+                if (isAndroid && isWeChat) {
+                    link.href = "#";
+                    link.target = "";
+                    const handler = (e) => {
+                        e.preventDefault();
+                        showWeChatTip();
+                    };
+                    link.__difangkeDownloadHandler = handler;
+                    link.addEventListener('click', handler);
+                    return;
+                }
+
+                // 3) Android browser: direct apk
+                if (isAndroid) {
+                    link.href = androidLink;
+                    link.target = "_blank";
+                    return;
+                }
+
+                // Fallback: App Store
+                link.href = iosLink;
+                link.target = "_blank";
             });
         }
 
         // Initialize
-        startAutoSlide();
+        if (typeof startAutoSlide === 'function') startAutoSlide();
         setupDynamicLinks();
     </script>
 
