@@ -13,6 +13,7 @@ struct TimelinePageView: View {
     let offset: Int
     let locationManager: LocationManager
     let pastLimitOffset: Int
+    let isActivePage: Bool
     let isFromHistory: Bool
     @Query private var pageInsights: [DailyInsight]
     
@@ -43,8 +44,9 @@ struct TimelinePageView: View {
     @State private var trajectoryPoints: [CLLocationCoordinate2D] = []
     @State private var totalDailyMileage: Double = 0
     @State private var dayPhotoAssets: [PHAsset] = []
+    @State private var lastSummaryTimelineSignature: String?
     
-    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isFromHistory: Bool = false) {
+    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isActivePage: Bool = true, isFromHistory: Bool = false) {
         self.date = date
         let start = Calendar.current.startOfDay(for: date)
         _pageInsights = Query(filter: #Predicate<DailyInsight> { insight in
@@ -57,6 +59,7 @@ struct TimelinePageView: View {
         self.offset = offset
         self.locationManager = locationManager
         self.pastLimitOffset = pastLimitOffset
+        self.isActivePage = isActivePage
         self.isFromHistory = isFromHistory
         
         let cached = TimelineBuilder.timelineCache[date] ?? []
@@ -114,7 +117,7 @@ struct TimelinePageView: View {
         .onChange(of: footprints) { _, _ in
             // 安全刷新：仅重新获取数据库内容刷新 UI，不触发 syncDay 算法，彻底杜绝死循环
             let items = PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
-            self.timelineItems = items
+            applyTimelineItems(items, triggerAiIfChanged: true)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
             // 当后台完成活动匹配时，仅刷新 UI，不触发 AI 重新总结
@@ -127,9 +130,15 @@ struct TimelinePageView: View {
                 autoFocus: autoFocusOnOpen,
                 onDismiss: { didChange in
                     autoFocusOnOpen = false
-                    refreshTimeline(force: false)
-                    if didChange && isAiAssistantEnabled {
-                        Task {
+                    Task { @MainActor in
+                        if didChange {
+                            await refreshTransportEndpointsForCurrentDay()
+                            CloudSettingsManager.shared.triggerDataSyncPulse()
+                        }
+
+                        refreshTimeline(force: false)
+
+                        if didChange && isAiAssistantEnabled {
                             await refreshAiSummary(force: true)
                         }
                     }
@@ -170,6 +179,87 @@ struct TimelinePageView: View {
     // 过滤掉与当前正在进行的实时停留重合的足迹，避免双重视图
     private var filteredTimelineItems: [TimelineItem] {
         self.timelineItems
+    }
+
+    private var ongoingFootprintItem: TimelineItem? {
+        guard Calendar.current.isDateInToday(date),
+              let startLocation = locationManager.potentialStopStartLocation else {
+            return nil
+        }
+
+        let startTime = startLocation.timestamp
+        let endTime = max(Date(), startTime)
+        let matchedPlace = locationManager.matchedPlace
+        let matchedActivityType = inferredActivityTypeValue(for: matchedPlace?.placeID, at: startTime)
+        let address = locationManager.ongoingTitle ?? {
+            let currentAddress = locationManager.currentAddress
+            return (currentAddress == "正在解析位置..." || currentAddress == "未知位置") ? nil : currentAddress
+        }()
+
+        let alreadyCovered = filteredTimelineItems.contains { item in
+            guard case .footprint(let footprint) = item else { return false }
+
+            if let placeID = matchedPlace?.placeID, footprint.placeID == placeID, footprint.endTime >= startTime {
+                return true
+            }
+
+            let footprintLocation = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
+            let distance = startLocation.distance(from: footprintLocation)
+            return distance < 120 && footprint.endTime >= startTime.addingTimeInterval(-300)
+        }
+
+        guard !alreadyCovered else { return nil }
+
+        let temporaryFootprint = Footprint(
+            date: Calendar.current.startOfDay(for: date),
+            startTime: startTime,
+            endTime: endTime,
+            footprintLocations: [startLocation.coordinate],
+            locationHash: "ONGOING_STAY",
+            duration: endTime.timeIntervalSince(startTime),
+            status: .manual,
+            placeID: matchedPlace?.placeID,
+            address: address,
+            isAddressEditedByHand: matchedPlace != nil,
+            activityTypeValue: matchedActivityType
+        )
+
+        return .footprint(temporaryFootprint)
+    }
+
+    private func inferredActivityTypeValue(for placeID: UUID?, at time: Date) -> String? {
+        guard let placeID else { return nil }
+
+        // 优先复用当天同地点最近一次已确定的活动类型，确保实时卡片展示稳定。
+        if let sameDayType = footprints
+            .filter({ $0.placeID == placeID && $0.activityTypeValue != nil })
+            .sorted(by: { $0.endTime > $1.endTime })
+            .first?
+            .activityTypeValue {
+            return sameDayType
+        }
+
+        // 回退到全局习惯匹配规则（与已有自动补齐逻辑一致）。
+        return locationManager.suggestFrequentActivityType(for: placeID, at: time)
+    }
+
+    private var displayedTimelineItems: [TimelineItem] {
+        var items = filteredTimelineItems
+        guard let ongoingFootprintItem else { return items }
+
+        // 保持原时间线顺序，不做全量重排；仅按现有方向插入当前停留项。
+        if items.count < 2 {
+            items.append(ongoingFootprintItem)
+            return items
+        }
+
+        let isDescending = (items.first?.startTime ?? .distantPast) >= (items.last?.startTime ?? .distantPast)
+        if isDescending {
+            items.insert(ongoingFootprintItem, at: 0)
+        } else {
+            items.append(ongoingFootprintItem)
+        }
+        return items
     }
     
     private var timelineScrollView: some View {
@@ -215,7 +305,8 @@ struct TimelinePageView: View {
                 RecordingStatusCard(
                     locationManager: locationManager, 
                     footprintCount: footprints.count,
-                    timelineItems: filteredTimelineItems,
+                    timelineItems: displayedTimelineItems,
+                    rendersLiveMap: isActivePage,
                     onTimelineItemTap: handleTimelineItemTap,
                     photoAssets: dayPhotoAssets
                 )
@@ -223,20 +314,22 @@ struct TimelinePageView: View {
             } else {
                     DaySummaryCard(
                         date: date,
+                        dateOffset: offset,
                         totalPoints: totalPointsCount,
-                        footprintCount: filteredTimelineItems.filter { if case .footprint = $0 { return true }; return false }.count,
+                        footprintCount: displayedTimelineItems.filter { if case .footprint = $0 { return true }; return false }.count,
                         totalMileage: totalDailyMileage,
                         points: trajectoryPoints,
-                    timelineItems: filteredTimelineItems,
+                    timelineItems: displayedTimelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
                     photoAssets: dayPhotoAssets,
                     summary: pageInsights.first?.content,
-                    isLoading: isLoadingTimeline
+                    isLoading: isLoadingTimeline,
+                    rendersLiveMap: isActivePage
                 )
                 .padding(.horizontal, 16)
             }
             
-            if isToday && timelineItems.isEmpty && !isLoadingTimeline {
+            if isToday && displayedTimelineItems.isEmpty && !isLoadingTimeline {
                 PlaceholderFootprintCard()
                     .padding(.horizontal, 0)
             }
@@ -259,14 +352,14 @@ struct TimelinePageView: View {
     
     @ViewBuilder
     private func timelineListSection(isToday: Bool) -> some View {
-        if footprints.isEmpty && timelineItems.isEmpty && dayPhotoAssets.isEmpty && (!isToday || locationManager.potentialStopStartLocation == nil) {
+        if footprints.isEmpty && displayedTimelineItems.isEmpty && dayPhotoAssets.isEmpty && (!isToday || locationManager.potentialStopStartLocation == nil) {
             if allPlaces.isEmpty && isToday && !isGuideDismissed {
                 EmptyView()
             } else if !isLoadingTimeline {
                 emptyStateView
             }
         } else {
-            let items = filteredTimelineItems
+            let items = displayedTimelineItems
             let count = items.count
             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                 switch item {
@@ -294,13 +387,7 @@ struct TimelinePageView: View {
                             self.selectedTransport = selected
                         },
                         onDelete: { selected in
-                            let targetId = selected.id
-                            let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == targetId })
-                            if let records = try? modelContext.fetch(descriptor), let record = records.first {
-                                record.statusRaw = "ignored"
-                            }
-                            try? modelContext.save()
-                            refreshTimeline(force: true)
+                            deleteTransport(selected)
                         }
                     )
                     .padding(.horizontal, 16)
@@ -317,7 +404,92 @@ struct TimelinePageView: View {
             self.selectedTransport = transport
         }
     }
+
+    private func deleteTransport(_ selected: Transport) {
+        let targetId = selected.id
+
+        let recordDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == targetId })
+        if let records = try? modelContext.fetch(recordDescriptor), let record = records.first {
+            record.statusRaw = "ignored"
+        }
+
+        let overrideDescriptor = FetchDescriptor<TransportManualSelection>(predicate: #Predicate { $0.recordID == targetId })
+        let existingOverride = (try? modelContext.fetch(overrideDescriptor))?.first
+        let deletionOverride = existingOverride ?? TransportManualSelection(
+            recordID: targetId,
+            startTime: selected.startTime,
+            endTime: selected.endTime,
+            vehicleType: selected.currentType.rawValue,
+            isDeleted: true
+        )
+
+        deletionOverride.startTime = selected.startTime
+        deletionOverride.endTime = selected.endTime
+        deletionOverride.vehicleType = selected.currentType.rawValue
+        deletionOverride.isDeleted = true
+        deletionOverride.startLocationOverride = nil
+        deletionOverride.endLocationOverride = nil
+
+        if existingOverride == nil {
+            modelContext.insert(deletionOverride)
+        }
+
+        try? modelContext.save()
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+        refreshTimeline(force: false)
+        if isAiAssistantEnabled {
+            Task {
+                await refreshAiSummary(force: true)
+            }
+        }
+    }
     
+    @MainActor
+    private func applyTimelineItems(_ items: [TimelineItem], triggerAiIfChanged: Bool) {
+        self.timelineItems = items
+
+        let signature = timelineSummarySignature(for: items)
+        let previousSignature = lastSummaryTimelineSignature
+        lastSummaryTimelineSignature = signature
+
+        guard triggerAiIfChanged,
+              isAiAssistantEnabled,
+              previousSignature != nil,
+              previousSignature != signature else { return }
+
+        Task {
+            await refreshAiSummary(force: true)
+        }
+    }
+
+    private func timelineSummarySignature(for items: [TimelineItem]) -> String {
+        items.map { item in
+            switch item {
+            case .footprint(let footprint):
+                return [
+                    "f",
+                    footprint.footprintID.uuidString,
+                    String(Int(footprint.startTime.timeIntervalSince1970)),
+                    String(Int(footprint.endTime.timeIntervalSince1970)),
+                    footprint.placeID?.uuidString ?? "nil",
+                    footprint.activityTypeValue ?? "nil",
+                    String(format: "%.4f", footprint.latitude),
+                    String(format: "%.4f", footprint.longitude),
+                    String(footprint.photoAssetIDs.count)
+                ].joined(separator: ":")
+            case .transport(let transport):
+                return [
+                    "t",
+                    transport.id.uuidString,
+                    String(Int(transport.startTime.timeIntervalSince1970)),
+                    String(Int(transport.endTime.timeIntervalSince1970)),
+                    transport.currentType.rawValue,
+                    transport.points.map { String(format: "%.4f,%.4f", $0.latitude, $0.longitude) }.joined(separator: ";")
+                ].joined(separator: ":")
+            }
+        }.joined(separator: "|")
+    }
+
     @MainActor
     private func refreshTimeline(force: Bool = false) {
         refreshTask?.cancel()
@@ -365,7 +537,7 @@ struct TimelinePageView: View {
         if Task.isCancelled { return }
         
         let items = PersistentTimelineBuilder.fetchTimeline(for: targetDate, in: modelContext)
-        self.timelineItems = items
+        applyTimelineItems(items, triggerAiIfChanged: true)
         
         let result = await Task.detached(priority: .userInitiated) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
@@ -640,6 +812,107 @@ struct TimelinePageView: View {
         // 触感反馈
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
+
+    @MainActor
+    private func refreshTransportEndpointsForCurrentDay() async {
+        let startOfDay = Calendar.current.startOfDay(for: date)
+        let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
+
+        let placeDescriptor = FetchDescriptor<Place>()
+        let allPlaces = (try? modelContext.fetch(placeDescriptor)) ?? []
+
+        let footprintDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let dayFootprints = (try? modelContext.fetch(footprintDescriptor)) ?? []
+
+        let transportDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let dayTransports = (try? modelContext.fetch(transportDescriptor)) ?? []
+
+        var hasChanges = false
+
+        for transport in dayTransports {
+            var transportChanged = false
+            var decodedPoints: [CodableCoordinate] = []
+            if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData) {
+                decodedPoints = decoded
+            }
+
+            if let previousFootprint = dayFootprints.last(where: { $0.endTime <= transport.startTime + AppConfig.shared.snapTimeBuffer }) {
+                let gap = transport.startTime.timeIntervalSince(previousFootprint.endTime)
+                if gap >= 0 && gap < AppConfig.shared.transportAlignmentThreshold {
+                    transport.startTime = previousFootprint.endTime
+                    let locationName = preferredTransportLocationName(for: previousFootprint, allPlaces: allPlaces)
+                    if !locationName.isEmpty && locationName != "某地" && transport.startLocation != locationName {
+                        transport.startLocation = locationName
+                    }
+
+                    let footprintCoordinate = CodableCoordinate(lat: previousFootprint.latitude, lon: previousFootprint.longitude)
+                    if decodedPoints.first?.lat != footprintCoordinate.lat || decodedPoints.first?.lon != footprintCoordinate.lon {
+                        decodedPoints.insert(footprintCoordinate, at: 0)
+                    }
+                    transportChanged = true
+                }
+            }
+
+            if let nextFootprint = dayFootprints.first(where: { $0.startTime >= transport.endTime - AppConfig.shared.snapTimeBuffer }) {
+                let gap = nextFootprint.startTime.timeIntervalSince(transport.endTime)
+                if gap >= 0 && gap < AppConfig.shared.transportAlignmentThreshold {
+                    transport.endTime = nextFootprint.startTime
+                    let locationName = preferredTransportLocationName(for: nextFootprint, allPlaces: allPlaces)
+                    if !locationName.isEmpty && locationName != "某地" && transport.endLocation != locationName {
+                        transport.endLocation = locationName
+                    }
+
+                    let footprintCoordinate = CodableCoordinate(lat: nextFootprint.latitude, lon: nextFootprint.longitude)
+                    if decodedPoints.last?.lat != footprintCoordinate.lat || decodedPoints.last?.lon != footprintCoordinate.lon {
+                        decodedPoints.append(footprintCoordinate)
+                    }
+                    transportChanged = true
+                }
+            }
+
+            if transportChanged {
+                if let newPointsData = try? JSONEncoder().encode(decodedPoints) {
+                    transport.pointsData = newPointsData
+                }
+                transport.distance = TimelineBuilder.calculatePathDistance(decodedPoints)
+                let duration = transport.endTime.timeIntervalSince(transport.startTime)
+                if duration > 0 {
+                    transport.averageSpeed = transport.distance / duration
+                }
+                hasChanges = true
+            }
+        }
+
+        if hasChanges {
+            try? modelContext.save()
+        }
+    }
+
+    private func preferredTransportLocationName(for footprint: Footprint, allPlaces: [Place]) -> String {
+        if footprint.isAddressEditedByHand, let address = footprint.address, !address.isEmpty {
+            return address
+        }
+
+        if let placeID = footprint.placeID, let place = allPlaces.first(where: { $0.placeID == placeID }) {
+            return place.name
+        }
+
+        let coordinate = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+        let litePlaces = allPlaces.map { TimelineBuilder.convertToPlaceLite($0) }
+        if let matched = TimelineBuilder.getPlaceForCoordinate(coordinate, allPlaces: litePlaces) {
+            return matched.name
+        }
+
+        if let address = footprint.address, !address.isEmpty {
+            return address
+        }
+
+        return "未知位置"
+    }
     
     private func refreshAiSummary(force: Bool = false) async {
         let startOfDay = Calendar.current.startOfDay(for: date)
@@ -654,9 +927,22 @@ struct TimelinePageView: View {
             $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw == "active"
         })
         let latestTransports = (try? modelContext.fetch(tpDesc)) ?? []
-        
-        if !latestFootprints.isEmpty {
-            OpenAIService.shared.enqueueDailySummary(for: date, footprints: latestFootprints, transports: latestTransports, force: force)
+
+        let summaryFootprints = latestFootprints.filter { $0.isUserModifiedForDailySummary }
+
+        if summaryFootprints.isEmpty {
+            let insightDescriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate {
+                $0.date == startOfDay
+            })
+            if let existingInsight = (try? modelContext.fetch(insightDescriptor))?.first,
+               existingInsight.aiGenerated == true {
+                existingInsight.content = nil
+                existingInsight.dataFingerprint = nil
+                try? modelContext.save()
+            }
+            return
         }
+        
+        OpenAIService.shared.enqueueDailySummary(for: date, footprints: summaryFootprints, transports: latestTransports, force: force)
     }
 }

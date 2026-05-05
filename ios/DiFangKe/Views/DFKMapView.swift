@@ -2,199 +2,973 @@ import SwiftUI
 import MapKit
 import SwiftData
 import Photos
+import UIKit
+
+@MainActor
+private final class DFKMapSnapshotCache {
+    static let shared = DFKMapSnapshotCache()
+    private let cache = NSCache<NSString, UIImage>()
+
+    private init() {
+        cache.countLimit = 24
+    }
+
+    func image(for key: String) -> UIImage? {
+        cache.object(forKey: key as NSString)
+    }
+
+    func setImage(_ image: UIImage, for key: String) {
+        cache.setObject(image, forKey: key as NSString)
+    }
+}
 
 /// DiFangKe 统一地图组件，用于确保全应用地图表现一致
 struct DFKMapView: View {
     @Binding var cameraPosition: MapCameraPosition
     var isInteractive: Bool = false
+    var rendersLiveMap: Bool = true
     var showsUserLocation: Bool = true
     var points: [CLLocationCoordinate2D] = []
     var mainAnnotationCoordinate: CLLocationCoordinate2D? = nil
     var mainAnnotationTitle: String? = nil
     var timelineItems: [TimelineItem] = []
     var photoAssets: [PHAsset] = []
-    
-    // 热力图支持 (用于统计视图)
+    var widgetSnapshotOffset: Int? = nil
+    var allowsGeneratedSnapshot: Bool = true
+
     struct HeatmapPoint: Identifiable {
         let id: String
         let coordinate: CLLocationCoordinate2D
         let intensity: Int
         let maxIntensity: Int
-        
+
         init(coordinate: CLLocationCoordinate2D, intensity: Int, maxIntensity: Int) {
-            // 使用坐标作为稳定 ID，避免每次刷新生成新 UUID 导致 MapKit 深度重新渲染
             self.id = String(format: "%.5f,%.5f", coordinate.latitude, coordinate.longitude)
             self.coordinate = coordinate
             self.intensity = intensity
             self.maxIntensity = maxIntensity
         }
     }
+
+    fileprivate struct AggregatedFootprint: Identifiable {
+        let id: String
+        let coordinate: CLLocationCoordinate2D
+        let totalDuration: TimeInterval
+        let representative: Footprint
+        let footprints: [Footprint]
+    }
+
     var heatmapPoints: [HeatmapPoint] = []
-    
+
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     var onPhotoTap: ((PHAsset) -> Void)? = nil
-    
+
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
-    
-    var body: some View {
-        Map(position: $cameraPosition, interactionModes: isInteractive ? .all : []) {
-            if showsUserLocation {
-                UserAnnotation()
-            }
-            
-            // 1. 轨迹线系统 (已修改为仅显示交通段路线，隐藏原始 GPS 噪点线)
-            ForEach(timelineItems) { item in
-                if case .transport(let transport) = item {
-                    // 背景边框
-                    MapPolyline(coordinates: transport.points)
-                        .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: (isInteractive ? 5 : 3) + 2.5, lineCap: .round, lineJoin: .round))
-                    
-                    // 交通轨迹线
-                    MapPolyline(coordinates: transport.points)
-                        .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: isInteractive ? 5 : 3, lineCap: .round, lineJoin: .round))
-                }
-            }
-            
-            if let mainCoord = mainAnnotationCoordinate {
-                Marker("", coordinate: mainCoord)
-                    .tint(Color.dfkAccent)
-            }
-            
-            // 重要地点呈现
-            ForEach(allPlaces.filter { $0.isUserDefined }) { place in
-                MapCircle(center: place.coordinate, radius: Double(place.radius))
-                    .foregroundStyle(Color.orange.opacity(0.1))
-                    .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-            }
-            
-            // 每一个 TimelineItem 在地图上的标注 (放在最后以确保在顶层显示)
-            ForEach(timelineItems) { item in
-                if case .footprint(let fp) = item {
-                    Annotation("", coordinate: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)) {
-                        let scale = calculateScale(for: fp.duration)
-                        let baseSize: CGFloat = 28
-                        let size = baseSize * scale
-                        
-                        let footprintIcon = ZStack {
-                            let activity = fp.getActivityType(from: allActivities)
-                            let activityColor = activity?.color ?? Color.secondary.opacity(0.5)
-                            
-                            Circle()
-                                .fill(activityColor)
-                                .frame(width: size, height: size)
-                                .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1.5 * scale))
-                            
-                            Image(systemName: activity?.icon ?? "questionmark.circle.dashed")
-                                .font(.system(size: (activity?.icon == nil ? 18 : 13) * scale, weight: .bold))
-                                .foregroundColor(Color(uiColor: .systemBackground))
-                        }
-                        .contentShape(Circle())
-                        
-                        Group {
-                            if let onTimelineItemTap {
-                                footprintIcon.onTapGesture { onTimelineItemTap(.footprint(fp)) }
-                            } else {
-                                footprintIcon
-                            }
-                        }
-                    }
-                } else if case .transport(let transport) = item {
-                    // 直接使用交通段自身的轨迹点序列计算“路程中点”
-                    // 这样可以确保图标既在“绘制的路线上”，又处于“实际行驶路程的中心”
-                    let finalPoint = transport.points.distanceMidpoint
 
-                    if let coord = finalPoint {
-                        Annotation("", coordinate: coord) {
-                            let transportIcon = ZStack {
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.dfkAccent)
-                                    .frame(width: 20, height: 20)
-                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(uiColor: .systemBackground), lineWidth: 1.2))
-                                
-                                Image(systemName: transport.currentType.sfSymbol)
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(Color(uiColor: .systemBackground))
+    init(
+        cameraPosition: Binding<MapCameraPosition>,
+        rendersLiveMap: Bool = true,
+        isInteractive: Bool = false,
+        widgetSnapshotOffset: Int? = nil,
+        allowsGeneratedSnapshot: Bool = true,
+        showsUserLocation: Bool = true,
+        points: [CLLocationCoordinate2D] = [],
+        mainAnnotationCoordinate: CLLocationCoordinate2D? = nil,
+        mainAnnotationTitle: String? = nil,
+        timelineItems: [TimelineItem] = [],
+        photoAssets: [PHAsset] = [],
+        heatmapPoints: [HeatmapPoint] = [],
+        onTimelineItemTap: ((TimelineItem) -> Void)? = nil,
+        onPhotoTap: ((PHAsset) -> Void)? = nil
+    ) {
+        self._cameraPosition = cameraPosition
+        self.rendersLiveMap = rendersLiveMap
+        self.isInteractive = isInteractive
+        self.widgetSnapshotOffset = widgetSnapshotOffset
+        self.allowsGeneratedSnapshot = allowsGeneratedSnapshot
+        self.showsUserLocation = showsUserLocation
+        self.points = points
+        self.mainAnnotationCoordinate = mainAnnotationCoordinate
+        self.mainAnnotationTitle = mainAnnotationTitle
+        self.timelineItems = timelineItems
+        self.photoAssets = photoAssets
+        self.heatmapPoints = heatmapPoints
+        self.onTimelineItemTap = onTimelineItemTap
+        self.onPhotoTap = onPhotoTap
+    }
+
+    @State private var snapshotImage: UIImage?
+    @State private var snapshotTask: Task<Void, Never>?
+
+    @State private var isRequestingWidgetSnapshot = false
+    @State private var selectedAggregatedFootprint: AggregatedFootprint?
+
+    private var hasVisibleContent: Bool {
+        !points.isEmpty ||
+        validMainAnnotationCoordinate != nil ||
+        !timelineItems.isEmpty ||
+        !validPhotoAnnotations.isEmpty ||
+        !validHeatmapPoints.isEmpty ||
+        showsUserLocation
+    }
+
+    private var userDefinedPlaces: [Place] {
+        allPlaces.filter {
+            $0.isUserDefined &&
+            $0.coordinate.isRenderableMapCoordinate &&
+            $0.radius.isFinite &&
+            $0.radius > 1
+        }
+    }
+
+    private var transportItems: [Transport] {
+        timelineItems.compactMap { item in
+            guard case .transport(let transport) = item,
+                  transport.points.filter(\.isRenderableMapCoordinate).count >= 2 else { return nil }
+            return transport
+        }
+    }
+
+    private var validMainAnnotationCoordinate: CLLocationCoordinate2D? {
+        guard let mainAnnotationCoordinate, mainAnnotationCoordinate.isRenderableMapCoordinate else { return nil }
+        return mainAnnotationCoordinate
+    }
+
+    private var validAggregatedFootprints: [AggregatedFootprint] {
+        aggregatedFootprints.filter { $0.coordinate.isRenderableMapCoordinate }
+    }
+
+    private var validPhotoAnnotations: [(asset: PHAsset, coordinate: CLLocationCoordinate2D)] {
+        photoAssets.compactMap { asset in
+            guard let coordinate = asset.location?.gcj02.coordinate,
+                  coordinate.isRenderableMapCoordinate else { return nil }
+            return (asset, coordinate)
+        }
+    }
+
+    private var validHeatmapPoints: [HeatmapPoint] {
+        heatmapPoints.filter { $0.coordinate.isRenderableMapCoordinate }
+    }
+
+    private var interactiveRegion: MKCoordinateRegion? {
+        var allCoords = points.filter(\.isRenderableMapCoordinate)
+        if let mainAnnotationCoordinate = validMainAnnotationCoordinate {
+            allCoords.append(mainAnnotationCoordinate)
+        }
+        for item in timelineItems {
+            switch item {
+            case .footprint(let footprint):
+                let coordinate = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+                if coordinate.isRenderableMapCoordinate {
+                    allCoords.append(coordinate)
+                }
+            case .transport(let transport):
+                allCoords.append(contentsOf: transport.points.filter(\.isRenderableMapCoordinate))
+            }
+        }
+        allCoords.append(contentsOf: validPhotoAnnotations.map(\.coordinate))
+        allCoords.append(contentsOf: validHeatmapPoints.map(\.coordinate))
+
+        if allCoords.isEmpty,
+           showsUserLocation,
+           let lastLoc = LocationManager.shared.lastLocation?.coordinate,
+           lastLoc.isRenderableMapCoordinate {
+            allCoords.append(lastLoc)
+        }
+
+        return allCoords.boundingRegion(paddingFactor: 1.4)
+    }
+
+    private var shouldDrawStandalonePhotosInSnapshot: Bool {
+        timelineItems.contains { item in
+            guard case .footprint(let footprint) = item else { return false }
+            return !footprint.photoAssetIDs.isEmpty
+        }
+    }
+
+    private func latestPhotoAssetID(for aggregated: AggregatedFootprint) -> String? {
+        aggregated.footprints
+            .sorted { lhs, rhs in
+                if lhs.endTime != rhs.endTime {
+                    return lhs.endTime > rhs.endTime
+                }
+                return lhs.startTime > rhs.startTime
+            }
+            .compactMap { $0.photoAssetIDs.last }
+            .first
+    }
+
+    private func markerSize(for duration: TimeInterval) -> CGFloat {
+        let baseSize: CGFloat = 28
+        return baseSize * calculateScale(for: duration)
+    }
+
+    private var aggregatedFootprints: [AggregatedFootprint] {
+        struct Bucket {
+            var weightedLatitude: Double
+            var weightedLongitude: Double
+            var totalDuration: TimeInterval
+            var representative: Footprint
+            var footprints: [Footprint]
+        }
+
+        let footprints = timelineItems.compactMap { item -> Footprint? in
+            guard case .footprint(let footprint) = item else { return nil }
+            let coordinate = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+            guard coordinate.isRenderableMapCoordinate else { return nil }
+            return footprint
+        }
+
+        var buckets: [String: Bucket] = [:]
+        var orderedKeys: [String] = []
+
+        for footprint in footprints {
+            let durationWeight = max(footprint.duration, 1)
+            let key: String
+            if let placeID = footprint.placeID {
+                key = "place:\(placeID.uuidString)"
+            } else if !footprint.locationHash.isEmpty {
+                key = "hash:\(footprint.locationHash)"
+            } else {
+                key = String(format: "coord:%.5f,%.5f", footprint.latitude, footprint.longitude)
+            }
+
+            if var bucket = buckets[key] {
+                bucket.weightedLatitude += footprint.latitude * durationWeight
+                bucket.weightedLongitude += footprint.longitude * durationWeight
+                bucket.totalDuration += footprint.duration
+                bucket.footprints.append(footprint)
+                if footprint.duration > bucket.representative.duration {
+                    bucket.representative = footprint
+                }
+                buckets[key] = bucket
+            } else {
+                orderedKeys.append(key)
+                buckets[key] = Bucket(
+                    weightedLatitude: footprint.latitude * durationWeight,
+                    weightedLongitude: footprint.longitude * durationWeight,
+                    totalDuration: footprint.duration,
+                    representative: footprint,
+                    footprints: [footprint]
+                )
+            }
+        }
+
+        return orderedKeys.compactMap { key in
+            guard let bucket = buckets[key] else { return nil }
+            let divisor = max(bucket.totalDuration, 1)
+            return AggregatedFootprint(
+                id: key,
+                coordinate: CLLocationCoordinate2D(
+                    latitude: bucket.weightedLatitude / divisor,
+                    longitude: bucket.weightedLongitude / divisor
+                ),
+                totalDuration: bucket.totalDuration,
+                representative: bucket.representative,
+                footprints: bucket.footprints.sorted { $0.startTime < $1.startTime }
+            )
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let isValidSize = geometry.size.width > 1 && geometry.size.height > 1
+
+            ZStack {
+                Group {
+                    if isInteractive && isValidSize && rendersLiveMap {
+                        Map(position: $cameraPosition) {
+                            ForEach(userDefinedPlaces) { place in
+                                MapCircle(center: place.coordinate, radius: max(5, min(Double(place.radius), 10_000)))
+                                    .foregroundStyle(Color.orange.opacity(0.1))
+                                    .stroke(Color.orange.opacity(0.3), lineWidth: 1)
                             }
-                            .contentShape(RoundedRectangle(cornerRadius: 6))
-                            
-                            Group {
-                                if let onTimelineItemTap {
-                                    transportIcon.onTapGesture { onTimelineItemTap(.transport(transport)) }
-                                } else {
-                                    transportIcon
+
+                            transportMapContent()
+
+                            ForEach(validAggregatedFootprints) { aggregated in
+                                Annotation("", coordinate: aggregated.coordinate) {
+                                    Button {
+                                        handleFootprintTap(for: aggregated)
+                                    } label: {
+                                        aggregatedAnnotationContent(for: aggregated)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
                             }
-                        }
-                    }
-                }
-            }
-            
-            // 照片标注 (用真正在该地拍摄的照片做图标)
-            ForEach(photoAssets, id: \.localIdentifier) { asset in
-                if let coord = asset.location?.gcj02.coordinate {
-                    Annotation("", coordinate: coord) {
-                        let content = AssetThumbnailView(assetID: asset.localIdentifier)
-                            .frame(width: 32, height: 32)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.5))
-                            .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
-                            .contentShape(Rectangle())
-                        
-                        // IMPORTANT: Only attach gesture if handler exists.
-                        // If nil, touch passes through to Map, then to Card.
-                        Group {
-                            if let onPhotoTap {
-                                content.onTapGesture { onPhotoTap(asset) }
-                            } else {
-                                content
+
+                            ForEach(validPhotoAnnotations, id: \.asset.localIdentifier) { entry in
+                                Annotation("", coordinate: entry.coordinate) {
+                                    photoAnnotationContent(for: entry.asset)
+                                }
+                            }
+
+                            ForEach(validHeatmapPoints) { point in
+                                Annotation("", coordinate: point.coordinate) {
+                                    heatmapAnnotationContent(for: point)
+                                }
+                            }
+
+                            if let coordinate = validMainAnnotationCoordinate {
+                                Annotation(mainAnnotationTitle ?? "", coordinate: coordinate) {
+                                    Circle()
+                                        .fill(Color.dfkAccent)
+                                        .frame(width: 14, height: 14)
+                                        .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
+                                }
+                            }
+
+                            if showsUserLocation {
+                                UserAnnotation()
                             }
                         }
+                        .mapStyle(.standard(emphasis: .muted))
+                        .mapControls {
+                            MapUserLocationButton()
+                            MapCompass()
+                            MapScaleView()
+                        }
+                    } else {
+                        snapshotContent(for: geometry.size)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+
+                if let aggregated = selectedAggregatedFootprint {
+                    aggregatedModal(for: aggregated)
+                        .transition(.opacity)
+                }
+            }
+            .onAppear {
+                if !isInteractive {
+                    loadSnapshot(for: geometry.size)
+                }
+            }
+            .onChange(of: snapshotCacheKey(for: geometry.size)) { _, _ in
+                if !isInteractive {
+                    loadSnapshot(for: geometry.size, forceWidgetRefresh: true)
+                }
+            }
+            .onDisappear {
+                snapshotTask?.cancel()
+            }
+        }
+    }
+
+    private func handleFootprintTap(for aggregated: AggregatedFootprint) {
+        if aggregated.footprints.count > 1 {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                selectedAggregatedFootprint = aggregated
+            }
+            return
+        }
+
+        guard let footprint = aggregated.footprints.first else { return }
+        onTimelineItemTap?(.footprint(footprint))
+    }
+
+    @ViewBuilder
+    private func aggregatedModal(for aggregated: AggregatedFootprint) -> some View {
+        ZStack(alignment: .bottom) {
+            Color.black.opacity(0.22)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        selectedAggregatedFootprint = nil
+                    }
+                }
+
+            AggregatedFootprintListView(
+                aggregated: aggregated,
+                allPlaces: allPlaces,
+                onClose: {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        selectedAggregatedFootprint = nil
+                    }
+                },
+                onFootprintSelected: { footprint in
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        selectedAggregatedFootprint = nil
+                    }
+                    DispatchQueue.main.async {
+                        onTimelineItemTap?(.footprint(footprint))
+                    }
+                }
+            )
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
+        }
+        .zIndex(10)
+    }
+
+    @ViewBuilder
+    private func snapshotContent(for size: CGSize) -> some View {
+        if let snapshotImage {
+            Image(uiImage: snapshotImage)
+                .resizable()
+                .scaledToFill()
+                .clipped()
+        } else {
+            placeholderView
+        }
+    }
+
+    private var placeholderView: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(uiColor: .secondarySystemBackground),
+                    Color(uiColor: .tertiarySystemBackground)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            VStack(spacing: 8) {
+                Image(systemName: hasVisibleContent ? "map" : "map.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.secondary.opacity(0.55))
+
+                if hasVisibleContent {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.secondary)
+                } else {
+                    Text("暂无地图数据")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .clipped()
+    }
+
+    private func aggregatedAnnotationContent(for aggregated: AggregatedFootprint) -> some View {
+        let fp = aggregated.representative
+        let scale = calculateScale(for: aggregated.totalDuration)
+        let size = markerSize(for: aggregated.totalDuration)
+
+        return ZStack {
+            if let latestPhotoAssetID = latestPhotoAssetID(for: aggregated) {
+                AssetThumbnailView(assetID: latestPhotoAssetID)
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: 8 * scale, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8 * scale, style: .continuous)
+                            .stroke(Color.white, lineWidth: 1.5 * scale)
+                    )
+                    .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
+            } else {
+                let activity = fp.getActivityType(from: allActivities)
+                let activityColor = activity?.color ?? Color.secondary.opacity(0.5)
+                let iconName = activity?.icon ?? "questionmark.circle.dashed"
+                let iconSize: CGFloat = (activity?.icon == nil ? 18 : 13) * scale
+
+                Circle()
+                    .fill(activityColor)
+                    .frame(width: size, height: size)
+                    .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1.5 * scale))
+
+                Image(systemName: iconName)
+                    .font(.system(size: iconSize, weight: .bold))
+                    .foregroundColor(Color(uiColor: .systemBackground))
+            }
+        }
+        .frame(width: size, height: size)
+        .contentShape(RoundedRectangle(cornerRadius: 8 * scale, style: .continuous))
+    }
+
+    private func transportAnnotationContent(for transport: Transport) -> some View {
+        let transportIcon = ZStack {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.dfkAccent)
+                .frame(width: 20, height: 20)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(uiColor: .systemBackground), lineWidth: 1.2))
+
+            Image(systemName: transport.currentType.sfSymbol)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(Color(uiColor: .systemBackground))
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 6))
+
+        if let onTimelineItemTap {
+            return AnyView(
+                Button {
+                    onTimelineItemTap(.transport(transport))
+                } label: {
+                    transportIcon
+                }
+                .buttonStyle(.plain)
+            )
+        } else {
+            return AnyView(transportIcon)
+        }
+    }
+
+    @MapContentBuilder
+    private func transportMapContent() -> some MapContent {
+        let backgroundLineWidth: CGFloat = (isInteractive ? 5 : 3) + 2.5
+        let foregroundLineWidth: CGFloat = isInteractive ? 5 : 3
+
+        ForEach(transportItems) { transport in
+            MapPolyline(coordinates: transport.points)
+                .stroke(
+                    Color(uiColor: .systemBackground),
+                    style: StrokeStyle(lineWidth: backgroundLineWidth, lineCap: .round, lineJoin: .round)
+                )
+
+            MapPolyline(coordinates: transport.points)
+                .stroke(
+                    Color.dfkAccent,
+                    style: StrokeStyle(lineWidth: foregroundLineWidth, lineCap: .round, lineJoin: .round)
+                )
+
+            if let coord = transport.points.distanceMidpoint {
+                Annotation("", coordinate: coord) {
+                    transportAnnotationContent(for: transport)
+                }
+            }
+        }
+    }
+
+    @MapContentBuilder
+    private func aggregatedFootprintAnnotations() -> some MapContent {
+        ForEach(aggregatedFootprints) { aggregated in
+            Annotation("", coordinate: aggregated.coordinate) {
+                aggregatedAnnotationContent(for: aggregated)
+            }
+            .tag(aggregated.id)
+        }
+    }
+
+    @MapContentBuilder
+    private func photoAnnotations() -> some MapContent {
+        ForEach(photoAssets, id: \.localIdentifier) { asset in
+            if let coord = asset.location?.gcj02.coordinate {
+                Annotation("", coordinate: coord) {
+                    photoAnnotationContent(for: asset)
+                }
+            }
+        }
+    }
+
+    private func heatmapAnnotationContent(for point: HeatmapPoint) -> some View {
+        let rawRatio = Double(point.intensity) / Double(max(1, point.maxIntensity))
+        let ratio = pow(rawRatio, 0.4)
+        let color: Color = {
+            if point.maxIntensity <= 1 {
+                return .orange
+            } else if ratio < 0.25 {
+                return .orange
+            } else if ratio < 0.85 {
+                return .red
+            } else {
+                return .dfkDeepRed
+            }
+        }()
+
+        let baseSize: CGFloat = isInteractive ? 24 : 14
+        let multiplier: CGFloat = isInteractive ? 6 : 3
+        let maxSize: CGFloat = isInteractive ? 60 : 30
+        let size = CGFloat(max(baseSize, min(maxSize, CGFloat(point.intensity) * multiplier)))
+
+        return Circle()
+            .fill(
+                RadialGradient(
+                    colors: [color.opacity(0.7), color.opacity(0.15)],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: size / 2
+                )
+            )
+            .frame(width: size, height: size)
+    }
+
+    private func photoAnnotationContent(for asset: PHAsset) -> some View {
+        let content = AssetThumbnailView(assetID: asset.localIdentifier)
+            .frame(width: 38, height: 38)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.5))
+            .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
+            .contentShape(Rectangle())
+
+        if let onPhotoTap {
+            return AnyView(
+                Button {
+                    onPhotoTap(asset)
+                } label: {
+                    content
+                }
+                .buttonStyle(.plain)
+            )
+        }
+
+        return AnyView(content)
+    }
+
+    private func snapshotCacheKey(for size: CGSize) -> String {
+        let footprintKey = timelineItems.compactMap { item -> String? in
+            guard case .footprint(let fp) = item else { return nil }
+            return [
+                "f",
+                fp.footprintID.uuidString,
+                String(Int(fp.startTime.timeIntervalSince1970)),
+                String(Int(fp.endTime.timeIntervalSince1970)),
+                String(format: "%.4f", fp.latitude),
+                String(format: "%.4f", fp.longitude),
+                String(fp.photoAssetIDs.count),
+                fp.activityTypeValue ?? "nil"
+            ].joined(separator: ":")
+        }.joined(separator: "|")
+
+        let transportKey = timelineItems.compactMap { item -> String? in
+            guard case .transport(let transport) = item else { return nil }
+            let pathKey = transport.points.map { String(format: "%.4f,%.4f", $0.latitude, $0.longitude) }.joined(separator: ";")
+            return [
+                "t",
+                transport.id.uuidString,
+                String(Int(transport.startTime.timeIntervalSince1970)),
+                String(Int(transport.endTime.timeIntervalSince1970)),
+                transport.currentType.rawValue,
+                pathKey
+            ].joined(separator: ":")
+        }.joined(separator: "|")
+
+        let pointKey = points.prefix(12).map { String(format: "%.4f,%.4f", $0.latitude, $0.longitude) }.joined(separator: "|")
+        let photoKey = photoAssets.prefix(8).map(\.localIdentifier).joined(separator: "|")
+        let footprintPhotoKey = aggregatedFootprints.compactMap { aggregated -> String? in
+            guard let latestPhotoAssetID = latestPhotoAssetID(for: aggregated) else { return nil }
+            return "\(aggregated.id):\(latestPhotoAssetID)"
+        }.joined(separator: "|")
+        let heatmapKey = heatmapPoints.prefix(8).map(\.id).joined(separator: "|")
+        let annotationKey = mainAnnotationCoordinate.map { String(format: "%.4f,%.4f", $0.latitude, $0.longitude) } ?? "none"
+        let sizeKey = "\(Int(size.width.rounded()))x\(Int(size.height.rounded()))"
+        let styleKey = UITraitCollection.current.userInterfaceStyle == .dark ? "dark" : "light"
+        return [sizeKey, styleKey, annotationKey, pointKey, footprintKey, transportKey, photoKey, footprintPhotoKey, heatmapKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
+    }
+
+    private func loadSnapshot(for size: CGSize, forceWidgetRefresh: Bool = false) {
+        guard size.width > 1, size.height > 1, hasVisibleContent else {
+            snapshotImage = nil
+            return
+        }
+
+        if let widgetSnapshotOffset,
+           !forceWidgetRefresh,
+           let widgetImage = loadWidgetSnapshotImage(offset: widgetSnapshotOffset) {
+            snapshotTask?.cancel()
+            isRequestingWidgetSnapshot = false
+            snapshotImage = widgetImage
+            return
+        }
+
+        if let widgetSnapshotOffset {
+            snapshotTask?.cancel()
+            if let widgetImage = loadWidgetSnapshotImage(offset: widgetSnapshotOffset) {
+                snapshotImage = widgetImage
+            }
+            isRequestingWidgetSnapshot = true
+            snapshotTask = Task { @MainActor in
+                await WidgetDataSyncManager.shared.syncOffsetOnDemand(widgetSnapshotOffset)
+                if Task.isCancelled { return }
+
+                for _ in 0..<20 {
+                    if let image = loadWidgetSnapshotImage(offset: widgetSnapshotOffset) {
+                        snapshotImage = image
+                        isRequestingWidgetSnapshot = false
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if Task.isCancelled { return }
+                }
+            }
+            return
+        }
+
+        guard allowsGeneratedSnapshot else {
+            snapshotTask?.cancel()
+            snapshotImage = nil
+            isRequestingWidgetSnapshot = false
+            return
+        }
+
+        let cacheKey = snapshotCacheKey(for: size)
+        if let cached = DFKMapSnapshotCache.shared.image(for: cacheKey) {
+            isRequestingWidgetSnapshot = false
+            snapshotImage = cached
+            return
+        }
+
+        snapshotTask?.cancel()
+        isRequestingWidgetSnapshot = true
+        snapshotTask = Task { @MainActor in
+            guard let image = await buildSnapshotImage(size: size) else { return }
+            if Task.isCancelled { return }
+            DFKMapSnapshotCache.shared.setImage(image, for: cacheKey)
+            snapshotImage = image
+            isRequestingWidgetSnapshot = false
+        }
+    }
+
+    @MainActor
+    private func buildSnapshotImage(size: CGSize) async -> UIImage? {
+        guard let region = snapshotRegion(for: size) else { return nil }
+
+        let footprintPhotoImages = await loadSnapshotFootprintPhotoImages(targetSide: 88)
+        let standalonePhotoImages = await loadStandaloneSnapshotPhotoImages(targetSide: 80)
+
+        let options = MKMapSnapshotter.Options()
+        options.region = region
+        options.size = size
+        options.scale = UIScreen.main.scale
+        options.traitCollection = UITraitCollection.current
+
+        let snapshotter = MKMapSnapshotter(options: options)
+        guard let snapshot = try? await snapshotter.start() else { return nil }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = UIScreen.main.scale
+        let renderer = UIGraphicsImageRenderer(size: snapshot.image.size, format: format)
+        let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
+        let strokeColor = UITraitCollection.current.userInterfaceStyle == .dark ? UIColor.black : UIColor.white
+
+        return renderer.image { ctx in
+            snapshot.image.draw(at: .zero)
+
+            for place in allPlaces.filter({ $0.isUserDefined }) {
+                let center = snapshot.point(for: place.coordinate)
+                let metersPerDegreeLongitude = 111_320.0 * max(0.2, cos(place.coordinate.latitude * .pi / 180.0))
+                let visibleWidthMeters = max(1, region.span.longitudeDelta * metersPerDegreeLongitude)
+                let metersPerPoint = visibleWidthMeters / max(size.width, 1)
+                let radius = max(10, CGFloat(Double(place.radius) / max(Double(metersPerPoint), 1)))
+                let rect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
+                ctx.cgContext.setFillColor(UIColor.orange.withAlphaComponent(0.12).cgColor)
+                ctx.cgContext.fillEllipse(in: rect)
+                ctx.cgContext.setStrokeColor(UIColor.orange.withAlphaComponent(0.35).cgColor)
+                ctx.cgContext.setLineWidth(1)
+                ctx.cgContext.strokeEllipse(in: rect)
+            }
+
+            ctx.cgContext.setLineCap(.round)
+            ctx.cgContext.setLineJoin(.round)
+
+            for item in timelineItems {
+                guard case .transport(let transport) = item, transport.points.count >= 2 else { continue }
+                let projected = transport.points.map { snapshot.point(for: $0) }
+
+                ctx.cgContext.beginPath()
+                ctx.cgContext.move(to: projected[0])
+                for point in projected.dropFirst() {
+                    ctx.cgContext.addLine(to: point)
+                }
+                ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(0.85).cgColor)
+                ctx.cgContext.setLineWidth(4)
+                ctx.cgContext.strokePath()
+
+                if let midCoord = transport.points.distanceMidpoint {
+                    let midPoint = snapshot.point(for: midCoord)
+                    let rect = CGRect(x: midPoint.x - 10, y: midPoint.y - 10, width: 20, height: 20)
+                    let path = UIBezierPath(roundedRect: rect, cornerRadius: 5)
+                    themeColor.setFill()
+                    path.fill()
+                    strokeColor.setStroke()
+                    path.lineWidth = 1.2
+                    path.stroke()
+
+                    if let iconImage = UIImage(systemName: transport.currentType.sfSymbol) {
+                        iconImage.withTintColor(strokeColor).draw(in: CGRect(x: midPoint.x - 6, y: midPoint.y - 6, width: 12, height: 12))
                     }
                 }
             }
-            
-            // 统计热力图点
-            ForEach(heatmapPoints) { point in
-                Annotation("", coordinate: point.coordinate) {
-                    // 使用非线性缩放（如平方根或更低幂次），使热力图颜色分布更均匀。
-                    // 解决因个别极高频地点（如家）导致其他所有地点都落在 0.2 以下变为橙色的问题。
-                    let rawRatio = Double(point.intensity) / Double(max(1, point.maxIntensity))
-                    let ratio = pow(rawRatio, 0.4) // 使用 0.4 次幂显著提升低频点权重
-                    
-                    let color: Color = {
-                        if point.maxIntensity <= 1 {
-                            return .orange
-                        } else if ratio < 0.25 {
-                            return .orange
-                        } else if ratio < 0.85 {
-                            return .red
-                        } else {
-                            return .dfkDeepRed
-                        }
-                    }()
-                    
-                    // 大地图模式下圆圈变大
-                    let baseSize: CGFloat = isInteractive ? 24 : 14
-                    let multiplier: CGFloat = isInteractive ? 6 : 3
-                    let maxSize: CGFloat = isInteractive ? 60 : 30
-                    let size = CGFloat(max(baseSize, min(maxSize, CGFloat(point.intensity) * multiplier)))
-                    
-                    Circle()
-                        .fill(color.opacity(0.7).gradient)
-                        .frame(width: size, height: size)
-                        .blur(radius: size * 0.1)
+
+            for aggregated in aggregatedFootprints {
+                let fp = aggregated.representative
+                let point = snapshot.point(for: aggregated.coordinate)
+                let hours = aggregated.totalDuration / 3600.0
+                let dotScale: CGFloat = 1.0 + (1.5 - 1.0) * min(1.0, max(0.0, (hours - 0.5) / (12.0 - 0.5)))
+                let markerSize = 28 * dotScale
+                let rect = CGRect(x: point.x - markerSize / 2, y: point.y - markerSize / 2, width: markerSize, height: markerSize)
+
+                if let latestPhotoAssetID = latestPhotoAssetID(for: aggregated),
+                   let photoImage = footprintPhotoImages[latestPhotoAssetID] {
+                    let clipPath = UIBezierPath(roundedRect: rect, cornerRadius: 8 * dotScale)
+                    ctx.cgContext.saveGState()
+                    clipPath.addClip()
+                    photoImage.draw(in: rect)
+                    ctx.cgContext.restoreGState()
+
+                    ctx.cgContext.setStrokeColor(UIColor.white.cgColor)
+                    ctx.cgContext.setLineWidth(1.5)
+                    ctx.cgContext.addPath(clipPath.cgPath)
+                    ctx.cgContext.strokePath()
+                } else {
+                    let activity = fp.getActivityType(from: allActivities)
+                    let activityColor = UIColor(activity?.color ?? Color.secondary.opacity(0.5))
+                    let iconName = activity?.icon ?? "questionmark.circle.dashed"
+
+                    ctx.cgContext.setFillColor(activityColor.cgColor)
+                    ctx.cgContext.fillEllipse(in: rect)
+                    ctx.cgContext.setStrokeColor(strokeColor.cgColor)
+                    ctx.cgContext.setLineWidth(1.5)
+                    ctx.cgContext.strokeEllipse(in: rect)
+                    if let iconImage = UIImage(systemName: iconName) {
+                        let iconSize = markerSize * 0.55
+                        iconImage.withTintColor(strokeColor).draw(in: CGRect(x: point.x - iconSize / 2, y: point.y - iconSize / 2, width: iconSize, height: iconSize))
+                    }
                 }
             }
-        }
-        .mapControls {
-            if isInteractive {
-                MapUserLocationButton()
-                MapCompass()
-                MapPitchToggle()
+
+            if shouldDrawStandalonePhotosInSnapshot {
+                for asset in photoAssets {
+                    guard let coord = asset.location?.gcj02.coordinate else { continue }
+                    let point = snapshot.point(for: coord)
+                    let markerSize: CGFloat = 24
+                    let rect = CGRect(x: point.x - markerSize / 2, y: point.y - markerSize / 2, width: markerSize, height: markerSize)
+                    let path = UIBezierPath(roundedRect: rect, cornerRadius: 6)
+
+                    if let photoImage = standalonePhotoImages[asset.localIdentifier] {
+                        ctx.cgContext.saveGState()
+                        path.addClip()
+                        photoImage.draw(in: rect)
+                        ctx.cgContext.restoreGState()
+                    } else {
+                        UIColor.white.withAlphaComponent(0.92).setFill()
+                        path.fill()
+                    }
+
+                    UIColor.white.setStroke()
+                    path.lineWidth = 1.5
+                    path.stroke()
+                }
+            }
+
+            for point in heatmapPoints {
+                let mapped = snapshot.point(for: point.coordinate)
+                let rawRatio = Double(point.intensity) / Double(max(1, point.maxIntensity))
+                let ratio = pow(rawRatio, 0.4)
+                let color: UIColor = {
+                    if point.maxIntensity <= 1 {
+                        return .orange
+                    } else if ratio < 0.25 {
+                        return .orange
+                    } else if ratio < 0.85 {
+                        return .red
+                    } else {
+                        return UIColor(Color.dfkDeepRed)
+                    }
+                }()
+                let size = max(14.0, min(30.0, CGFloat(point.intensity) * 3))
+                let rect = CGRect(x: mapped.x - size / 2, y: mapped.y - size / 2, width: size, height: size)
+                ctx.cgContext.setFillColor(color.withAlphaComponent(0.28).cgColor)
+                ctx.cgContext.fillEllipse(in: rect)
+            }
+
+            if let mainAnnotationCoordinate {
+                let point = snapshot.point(for: mainAnnotationCoordinate)
+                let rect = CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10)
+                ctx.cgContext.setFillColor(themeColor.cgColor)
+                ctx.cgContext.fillEllipse(in: rect)
+                ctx.cgContext.setStrokeColor(strokeColor.cgColor)
+                ctx.cgContext.setLineWidth(1.5)
+                ctx.cgContext.strokeEllipse(in: rect)
             }
         }
-        .mapStyle(.standard)
+    }
+
+    private func snapshotRegion(for size: CGSize) -> MKCoordinateRegion? {
+        var allCoords = points
+        if let mainAnnotationCoordinate {
+            allCoords.append(mainAnnotationCoordinate)
+        }
+        for item in timelineItems {
+            switch item {
+            case .footprint(let fp):
+                allCoords.append(CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude))
+            case .transport(let transport):
+                allCoords.append(contentsOf: transport.points)
+            }
+        }
+        if shouldDrawStandalonePhotosInSnapshot {
+            allCoords.append(contentsOf: photoAssets.compactMap { $0.location?.gcj02.coordinate })
+        }
+        allCoords.append(contentsOf: heatmapPoints.map(\.coordinate))
+
+        if allCoords.isEmpty, showsUserLocation, let lastLoc = LocationManager.shared.lastLocation?.coordinate {
+            allCoords.append(lastLoc)
+        }
+
+        guard !allCoords.isEmpty else { return nil }
+
+        var region = allCoords.boundingRegion(paddingFactor: 1.6) ?? MKCoordinateRegion(center: allCoords[0], span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
+        if size.width > size.height {
+            region.span.longitudeDelta *= 1.5
+        }
+        return region
+    }
+
+    private func loadWidgetSnapshotImage(offset: Int) -> UIImage? {
+        let themeName = UITraitCollection.current.userInterfaceStyle == .dark ? "dark" : "light"
+        let fileName = "widget_snapshot_medium_\(themeName)_\(offset)_\(WidgetDataSyncManager.snapshotFileVersion).jpg"
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppConfig.shared.appGroupID) else {
+            return nil
+        }
+        let fileURL = containerURL.appendingPathComponent(fileName)
+        guard let data = try? Data(contentsOf: fileURL) else {
+            return nil
+        }
+        return UIImage(data: data)
+    }
+
+    private func loadSnapshotFootprintPhotoImages(targetSide: CGFloat) async -> [String: UIImage] {
+        let assetIDs = Set(aggregatedFootprints.compactMap { latestPhotoAssetID(for: $0) })
+        guard !assetIDs.isEmpty else { return [:] }
+
+        var images: [String: UIImage] = [:]
+        for assetID in assetIDs {
+            if let image = await loadSnapshotAssetImage(assetID: assetID, targetSize: CGSize(width: targetSide, height: targetSide)) {
+                images[assetID] = image
+            }
+        }
+        return images
+    }
+
+    private func loadStandaloneSnapshotPhotoImages(targetSide: CGFloat) async -> [String: UIImage] {
+        let assetIDs = Set(photoAssets.map(\.localIdentifier))
+        guard !assetIDs.isEmpty else { return [:] }
+
+        var images: [String: UIImage] = [:]
+        for assetID in assetIDs {
+            if let image = await loadSnapshotAssetImage(assetID: assetID, targetSize: CGSize(width: targetSide, height: targetSide)) {
+                images[assetID] = image
+            }
+        }
+        return images
+    }
+
+    private func loadSnapshotAssetImage(assetID: String, targetSize: CGSize) async -> UIImage? {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return nil }
+
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+        guard let asset = assets.firstObject else { return nil }
+
+        return await withCheckedContinuation { continuation in
+            let options = PHImageRequestOptions()
+            options.isNetworkAccessAllowed = true
+            options.deliveryMode = .highQualityFormat
+            options.resizeMode = .exact
+
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFill,
+                options: options
+            ) { image, _ in
+                continuation.resume(returning: image)
+            }
+        }
     }
 
     private func calculateScale(for duration: TimeInterval) -> CGFloat {
@@ -204,6 +978,492 @@ struct DFKMapView: View {
         if minutes < 180 { return 1.15 }
         if minutes < 480 { return 1.25 }
         return 1.35
+    }
+}
+
+private struct AggregatedFootprintListView: View {
+    let aggregated: DFKMapView.AggregatedFootprint
+    let allPlaces: [Place]
+    let onClose: () -> Void
+    let onFootprintSelected: (Footprint) -> Void
+
+    private var title: String {
+        let representative = aggregated.representative
+        if let matchedPlace = allPlaces.first(where: { $0.placeID == representative.placeID && $0.isUserDefined }) {
+            return matchedPlace.name
+        }
+        if let address = representative.address, !address.isEmpty {
+            return address
+        }
+        return "同地点足迹"
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Capsule()
+                .fill(Color.secondary.opacity(0.35))
+                .frame(width: 36, height: 5)
+                .padding(.top, 10)
+                .padding(.bottom, 10)
+
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color.dfkMainText)
+                        .lineLimit(1)
+                    Text("共 \(aggregated.footprints.count) 条足迹")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(Color(uiColor: .tertiarySystemFill))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(aggregated.footprints) { footprint in
+                        FootprintCardView(
+                            footprint: footprint,
+                            allPlaces: allPlaces,
+                            showTimeline: false,
+                            disableContextMenu: true
+                        ) { selected, _ in
+                            onFootprintSelected(selected)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 20)
+            }
+        }
+        .frame(maxWidth: 560)
+        .frame(maxHeight: 420)
+        .background(
+            RoundedRectangle(cornerRadius: 24)
+                .fill(Color(uiColor: .systemBackground))
+                .shadow(color: .black.opacity(0.16), radius: 20, x: 0, y: 12)
+        )
+    }
+}
+
+private struct StableInteractiveMapView: UIViewRepresentable {
+    private static let controlsStackTag = 9000
+    private static let userTrackingButtonTag = 9001
+    private static let compassButtonTag = 9002
+    private static let scaleViewTag = 9003
+
+    let region: MKCoordinateRegion?
+    let showsUserLocation: Bool
+    let userDefinedPlaces: [Place]
+    let transportItems: [Transport]
+    let aggregatedFootprints: [DFKMapView.AggregatedFootprint]
+    let photoAnnotations: [(asset: PHAsset, coordinate: CLLocationCoordinate2D)]
+    let heatmapPoints: [DFKMapView.HeatmapPoint]
+    let mainAnnotationCoordinate: CLLocationCoordinate2D?
+    let allActivities: [ActivityType]
+    let onFootprintTap: (DFKMapView.AggregatedFootprint) -> Void
+    let onTransportTap: (Transport) -> Void
+    let onPhotoTap: (PHAsset) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeUIView(context: Context) -> MKMapView {
+        let mapView = MKMapView(frame: .zero)
+        mapView.delegate = context.coordinator
+        mapView.mapType = .standard
+        mapView.showsCompass = false
+        mapView.showsScale = false
+        mapView.pointOfInterestFilter = .excludingAll
+        mapView.isRotateEnabled = true
+        mapView.isPitchEnabled = true
+        mapView.register(MKAnnotationView.self, forAnnotationViewWithReuseIdentifier: Coordinator.annotationReuseIdentifier)
+
+        let controlsStack = UIStackView()
+        controlsStack.tag = Self.controlsStackTag
+        controlsStack.axis = .vertical
+        controlsStack.alignment = .trailing
+        controlsStack.spacing = 12
+        controlsStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let trackingButton = MKUserTrackingButton(mapView: mapView)
+        trackingButton.tag = Self.userTrackingButtonTag
+        trackingButton.translatesAutoresizingMaskIntoConstraints = false
+        controlsStack.addArrangedSubview(Self.makeCircularControlContainer(for: trackingButton))
+
+        let compassButton = MKCompassButton(mapView: mapView)
+        compassButton.tag = Self.compassButtonTag
+        compassButton.compassVisibility = .adaptive
+        compassButton.translatesAutoresizingMaskIntoConstraints = false
+        controlsStack.addArrangedSubview(Self.makeCircularControlContainer(for: compassButton))
+
+        mapView.addSubview(controlsStack)
+
+        let scaleView = MKScaleView(mapView: mapView)
+        scaleView.tag = Self.scaleViewTag
+        scaleView.scaleVisibility = .adaptive
+        scaleView.legendAlignment = .trailing
+        scaleView.translatesAutoresizingMaskIntoConstraints = false
+        mapView.addSubview(scaleView)
+
+        NSLayoutConstraint.activate([
+            controlsStack.trailingAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            controlsStack.topAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.topAnchor, constant: 16),
+            scaleView.trailingAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            scaleView.bottomAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.bottomAnchor, constant: -16)
+        ])
+
+        return mapView
+    }
+
+    private static func makeCircularControlContainer(for control: UIView) -> UIView {
+        let blurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+        blurView.clipsToBounds = true
+        blurView.layer.cornerRadius = 22
+        blurView.layer.cornerCurve = .continuous
+        blurView.layer.borderWidth = 0.5
+        blurView.layer.borderColor = UIColor.white.withAlphaComponent(0.35).cgColor
+        blurView.translatesAutoresizingMaskIntoConstraints = false
+
+        blurView.contentView.addSubview(control)
+        NSLayoutConstraint.activate([
+            blurView.widthAnchor.constraint(equalToConstant: 44),
+            blurView.heightAnchor.constraint(equalToConstant: 44),
+            control.centerXAnchor.constraint(equalTo: blurView.contentView.centerXAnchor),
+            control.centerYAnchor.constraint(equalTo: blurView.contentView.centerYAnchor),
+            control.widthAnchor.constraint(lessThanOrEqualTo: blurView.contentView.widthAnchor),
+            control.heightAnchor.constraint(lessThanOrEqualTo: blurView.contentView.heightAnchor)
+        ])
+
+        return blurView
+    }
+
+    func updateUIView(_ mapView: MKMapView, context: Context) {
+        context.coordinator.parent = self
+        mapView.showsUserLocation = showsUserLocation
+        if let trackingButton = mapView.viewWithTag(Self.userTrackingButtonTag) as? MKUserTrackingButton {
+            trackingButton.isHidden = !showsUserLocation
+        }
+        if let controlsStack = mapView.viewWithTag(Self.controlsStackTag) as? UIStackView {
+            controlsStack.isHidden = !showsUserLocation
+        }
+        if let scaleView = mapView.viewWithTag(Self.scaleViewTag) as? MKScaleView {
+            scaleView.isHidden = !showsUserLocation
+        }
+
+        if let region, context.coordinator.shouldApply(region: region, to: mapView.region) {
+            mapView.setRegion(region, animated: false)
+        }
+
+        context.coordinator.overlayStyles.removeAll()
+        context.coordinator.footprintsByID = Dictionary(uniqueKeysWithValues: aggregatedFootprints.map { ($0.id, $0) })
+        context.coordinator.transportsByID = Dictionary(uniqueKeysWithValues: transportItems.map { ($0.id.uuidString, $0) })
+        context.coordinator.photosByID = Dictionary(uniqueKeysWithValues: photoAnnotations.map { ($0.asset.localIdentifier, $0.asset) })
+
+        let removableAnnotations = mapView.annotations.filter { !($0 is MKUserLocation) }
+        mapView.removeAnnotations(removableAnnotations)
+        mapView.removeOverlays(mapView.overlays)
+
+        for place in userDefinedPlaces {
+            let circle = MKCircle(center: place.coordinate, radius: max(5, min(Double(place.radius), 10_000)))
+            context.coordinator.overlayStyles[ObjectIdentifier(circle)] = OverlayStyle(
+                strokeColor: UIColor.orange.withAlphaComponent(0.35),
+                fillColor: UIColor.orange.withAlphaComponent(0.12),
+                lineWidth: 1
+            )
+            mapView.addOverlay(circle)
+        }
+
+        for transport in transportItems {
+            let validPoints = transport.points.filter(\.isRenderableMapCoordinate)
+            guard validPoints.count >= 2 else { continue }
+
+            let border = MKPolyline(coordinates: validPoints, count: validPoints.count)
+            context.coordinator.overlayStyles[ObjectIdentifier(border)] = OverlayStyle(
+                strokeColor: UIColor.systemBackground,
+                fillColor: nil,
+                lineWidth: 7.5
+            )
+            mapView.addOverlay(border)
+
+            let line = MKPolyline(coordinates: validPoints, count: validPoints.count)
+            context.coordinator.overlayStyles[ObjectIdentifier(line)] = OverlayStyle(
+                strokeColor: UIColor(Color.dfkAccent),
+                fillColor: nil,
+                lineWidth: 5
+            )
+            mapView.addOverlay(line)
+
+            if let midpoint = validPoints.distanceMidpoint {
+                mapView.addAnnotation(MapImageAnnotation(
+                    coordinate: midpoint,
+                    kind: .transport(transport.id.uuidString),
+                    image: Coordinator.transportImage(symbolName: transport.currentType.sfSymbol)
+                ))
+            }
+        }
+
+        for aggregated in aggregatedFootprints {
+            let activity = aggregated.representative.getActivityType(from: allActivities)
+            mapView.addAnnotation(MapImageAnnotation(
+                coordinate: aggregated.coordinate,
+                kind: .footprint(aggregated.id),
+                image: Coordinator.footprintImage(
+                    symbolName: activity?.icon ?? "questionmark.circle.dashed",
+                    color: UIColor(activity?.color ?? Color.secondary.opacity(0.5)),
+                    duration: aggregated.totalDuration
+                )
+            ))
+        }
+
+        for entry in photoAnnotations {
+            mapView.addAnnotation(MapImageAnnotation(
+                coordinate: entry.coordinate,
+                kind: .photo(entry.asset.localIdentifier),
+                image: Coordinator.photoImage()
+            ))
+        }
+
+        for point in heatmapPoints {
+            mapView.addAnnotation(MapImageAnnotation(
+                coordinate: point.coordinate,
+                kind: .heatmap(point.id),
+                image: Coordinator.heatmapImage(point: point)
+            ))
+        }
+
+        if let mainAnnotationCoordinate {
+            mapView.addAnnotation(MapImageAnnotation(
+                coordinate: mainAnnotationCoordinate,
+                kind: .main,
+                image: Coordinator.mainMarkerImage()
+            ))
+        }
+    }
+
+    final class Coordinator: NSObject, MKMapViewDelegate {
+        static let annotationReuseIdentifier = "StableInteractiveMapAnnotation"
+
+        var parent: StableInteractiveMapView
+        var overlayStyles: [ObjectIdentifier: OverlayStyle] = [:]
+        var footprintsByID: [String: DFKMapView.AggregatedFootprint] = [:]
+        var transportsByID: [String: Transport] = [:]
+        var photosByID: [String: PHAsset] = [:]
+
+        init(_ parent: StableInteractiveMapView) {
+            self.parent = parent
+        }
+
+        func shouldApply(region: MKCoordinateRegion, to current: MKCoordinateRegion) -> Bool {
+            let latDiff = abs(region.center.latitude - current.center.latitude)
+            let lonDiff = abs(region.center.longitude - current.center.longitude)
+            let latDeltaDiff = abs(region.span.latitudeDelta - current.span.latitudeDelta)
+            let lonDeltaDiff = abs(region.span.longitudeDelta - current.span.longitudeDelta)
+            return latDiff > 0.0001 || lonDiff > 0.0001 || latDeltaDiff > 0.0001 || lonDeltaDiff > 0.0001
+        }
+
+        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            let style = overlayStyles[ObjectIdentifier(overlay)]
+
+            if let circle = overlay as? MKCircle {
+                let renderer = MKCircleRenderer(circle: circle)
+                renderer.strokeColor = style?.strokeColor ?? UIColor.orange.withAlphaComponent(0.35)
+                renderer.fillColor = style?.fillColor
+                renderer.lineWidth = style?.lineWidth ?? 1
+                return renderer
+            }
+
+            if let polyline = overlay as? MKPolyline {
+                let renderer = MKPolylineRenderer(polyline: polyline)
+                renderer.strokeColor = style?.strokeColor ?? UIColor(Color.dfkAccent)
+                renderer.lineWidth = style?.lineWidth ?? 5
+                renderer.lineCap = .round
+                renderer.lineJoin = .round
+                return renderer
+            }
+
+            return MKOverlayRenderer(overlay: overlay)
+        }
+
+        func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            guard let annotation = annotation as? MapImageAnnotation else { return nil }
+            let view = mapView.dequeueReusableAnnotationView(withIdentifier: Self.annotationReuseIdentifier, for: annotation)
+            view.annotation = annotation
+            view.image = annotation.image
+            view.canShowCallout = false
+            view.centerOffset = annotation.centerOffset
+            return view
+        }
+
+        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            defer {
+                if let annotation = view.annotation {
+                    mapView.deselectAnnotation(annotation, animated: false)
+                }
+            }
+
+            guard let annotation = view.annotation as? MapImageAnnotation else { return }
+
+            switch annotation.kind {
+            case .footprint(let id):
+                if let footprint = footprintsByID[id] {
+                    parent.onFootprintTap(footprint)
+                }
+            case .transport(let id):
+                if let transport = transportsByID[id] {
+                    parent.onTransportTap(transport)
+                }
+            case .photo(let id):
+                if let asset = photosByID[id] {
+                    parent.onPhotoTap(asset)
+                }
+            case .heatmap, .main:
+                break
+            }
+        }
+
+        static func footprintImage(symbolName: String, color: UIColor, duration: TimeInterval) -> UIImage {
+            let scale = annotationScale(for: duration)
+            let size = CGSize(width: 28 * scale, height: 28 * scale)
+            let renderer = UIGraphicsImageRenderer(size: size)
+            return renderer.image { context in
+                let rect = CGRect(origin: .zero, size: size)
+                color.setFill()
+                context.cgContext.fillEllipse(in: rect)
+                UIColor.systemBackground.setStroke()
+                context.cgContext.setLineWidth(1.5 * scale)
+                context.cgContext.strokeEllipse(in: rect.insetBy(dx: 0.75 * scale, dy: 0.75 * scale))
+
+                let iconSize = CGSize(width: size.width * 0.55, height: size.height * 0.55)
+                let iconOrigin = CGPoint(x: (size.width - iconSize.width) / 2, y: (size.height - iconSize.height) / 2)
+                UIImage(systemName: symbolName)?
+                    .withTintColor(.systemBackground, renderingMode: .alwaysOriginal)
+                    .draw(in: CGRect(origin: iconOrigin, size: iconSize))
+            }
+        }
+
+        static func transportImage(symbolName: String) -> UIImage {
+            let size = CGSize(width: 20, height: 20)
+            let renderer = UIGraphicsImageRenderer(size: size)
+            return renderer.image { context in
+                let rect = CGRect(origin: .zero, size: size)
+                let path = UIBezierPath(roundedRect: rect, cornerRadius: 6)
+                UIColor(Color.dfkAccent).setFill()
+                path.fill()
+                UIColor.systemBackground.setStroke()
+                path.lineWidth = 1.2
+                path.stroke()
+
+                UIImage(systemName: symbolName)?
+                    .withTintColor(.systemBackground, renderingMode: .alwaysOriginal)
+                    .draw(in: CGRect(x: 5, y: 5, width: 10, height: 10))
+            }
+        }
+
+        static func photoImage() -> UIImage {
+            let size = CGSize(width: 24, height: 24)
+            let renderer = UIGraphicsImageRenderer(size: size)
+            return renderer.image { context in
+                let rect = CGRect(origin: .zero, size: size)
+                let path = UIBezierPath(roundedRect: rect, cornerRadius: 6)
+                UIColor.white.setFill()
+                path.fill()
+                UIColor.systemGray2.setStroke()
+                path.lineWidth = 1.2
+                path.stroke()
+
+                UIImage(systemName: "photo.fill")?
+                    .withTintColor(UIColor(Color.dfkAccent), renderingMode: .alwaysOriginal)
+                    .draw(in: CGRect(x: 5, y: 5, width: 14, height: 14))
+            }
+        }
+
+        static func mainMarkerImage() -> UIImage {
+            let size = CGSize(width: 14, height: 14)
+            let renderer = UIGraphicsImageRenderer(size: size)
+            return renderer.image { context in
+                let rect = CGRect(origin: .zero, size: size)
+                UIColor(Color.dfkAccent).setFill()
+                context.cgContext.fillEllipse(in: rect)
+                UIColor.systemBackground.setStroke()
+                context.cgContext.setLineWidth(1.5)
+                context.cgContext.strokeEllipse(in: rect.insetBy(dx: 0.75, dy: 0.75))
+            }
+        }
+
+        static func heatmapImage(point: DFKMapView.HeatmapPoint) -> UIImage {
+            let rawRatio = Double(point.intensity) / Double(max(1, point.maxIntensity))
+            let ratio = pow(rawRatio, 0.4)
+            let color: UIColor = {
+                if point.maxIntensity <= 1 {
+                    return .orange
+                } else if ratio < 0.25 {
+                    return .orange
+                } else if ratio < 0.85 {
+                    return .red
+                } else {
+                    return UIColor(Color.dfkDeepRed)
+                }
+            }()
+            let sizeValue = max(14.0, min(30.0, CGFloat(point.intensity) * 3))
+            let size = CGSize(width: sizeValue, height: sizeValue)
+            let renderer = UIGraphicsImageRenderer(size: size)
+            return renderer.image { context in
+                let rect = CGRect(origin: .zero, size: size)
+                context.cgContext.setFillColor(color.withAlphaComponent(0.45).cgColor)
+                context.cgContext.fillEllipse(in: rect)
+            }
+        }
+
+        static func annotationScale(for duration: TimeInterval) -> CGFloat {
+            let minutes = duration / 60
+            if minutes < 15 { return 0.8 }
+            if minutes < 60 { return 1.0 }
+            if minutes < 180 { return 1.15 }
+            if minutes < 480 { return 1.25 }
+            return 1.35
+        }
+    }
+}
+
+private struct OverlayStyle {
+    let strokeColor: UIColor
+    let fillColor: UIColor?
+    let lineWidth: CGFloat
+}
+
+private final class MapImageAnnotation: NSObject, MKAnnotation {
+    enum Kind {
+        case footprint(String)
+        case transport(String)
+        case photo(String)
+        case heatmap(String)
+        case main
+    }
+
+    let kind: Kind
+    dynamic var coordinate: CLLocationCoordinate2D
+    let image: UIImage
+    let centerOffset: CGPoint
+
+    init(coordinate: CLLocationCoordinate2D, kind: Kind, image: UIImage, centerOffset: CGPoint = .zero) {
+        self.coordinate = coordinate
+        self.kind = kind
+        self.image = image
+        self.centerOffset = centerOffset
     }
 }
 
@@ -304,5 +1564,11 @@ extension Array where Element == CLLocationCoordinate2D {
         
         guard upper - lower >= 1 else { return [] }
         return Array(self[lower...upper])
+    }
+}
+
+private extension CLLocationCoordinate2D {
+    var isRenderableMapCoordinate: Bool {
+        latitude.isFinite && longitude.isFinite && CLLocationCoordinate2DIsValid(self)
     }
 }

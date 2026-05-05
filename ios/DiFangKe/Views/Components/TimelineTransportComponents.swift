@@ -185,6 +185,24 @@ struct TransportModalView: View {
     private var currentEndLocation: String {
         localEndOverride ?? transport.endLocation
     }
+
+    private var validTransportPoints: [CLLocationCoordinate2D] {
+        transport.points.filter {
+            $0.latitude.isFinite &&
+            $0.longitude.isFinite &&
+            CLLocationCoordinate2DIsValid($0)
+        }
+    }
+
+    private var validMapPhotos: [(asset: PHAsset, coordinate: CLLocationCoordinate2D)] {
+        mapPhotos.compactMap { asset in
+            guard let coordinate = asset.location?.gcj02.coordinate,
+                  coordinate.latitude.isFinite,
+                  coordinate.longitude.isFinite,
+                  CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+            return (asset, coordinate)
+        }
+    }
     
     // Use the effective type for display
     private var displayType: TransportType {
@@ -213,82 +231,93 @@ struct TransportModalView: View {
         NavigationStack {
             ZStack(alignment: .top) {
                 // 1. Map View
-                Map(position: $position) {
-                    // Important Places Circles (isUserDefined)
-                    ForEach(allPlaces.filter { $0.isUserDefined }) { place in
-                        MapCircle(center: place.coordinate, radius: Double(place.radius))
-                            .foregroundStyle(Color.orange.opacity(0.1))
-                            .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                    }
+                GeometryReader { geometry in
+                    if geometry.size.width > 1 && geometry.size.height > 1 {
+                        Map(position: $position) {
+                            // Important Places Circles (isUserDefined)
+                            ForEach(allPlaces.filter {
+                                $0.isUserDefined &&
+                                $0.radius.isFinite &&
+                                $0.radius > 1 &&
+                                $0.coordinate.latitude.isFinite &&
+                                $0.coordinate.longitude.isFinite &&
+                                CLLocationCoordinate2DIsValid($0.coordinate)
+                            }) { place in
+                                MapCircle(center: place.coordinate, radius: max(5, min(Double(place.radius), 10_000)))
+                                    .foregroundStyle(Color.orange.opacity(0.1))
+                                    .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                            }
 
-                    // Start Marker (Physical Look & Title)
-                    if let start = transport.points.first {
-                        Marker(currentStartLocation, coordinate: start)
-                            .tint(.green)
-                    }
-                    
-                    // Start Interaction Layer
-                    if let start = transport.points.first {
-                        Annotation("", coordinate: start, anchor: .top) {
-                            Text(currentStartLocation)
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(isStartImportantPlace ? .orange : .primary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
-                                .overlay(Capsule().stroke(Color.green, lineWidth: 1))
-                        }
-                    }
-                    
-                    // End Marker (Physical Look & Title)
-                    if let end = transport.points.last {
-                        Marker(currentEndLocation, coordinate: end)
-                            .tint(.blue)
-                    }
-                    
-                    // End Interaction Layer
-                    if let end = transport.points.last {
-                        Annotation("", coordinate: end, anchor: .top) {
-                            Text(currentEndLocation)
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(isEndImportantPlace ? .orange : .primary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
-                                .overlay(Capsule().stroke(Color.blue, lineWidth: 1))
-                        }
-                    }
-                    
-                    // Route Polyline Background Border
-                    MapPolyline(coordinates: transport.points)
-                        .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: 7.5, lineCap: .round, lineJoin: .round))
-                    
-                    // Route Polyline Main
-                    MapPolyline(coordinates: transport.points)
-                        .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
-                    
-                    // Photos along the route
-                    ForEach(mapPhotos, id: \.localIdentifier) { asset in
-                        if let coord = asset.location?.gcj02.coordinate {
-                            Annotation("", coordinate: coord) {
-                                AssetThumbnailView(assetID: asset.localIdentifier)
-                                    .frame(width: 32, height: 32)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.5))
-                                    .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        selectedPhotoAsset = IdentifiableString(value: asset.localIdentifier)
-                                    }
+                            // Start Marker (Physical Look & Title)
+                            if let start = validTransportPoints.first {
+                                Marker(currentStartLocation, coordinate: start)
+                                    .tint(.green)
+                            }
+                            
+                            // Start Interaction Layer
+                            if let start = validTransportPoints.first {
+                                Annotation("", coordinate: start, anchor: .top) {
+                                    Text(currentStartLocation)
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundColor(isStartImportantPlace ? .orange : .primary)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
+                                        .overlay(Capsule().stroke(Color.green, lineWidth: 1))
+                                }
+                            }
+                            
+                            // End Marker (Physical Look & Title)
+                            if let end = validTransportPoints.last {
+                                Marker(currentEndLocation, coordinate: end)
+                                    .tint(.blue)
+                            }
+                            
+                            // End Interaction Layer
+                            if let end = validTransportPoints.last {
+                                Annotation("", coordinate: end, anchor: .top) {
+                                    Text(currentEndLocation)
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundColor(isEndImportantPlace ? .orange : .primary)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
+                                        .overlay(Capsule().stroke(Color.blue, lineWidth: 1))
+                                }
+                            }
+                            
+                            // Route Polyline Background Border
+                            MapPolyline(coordinates: validTransportPoints)
+                                .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: 7.5, lineCap: .round, lineJoin: .round))
+                            
+                            // Route Polyline Main
+                            MapPolyline(coordinates: validTransportPoints)
+                                .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                            
+                            // Photos along the route
+                            ForEach(validMapPhotos, id: \.asset.localIdentifier) { entry in
+                                Annotation("", coordinate: entry.coordinate) {
+                                    AssetThumbnailView(assetID: entry.asset.localIdentifier)
+                                        .frame(width: 32, height: 32)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.5))
+                                        .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            selectedPhotoAsset = IdentifiableString(value: entry.asset.localIdentifier)
+                                        }
+                                }
                             }
                         }
+                        .mapStyle(.standard(emphasis: .muted))
+                        .mapControls {
+                            MapUserLocationButton()
+                            MapCompass()
+                            MapScaleView()
+                        }
+                    } else {
+                        Color.clear
                     }
-                }
-                .mapStyle(.standard(emphasis: .muted))
-                .mapControls {
-                    MapUserLocationButton()
-                    MapCompass()
-                    MapScaleView()
                 }
             }
             .navigationTitle("交通详情")

@@ -50,6 +50,22 @@ final class Footprint {
         get { FootprintStatus(rawValue: statusValue) ?? .candidate }
         set { statusValue = newValue.rawValue }
     }
+
+    var isUserModifiedForDailySummary: Bool {
+        if status == .manual || status == .confirmed {
+            return true
+        }
+
+        if isAddressEditedByHand || isHighlight == true || !photoAssetIDs.isEmpty {
+            return true
+        }
+
+        if let reason, !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+
+        return false
+    }
     
     func getActivityType(from allActivities: [ActivityType]) -> ActivityType? {
         guard let val = activityTypeValue else { return nil }

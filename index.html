@@ -973,6 +973,26 @@
                 link.href = iosLink;
                 link.target = "_blank";
             });
+
+            document.querySelectorAll('.btn-android-download').forEach(link => {
+                if (link.__difangkeAndroidHandler) {
+                    link.removeEventListener('click', link.__difangkeAndroidHandler);
+                    link.__difangkeAndroidHandler = null;
+                }
+
+                link.href = androidLink;
+                link.target = "_blank";
+
+                if (isWeChat) {
+                    link.target = "";
+                    const handler = (e) => {
+                        e.preventDefault();
+                        showWeChatTip();
+                    };
+                    link.__difangkeAndroidHandler = handler;
+                    link.addEventListener('click', handler);
+                }
+            });
         }
 
         // Initialize

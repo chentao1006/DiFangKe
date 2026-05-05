@@ -26,7 +26,6 @@ struct FootprintModalView: View {
     @FocusState private var reasonFocused: Bool
     var autoFocus: Bool = false
     @State private var showingDeleteAlert = false
-    @State private var selectedItems: [PhotosPickerItem] = []
     @State private var showAddPhotoDialog = false
     @State private var showPhotoPicker = false
     @State private var showCamera = false
@@ -170,12 +169,8 @@ struct FootprintModalView: View {
                 }
                 
                 enrichPlaceIfNeeded()
-                
-                // 为地图获取照片，并应用每个足迹最多 10 张的显示策略
-                PhotoService.shared.fetchAssets(startTime: footprint.startTime, endTime: footprint.endTime) { assets in
-                    let filtered = assets.filter { $0.location != nil }
-                    self.mapPhotos = Array(filtered.suffix(10))
-                }
+
+                refreshMapPhotos()
                 
                 // 第一次进入足迹详情且状态为“未定义”时，强提示授权
                 if !hasSeenPhotoPermissionGuide && PhotoService.shared.authorizationStatus == .notDetermined {
@@ -184,35 +179,8 @@ struct FootprintModalView: View {
                     hasSeenPhotoPermissionGuide = true
                 }
             }
-            .onChange(of: selectedItems) { _, newValue in
-                Task {
-                    for item in newValue {
-                        // Load image data from the picker item
-                        if let data = try? await item.loadTransferable(type: Data.self),
-                           let uiImage = UIImage(data: data) {
-                            var localID: String?
-                            try? await PHPhotoLibrary.shared().performChanges {
-                                let req = PHAssetCreationRequest.forAsset()
-                                req.addResource(with: .photo, data: data, options: nil)
-                                localID = req.placeholderForCreatedAsset?.localIdentifier
-                            }
-                            if let id = localID {
-                                await MainActor.run {
-                                    withAnimation {
-                                        ensureFootprintManaged()
-                                        var ids = footprint.photoAssetIDs
-                                        ids.append(id)
-                                        footprint.photoAssetIDs = ids
-                                        hasChanged = true
-                                    }
-                                    try? modelContext.save()
-                                }
-                            }
-                            _ = uiImage // suppress unused warning
-                        }
-                    }
-                    selectedItems = []
-                }
+            .onChange(of: footprint.photoAssetIDs) { _, _ in
+                refreshMapPhotos()
             }
             .sheet(isPresented: $showCamera) {
                 CameraPickerView { image in
@@ -241,7 +209,11 @@ struct FootprintModalView: View {
                     }
                 }
             }
-            .photosPicker(isPresented: $showPhotoPicker, selection: $selectedItems, matching: .images)
+            .sheet(isPresented: $showPhotoPicker) {
+                PhotoLibraryPicker { identifiers in
+                    attachSelectedPhotoAssetIdentifiers(identifiers)
+                }
+            }
             .sheet(isPresented: $showingSearchSheet) {
                 LocationSearchSheet(locationManager: locationManager, 
                                     coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), 
@@ -293,6 +265,66 @@ struct FootprintModalView: View {
 }
 
 extension FootprintModalView {
+    private func openPhotoPicker() {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+
+        switch status {
+        case .authorized, .limited:
+            showPhotoPicker = true
+        case .notDetermined:
+            PhotoService.shared.requestPermission { granted in
+                guard granted else { return }
+                showPhotoPicker = true
+            }
+        case .denied, .restricted:
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(url)
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    private func attachSelectedPhotoAssetIdentifiers(_ resolvedIdentifiers: [String]) {
+        guard !resolvedIdentifiers.isEmpty else { return }
+
+        ensureFootprintManaged()
+
+        let existingIdentifiers = Set(footprint.photoAssetIDs)
+        let newIdentifiers = resolvedIdentifiers.filter { !existingIdentifiers.contains($0) }
+        guard !newIdentifiers.isEmpty else { return }
+
+        withAnimation {
+            footprint.photoAssetIDs.append(contentsOf: newIdentifiers)
+            footprint.status = .manual
+            hasChanged = true
+        }
+
+        try? modelContext.save()
+        refreshMapPhotos()
+    }
+
+    private func refreshMapPhotos() {
+        guard !footprint.photoAssetIDs.isEmpty else {
+            mapPhotos = []
+            return
+        }
+
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: footprint.photoAssetIDs, options: nil)
+        var fetchedAssets: [PHAsset] = []
+        assets.enumerateObjects { asset, _, _ in
+            if asset.location != nil {
+                fetchedAssets.append(asset)
+            }
+        }
+
+        let orderedAssets = footprint.photoAssetIDs.compactMap { assetID in
+            fetchedAssets.first(where: { $0.localIdentifier == assetID })
+        }
+
+        mapPhotos = Array(orderedAssets.suffix(10))
+    }
+
     private func deletePhoto() {
         guard let assetID = photoToDelete else { return }
         ensureFootprintManaged()
@@ -361,6 +393,7 @@ extension FootprintModalView {
                             withAnimation {
                                 ensureFootprintManaged()
                                 footprint.activityTypeValue = nil
+                                footprint.status = .manual
                                 hasChanged = true
                                 if !isDraft { try? modelContext.save() }
                             }
@@ -372,6 +405,7 @@ extension FootprintModalView {
                                 withAnimation {
                                     ensureFootprintManaged()
                                     footprint.activityTypeValue = type.id.uuidString
+                                    footprint.status = .manual
                                     hasChanged = true
                                     if !isDraft { try? modelContext.save() }
                                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -445,6 +479,7 @@ extension FootprintModalView {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
                                 ensureFootprintManaged()
                                 footprint.activityTypeValue = activity.id.uuidString
+                                footprint.status = .manual
                                 hasChanged = true
                                 if !isDraft { try? modelContext.save() }
                                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -719,7 +754,7 @@ extension FootprintModalView {
                 }
                 .confirmationDialog("添加照片", isPresented: $showAddPhotoDialog) {
                     Button("拍摄照片") { showCamera = true }
-                    Button("从相册选择") { showPhotoPicker = true }
+                    Button("从相册选择") { openPhotoPicker() }
                     Button("取消", role: .cancel) { }
                 }
             }
@@ -780,7 +815,7 @@ extension FootprintModalView {
                     }
                     .confirmationDialog("添加照片", isPresented: $showAddPhotoDialog) {
                         Button("拍摄照片") { showCamera = true }
-                        Button("从相册选择") { showPhotoPicker = true }
+                        Button("从相册选择") { openPhotoPicker() }
                         Button("取消", role: .cancel) { }
                     }
                 }
@@ -833,8 +868,7 @@ struct FullFrameMapView: View {
     var body: some View {
         NavigationStack {
             FootprintDetailMapView(footprint: footprint, photoAssets: photoAssets, isInteractive: true)
-                .ignoresSafeArea(edges: .bottom)
-                .navigationTitle("查看地图")
+                .navigationTitle("足迹地图")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
@@ -876,6 +910,42 @@ struct CameraPickerView: UIViewControllerRepresentable {
         
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
             parent.onCapture(nil)
+            picker.dismiss(animated: true)
+        }
+    }
+}
+
+struct PhotoLibraryPicker: UIViewControllerRepresentable {
+    let onPick: ([String]) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var configuration = PHPickerConfiguration(photoLibrary: .shared())
+        configuration.filter = .images
+        configuration.selectionLimit = 0
+        configuration.preferredAssetRepresentationMode = .current
+
+        let picker = PHPickerViewController(configuration: configuration)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        private let parent: PhotoLibraryPicker
+
+        init(_ parent: PhotoLibraryPicker) {
+            self.parent = parent
+        }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            let identifiers = results.compactMap(\.assetIdentifier)
+            parent.onPick(identifiers)
             picker.dismiss(animated: true)
         }
     }
@@ -1022,7 +1092,10 @@ struct AddToFavoriteModal: View {
             address: address
         )
         modelContext.insert(newPlace)
+        footprint.address = finalName
         footprint.placeID = newPlace.placeID
+        footprint.isAddressEditedByHand = true
+        footprint.status = .manual
         try? modelContext.save()
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         dismiss()
@@ -1036,14 +1109,20 @@ private struct MiniMapView: View {
     @State private var cameraPosition: MapCameraPosition = .automatic
     
     var body: some View {
-        Map(position: $cameraPosition) {
-            Marker("", coordinate: coordinate).tint(Color.orange)
-            MapCircle(center: coordinate, radius: radius)
-                .foregroundStyle(Color.orange.opacity(0.15))
-                .stroke(Color.orange.opacity(0.6), lineWidth: 1.5)
+        GeometryReader { geometry in
+            if geometry.size.width > 0 && geometry.size.height > 0 {
+                Map(position: $cameraPosition) {
+                    Marker("", coordinate: coordinate).tint(Color.orange)
+                    MapCircle(center: coordinate, radius: radius)
+                        .foregroundStyle(Color.orange.opacity(0.15))
+                        .stroke(Color.orange.opacity(0.6), lineWidth: 1.5)
+                }
+                .mapStyle(.standard)
+                .disabled(true)
+            } else {
+                Color.clear
+            }
         }
-        .mapStyle(.standard)
-        .disabled(true)
         .onChange(of: radius) { _, newRadius in
             let span = newRadius * 6
             cameraPosition = .region(MKCoordinateRegion(center: coordinate, latitudinalMeters: span, longitudinalMeters: span))

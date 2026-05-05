@@ -7,6 +7,7 @@ import Photos
 // MARK: - Day Summary Card
 struct DaySummaryCard: View {
     let date: Date
+    let dateOffset: Int
     let totalPoints: Int
     let footprintCount: Int
     let totalMileage: Double
@@ -16,6 +17,7 @@ struct DaySummaryCard: View {
     var photoAssets: [PHAsset] = []
     var summary: String? = nil
     var isLoading: Bool = false
+    var rendersLiveMap: Bool = true
     
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
@@ -67,7 +69,10 @@ struct DaySummaryCard: View {
                 if hasDataForMap {
                     DFKMapView(
                         cameraPosition: $cameraPosition,
+                        rendersLiveMap: rendersLiveMap,
                         isInteractive: false,
+                        widgetSnapshotOffset: dateOffset,
+                        allowsGeneratedSnapshot: false,
                         showsUserLocation: false,
                         points: points,
                         timelineItems: timelineItems,
@@ -126,7 +131,7 @@ struct DaySummaryCard: View {
                 timelineItems: timelineItems,
                 onTimelineItemTap: onTimelineItemTap,
                 photoAssets: photoAssets,
-                showsUserLocation: false
+                showsUserLocation: true
             )
         }
     }
@@ -222,7 +227,6 @@ struct FullFrameTrajectoryMapView: View {
                     case .transport(let transport):
                         self.selectedTransport = transport
                     }
-                    onTimelineItemTap?(item) // Still notify parent if needed
                 },
                 onPhotoTap: { asset in
                     self.selectedPhotoAsset = IdentifiableString(value: asset.localIdentifier)
@@ -244,7 +248,6 @@ struct FullFrameTrajectoryMapView: View {
                 let index = assetIDs.firstIndex(of: item.value) ?? 0
                 PhotoFullscreenView(assetIDs: assetIDs, currentIndex: index)
             }
-            .ignoresSafeArea(edges: .bottom)
             .onAppear { updateCamera() }
             .onChange(of: points.count) { _, _ in updateCamera() }
             .onChange(of: photoAssets.count) { _, _ in updateCamera() }
@@ -302,6 +305,7 @@ struct RecordingStatusCard: View {
     let locationManager: LocationManager
     let footprintCount: Int
     var timelineItems: [TimelineItem] = []
+    var rendersLiveMap: Bool = true
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     var photoAssets: [PHAsset] = []
     @State private var showFullscreenMap = false
@@ -412,7 +416,10 @@ struct RecordingStatusCard: View {
                 // DFKMapView Section
                 DFKMapView(
                     cameraPosition: $cameraPosition,
+                    rendersLiveMap: rendersLiveMap,
                     isInteractive: false,
+                    widgetSnapshotOffset: 0,
+                    allowsGeneratedSnapshot: false,
                     showsUserLocation: true,
                     points: locationManager.allTodayCoordinates,
                     timelineItems: timelineItems,

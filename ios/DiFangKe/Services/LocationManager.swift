@@ -24,6 +24,16 @@ struct LocationSuggestion: Identifiable, Equatable {
     }
 }
 
+struct RawRecordingDeviceOption: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let isCurrentDevice: Bool
+
+    var subtitle: String {
+        isCurrentDevice ? "当前设备" : String(id.prefix(8))
+    }
+}
+
 // MARK: - 原始坐标持久化存储（按天存储至 CSV 文件）
 final class RawLocationStore {
     static let shared = RawLocationStore()
@@ -31,9 +41,12 @@ final class RawLocationStore {
     private let fileManager = FileManager.default
     private let directoryName = "RawLocations"
     private let saveQueue = DispatchQueue(label: "com.ct106.difangke.rawsave", qos: .background)
+    private let preferredRecordingDeviceKey = "raw_recording_source_device_id"
+    private let knownDeviceNamesKey = "raw_recording_device_names"
     
     private init() {
         createDirectoryIfNeeded()
+        rememberKnownDeviceName(currentDeviceName, for: deviceID)
     }
     
     private var documentsDirectory: URL {
@@ -58,6 +71,89 @@ final class RawLocationStore {
         let id = UIDevice.current.identifierForVendor?.uuidString ?? UUID().uuidString
         UserDefaults.standard.set(id, forKey: "raw_location_device_id")
         return id
+    }
+
+    var currentDeviceIdentifier: String {
+        deviceID
+    }
+
+    private var currentDeviceName: String {
+        UIDevice.current.name
+    }
+
+    private var isICloudSyncEnabled: Bool {
+        if UserDefaults.standard.object(forKey: "isICloudSyncEnabled") == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: "isICloudSyncEnabled")
+    }
+
+    func preferredRecordingDeviceID() -> String {
+        guard isICloudSyncEnabled else { return deviceID }
+        if let selected = UserDefaults.standard.string(forKey: preferredRecordingDeviceKey), !selected.isEmpty {
+            return selected
+        }
+        return deviceID
+    }
+
+    func setPreferredRecordingDeviceID(_ deviceID: String) {
+        UserDefaults.standard.set(deviceID, forKey: preferredRecordingDeviceKey)
+    }
+
+    func displayName(forRecordingDeviceID deviceID: String) -> String {
+        if deviceID == self.deviceID {
+            return currentDeviceName
+        }
+        return knownDeviceNames()[deviceID] ?? "设备 \(String(deviceID.prefix(8)))"
+    }
+
+    func availableRecordingDevices() -> [RawRecordingDeviceOption] {
+        rememberKnownDeviceName(currentDeviceName, for: deviceID)
+
+        var deviceIDs: Set<String> = [deviceID, preferredRecordingDeviceID()]
+        if let files = try? fileManager.contentsOfDirectory(at: baseDirectory, includingPropertiesForKeys: nil) {
+            for fileURL in files where fileURL.pathExtension == "csv" {
+                if let parsedDeviceID = parseDeviceID(fromFileName: fileURL.lastPathComponent) {
+                    deviceIDs.insert(parsedDeviceID)
+                }
+            }
+        }
+
+        return deviceIDs.map { id in
+            RawRecordingDeviceOption(
+                id: id,
+                name: displayName(forRecordingDeviceID: id),
+                isCurrentDevice: id == deviceID
+            )
+        }
+        .sorted {
+            if $0.isCurrentDevice != $1.isCurrentDevice {
+                return $0.isCurrentDevice && !$1.isCurrentDevice
+            }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+    }
+
+    func availableDatesForPreferredRecordingDevice() -> Set<Date> {
+        guard let files = try? fileManager.contentsOfDirectory(at: baseDirectory, includingPropertiesForKeys: nil) else {
+            return []
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        var dates = Set<Date>()
+        for fileURL in files where fileURL.pathExtension == "csv" {
+            let fileName = fileURL.lastPathComponent
+            guard let parsedDeviceID = parseDeviceID(fromFileName: fileName), parsedDeviceID == preferredRecordingDeviceID() else {
+                continue
+            }
+            let dateString = String(fileName.prefix(10))
+            if let date = formatter.date(from: dateString) {
+                dates.insert(Calendar.current.startOfDay(for: date))
+            }
+        }
+        return dates
     }
 
     private func getFileURL(for date: Date, device: String? = nil) -> URL {
@@ -164,7 +260,7 @@ final class RawLocationStore {
         return recent
     }
 
-    /// 读取指定日期的所有坐标点（包含本设备和其他同步过来的设备）
+    /// 读取指定日期的所有坐标点，仅返回当前选定记录设备的轨迹
     func loadAllDevicesLocations(for date: Date, filtered: Bool = true) -> [CLLocation] {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
@@ -175,7 +271,12 @@ final class RawLocationStore {
         }
         
         var allPoints: [CLLocation] = []
-        let relevantFiles = files.filter { $0.lastPathComponent.hasPrefix(datePrefix) && $0.pathExtension == "csv" }
+        let selectedDeviceID = preferredRecordingDeviceID()
+        let relevantFiles = files.filter {
+            $0.lastPathComponent.hasPrefix(datePrefix) &&
+            $0.pathExtension == "csv" &&
+            parseDeviceID(fromFileName: $0.lastPathComponent) == selectedDeviceID
+        }
         
         for fileURL in relevantFiles {
             let dayPoints = loadLocations(fromURL: fileURL, filtered: filtered)
@@ -365,7 +466,12 @@ final class RawLocationStore {
         }
         
         var totalCount = 0
-        let relevantFiles = files.filter { $0.lastPathComponent.hasPrefix(datePrefix) && $0.pathExtension == "csv" }
+        let selectedDeviceID = preferredRecordingDeviceID()
+        let relevantFiles = files.filter {
+            $0.lastPathComponent.hasPrefix(datePrefix) &&
+            $0.pathExtension == "csv" &&
+            parseDeviceID(fromFileName: $0.lastPathComponent) == selectedDeviceID
+        }
         
         for fileURL in relevantFiles {
             if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
@@ -375,6 +481,31 @@ final class RawLocationStore {
             }
         }
         return totalCount
+    }
+
+    private func parseDeviceID(fromFileName fileName: String) -> String? {
+        guard fileName.hasSuffix(".csv") else { return nil }
+        let stem = String(fileName.dropLast(4))
+        if stem.count == 10 {
+            return deviceID
+        }
+
+        guard stem.count > 11 else { return nil }
+        let dashIndex = stem.index(stem.startIndex, offsetBy: 10)
+        guard stem[dashIndex] == "-" else { return nil }
+        return String(stem[stem.index(after: dashIndex)...])
+    }
+
+    private func knownDeviceNames() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: knownDeviceNamesKey) as? [String: String] ?? [:]
+    }
+
+    private func rememberKnownDeviceName(_ name: String, for deviceID: String) {
+        guard !name.isEmpty, !deviceID.isEmpty else { return }
+        var knownNames = knownDeviceNames()
+        if knownNames[deviceID] == name { return }
+        knownNames[deviceID] = name
+        UserDefaults.standard.set(knownNames, forKey: knownDeviceNamesKey)
     }
 
     // --- CloudKit 手动同步相关 ---
@@ -411,6 +542,7 @@ final class RawLocationStore {
                 let record = CKRecord(recordType: "RawTrajectory", recordID: recordID)
                 record["date"] = dateStr
                 record["deviceID"] = deviceID
+                record["deviceName"] = currentDeviceName
                 record["file"] = CKAsset(fileURL: localURL)
                 recordsToSave.append(record)
             }
@@ -460,10 +592,14 @@ final class RawLocationStore {
             for (_, result) in results {
                 if let record = try? result.get() {
                     let remoteDeviceID = record["deviceID"] as? String ?? ""
+                    let remoteDeviceName = record["deviceName"] as? String ?? ""
                     let remoteDate = record["date"] as? String ?? ""
                     
                     // 只有其他设备的数据才下载
                     if remoteDeviceID != deviceID && !remoteDate.isEmpty {
+                        if !remoteDeviceName.isEmpty {
+                            rememberKnownDeviceName(remoteDeviceName, for: remoteDeviceID)
+                        }
                         if let asset = record["file"] as? CKAsset, let assetURL = asset.fileURL {
                             let localFileName = "\(remoteDate)-\(remoteDeviceID).csv"
                             let localURL = baseDirectory.appendingPathComponent(localFileName)
@@ -817,6 +953,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
             .store(in: &cancellables)
+        // 核心修复：在 init() 里就启动运动传感器 + 健康授权
+        // 这样即使 App 从后台被系统唤醒（不走 startTracking），运动状态变化也能触发 boost
+        HealthManager.shared.requestAuthorization { _ in }
+        HealthManager.shared.startActivityTracking()
     }
     
     private var cancellables = Set<AnyCancellable>()
@@ -840,17 +980,24 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             .store(in: &cancellables)
     }
     
+    /// 出门保护期截止时间 —— 在此时间之前 isStationary 强制返回 false
+    /// 防止节能逻辑在 GPS/传感器还没稳定时把精度降回低频
+    private var departureBoostEndTime: Date = .distantPast
+
     /// 强制激活高精度模式（通常由计步器、运动传感器或网络变化触发，早于 GPS 位移）
     private func forceHighAccuracyBoost() {
         print("🚀 Status change detected! Forcing high accuracy boost...")
+        
+        // 0. 设置 3 分钟出门保护期，防止节能模式过早介入
+        departureBoostEndTime = Date().addingTimeInterval(3 * 60)
         
         // 1. 确保背景模式配置正确（防止被系统意外重置）
         locationManager.allowsBackgroundLocationUpdates = true
         locationManager.pausesLocationUpdatesAutomatically = false
         
-        // 2. 提升精度与频率至最高
-        locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
-        locationManager.distanceFilter = kCLDistanceFilterNone
+        // 2. 提升精度，但避免长期停留在导航级满额采样导致发热
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.distanceFilter = 10.0
         locationManager.activityType = .fitness
         
         // 3. 核心补救：立即请求一次单次精确定位，强制拉高硬件功率
@@ -882,23 +1029,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     /// 遍历原始轨迹存储目录，找出所有有记录的日期并缓存
     func refreshAvailableRawDates() {
-        let fileManager = FileManager.default
-        let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let baseDir = docs.appendingPathComponent("RawLocations")
-        
-        guard let files = try? fileManager.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else { return }
-        
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        
-        var dates = Set<Date>()
-        for file in files where file.pathExtension == "csv" {
-            let name = file.lastPathComponent
-            let dateStr = String(name.prefix(10))
-            if let date = formatter.date(from: dateStr) {
-                dates.insert(Calendar.current.startOfDay(for: date))
-            }
-        }
+        let dates = RawLocationStore.shared.availableDatesForPreferredRecordingDevice()
         Task { @MainActor in
             self.availableRawDates = dates
         }
@@ -1067,11 +1198,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationManager.requestAlwaysAuthorization()
         
         // --- 核心：集成健康数据与运动传感器 ---
+        // 注意：已在 init() 中启动，此处调用是为了确保 startTracking() 重入时状态正确
         HealthManager.shared.requestAuthorization { success in
             if success {
                 print("HealthKit authorized")
             }
         }
+        // 防止重复启动：stopActivityTracking 后再重启
+        HealthManager.shared.stopActivityTracking()
         HealthManager.shared.startActivityTracking()
         
         // Re-enable updates if they were stopped
@@ -1378,9 +1512,22 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 判定是否正在长久停留
         // 我们将其放宽到 150m (从 300m 下调)，并增加已知地点粘性
         let isStationary: Bool = {
+            // ✅ 出门保护期：任何 boost 触发后 3 分钟内，强制维持高频模式
+            // 防止 GPS/传感器还未稳定时，节能逻辑过早将精度降回低频
+            if Date() < departureBoostEndTime {
+                return false
+            }
+            
             guard let startLoc = potentialStopStartLocation else { return false }
             let duration = Date().timeIntervalSince(startLoc.timestamp)
             let distance = location.distance(from: startLoc)
+            
+            // C: 运动状态锁（优先级最高）- 如果传感器检测到正在步行/跑步/骑行，
+            // 哪怕 GPS 位移没跟上，也要维持高频记录（传感器比 GPS 快）
+            let motion = HealthManager.shared.currentMotionType
+            if motion == .walking || motion == .running || motion == .cycling || motion == .automotive {
+                return false
+            }
             
             // A: 通用逻辑 - 5分钟以上且位移在 150m 内 (应对室内漂移)
             if duration > 300 && distance < 150.0 { return true }
@@ -1388,12 +1535,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // B: 地点粘性 - 如果在已知地点范围内已超过 1 分钟，且当前速度极低，则提前进入节能
             if let p = place, duration > 60 && distance < Double(p.radius) + 80.0 && speed < 1.0 {
                 return true
-            }
-            
-            // C: 运动状态锁 - 如果传感器检测到正在步行/跑步/骑行，哪怕 GPS 位移没跟上，也要维持高频记录
-            let motion = HealthManager.shared.currentMotionType
-            if motion == .walking || motion == .running || motion == .cycling {
-                return false
             }
             
             return false
@@ -1422,20 +1563,20 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             let motion = HealthManager.shared.currentMotionType
             let isMovingBySensor = motion == .walking || motion == .running || motion == .cycling || motion == .automotive
             
-            // 只要传感器认为在动，或者速度 > 0.5m/s
-            if isMovingBySensor || speed > 0.5 {
-                let targetAccuracy = kCLLocationAccuracyBestForNavigation
-                if manager.desiredAccuracy != targetAccuracy {
-                    manager.desiredAccuracy = targetAccuracy
-                    manager.distanceFilter = kCLDistanceFilterNone // 满额记录
-                    manager.activityType = (motion == .automotive) ? .automotiveNavigation : .fitness
-                }
-            } else if speed > 15.0 {
-                // 高速驾驶模式
+            // 高速驾驶优先走车载导航模式，但仍保留距离过滤，避免无限采样
+            if motion == .automotive || speed > 15.0 {
                 if manager.desiredAccuracy != kCLLocationAccuracyBest {
                     manager.desiredAccuracy = kCLLocationAccuracyBest
-                    manager.distanceFilter = 20.0
+                    manager.distanceFilter = 15.0
                     manager.activityType = .automotiveNavigation
+                }
+            // 只要传感器认为在动，或者速度 > 0.5m/s
+            } else if isMovingBySensor || speed > 0.5 {
+                let targetAccuracy = kCLLocationAccuracyBest
+                if manager.desiredAccuracy != targetAccuracy {
+                    manager.desiredAccuracy = targetAccuracy
+                    manager.distanceFilter = 10.0
+                    manager.activityType = .fitness
                 }
             }
             updateRegionMonitoring(isStationary: false)
@@ -1681,6 +1822,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 核心唤醒逻辑：只要检测到“离开”某个地方，立即拉高精度，不等 GPS 位移
         if visit.departureDate != Date.distantFuture {
             print("🚀 Visit departure detected! Waking up GPS immediately...")
+            // 后台唤醒路径：确保运动传感器也重新启动（系统可能已将其暂停）
+            HealthManager.shared.stopActivityTracking()
+            HealthManager.shared.startActivityTracking()
             forceHighAccuracyBoost()
         }
     }
@@ -1721,14 +1865,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
         if region.identifier == "StationaryWakeupRegion" {
-            print("Exited stationary region! Waking up GPS immediately...")
-            // 强行提高定位精度以立即捕获一条好的轨迹点
-            manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
-            manager.distanceFilter = kCLDistanceFilterNone
-            manager.activityType = .fitness
-            manager.requestLocation()
+            print("🚧 Exited stationary region! Waking up GPS immediately...")
+            // 统一通过 forceHighAccuracyBoost 处理，确保出门保护期和传感器重启一并执行
+            HealthManager.shared.stopActivityTracking()
+            HealthManager.shared.startActivityTracking()
+            forceHighAccuracyBoost()
             
-            // 移除监听
+            // 移除监听（已移动，围栅失效）
             manager.stopMonitoring(for: region)
         }
     }
@@ -1867,6 +2010,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         )
     }
 
+    func suggestFrequentActivityType(for placeID: UUID, at time: Date) -> String? {
+        guard let context = modelContext else { return nil }
+        return LocationManager.resolveFrequentActivityType(
+            for: placeID,
+            at: time,
+            context: context,
+            window: habitTimeWindow,
+            threshold: habitFrequencyThreshold
+        )
+    }
+
     /// 核心算法：识别习惯活动 (静态版本以便于后台任务调用)
     nonisolated private static func resolveFrequentActivityType(
         for placeID: UUID,
@@ -1935,8 +2089,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             var footprintsToAnalyze: [PersistentIdentifier] = []
             
             for fp in footprints {
-                // 1. 自动关联活动类型 (仅补齐缺失的)
-                if fp.activityTypeValue == nil {
+                // 1. 自动关联活动类型 (仅补齐缺失的，且跳过人工修改过的)
+                if fp.activityTypeValue == nil && fp.statusValue != "manual" {
                     if let pid = fp.placeID {
                         if let type = LocationManager.resolveFrequentActivityType(
                             for: pid,
@@ -1982,9 +2136,29 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                                   context: ModelContext? = nil) {
         let activeContext = context ?? self.modelContext
         guard let context = activeContext else { return }
+
+        // 硬约束：单条足迹不能跨天，限制在 startOfDay...nextDay(0:00) 内。
+        let boundedDayStart = Calendar.current.startOfDay(for: candidate.startTime)
+        let boundedDayEnd = boundedDayStart.addingTimeInterval(86400)
+        let boundedStart = max(candidate.startTime, boundedDayStart)
+        let boundedEnd = min(max(candidate.endTime, boundedStart), boundedDayEnd)
+        guard boundedEnd > boundedStart else { return }
+
+        let boundedRawLocations = candidate.rawLocations.filter {
+            $0.timestamp >= boundedStart && $0.timestamp <= boundedEnd
+        }
+        let effectiveRawLocations = boundedRawLocations.isEmpty ? candidate.rawLocations : boundedRawLocations
+        let effectiveCenterCoordinate = FootprintProcessor.shared.calculateCenter(effectiveRawLocations)
+        let boundedCandidate = CandidateFootprint(
+            startTime: boundedStart,
+            endTime: boundedEnd,
+            centerCoordinate: effectiveCenterCoordinate,
+            duration: boundedEnd.timeIntervalSince(boundedStart),
+            rawLocations: effectiveRawLocations
+        )
         
         // 检查是否需要合并之前的记录
-        let targetStart = Calendar.current.startOfDay(for: candidate.startTime)
+        let targetStart = Calendar.current.startOfDay(for: boundedCandidate.startTime)
         let targetEnd = targetStart.addingTimeInterval(86400)
         
         var fetchDescriptor = FetchDescriptor<Footprint>(
@@ -1994,24 +2168,24 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         fetchDescriptor.fetchLimit = 1
         
         let existingFootprints = try? context.fetch(fetchDescriptor)
-        if let last = existingFootprints?.first, FootprintProcessor.shared.shouldMerge(lastFootprint: last, newCandidate: candidate) {
+        if let last = existingFootprints?.first, FootprintProcessor.shared.shouldMerge(lastFootprint: last, newCandidate: boundedCandidate) {
             // 合并逻辑：确保时间范围正确延伸，不重复生成重叠记录
             let oldEndTime = last.endTime
             let oldStartTime = last.startTime
             
-            last.endTime = max(last.endTime, candidate.endTime)
-            last.startTime = min(last.startTime, candidate.startTime)
+            last.endTime = min(max(last.endTime, boundedCandidate.endTime), targetEnd)
+            last.startTime = max(min(last.startTime, boundedCandidate.startTime), targetStart)
             last.date = Calendar.current.startOfDay(for: last.startTime)
             
             // 仅在有明显新轨迹或时间延伸时追加坐标，避免无限堆积重叠坐标
             if last.endTime > oldEndTime || last.startTime < oldStartTime {
                 var currentPath = last.footprintLocations
-                currentPath.append(contentsOf: candidate.rawLocations.map { $0.coordinate })
+                currentPath.append(contentsOf: boundedCandidate.rawLocations.map { $0.coordinate })
                 last.footprintLocations = currentPath
             }
             
             // 重新匹配地点（以防合并过程中位置偏移导致匹配变化）
-            if let mPlace = self.matchedPlaceFor(coordinate: candidate.centerCoordinate) {
+            if let mPlace = self.matchedPlaceFor(coordinate: boundedCandidate.centerCoordinate) {
                 if last.placeID != mPlace.placeID {
                     last.placeID = mPlace.placeID
                 }
@@ -2023,23 +2197,23 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         } else {
             // 创建新足迹。重要的：日期应归于足迹开始的那一天，而非生成时的这一秒
             let newFootprint = Footprint(
-                date: Calendar.current.startOfDay(for: candidate.startTime),
-                startTime: candidate.startTime,
-                endTime: candidate.endTime,
-                footprintLocations: candidate.rawLocations.map { $0.coordinate },
+                date: Calendar.current.startOfDay(for: boundedCandidate.startTime),
+                startTime: boundedCandidate.startTime,
+                endTime: boundedCandidate.endTime,
+                footprintLocations: boundedCandidate.rawLocations.map { $0.coordinate },
                 locationHash: "TBD",
-                duration: candidate.duration,
+                duration: boundedCandidate.duration,
                 status: .confirmed,
                 address: (isHistorical || currentAddress == "正在解析位置..." || currentAddress == "未知位置") ? nil : currentAddress
             )
             
-            if let mPlace = self.matchedPlaceFor(coordinate: candidate.centerCoordinate) {
+            if let mPlace = self.matchedPlaceFor(coordinate: boundedCandidate.centerCoordinate) {
                 let pid = mPlace.placeID
                 newFootprint.placeID = pid
                 
                 // --- 自动关联习惯活动类型 ---
                 // 只有同一地点、同一时间段出现过3次以上才关联
-                newFootprint.activityTypeValue = self.findFrequentActivityType(for: pid, at: candidate.startTime, context: context)
+                newFootprint.activityTypeValue = self.findFrequentActivityType(for: pid, at: boundedCandidate.startTime, context: context)
                 
                 // Address 优先使用地点名称，解决“标题对地点(地址)不对”的问题
                 newFootprint.address = mPlace.name
@@ -2448,6 +2622,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // 数据加载完成后，后台扫描并补全缺失的活动类型
             self.autoFillMissingActivityTypes(for: today)
         }
+    }
+
+    @MainActor
+    func refreshForRecordingDeviceChange() async {
+        TimelineBuilder.timelineCache.removeAll()
+        refreshAvailableRawDates()
+        await loadPointsFromStore()
+        lastRawDataUpdateTrigger = Date()
+        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
     }
     
     /// 简单的点抽稀逻辑 (Douglas-Peucker 简化版或采样)

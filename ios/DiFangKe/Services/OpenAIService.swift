@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import SwiftData
 import Observation
+import CoreLocation
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -214,6 +215,12 @@ class OpenAIService {
 
     func enqueueDailySummary(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], force: Bool = false) {
         let startOfDate = Calendar.current.startOfDay(for: date)
+        let summaryFootprints = footprints.filter { $0.isUserModifiedForDailySummary }
+
+        guard !summaryFootprints.isEmpty else {
+            dailySummaryDateSet.remove(startOfDate)
+            return
+        }
         
         // 如果不是强制刷新，且已经在队列中或已处理过，则跳过
         if !force && dailySummaryDateSet.contains(startOfDate) { return }
@@ -226,7 +233,7 @@ class OpenAIService {
             return false
         }
         
-        let fpIds = footprints.map { $0.footprintID }
+        let fpIds = summaryFootprints.map { $0.footprintID }
         let tpIds = transports.map { $0.recordID }
         
         dailySummaryDateSet.insert(startOfDate)
@@ -407,14 +414,21 @@ class OpenAIService {
         var lines: [String] = []
         
         var events: [(Date, String)] = []
+        var uniquePlaceKeys: Set<String> = []
+        var totalTransportDistance: Double = 0
+        var footprintCoordsByTime: [(Date, CLLocationCoordinate2D)] = []
         
         for id in fpIds {
             let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
             if let fp = (try? context.fetch(fpDescriptor))?.first {
+                guard fp.isUserModifiedForDailySummary else { continue }
                 let factLine = dailySummaryFactLine(for: fp, places: allPlaces, activities: allActivities)
                 if !factLine.isEmpty {
                     events.append((fp.startTime, factLine))
                 }
+
+                uniquePlaceKeys.insert(dailySummaryPlaceKey(for: fp, places: allPlaces))
+                footprintCoordsByTime.append((fp.startTime, CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)))
             }
         }
         
@@ -425,6 +439,9 @@ class OpenAIService {
                 if !factLine.isEmpty {
                     events.append((tp.startTime, factLine))
                 }
+                if tp.distance > 0 {
+                    totalTransportDistance += tp.distance
+                }
             }
         }
         
@@ -434,10 +451,22 @@ class OpenAIService {
         for (index, event) in events.enumerated() {
             lines.append("\(index + 1). \(event.1)")
         }
+
+        let inferredFootprintDistance = dailySummaryInferredDistance(from: footprintCoordsByTime)
+        let totalDistanceEvidence = max(totalTransportDistance, inferredFootprintDistance)
+
+        if totalDistanceEvidence > 0 {
+            lines.append("\(lines.count + 1). 当日里程：\(dailySummaryDistanceText(totalDistanceEvidence))")
+        }
+        lines.append("\(lines.count + 1). 地点变化：\(dailySummaryPlaceJudgement(uniquePlaceCount: uniquePlaceKeys.count, distanceMeters: totalDistanceEvidence))")
         
         guard !lines.isEmpty else { return nil }
         
-        let fallbackSummary = dailySummaryFallbackSummary(footprintCount: lines.count)
+        let fallbackSummary = dailySummaryFallbackSummary(
+            footprintCount: events.count,
+            totalDistance: totalDistanceEvidence,
+            placeJudgement: dailySummaryPlaceJudgement(uniquePlaceCount: uniquePlaceKeys.count, distanceMeters: totalDistanceEvidence)
+        )
         return DailySummaryProfile(
             lines: lines,
             fingerprint: lines.joined(separator: "\n"),
@@ -449,12 +478,10 @@ class OpenAIService {
         let start = footprint.startTime.formatted(.dateTime.hour().minute())
         let end = footprint.endTime.formatted(.dateTime.hour().minute())
         var parts: [String] = ["\(start)-\(end)"]
-        
-        if let place = places.first(where: { $0.placeID == footprint.placeID }) {
-            let name = place.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !name.isEmpty {
-                parts.append(name)
-            }
+
+        let placeName = dailySummaryPreferredPlaceName(for: footprint, places: places)
+        if !placeName.isEmpty {
+            parts.append(placeName)
         }
         
         if let activity = footprint.getActivityType(from: activities) {
@@ -473,6 +500,22 @@ class OpenAIService {
         }
         
         return parts.joined(separator: "｜")
+    }
+
+    private func dailySummaryPreferredPlaceName(for footprint: Footprint, places: [Place]) -> String {
+        let address = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if footprint.isAddressEditedByHand && !address.isEmpty {
+            return address
+        }
+
+        if let place = places.first(where: { $0.placeID == footprint.placeID }) {
+            let name = place.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                return name
+            }
+        }
+
+        return address
     }
 
     private func dailySummaryTransportLine(for transport: TransportRecord) -> String {
@@ -495,17 +538,75 @@ class OpenAIService {
         return parts.joined(separator: "｜")
     }
 
-    private func dailySummaryFallbackSummary(footprintCount: Int) -> String {
+    private func dailySummaryFallbackSummary(footprintCount: Int, totalDistance: Double, placeJudgement: String) -> String {
+        let base: String
         switch footprintCount {
         case 1:
-            return "今天没去别的地方"
+            base = "今天没去别的地方"
         case 2...3:
-            return "今天去过几个地方"
+            base = "今天去过几个地方"
         case 4...:
-            return "今天去过的地方还不少"
+            base = "今天去过的地方还不少"
         default:
-            return "又是平凡的一天"
+            base = "又是平凡的一天"
         }
+
+        if totalDistance > 0 {
+            return "\(base)，里程约\(dailySummaryDistanceText(totalDistance))，\(placeJudgement)"
+        }
+        return "\(base)，\(placeJudgement)"
+    }
+
+    private func dailySummaryDistanceText(_ meters: Double) -> String {
+        if meters < 1000 {
+            return "\(Int(meters.rounded()))m"
+        }
+        return String(format: "%.1fkm", meters / 1000)
+    }
+
+    private func dailySummaryPlaceJudgement(uniquePlaceCount: Int, distanceMeters: Double) -> String {
+        if distanceMeters >= 50_000 {
+            return "地点变化比较明显"
+        }
+        switch uniquePlaceCount {
+        case 0...1:
+            return "地点变化不大"
+        case 2...3:
+            return "地点有一定变化"
+        default:
+            return "地点变化比较明显"
+        }
+    }
+
+    private func dailySummaryPlaceKey(for footprint: Footprint, places: [Place]) -> String {
+        let address = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if footprint.isAddressEditedByHand && !address.isEmpty {
+            return "addr:\(address)"
+        }
+
+        if let placeID = footprint.placeID {
+            return "pid:\(placeID.uuidString)"
+        }
+
+        if !address.isEmpty {
+            return "addr:\(address)"
+        }
+
+        // 无 placeID/地址时回退到坐标网格，确保照片导入的跨城点能体现“地点变化”。
+        return String(format: "grid:%.2f,%.2f", footprint.latitude, footprint.longitude)
+    }
+
+    private func dailySummaryInferredDistance(from timedCoords: [(Date, CLLocationCoordinate2D)]) -> Double {
+        let sorted = timedCoords.sorted { $0.0 < $1.0 }
+        guard sorted.count >= 2 else { return 0 }
+
+        var total: Double = 0
+        for index in 1..<sorted.count {
+            let prev = CLLocation(latitude: sorted[index - 1].1.latitude, longitude: sorted[index - 1].1.longitude)
+            let cur = CLLocation(latitude: sorted[index].1.latitude, longitude: sorted[index].1.longitude)
+            total += prev.distance(from: cur)
+        }
+        return total
     }
 
     private func dailySummaryCleanedSummary(_ summary: String?) -> String? {
@@ -586,6 +687,10 @@ class OpenAIService {
         6. 如果当天有多次交通出行但地点变化不大，可以概括为“出门走走”或“多次往返”。
         7. 如果信息零散，就总结整体状态，不要编造细节。
         8. 尽量控制在 15 字以内。
+        9. 可以优先吸收“当日里程”和“地点变化”这两条信息，不要机械复述。
+        10. 输出前先做一致性校验：结论必须和里程、地点线索一致，不能互相矛盾。
+        11. 若片段体现明显的远距离或跨区域移动，结论应体现范围扩大与跨区域特征，避免收缩性描述。
+        12. 活动范围判断要以明确事实优先：里程数和地点词 > 模糊描述；有冲突时按更强证据下结论。
 
         事实片段：
         \(list)
@@ -593,7 +698,7 @@ class OpenAIService {
         
         let body: [String: Any] = [
             "messages": [
-                ["role": "system", "content": "你是一位只做事实概括的中文助手。输出要自然、口语化，像日常顺口说一句；不要虚构，不要抒情，不要修辞，不要使用报表口吻、监控口吻或生硬表达，也不要补写感受、氛围、节奏、心情或状态判断。"],
+                ["role": "system", "content": "你是一位只做事实概括的中文助手。输出前先做事实一致性校验：结论必须与里程和地点线索一致，禁止出现与证据相反的收缩性结论。输出要自然、口语化，不要虚构，不要抒情，不要修辞，不要使用报表口吻、监控口吻或生硬表达，也不要补写感受、氛围、节奏、心情或状态判断。"],
                 ["role": "user", "content": prompt]
             ],
             "temperature": 0.2

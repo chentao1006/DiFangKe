@@ -262,7 +262,7 @@ class TimelineBuilder {
                         isHighlight: (last.isHighlight == true || fp.isHighlight == true),
                         maxDiameter: 0, // Not strictly needed for UI Lite objects
                         aiAnalyzed: last.aiAnalyzed || fp.aiAnalyzed,
-                        activityTypeValue: last.activityTypeValue ?? fp.activityTypeValue
+                        activityTypeValue: (last.status == .manual && last.activityTypeValue == nil) || (fp.status == .manual && fp.activityTypeValue == nil) ? nil : (last.activityTypeValue ?? fp.activityTypeValue)
                     )
                     finalizedSortedFootprints[finalizedSortedFootprints.count - 1] = combined
                 } else {
@@ -500,7 +500,7 @@ class TimelineBuilder {
                             duration: max(f1.endTime, f2.endTime).timeIntervalSince(f1.startTime),
                             status: (f1.status == .confirmed || f2.status == .confirmed) ? .confirmed : f1.status,
                             address: (f1.placeID != nil || f1.isAddressEditedByHand) ? f1.address : ((f2.placeID != nil || f2.isAddressEditedByHand) ? f2.address : f1.address),
-                            activityTypeValue: f1.activityTypeValue ?? f2.activityTypeValue
+                            activityTypeValue: (f1.status == .manual && f1.activityTypeValue == nil) || (f2.status == .manual && f2.activityTypeValue == nil) ? nil : (f1.activityTypeValue ?? f2.activityTypeValue)
                         )
                         combined.isAddressEditedByHand = f1.isAddressEditedByHand || f2.isAddressEditedByHand
                         combined.placeID = f1.placeID ?? f2.placeID
@@ -1734,6 +1734,10 @@ class PersistentTimelineBuilder {
     }
 
     private static func getSimplifiedLocationName(for footprint: Footprint, allPlaces: [Place]) -> String {
+        if footprint.isAddressEditedByHand, let addr = footprint.address, !addr.isEmpty {
+            return addr
+        }
+
         // 1. 优先使用已绑定的 PlaceID
         if let placeID = footprint.placeID, let place = allPlaces.first(where: { $0.placeID == placeID }) {
             return place.name
@@ -2123,6 +2127,29 @@ extension PersistentTimelineBuilder {
             $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
         })
         let fps = (try? context.fetch(fpDescriptor)) ?? []
+
+        // 兜底自愈：历史异常数据可能出现跨天结束时间（例如 46h），读取时裁回当天窗口。
+        var hasFootprintCorrections = false
+        for fp in fps {
+            let boundedStart = max(fp.startTime, startOfDay)
+            let boundedEnd = min(max(fp.endTime, boundedStart), endOfDay)
+            if fp.startTime != boundedStart {
+                fp.startTime = boundedStart
+                hasFootprintCorrections = true
+            }
+            if fp.endTime != boundedEnd {
+                fp.endTime = boundedEnd
+                hasFootprintCorrections = true
+            }
+            let normalizedDate = Calendar.current.startOfDay(for: fp.startTime)
+            if fp.date != normalizedDate {
+                fp.date = normalizedDate
+                hasFootprintCorrections = true
+            }
+        }
+        if hasFootprintCorrections {
+            try? context.save()
+        }
         
         let tpDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
             $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"

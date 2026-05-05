@@ -47,7 +47,7 @@ struct HistoryStatisticsView: View {
     @State private var appearanceTrigger = false
     @State private var mapPosition: MapCameraPosition = .automatic
     @State private var mapDelta: Double = 0.1
-    @State private var heatmapPoints: [LocationPoint] = []
+    @State private var heatmapPoints: [DFKMapView.HeatmapPoint] = []
     
     // AI Summary State
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
@@ -309,10 +309,15 @@ struct HistoryStatisticsView: View {
     }
     
     private func updateHeatmapPoints(delta: Double) {
-        let newPoints = getTopLocations(delta: delta)
+        let locations = getTopLocations(delta: delta)
+        let maxIntensity = locations.map { $0.count }.max() ?? 1
+        let newPoints = locations.map { DFKMapView.HeatmapPoint(coordinate: $0.coord, intensity: $0.count, maxIntensity: maxIntensity) }
+        
         // 只有当聚类点发生较大变化或首次加载时才更新
-        if heatmapPoints.count != newPoints.count || heatmapPoints.first?.hash != newPoints.first?.hash {
-            heatmapPoints = newPoints
+        if heatmapPoints.count != newPoints.count || heatmapPoints.first?.id != newPoints.first?.id {
+            withAnimation(.easeOut(duration: 0.3)) {
+                heatmapPoints = newPoints
+            }
         }
     }
     
@@ -405,14 +410,13 @@ struct HistoryStatisticsView: View {
             if heatmapPoints.isEmpty {
                 placeholderView("暂无地点数据")
             } else {
-                let maxIntensity = heatmapPoints.map { $0.count }.max() ?? 1
                 DFKMapView(
                     cameraPosition: $mapPosition,
                     isInteractive: false,
                     showsUserLocation: false,
-                    heatmapPoints: heatmapPoints.map { DFKMapView.HeatmapPoint(coordinate: $0.coord, intensity: $0.count, maxIntensity: maxIntensity) }
+                    heatmapPoints: heatmapPoints
                 )
-                .onMapCameraChange { context in
+                .onMapCameraChange(frequency: .onEnd) { context in
                     // 地图缩放变化时，动态重新聚类
                     updateHeatmapPoints(delta: context.region.span.latitudeDelta)
                 }
@@ -727,17 +731,17 @@ struct HistoryStatisticsView: View {
 
 struct FullHeatmapView: View {
     @Environment(\.dismiss) private var dismiss
-    let heatmapPoints: [HistoryStatisticsView.LocationPoint]
+    let heatmapPoints: [DFKMapView.HeatmapPoint]
     let initialPosition: MapCameraPosition
     
     @State private var position: MapCameraPosition
     @State private var maxIntensity: Int
     
-    init(heatmapPoints: [HistoryStatisticsView.LocationPoint], initialPosition: MapCameraPosition) {
+    init(heatmapPoints: [DFKMapView.HeatmapPoint], initialPosition: MapCameraPosition) {
         self.heatmapPoints = heatmapPoints
         self.initialPosition = initialPosition
         self._position = State(initialValue: initialPosition)
-        self._maxIntensity = State(initialValue: heatmapPoints.map { $0.count }.max() ?? 1)
+        self._maxIntensity = State(initialValue: heatmapPoints.map { $0.intensity }.max() ?? 1)
     }
     
     var body: some View {
@@ -746,9 +750,8 @@ struct FullHeatmapView: View {
                 cameraPosition: $position,
                 isInteractive: true,
                 showsUserLocation: true,
-                heatmapPoints: heatmapPoints.map { DFKMapView.HeatmapPoint(coordinate: $0.coord, intensity: $0.count, maxIntensity: maxIntensity) }
+                heatmapPoints: heatmapPoints
             )
-            .ignoresSafeArea(edges: .bottom)
             .navigationTitle("热点地区")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

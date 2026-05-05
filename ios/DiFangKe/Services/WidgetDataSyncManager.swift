@@ -2,14 +2,28 @@ import Foundation
 import SwiftUI
 import SwiftData
 import MapKit
+import Photos
 import WidgetKit
 
 @MainActor
 final class WidgetDataSyncManager {
     static let shared = WidgetDataSyncManager()
+    static let snapshotFileVersion = "v4"
+
+    private struct AggregatedFootprintSnapshot {
+        let coordinate: CLLocationCoordinate2D
+        let totalDuration: TimeInterval
+        let representative: Footprint
+        let latestPhotoAssetID: String?
+    }
     
-    private let groupID = "group.com.ct106.difangke"
+    private var groupID: String { AppConfig.shared.appGroupID }
     private var container: ModelContainer?
+    private let todaySyncMinimumInterval: TimeInterval = 90
+    private var lastTodaySyncAt: Date?
+    private var isTodaySyncInFlight = false
+    private var hasPendingTodaySync = false
+    private var onDemandOffsetsInFlight = Set<Int>()
     
     private init() {}
     
@@ -34,17 +48,165 @@ final class WidgetDataSyncManager {
     
     /// 仅同步今日数据 (用于位置更新等高频场景)
     func syncTodayOnly() async {
+        if isTodaySyncInFlight {
+            hasPendingTodaySync = true
+            return
+        }
+
+        let now = Date()
+        if let lastTodaySyncAt, now.timeIntervalSince(lastTodaySyncAt) < todaySyncMinimumInterval {
+            return
+        }
+
+        isTodaySyncInFlight = true
+        defer {
+            isTodaySyncInFlight = false
+        }
+
         ensureContainer()
         await syncData(forOffset: 0)
+        lastTodaySyncAt = Date()
+        WidgetCenter.shared.reloadAllTimelines()
+
+        if hasPendingTodaySync {
+            hasPendingTodaySync = false
+            let followUpDelay = todaySyncMinimumInterval
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                try? await Task.sleep(nanoseconds: UInt64(followUpDelay * 1_000_000_000))
+                await self.syncTodayOnly()
+            }
+        }
+    }
+
+    func syncOffsetOnDemand(_ offset: Int) async {
+        guard !onDemandOffsetsInFlight.contains(offset) else { return }
+        onDemandOffsetsInFlight.insert(offset)
+        defer { onDemandOffsetsInFlight.remove(offset) }
+
+        ensureContainer()
+        await syncData(forOffset: offset)
         WidgetCenter.shared.reloadAllTimelines()
     }
     
     private func ensureContainer() {
         if container == nil {
             let schema = Schema([Footprint.self, Place.self, TransportRecord.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self])
-            let config = ModelConfiguration("dfk_v5_stable", schema: schema, groupContainer: .identifier(groupID))
-            self.container = try? ModelContainer(for: schema, configurations: [config])
+            let config = ModelConfiguration(
+                "dfk_v5_stable", 
+                schema: schema, 
+                groupContainer: .identifier(groupID),
+                cloudKitDatabase: .none // 核心修复：强制禁用小组件同步容器的 CloudKit，防止与主 App 冲突
+            )
+            do {
+                self.container = try ModelContainer(for: schema, configurations: [config])
+            } catch {
+                print("[WidgetSync] Failed to create fallback container: \(error)")
+            }
         }
+    }
+
+    private func aggregatedFootprints(from footprints: [Footprint]) -> [AggregatedFootprintSnapshot] {
+        struct Bucket {
+            var weightedLatitude: Double
+            var weightedLongitude: Double
+            var totalDuration: TimeInterval
+            var representative: Footprint
+            var latestPhotoAssetID: String?
+            var latestPhotoEndTime: Date?
+        }
+
+        var buckets: [String: Bucket] = [:]
+        var orderedKeys: [String] = []
+
+        for footprint in footprints {
+            let durationWeight = max(footprint.duration, 1)
+            let key: String
+            if let placeID = footprint.placeID {
+                key = "place:\(placeID.uuidString)"
+            } else if !footprint.locationHash.isEmpty {
+                key = "hash:\(footprint.locationHash)"
+            } else {
+                key = String(format: "coord:%.5f,%.5f", footprint.latitude, footprint.longitude)
+            }
+
+            if var bucket = buckets[key] {
+                bucket.weightedLatitude += footprint.latitude * durationWeight
+                bucket.weightedLongitude += footprint.longitude * durationWeight
+                bucket.totalDuration += footprint.duration
+                if footprint.duration > bucket.representative.duration {
+                    bucket.representative = footprint
+                }
+                if let latestPhotoAssetID = footprint.photoAssetIDs.last,
+                   bucket.latestPhotoEndTime == nil || footprint.endTime >= bucket.latestPhotoEndTime! {
+                    bucket.latestPhotoAssetID = latestPhotoAssetID
+                    bucket.latestPhotoEndTime = footprint.endTime
+                }
+                buckets[key] = bucket
+            } else {
+                orderedKeys.append(key)
+                buckets[key] = Bucket(
+                    weightedLatitude: footprint.latitude * durationWeight,
+                    weightedLongitude: footprint.longitude * durationWeight,
+                    totalDuration: footprint.duration,
+                    representative: footprint,
+                    latestPhotoAssetID: footprint.photoAssetIDs.last,
+                    latestPhotoEndTime: footprint.photoAssetIDs.isEmpty ? nil : footprint.endTime
+                )
+            }
+        }
+
+        return orderedKeys.compactMap { key in
+            guard let bucket = buckets[key] else { return nil }
+            let divisor = max(bucket.totalDuration, 1)
+            let representative = bucket.representative
+            return AggregatedFootprintSnapshot(
+                coordinate: CLLocationCoordinate2D(
+                    latitude: bucket.weightedLatitude / divisor,
+                    longitude: bucket.weightedLongitude / divisor
+                ),
+                totalDuration: bucket.totalDuration,
+                representative: representative,
+                latestPhotoAssetID: bucket.latestPhotoAssetID
+            )
+        }
+    }
+
+    private func loadWidgetSnapshotAssetImage(assetID: String, targetSize: CGSize) async -> UIImage? {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return nil }
+
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+        guard let asset = assets.firstObject else { return nil }
+
+        return await withCheckedContinuation { continuation in
+            let options = PHImageRequestOptions()
+            options.isNetworkAccessAllowed = true
+            options.deliveryMode = .highQualityFormat
+            options.resizeMode = .exact
+
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFill,
+                options: options
+            ) { image, _ in
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
+    private func loadAggregatedFootprintPhotoImages(_ aggregatedFootprints: [AggregatedFootprintSnapshot], targetSide: CGFloat) async -> [String: UIImage] {
+        let assetIDs = Set(aggregatedFootprints.compactMap(\.latestPhotoAssetID))
+        guard !assetIDs.isEmpty else { return [:] }
+
+        var images: [String: UIImage] = [:]
+        for assetID in assetIDs {
+            if let image = await loadWidgetSnapshotAssetImage(assetID: assetID, targetSize: CGSize(width: targetSide, height: targetSide)) {
+                images[assetID] = image
+            }
+        }
+        return images
     }
     
     private func syncData(forOffset offset: Int) async {
@@ -74,6 +236,8 @@ final class WidgetDataSyncManager {
             )
             let transports = (try? context.fetch(transportDescriptor)) ?? []
             let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+            let aggregatedFootprints = aggregatedFootprints(from: footprints)
+            let footprintPhotoImages = await loadAggregatedFootprintPhotoImages(aggregatedFootprints, targetSide: 88)
             
             let defaults = UserDefaults(suiteName: groupID)
             let lastLat = defaults?.double(forKey: "lastLat") ?? 39.9042
@@ -175,30 +339,46 @@ final class WidgetDataSyncManager {
                                 }
                             }
                             
-                            // 绘制足迹
-                            for fp in footprints {
-                                let point = snapshot.point(for: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude))
-                                let activity = allActivities.first { $0.id.uuidString == fp.activityTypeValue || $0.name == fp.activityTypeValue }
-                                let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
-                                let iconName = activity?.icon ?? "questionmark.circle.dashed"
-                                
-                                let hours = fp.duration / 3600.0
+                            // 绘制聚合足迹
+                            for aggregated in aggregatedFootprints {
+                                let fp = aggregated.representative
+                                let point = snapshot.point(for: aggregated.coordinate)
+                                let hours = aggregated.totalDuration / 3600.0
                                 let dotScale: CGFloat = 1.0 + (1.5 - 1.0) * min(1.0, max(0.0, (hours - 0.5) / (12.0 - 0.5)))
                                 let size = 28 * dotScale // 尺寸调整，适应小尺寸
-                                
-                                ctx.cgContext.setFillColor(activityColor.cgColor)
-                                ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-                                ctx.cgContext.fillPath()
-                                
                                 let strokeColor = theme == .dark ? UIColor.black : UIColor.white
-                                ctx.cgContext.setStrokeColor(strokeColor.cgColor)
-                                ctx.cgContext.setLineWidth(1.5)
-                                ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-                                ctx.cgContext.strokePath()
-                                if let iconImage = UIImage(systemName: iconName) {
-                                    let iconSize = (size * 0.55)
-                                    let iconRect = CGRect(x: point.x - iconSize/2, y: point.y - iconSize/2, width: iconSize, height: iconSize)
-                                    iconImage.withTintColor(strokeColor).draw(in: iconRect)
+
+                                if let latestPhotoAssetID = aggregated.latestPhotoAssetID,
+                                   let photoImage = footprintPhotoImages[latestPhotoAssetID] {
+                                    let rect = CGRect(x: point.x - size/2, y: point.y - size/2, width: size, height: size)
+                                    let path = UIBezierPath(roundedRect: rect, cornerRadius: 8 * dotScale)
+                                    ctx.cgContext.saveGState()
+                                    path.addClip()
+                                    photoImage.draw(in: rect)
+                                    ctx.cgContext.restoreGState()
+
+                                    ctx.cgContext.setStrokeColor(UIColor.white.cgColor)
+                                    ctx.cgContext.setLineWidth(1.5)
+                                    ctx.cgContext.addPath(path.cgPath)
+                                    ctx.cgContext.strokePath()
+                                } else {
+                                    let activity = allActivities.first { $0.id.uuidString == fp.activityTypeValue || $0.name == fp.activityTypeValue }
+                                    let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
+                                    let iconName = activity?.icon ?? "questionmark.circle.dashed"
+
+                                    ctx.cgContext.setFillColor(activityColor.cgColor)
+                                    ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)
+                                    ctx.cgContext.fillPath()
+
+                                    ctx.cgContext.setStrokeColor(strokeColor.cgColor)
+                                    ctx.cgContext.setLineWidth(1.5)
+                                    ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)
+                                    ctx.cgContext.strokePath()
+                                    if let iconImage = UIImage(systemName: iconName) {
+                                        let iconSize = (size * 0.55)
+                                        let iconRect = CGRect(x: point.x - iconSize/2, y: point.y - iconSize/2, width: iconSize, height: iconSize)
+                                        iconImage.withTintColor(strokeColor).draw(in: iconRect)
+                                    }
                                 }
                             }
                         }
@@ -225,7 +405,7 @@ final class WidgetDataSyncManager {
     private func getFileURL(forOffset offset: Int, sizeName: String, themeName: String) -> URL {
         let manager = FileManager.default
         let containerURL = manager.containerURL(forSecurityApplicationGroupIdentifier: groupID)
-        let fileName = "widget_snapshot_\(sizeName)_\(themeName)_\(offset).jpg"
+        let fileName = "widget_snapshot_\(sizeName)_\(themeName)_\(offset)_\(Self.snapshotFileVersion).jpg"
         return containerURL!.appendingPathComponent(fileName)
     }
 }

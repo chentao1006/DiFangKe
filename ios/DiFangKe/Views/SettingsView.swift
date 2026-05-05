@@ -7,6 +7,7 @@ struct SettingsView: View {
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder)]) private var allActivities: [ActivityType]
     @AppStorage("isICloudSyncEnabled") private var isICloudSyncEnabled = true
+    @AppStorage("raw_recording_source_device_id") private var rawRecordingSourceDeviceID = ""
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @AppStorage("dailyNotificationHour") private var notificationHour: Int = 21
     @AppStorage("dailyNotificationMinute") private var notificationMinute: Int = 0
@@ -30,6 +31,24 @@ struct SettingsView: View {
             }
         )
     }
+
+    private var useCurrentDeviceForRawRecordingBinding: Binding<Bool> {
+        Binding(
+            get: {
+                rawRecordingSourceDeviceID == RawLocationStore.shared.currentDeviceIdentifier
+            },
+            set: { useCurrentDevice in
+                let currentDeviceID = RawLocationStore.shared.currentDeviceIdentifier
+                if useCurrentDevice {
+                    rawRecordingSourceDeviceID = currentDeviceID
+                    RawLocationStore.shared.setPreferredRecordingDeviceID(currentDeviceID)
+                } else if rawRecordingSourceDeviceID == currentDeviceID {
+                    rawRecordingSourceDeviceID = ""
+                    RawLocationStore.shared.setPreferredRecordingDeviceID("")
+                }
+            }
+        )
+    }
     
     var body: some View {
         Form {
@@ -44,9 +63,22 @@ struct SettingsView: View {
                     }
                 
                 Toggle("开启 iCloud 同步", isOn: $isICloudSyncEnabled)
+                if isICloudSyncEnabled {
+                    Toggle("以该设备记录为准", isOn: useCurrentDeviceForRawRecordingBinding)
+                }
                 Toggle("自动关联照片到足迹", isOn: $isAutoPhotoLinkEnabled)
             }
             
+            .onChange(of: rawRecordingSourceDeviceID) { _, _ in
+                Task { @MainActor in
+                    await locationManager.refreshForRecordingDeviceChange()
+                }
+            }
+            .onChange(of: isICloudSyncEnabled) { _, _ in
+                Task { @MainActor in
+                    await locationManager.refreshForRecordingDeviceChange()
+                }
+            }
             Section(header: Text("地点管理")) {
                 NavigationLink(destination: PlacesManagerView()) {
                     HStack {

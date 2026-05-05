@@ -39,44 +39,50 @@ struct RawPointsListView: View {
                 } else {
                     VStack(spacing: 0) {
                         MapReader { mapProxy in
-                            Map(position: $position) {
-                                MapPolyline(coordinates: allCoordinates)
-                                    .stroke(Color.dfkAccent.opacity(0.5), lineWidth: 3)
-                                
-                                if let selected = selectedPoint {
-                                    Annotation("选中点", coordinate: selected.coordinate, anchor: .bottom) {
-                                        VStack(spacing: 0) {
-                                            Image(systemName: "mappin.circle.fill")
-                                                .font(.title2)
-                                                .foregroundColor(.red)
-                                            Image(systemName: "arrowtriangle.down.fill")
-                                                .font(.caption2)
-                                                .foregroundColor(.red)
-                                                .offset(y: -4)
+                            GeometryReader { geometry in
+                                if geometry.size.width > 0 && geometry.size.height > 0 {
+                                    Map(position: $position) {
+                                        MapPolyline(coordinates: allCoordinates)
+                                            .stroke(Color.dfkAccent.opacity(0.5), lineWidth: 3)
+                                        
+                                        if let selected = selectedPoint {
+                                            Annotation("选中点", coordinate: selected.coordinate, anchor: .bottom) {
+                                                VStack(spacing: 0) {
+                                                    Image(systemName: "mappin.circle.fill")
+                                                        .font(.title2)
+                                                        .foregroundColor(.red)
+                                                    Image(systemName: "arrowtriangle.down.fill")
+                                                        .font(.caption2)
+                                                        .foregroundColor(.red)
+                                                        .offset(y: -4)
+                                                }
+                                            }
                                         }
                                     }
+                                    .mapStyle(.standard(emphasis: .muted))
+                                    .onTapGesture { screenPoint in
+                                        if let coordinate = mapProxy.convert(screenPoint, from: .local) {
+                                            selectNearestPoint(to: coordinate)
+                                        }
+                                    }
+                                    .overlay(alignment: .bottomTrailing) {
+                                        Button {
+                                            withAnimation {
+                                                position = .automatic
+                                            }
+                                        } label: {
+                                            Image(systemName: "scope")
+                                                .padding(8)
+                                                .background(.ultraThinMaterial)
+                                                .cornerRadius(8)
+                                                .padding(10)
+                                        }
+                                    }
+                                } else {
+                                    Color.clear
                                 }
                             }
                             .frame(height: 220)
-                            .mapStyle(.standard(emphasis: .muted))
-                            .onTapGesture { screenPoint in
-                                if let coordinate = mapProxy.convert(screenPoint, from: .local) {
-                                    selectNearestPoint(to: coordinate)
-                                }
-                            }
-                            .overlay(alignment: .bottomTrailing) {
-                                Button {
-                                    withAnimation {
-                                        position = .automatic
-                                    }
-                                } label: {
-                                    Image(systemName: "scope")
-                                        .padding(8)
-                                        .background(.ultraThinMaterial)
-                                        .cornerRadius(8)
-                                        .padding(10)
-                                }
-                            }
                         }
                         
                         ScrollViewReader { scrollProxy in

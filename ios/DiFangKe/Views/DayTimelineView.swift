@@ -267,7 +267,8 @@ struct DayTimelineView: View {
             allPlaces: allPlaces, 
             offset: offset, 
             locationManager: locationManager, 
-            pastLimitOffset: pastLimitOffset
+            pastLimitOffset: pastLimitOffset,
+            isActivePage: scrollID == date || selectedDate == date
         )
         .frame(width: UIScreen.main.bounds.width)
         .id(date)

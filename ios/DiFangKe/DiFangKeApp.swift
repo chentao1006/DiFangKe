@@ -116,8 +116,10 @@ struct DiFangKeApp: App {
                             PhotoService.shared.modelContext = context
                             OpenAIService.shared.modelContainer = modelContainer
                             
-                            // Only start tracking if enabled in settings
-                            if UserDefaults.standard.bool(forKey: "isTrackingEnabled") {
+                            // 核心修复：使用与 startTracking() 内部一致的判断逻辑
+                            // bool(forKey:) 在 key 不存在时返回 false，会导致新安装后追踪无法启动
+                            let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
+                            if isEnabled {
                                 locationManager.startTracking()
                             }
                             
@@ -125,11 +127,6 @@ struct DiFangKeApp: App {
                             
                             // 更新同步管理器的容器
                             WidgetDataSyncManager.shared.updateContainer(modelContainer)
-                            
-                            // 打开 App 时主动同步小组件数据
-                            Task {
-                                await WidgetDataSyncManager.shared.syncAll()
-                            }
                         }
                         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RefreshModelContainer"))) { _ in
                             refreshContainer()
@@ -139,7 +136,13 @@ struct DiFangKeApp: App {
             }
             .animation(.easeInOut(duration: 0.8), value: showSplash)
             .onChange(of: scenePhase) { _, newPhase in
-                if newPhase == .background || newPhase == .active {
+                if newPhase == .active {
+                    // App 回到前台：重新激活定位，防止系统暂停后遇到出门的情却没有记录
+                    let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
+                    if isEnabled {
+                        locationManager.startTracking()
+                    }
+                } else if newPhase == .background {
                     Task {
                         await WidgetDataSyncManager.shared.syncAll()
                     }
@@ -176,6 +179,9 @@ struct DiFangKeApp: App {
             locationManager.modelContext = context
             PhotoService.shared.modelContext = context
             OpenAIService.shared.modelContainer = newContainer
+            
+            // 同步更新 Widget 管理器中的容器
+            WidgetDataSyncManager.shared.updateContainer(newContainer)
             
             print("[DiFangKeApp] ModelContainer Refreshed with CloudKit enabled.")
         }

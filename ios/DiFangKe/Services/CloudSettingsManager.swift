@@ -19,6 +19,7 @@ class CloudSettingsManager: ObservableObject {
         "isNotificationGuideDismissed",
         "hasSeenPhotoPermissionGuide",
         "isTrackingEnabled",
+        "raw_recording_source_device_id",
         "dataSyncPulse",
         "customAiUrl",
         "customAiKey",
