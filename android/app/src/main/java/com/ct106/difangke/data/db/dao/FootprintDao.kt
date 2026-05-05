@@ -70,4 +70,7 @@ interface FootprintDao {
 
     @Query("DELETE FROM footprints WHERE startTime >= :start AND startTime < :end")
     suspend fun deleteBetween(start: Date, end: Date)
+
+    @Query("DELETE FROM footprints WHERE startTime >= :start AND startTime < :end AND statusValue = 'candidate'")
+    suspend fun deleteCandidatesBetween(start: Date, end: Date)
 }

@@ -1,5 +1,6 @@
 package com.ct106.difangke.ui.screens.history
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -128,7 +129,8 @@ fun DailyTimelineScreen(
                 onRequestNotification = { },
                 onDismissNotificationGuide = { },
                 onItemClick = onNavigateToDetail,
-                onMapClick = { onNavigateToMap(date) }
+                onMapClick = { onNavigateToMap(date) },
+                allowAutoRebuild = false
             )
         }
     }

@@ -215,6 +215,11 @@ class OpenAIService {
 
     func enqueueDailySummary(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], force: Bool = false) {
         let startOfDate = Calendar.current.startOfDay(for: date)
+        guard !Calendar.current.isDateInToday(startOfDate) else {
+            dailySummaryDateSet.remove(startOfDate)
+            return
+        }
+
         let summaryFootprints = footprints.filter { $0.isUserModifiedForDailySummary }
 
         guard !summaryFootprints.isEmpty else {

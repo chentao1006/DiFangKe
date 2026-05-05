@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ct106.difangke.AppConfig
 import com.ct106.difangke.data.model.TimelineItem
 import com.ct106.difangke.service.LocationTrackingService
 import com.ct106.difangke.ui.components.*
@@ -412,7 +413,8 @@ fun TimelinePage(
     onRequestNotification: () -> Unit,
     onDismissNotificationGuide: () -> Unit,
     onItemClick: (String) -> Unit,
-    onMapClick: () -> Unit
+    onMapClick: () -> Unit,
+    allowAutoRebuild: Boolean = true
 ) {
     val items by viewModel.getTimelineItems(date).collectAsState(initial = emptyList())
     val dailyInsight by viewModel.getDailyInsight(date).collectAsState(initial = null)
@@ -426,6 +428,12 @@ fun TimelinePage(
     }
     val isToday = date.time == today.time
     val isFuture = date.time > today.time
+
+    LaunchedEffect(allowAutoRebuild, date.time, isFuture, isToday, items.isEmpty(), points) {
+        if (allowAutoRebuild && !isFuture && !isToday && items.isEmpty() && points > 0) {
+            viewModel.ensureTimelineForDate(date)
+        }
+    }
 
     if (isFuture) {
         FuturePlaceholderView()
@@ -633,7 +641,7 @@ fun DateNavigator(
             enabled = canGoBack
         ) {
             Icon(
-                Icons.Default.KeyboardArrowLeft, 
+                Icons.AutoMirrored.Filled.KeyboardArrowLeft, 
                 contentDescription = "Previous", 
                 tint = if (canGoBack) primaryColor else Color.Gray.copy(alpha = 0.3f)
             )
@@ -694,7 +702,7 @@ fun DateNavigator(
             enabled = canGoForward
         ) {
             Icon(
-                Icons.Default.KeyboardArrowRight, 
+                Icons.AutoMirrored.Filled.KeyboardArrowRight, 
                 contentDescription = "Next", 
                 tint = if (canGoForward) primaryColor else Color.Gray.copy(alpha = 0.3f)
             )

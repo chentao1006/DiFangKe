@@ -3,11 +3,14 @@ package com.ct106.difangke.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ct106.difangke.AppConfig
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.DailyInsightEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.model.TimelineItem
+import com.ct106.difangke.data.model.representativeLatitude
+import com.ct106.difangke.data.model.representativeLongitude
 import com.ct106.difangke.service.LocationTrackingService
 import com.ct106.difangke.service.OpenAIService
 import kotlinx.coroutines.flow.*
@@ -24,6 +27,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val db = DiFangKeApp.instance.database
     val openAI = OpenAIService.shared
     private val builder = com.ct106.difangke.service.PersistentTimelineBuilder(application)
+    private val autoRebuildDatesInFlight = mutableSetOf<Long>()
 
     private val _currentDate = MutableStateFlow(Calendar.getInstance().apply {
         set(Calendar.HOUR_OF_DAY, 0)
@@ -159,7 +163,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 db.footprintDao().observeBetween(start, end),
                 db.transportRecordDao().observeForDay(start, end)
             ) { fps, tps ->
-                val visibleFps = fps.filter { it.statusRaw != "ignored" }
+                val visibleFps = fps.filter { it.statusValue != "ignored" }
                 val rawItems = (fps.map { TimelineItem.FootprintItem(it) } + tps.map { TimelineItem.TransportItem(it) })
                     .sortedByDescending { it.startTime }
                 
@@ -292,8 +296,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val results = FloatArray(1)
                 for (i in 0 until sortedFps.size - 1) {
                     android.location.Location.distanceBetween(
-                        sortedFps[i].latitude, sortedFps[i].longitude,
-                        sortedFps[i+1].latitude, sortedFps[i+1].longitude,
+                        sortedFps[i].representativeLatitude, sortedFps[i].representativeLongitude,
+                        sortedFps[i+1].representativeLatitude, sortedFps[i+1].representativeLongitude,
                         results
                     )
                     estimatedDist += results[0]
@@ -512,6 +516,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             loadDataForDate(date)
             _isRefreshing.value = false
             _lastDataSyncTrigger.value = Date()
+        }
+    }
+
+    fun ensureTimelineForDate(date: Date) {
+        val zeroedDate = zeroTime(date)
+        val dateKey = zeroedDate.time
+        if (!autoRebuildDatesInFlight.add(dateKey)) return
+
+        viewModelScope.launch {
+            try {
+                val nextDay = Calendar.getInstance().apply {
+                    time = zeroedDate
+                    add(Calendar.DAY_OF_YEAR, 1)
+                }.time
+
+                val existingFootprints = db.footprintDao().getBetween(zeroedDate, nextDay)
+                if (existingFootprints.isNotEmpty()) return@launch
+
+                val rawStore = RawLocationStore.getInstance(getApplication())
+                val rawPointCount = withContext(Dispatchers.IO) { rawStore.getTotalPointsCount(zeroedDate) }
+                if (rawPointCount <= 0) return@launch
+
+                builder.rebuildDay(zeroedDate)
+                loadDataForDate(zeroedDate)
+                _lastDataSyncTrigger.value = Date()
+            } finally {
+                autoRebuildDatesInFlight.remove(dateKey)
+            }
         }
     }
 

@@ -46,6 +46,7 @@ private val LightColorScheme = lightColorScheme(
     onSurfaceVariant = OnSurfaceSecondaryLight
 )
 
+@Suppress("DEPRECATION")
 @Composable
 fun DiFangKeTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),

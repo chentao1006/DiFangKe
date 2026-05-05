@@ -588,7 +588,7 @@ struct DFKMapView: View {
 
     private func photoAnnotationContent(for asset: PHAsset) -> some View {
         let content = AssetThumbnailView(assetID: asset.localIdentifier)
-            .frame(width: 38, height: 38)
+            .frame(width: 46, height: 46)
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.5))
             .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)

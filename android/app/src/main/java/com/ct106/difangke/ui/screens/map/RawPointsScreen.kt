@@ -8,6 +8,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -46,6 +47,7 @@ fun RawPointsScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
     val rawStore = remember { RawLocationStore.getInstance(context) }
     
     var points by remember { mutableStateOf<List<RawLocationStore.RawPoint>>(emptyList()) }
@@ -66,6 +68,14 @@ fun RawPointsScreen(
             rawStore.loadLocations(date, filtered = false)
         }
         isLoading = false
+    }
+
+    LaunchedEffect(selectedPoint?.timestamp, showOnlySuspicious, filteredPoints) {
+        val selectedTimestamp = selectedPoint?.timestamp ?: return@LaunchedEffect
+        val filteredIndex = filteredPoints.indexOfFirst { (_, point) -> point.timestamp == selectedTimestamp }
+        if (filteredIndex >= 0) {
+            listState.animateScrollToItem(filteredIndex + 1)
+        }
     }
 
     val isDark = isSystemInDarkTheme()
@@ -114,6 +124,13 @@ fun RawPointsScreen(
                 ) { view ->
                     val map = view.map
                     map.mapType = if (isDark) AMap.MAP_TYPE_NIGHT else AMap.MAP_TYPE_NORMAL
+                    map.setOnMapClickListener { latLng ->
+                        selectNearestPoint(
+                            tappedLatLng = latLng,
+                            candidates = filteredPoints,
+                            onPointSelected = { point -> selectedPoint = point }
+                        )
+                    }
                     
                     // 只有在点加载完成后更新
                     if (points.isNotEmpty()) {
@@ -160,7 +177,10 @@ fun RawPointsScreen(
                     Text("该日期暂无轨迹数据", color = Color.Gray)
                 }
             } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize()
+                ) {
                     item {
                         Text(
                             text = if (showOnlySuspicious) "筛选出 ${filteredPoints.size} 个疑似问题点" else "共 ${points.size} 个记录点",
@@ -196,6 +216,27 @@ fun RawPointsScreen(
                 }
             }
         }
+    }
+}
+
+private fun selectNearestPoint(
+    tappedLatLng: LatLng,
+    candidates: List<Pair<Int, RawLocationStore.RawPoint>>,
+    onPointSelected: (RawLocationStore.RawPoint) -> Unit
+) {
+    val closest = candidates.minByOrNull { (_, point) ->
+        haversineMeters(tappedLatLng.latitude, tappedLatLng.longitude, point.latitude, point.longitude)
+    } ?: return
+
+    val distance = haversineMeters(
+        tappedLatLng.latitude,
+        tappedLatLng.longitude,
+        closest.second.latitude,
+        closest.second.longitude
+    )
+
+    if (distance < 1000.0) {
+        onPointSelected(closest.second)
     }
 }
 

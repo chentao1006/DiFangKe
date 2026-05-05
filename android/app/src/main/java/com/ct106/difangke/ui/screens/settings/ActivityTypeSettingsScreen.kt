@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -67,7 +68,7 @@ fun ActivityTypeSettingsScreen(
                 title = { Text("管理活动类型", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
@@ -99,7 +100,7 @@ fun ActivityTypeSettingsScreen(
                     onClick = { editingActivity = activity },
                     onDelete = { trashActivity = activity }
                 )
-                Divider(
+                HorizontalDivider(
                     modifier = Modifier.padding(horizontal = 16.dp),
                     thickness = 0.5.dp,
                     color = MaterialTheme.colorScheme.outlineVariant

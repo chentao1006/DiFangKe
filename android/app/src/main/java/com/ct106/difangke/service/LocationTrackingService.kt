@@ -510,7 +510,7 @@ class LocationTrackingService : Service() {
             pointsJson = gson.toJson(pts)
         }
 
-        val transportType = TransportType.fromSpeed(avgSpeed)
+        val transportType = TransportType.from(speedMs = avgSpeed)
 
         val record = TransportRecordEntity(
             recordID = UUID.randomUUID().toString(),

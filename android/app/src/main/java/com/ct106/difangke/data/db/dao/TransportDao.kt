@@ -28,14 +28,23 @@ interface TransportRecordDao {
     @Update
     suspend fun update(record: TransportRecordEntity)
 
+    @Delete
+    suspend fun delete(record: TransportRecordEntity)
+
     @Query("DELETE FROM transport_records WHERE startTime >= :start AND startTime < :end")
     suspend fun deleteForDay(start: Date, end: Date)
+
+    @Query("DELETE FROM transport_records WHERE startTime >= :start AND startTime < :end AND manualTypeRaw IS NULL")
+    suspend fun deleteAutoForDay(start: Date, end: Date)
 
     @Query("SELECT * FROM transport_records WHERE recordID = :id LIMIT 1")
     suspend fun getById(id: String): TransportRecordEntity?
 
     @Query("SELECT * FROM transport_records ORDER BY startTime DESC")
     suspend fun getAllSync(): List<TransportRecordEntity>
+
+    @Query("SELECT * FROM transport_records WHERE day != :excludingDate AND statusRaw = 'active' ORDER BY startTime DESC LIMIT :limit")
+    suspend fun getRecentExcluding(excludingDate: Date, limit: Int): List<TransportRecordEntity>
 
     @Query("UPDATE transport_records SET statusRaw = 'ignored' WHERE recordID = :id")
     suspend fun ignoreById(id: String)

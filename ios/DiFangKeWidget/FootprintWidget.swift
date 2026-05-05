@@ -71,6 +71,23 @@ struct DFKFootprintEntry: TimelineEntry {
 
 struct DFKFootprintProvider: TimelineProvider {
     let groupID = "group.com.ct106.difangke"
+    private let snapshotFileVersion = "v4"
+
+    private func loadSnapshotImage(containerURL: URL, sizeName: String, themeName: String, offset: Int) -> UIImage? {
+        let candidateNames = [
+            "widget_snapshot_\(sizeName)_\(themeName)_\(offset)_\(snapshotFileVersion).jpg",
+            "widget_snapshot_\(sizeName)_\(themeName)_\(offset).jpg"
+        ]
+
+        for fileName in candidateNames {
+            let fileURL = containerURL.appendingPathComponent(fileName)
+            if let data = try? Data(contentsOf: fileURL), let image = UIImage(data: data) {
+                return image
+            }
+        }
+
+        return nil
+    }
     
     func placeholder(in context: Context) -> DFKFootprintEntry {
         DFKFootprintEntry(date: Date(), mapImageLight: nil, mapImageDark: nil, footprintCount: 0, displayTitle: "今日足迹", targetDate: Date(), isToday: true, dateOffset: 0, debugInfo: "Loading")
@@ -119,15 +136,23 @@ struct DFKFootprintProvider: TimelineProvider {
         // 尝试从共享目录读取图片 (光色和暗色)
         let manager = FileManager.default
         if let containerURL = manager.containerURL(forSecurityApplicationGroupIdentifier: groupID) {
-            let lightURL = containerURL.appendingPathComponent("widget_snapshot_\(sizeName)_light_\(offset).jpg")
-            let darkURL = containerURL.appendingPathComponent("widget_snapshot_\(sizeName)_dark_\(offset).jpg")
-            
-            if let data = try? Data(contentsOf: lightURL) {
-                finalImageLight = UIImage(data: data)
+            finalImageLight = loadSnapshotImage(
+                containerURL: containerURL,
+                sizeName: sizeName,
+                themeName: "light",
+                offset: offset
+            )
+            if finalImageLight != nil {
                 status = "Synced"
             }
-            if let data = try? Data(contentsOf: darkURL) {
-                finalImageDark = UIImage(data: data)
+
+            finalImageDark = loadSnapshotImage(
+                containerURL: containerURL,
+                sizeName: sizeName,
+                themeName: "dark",
+                offset: offset
+            )
+            if finalImageDark != nil {
                 status = "Synced"
             }
             

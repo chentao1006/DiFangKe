@@ -32,9 +32,6 @@
     <!-- 读取外部存储（用于 CSV 存储在旧设备） -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
-    <!-- 安装 APK 权限 -->
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
-
     <!-- 忽略电池优化权限 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
@@ -45,19 +42,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="false"
         android:theme="@style/Theme.DiFangKe"
-        android:allowBackup="true"
-        android:extractNativeLibs="true">
-
-        <!-- FileProvider 用于安装下载好的 APK -->
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.fileprovider"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
+        android:allowBackup="true">
 
         <!-- 高德地图 API Key（请在 https://lbs.amap.com/ 申请后替换） -->
         <meta-data

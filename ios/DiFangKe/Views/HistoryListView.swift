@@ -33,6 +33,79 @@ struct DaySummary: Identifiable, Equatable {
     }
 }
 
+private struct TimelineIconKey: Hashable {
+    let icon: String
+    let isTransport: Bool
+}
+
+private struct SummaryIconStyle {
+    let backgroundColor: Color
+    let foregroundColor: Color
+    let showsCircularBackground: Bool
+}
+
+private struct StarOutlineShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let outerRadius = min(rect.width, rect.height) / 2
+        let innerRadius = outerRadius * 0.5
+
+        for index in 0..<10 {
+            let angle = Double(index) * (.pi / 5) - (.pi / 2)
+            let radius = index.isMultiple(of: 2) ? outerRadius : innerRadius
+            let point = CGPoint(
+                x: center.x + CGFloat(cos(angle)) * radius,
+                y: center.y + CGFloat(sin(angle)) * radius
+            )
+
+            if index == 0 {
+                path.move(to: point)
+            } else {
+                path.addLine(to: point)
+            }
+        }
+
+        path.closeSubpath()
+        return path
+    }
+}
+
+private func deduplicatedTimelineIcons(_ icons: [DaySummary.TimelineIcon]) -> [DaySummary.TimelineIcon] {
+    var ordered: [DaySummary.TimelineIcon] = []
+    var positions: [TimelineIconKey: Int] = [:]
+
+    for item in icons {
+        let key = TimelineIconKey(icon: item.icon, isTransport: item.isTransport)
+        if let index = positions[key] {
+            if item.isHighlight && !ordered[index].isHighlight {
+                ordered[index] = DaySummary.TimelineIcon(
+                    icon: ordered[index].icon,
+                    colorHex: ordered[index].colorHex,
+                    isTransport: ordered[index].isTransport,
+                    isHighlight: true
+                )
+            }
+        } else {
+            positions[key] = ordered.count
+            ordered.append(item)
+        }
+    }
+
+    return Array(ordered.prefix(10))
+}
+
+private func timelineIconStyle(for item: DaySummary.TimelineIcon, colorScheme: ColorScheme) -> SummaryIconStyle {
+    let fallback = item.isTransport ? Color(hex: "#8E8E93") ?? .dfkAccent : Color.dfkAccent
+    let background = (Color(hex: item.colorHex) ?? fallback).opacity(0.9)
+    let foreground: Color = colorScheme == .dark ? .black : .white
+    return SummaryIconStyle(
+        backgroundColor: background,
+        foregroundColor: foreground,
+        showsCircularBackground: !item.isTransport && !item.isHighlight
+    )
+}
+
 // MARK: - Daily Timeline Modal
 struct SimpleDayTimelineView: View {
     let date: Date
@@ -352,14 +425,14 @@ struct HistoryListView: View {
                 
                 let totalTrajectoryCount = RawLocationStore.shared.getTotalPointsCount(for: date)
                 
-                let timelineIcons = timelineItems.reversed().map { item in
+                let timelineIcons = deduplicatedTimelineIcons(timelineItems.reversed().map { item in
                     DaySummary.TimelineIcon(
                         icon: item.getIcon(allActivityTypes: activityTypes),
                         colorHex: item.getColor(allActivityTypes: activityTypes),
                         isTransport: item.isTransport,
                         isHighlight: item.isHighlight
                     )
-                }
+                })
                 
                 let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
                 let totalMileage = LocationManager.calculatePathDistance(rawPoints)
@@ -633,28 +706,30 @@ struct DayCell: View {
 
 struct TimelineIconsView: View {
     let icons: [DaySummary.TimelineIcon]
+    @Environment(\.colorScheme) private var colorScheme
     var body: some View {
         FlowLayout(spacing: 6) {
             ForEach(icons) { item in
+                let style = timelineIconStyle(for: item, colorScheme: colorScheme)
                 ZStack {
                     if item.isHighlight {
-                        ZStack {
-                            Circle()
-                                .stroke(Color.dfkHighlight, lineWidth: 1.5)
-                                .frame(width: 17, height: 17)
-                            
-                            Image(systemName: item.icon)
-                                .font(.system(size: 10))
-                                .foregroundColor(item.isTransport ? .dfkAccent : (Color(hex: item.colorHex) ?? .secondary))
-                        }
-                    } else {
-                        Image(systemName: item.icon)
-                            .font(.system(size: 13))
-                            .foregroundColor(item.isTransport ? .dfkAccent : (Color(hex: item.colorHex) ?? .secondary))
+                        StarOutlineShape()
+                            .fill(style.backgroundColor)
+                            .frame(width: 21, height: 21)
+                    } else if style.showsCircularBackground {
+                        Circle()
+                            .fill(style.backgroundColor)
+                            .frame(width: 18, height: 18)
                     }
+
+                    Image(systemName: item.icon)
+                        .font(.system(size: item.isHighlight ? 11 : 10.5, weight: .semibold))
+                        .foregroundColor(item.isTransport ? .dfkAccent : style.foregroundColor)
                 }
+                .frame(width: item.isHighlight ? 21 : 20, height: item.isHighlight ? 21 : 20)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -832,6 +907,7 @@ struct MonthDayCell: View {
     let targetDate: Date
     let summary: DaySummary?
     let onTap: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
     
     var body: some View {
         let allIcons = summary?.timelineIcons ?? []
@@ -848,28 +924,26 @@ struct MonthDayCell: View {
             if !allIcons.isEmpty {
                 FlowLayout(spacing: 1) {
                     ForEach(allIcons) { item in
-                        let color = Color(hex: item.colorHex) ?? .dfkAccent
+                        let style = timelineIconStyle(for: item, colorScheme: colorScheme)
                         ZStack {
                             if item.isHighlight {
-                                ZStack {
-                                    Circle()
-                                        .stroke(Color.dfkHighlight, lineWidth: 1)
-                                        .frame(width: 12, height: 12)
-                                    
-                                    Image(systemName: item.icon)
-                                        .font(.system(size: 7))
-                                        .foregroundColor(item.isTransport ? .dfkAccent : color)
-                                }
-                            } else {
-                                Image(systemName: item.icon)
-                                    .font(.system(size: 8))
-                                    .foregroundColor(item.isTransport ? .dfkAccent : color)
+                                StarOutlineShape()
+                                    .fill(style.backgroundColor)
+                                    .frame(width: 15, height: 15)
+                            } else if style.showsCircularBackground {
+                                Circle()
+                                    .fill(style.backgroundColor)
+                                    .frame(width: 12, height: 12)
                             }
+
+                            Image(systemName: item.icon)
+                                .font(.system(size: item.isHighlight ? 7.4 : 7.0, weight: .semibold))
+                                .foregroundColor(item.isTransport ? .dfkAccent : style.foregroundColor)
                         }
-                        .frame(width: 11, height: 11)
+                        .frame(width: item.isHighlight ? 15 : 13, height: item.isHighlight ? 15 : 13)
                     }
                 }
-                .frame(maxWidth: 48)
+                .frame(maxWidth: 56)
                 .padding(.top, 1)
             }
             Spacer(minLength: 0)

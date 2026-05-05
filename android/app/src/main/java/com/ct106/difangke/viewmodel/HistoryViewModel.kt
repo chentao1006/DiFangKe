@@ -96,17 +96,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                     val totalMileage = store.calculateTotalDistance(date)
                     val totalPoints = store.getTotalPointsCount(date)
                     
-                    val icons = timelineItems.take(10).map { item ->
-                        DaySummary.TimelineIcon(
-                            icon = when(item) {
-                                is TimelineItem.FootprintItem -> item.footprint.activityTypeValue ?: "place"
-                                is TimelineItem.TransportItem -> "directions_bus"
-                            },
-                            colorHex = "#00A0AC", // 默认 brand color
-                            isTransport = item is TimelineItem.TransportItem,
-                            isHighlight = (item as? TimelineItem.FootprintItem)?.footprint?.isHighlight ?: false
-                        )
-                    }
+                    val icons = buildTimelineIcons(timelineItems, allActivityTypes)
 
                     summaryMap[date] = DaySummary(
                         date = date,
@@ -142,5 +132,49 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             _isRefreshing.value = false
             _lastDataSyncTrigger.value = Date()
         }
+    }
+
+    private fun buildTimelineIcons(
+        items: List<TimelineItem>,
+        activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>
+    ): List<DaySummary.TimelineIcon> {
+        val ordered = mutableListOf<DaySummary.TimelineIcon>()
+        val positions = mutableMapOf<String, Int>()
+        val activityTypeById = activityTypes.associateBy { it.id }
+
+        items
+            .sortedBy { it.startTime }
+            .forEach { item ->
+                val isTransport = item is TimelineItem.TransportItem
+                val isHighlight = (item as? TimelineItem.FootprintItem)?.footprint?.isHighlight ?: false
+                val icon = when (item) {
+                    is TimelineItem.FootprintItem -> {
+                        activityTypeById[item.footprint.activityTypeValue]?.icon ?: "place"
+                    }
+                    is TimelineItem.TransportItem -> "directions_bus"
+                }
+                val colorHex = when (item) {
+                    is TimelineItem.FootprintItem -> {
+                        activityTypeById[item.footprint.activityTypeValue]?.colorHex ?: "#00A0AC"
+                    }
+                    is TimelineItem.TransportItem -> "#8E8E93"
+                }
+                val key = "$icon|$isTransport"
+                val existingIndex = positions[key]
+
+                if (existingIndex == null) {
+                    positions[key] = ordered.size
+                    ordered += DaySummary.TimelineIcon(
+                        icon = icon,
+                        colorHex = colorHex,
+                        isTransport = isTransport,
+                        isHighlight = isHighlight
+                    )
+                } else if (isHighlight && !ordered[existingIndex].isHighlight) {
+                    ordered[existingIndex] = ordered[existingIndex].copy(isHighlight = true)
+                }
+            }
+
+        return ordered.take(10)
     }
 }

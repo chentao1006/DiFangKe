@@ -298,7 +298,7 @@ struct TransportModalView: View {
                             ForEach(validMapPhotos, id: \.asset.localIdentifier) { entry in
                                 Annotation("", coordinate: entry.coordinate) {
                                     AssetThumbnailView(assetID: entry.asset.localIdentifier)
-                                        .frame(width: 32, height: 32)
+                                        .frame(width: 40, height: 40)
                                         .clipShape(RoundedRectangle(cornerRadius: 6))
                                         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.5))
                                         .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)

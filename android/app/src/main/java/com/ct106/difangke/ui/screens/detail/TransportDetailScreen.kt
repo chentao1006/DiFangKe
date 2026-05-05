@@ -429,7 +429,7 @@ fun TransportDetailMapView(
                         .text(startLocation)
                         .fontColor(orangeColor)
                         .fontSize(34)
-                        .align(com.amap.api.maps.model.Text.ALIGN_CENTER_BOTTOM))
+                        .align(com.amap.api.maps.model.Text.ALIGN_CENTER_HORIZONTAL, com.amap.api.maps.model.Text.ALIGN_BOTTOM))
                 }
             }
             if (endLocation != null && points.size > 1) {
@@ -440,7 +440,7 @@ fun TransportDetailMapView(
                         .text(endLocation)
                         .fontColor(orangeColor)
                         .fontSize(34)
-                        .align(com.amap.api.maps.model.Text.ALIGN_CENTER_BOTTOM))
+                        .align(com.amap.api.maps.model.Text.ALIGN_CENTER_HORIZONTAL, com.amap.api.maps.model.Text.ALIGN_BOTTOM))
                 }
             }
         }

@@ -916,6 +916,10 @@ struct TimelinePageView: View {
     
     private func refreshAiSummary(force: Bool = false) async {
         let startOfDay = Calendar.current.startOfDay(for: date)
+        guard !Calendar.current.isDateInToday(startOfDay) else {
+            return
+        }
+
         let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
         
         let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate {

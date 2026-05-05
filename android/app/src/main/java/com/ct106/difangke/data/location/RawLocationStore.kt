@@ -3,6 +3,7 @@ package com.ct106.difangke.data.location
 import android.content.Context
 import android.location.Location
 import android.util.Log
+import com.ct106.difangke.AppConfig
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar

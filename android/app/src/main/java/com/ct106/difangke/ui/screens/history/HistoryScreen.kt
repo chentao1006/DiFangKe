@@ -13,6 +13,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -23,9 +24,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -277,7 +283,7 @@ fun HistoryDayRow(
                 DropdownMenuItem(
                     text = { Text("查看所有轨迹点") },
                     onClick = { showMenu = false; onViewRawPoints() },
-                    leadingIcon = { Icon(Icons.Default.List, null) }
+                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.List, null) }
                 )
             }
             Column(modifier = Modifier.width(70.dp)) {
@@ -303,14 +309,9 @@ fun HistoryDayRow(
                 }
                 
                 // Icons line
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     summary.timelineIcons.take(8).forEach { item ->
-                        Icon(
-                            imageVector = getIconForName(item.icon),
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp),
-                            tint = if (item.isTransport) MaterialTheme.colorScheme.primary else Color(android.graphics.Color.parseColor(item.colorHex))
-                        )
+                        HistoryIconBadge(item = item, size = 28.dp, iconSize = 16.dp, borderWidth = 1.5.dp)
                     }
                 }
             }
@@ -438,7 +439,7 @@ fun MonthDayCell(
             DropdownMenuItem(
                 text = { Text("查看所有轨迹点") },
                 onClick = { showMenu = false; onViewRawPoints() },
-                leadingIcon = { Icon(Icons.Default.List, null) }
+                leadingIcon = { Icon(Icons.AutoMirrored.Filled.List, null) }
             )
         }
         Text(
@@ -448,9 +449,84 @@ fun MonthDayCell(
             color = if (hasData) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
         )
         if (hasData) {
-            Box(Modifier.size(4.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+            Spacer(Modifier.height(3.dp))
+            Column(
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                summary.timelineIcons.take(4).chunked(2).forEach { rowItems ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        rowItems.forEach { item ->
+                            HistoryIconBadge(item = item, size = 16.dp, iconSize = 9.dp, borderWidth = 1.1.dp)
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun HistoryIconBadge(
+    item: DaySummary.TimelineIcon,
+    size: Dp,
+    iconSize: Dp,
+    borderWidth: Dp
+) {
+    val isDark = isSystemInDarkTheme()
+    val fallbackColor = if (item.isTransport) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary
+    val backgroundColor = try {
+        Color(android.graphics.Color.parseColor(item.colorHex))
+    } catch (_: IllegalArgumentException) {
+        fallbackColor
+    }
+    val iconTint = if (isDark) Color.Black else Color.White
+    Box(
+        modifier = Modifier
+            .size(size)
+            .drawBehind {
+                if (item.isHighlight) {
+                    val starPath = historyStarPath(this.size)
+                    drawPath(path = starPath, color = backgroundColor)
+                }
+            }
+            .then(
+                if (item.isHighlight || item.isTransport) {
+                    Modifier
+                } else {
+                    Modifier
+                        .clip(CircleShape)
+                        .background(backgroundColor)
+                }
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = getIconForName(item.icon),
+            contentDescription = null,
+            modifier = Modifier.size(iconSize),
+            tint = if (item.isTransport) MaterialTheme.colorScheme.primary else iconTint
+        )
+    }
+}
+
+private fun historyStarPath(size: androidx.compose.ui.geometry.Size): Path {
+    val path = Path()
+    val centerX = size.width / 2f
+    val centerY = size.height / 2f
+    val outerRadius = minOf(size.width, size.height) / 2f
+    val innerRadius = outerRadius * 0.5f
+
+    for (index in 0 until 10) {
+        val angle = Math.toRadians((index * 36.0) - 90.0)
+        val radius = if (index % 2 == 0) outerRadius else innerRadius
+        val x = centerX + (kotlin.math.cos(angle) * radius).toFloat()
+        val y = centerY + (kotlin.math.sin(angle) * radius).toFloat()
+        if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+    }
+
+    path.close()
+    return path
 }
 
 private fun isSameDay(d1: Date, d2: Date): Boolean {

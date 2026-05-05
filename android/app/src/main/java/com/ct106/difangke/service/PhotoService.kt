@@ -32,6 +32,7 @@ class PhotoService private constructor(private val context: Context) {
      * 查询指定时间范围内的照片集合
      * 对应 iOS HistoryListView 中的照片查询逻辑
      */
+    @Suppress("DEPRECATION")
     suspend fun getPhotosBetween(startDate: Date, endDate: Date): List<PhotoInfo> = withContext(Dispatchers.IO) {
         val photos = mutableListOf<PhotoInfo>()
         

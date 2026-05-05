@@ -11,6 +11,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -55,7 +57,7 @@ fun StatisticsScreen(
                 title = { Text("统计洞察", fontWeight = FontWeight.ExtraBold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -352,7 +354,7 @@ fun HeatmapSection(points: List<HeatmapPoint>) {
 @Composable
 fun ActivityRankSection(items: List<ActivityRankItem>) {
     Column(modifier = Modifier.fillMaxWidth()) {
-        SectionHeader("活动排行", Icons.Default.ShowChart)
+        SectionHeader("活动排行", Icons.AutoMirrored.Filled.ShowChart)
         Spacer(Modifier.height(16.dp))
         
         Card(
