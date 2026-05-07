@@ -1214,15 +1214,23 @@ struct AssetThumbnailView: View {
         self.isLoading = true
         self.isMissing = false
         
-        PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 400, height: 400)) { img, exists, status in
+        PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 400, height: 400)) { img, exists, status, isDegraded in
             self.authStatus = status
-            self.isLoading = false
             
             if !exists {
+                self.isLoading = false
                 self.isMissing = true
                 onAssetMissing?()
             }
-            self.image = img
+            
+            if let img = img {
+                self.image = img
+                if !isDegraded {
+                    self.isLoading = false
+                }
+            } else if !isDegraded {
+                self.isLoading = false
+            }
         }
     }
 }
@@ -1268,18 +1276,84 @@ struct PhotoFullscreenView: View {
 struct FullscreenImageItem: View {
     let assetID: String
     @State private var image: UIImage?
+    @State private var downloadProgress: Double = 0
+    @State private var isDownloading: Bool = false
+    @State private var isDegraded: Bool = true
+    @State private var loadFailed: Bool = false
     
     var body: some View {
         ZStack {
             if let image = image {
                 ZoomableImageView(image: image)
+                    .overlay {
+                        if isDownloading && isDegraded {
+                            ZStack {
+                                Circle()
+                                    .stroke(Color.white.opacity(0.2), lineWidth: 3)
+                                    .frame(width: 32, height: 32)
+                                Circle()
+                                    .trim(from: 0, to: CGFloat(downloadProgress))
+                                    .stroke(Color.white, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                                    .frame(width: 32, height: 32)
+                                    .rotationEffect(.degrees(-90))
+                            }
+                            .padding(12)
+                            .background(.ultraThinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .shadow(radius: 5)
+                        }
+                    }
+            } else if loadFailed {
+                VStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 32))
+                    Text("照片加载失败")
+                        .font(.system(size: 14))
+                    Button("重试") {
+                        loadFailed = false
+                        loadImage()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.1))
+                    .clipShape(Capsule())
+                }
+                .foregroundColor(.white)
             } else {
                 ProgressView().tint(.white)
             }
         }
         .onAppear {
-            PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 2000, height: 2000)) { img, _, _ in
-                self.image = img
+            loadImage()
+        }
+        .onChange(of: assetID) { _, _ in
+            loadImage()
+        }
+    }
+    
+    private func loadImage() {
+        PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 2400, height: 2400), contentMode: .aspectFit, progressHandler: { progress in
+            // Only show download UI if we are actually downloading (progress < 1.0)
+            if progress < 1.0 {
+                withAnimation(.linear) {
+                    self.isDownloading = true
+                    self.downloadProgress = progress
+                }
+            }
+        }) { img, exists, _, degraded in
+
+            if let img = img {
+                withAnimation(.easeInOut) {
+                    self.image = img
+                    self.isDegraded = degraded
+                    // If we got the high quality image, or if it was never downloading, hide the ring
+                    if !degraded {
+                        self.isDownloading = false
+                    }
+                }
+            } else if !degraded {
+                self.loadFailed = true
+                self.isDownloading = false
             }
         }
     }
@@ -1297,22 +1371,17 @@ struct ZoomableImageView: UIViewRepresentable {
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
         scrollView.backgroundColor = .clear
+        scrollView.contentInsetAdjustmentBehavior = .never
 
         let imageView = UIImageView(image: image)
         imageView.contentMode = .scaleAspectFit
-        imageView.tag = 100 // Use tag to find the view later
+        imageView.tag = 100
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        imageView.frame = scrollView.bounds
         scrollView.addSubview(imageView)
 
-        // Setup constraints or frame
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            imageView.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
-            imageView.heightAnchor.constraint(equalTo: scrollView.heightAnchor),
-            imageView.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
-            imageView.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor)
-        ])
-
         // Add double tap to zoom
+
         let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         scrollView.addGestureRecognizer(doubleTap)
@@ -1320,7 +1389,19 @@ struct ZoomableImageView: UIViewRepresentable {
         return scrollView
     }
 
-    func updateUIView(_ uiView: UIScrollView, context: Context) {}
+    func updateUIView(_ uiView: UIScrollView, context: Context) {
+        if let imageView = uiView.viewWithTag(100) as? UIImageView {
+            if imageView.image != image {
+                imageView.image = image
+                // Reset zoom scale when image changes (e.g. from low-res to high-res)
+                uiView.zoomScale = 1.0
+            }
+            // Ensure the image view fills the scroll view bounds initially
+            if uiView.zoomScale == 1.0 {
+                imageView.frame = uiView.bounds
+            }
+        }
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -1344,13 +1425,14 @@ struct ZoomableImageView: UIViewRepresentable {
                 scrollView.setZoomScale(1, animated: true)
             } else {
                 let point = gesture.location(in: scrollView.viewWithTag(100))
-                let size = CGSize(width: scrollView.frame.size.width / 2.5, height: scrollView.frame.size.height / 2.5)
+                let size = CGSize(width: scrollView.frame.size.width / 3, height: scrollView.frame.size.height / 3)
                 let rect = CGRect(origin: CGPoint(x: point.x - size.width/2, y: point.y - size.height/2), size: size)
                 scrollView.zoom(to: rect, animated: true)
             }
         }
     }
 }
+
 
 struct FootprintDetailMapView: View {
     let footprint: Footprint

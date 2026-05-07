@@ -70,7 +70,6 @@ struct DFKMapView: View {
         cameraPosition: Binding<MapCameraPosition>,
         rendersLiveMap: Bool = true,
         isInteractive: Bool = false,
-        widgetSnapshotOffset: Int? = nil,
         allowsGeneratedSnapshot: Bool = true,
         showsUserLocation: Bool = true,
         points: [CLLocationCoordinate2D] = [],
@@ -85,7 +84,6 @@ struct DFKMapView: View {
         self._cameraPosition = cameraPosition
         self.rendersLiveMap = rendersLiveMap
         self.isInteractive = isInteractive
-        self.widgetSnapshotOffset = widgetSnapshotOffset
         self.allowsGeneratedSnapshot = allowsGeneratedSnapshot
         self.showsUserLocation = showsUserLocation
         self.points = points
@@ -140,10 +138,10 @@ struct DFKMapView: View {
     }
 
     private var validPhotoAnnotations: [(asset: PHAsset, coordinate: CLLocationCoordinate2D)] {
-        photoAssets.compactMap { asset in
-            guard let coordinate = asset.location?.gcj02.coordinate,
-                  coordinate.isRenderableMapCoordinate else { return nil }
-            return (asset, coordinate)
+        aggregatedFootprints.compactMap { aggregated -> (PHAsset, CLLocationCoordinate2D)? in
+            guard let assetID = latestPhotoAssetID(for: aggregated) else { return nil }
+            guard let asset = photoAssets.first(where: { $0.localIdentifier == assetID }) else { return nil }
+            return (asset, aggregated.coordinate)
         }
     }
 
@@ -188,14 +186,10 @@ struct DFKMapView: View {
     }
 
     private func latestPhotoAssetID(for aggregated: AggregatedFootprint) -> String? {
+        // 直接从足迹数据中提取，不依赖异步加载的 photoAssets 数组，确保渲染及时
         aggregated.footprints
-            .sorted { lhs, rhs in
-                if lhs.endTime != rhs.endTime {
-                    return lhs.endTime > rhs.endTime
-                }
-                return lhs.startTime > rhs.startTime
-            }
-            .compactMap { $0.photoAssetIDs.last }
+            .sorted { $0.startTime > $1.startTime }
+            .compactMap { $0.photoAssetIDs.first } // 匹配足迹卡片使用的 .first (最新)
             .first
     }
 
@@ -301,6 +295,7 @@ struct DFKMapView: View {
                             ForEach(validPhotoAnnotations, id: \.asset.localIdentifier) { entry in
                                 Annotation("", coordinate: entry.coordinate) {
                                     photoAnnotationContent(for: entry.asset)
+                                        .zIndex(100)
                                 }
                             }
 
@@ -655,60 +650,24 @@ struct DFKMapView: View {
             return
         }
 
-        if let widgetSnapshotOffset,
-           !forceWidgetRefresh,
-           let widgetImage = loadWidgetSnapshotImage(offset: widgetSnapshotOffset) {
-            snapshotTask?.cancel()
-            isRequestingWidgetSnapshot = false
-            snapshotImage = widgetImage
-            return
-        }
-
-        if let widgetSnapshotOffset {
-            snapshotTask?.cancel()
-            if let widgetImage = loadWidgetSnapshotImage(offset: widgetSnapshotOffset) {
-                snapshotImage = widgetImage
-            }
-            isRequestingWidgetSnapshot = true
-            snapshotTask = Task { @MainActor in
-                await WidgetDataSyncManager.shared.syncOffsetOnDemand(widgetSnapshotOffset)
-                if Task.isCancelled { return }
-
-                for _ in 0..<20 {
-                    if let image = loadWidgetSnapshotImage(offset: widgetSnapshotOffset) {
-                        snapshotImage = image
-                        isRequestingWidgetSnapshot = false
-                        return
-                    }
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                    if Task.isCancelled { return }
-                }
-            }
-            return
-        }
-
         guard allowsGeneratedSnapshot else {
             snapshotTask?.cancel()
             snapshotImage = nil
-            isRequestingWidgetSnapshot = false
             return
         }
 
         let cacheKey = snapshotCacheKey(for: size)
         if let cached = DFKMapSnapshotCache.shared.image(for: cacheKey) {
-            isRequestingWidgetSnapshot = false
             snapshotImage = cached
             return
         }
 
         snapshotTask?.cancel()
-        isRequestingWidgetSnapshot = true
         snapshotTask = Task { @MainActor in
             guard let image = await buildSnapshotImage(size: size) else { return }
             if Task.isCancelled { return }
             DFKMapSnapshotCache.shared.setImage(image, for: cacheKey)
             snapshotImage = image
-            isRequestingWidgetSnapshot = false
         }
     }
 
@@ -796,7 +755,7 @@ struct DFKMapView: View {
                     let clipPath = UIBezierPath(roundedRect: rect, cornerRadius: 8 * dotScale)
                     ctx.cgContext.saveGState()
                     clipPath.addClip()
-                    photoImage.draw(in: rect)
+                    drawImageAspectFill(photoImage, in: rect)
                     ctx.cgContext.restoreGState()
 
                     ctx.cgContext.setStrokeColor(UIColor.white.cgColor)
@@ -820,30 +779,6 @@ struct DFKMapView: View {
                 }
             }
 
-            if shouldDrawStandalonePhotosInSnapshot {
-                for asset in photoAssets {
-                    guard let coord = asset.location?.gcj02.coordinate else { continue }
-                    let point = snapshot.point(for: coord)
-                    let markerSize: CGFloat = 24
-                    let rect = CGRect(x: point.x - markerSize / 2, y: point.y - markerSize / 2, width: markerSize, height: markerSize)
-                    let path = UIBezierPath(roundedRect: rect, cornerRadius: 6)
-
-                    if let photoImage = standalonePhotoImages[asset.localIdentifier] {
-                        ctx.cgContext.saveGState()
-                        path.addClip()
-                        photoImage.draw(in: rect)
-                        ctx.cgContext.restoreGState()
-                    } else {
-                        UIColor.white.withAlphaComponent(0.92).setFill()
-                        path.fill()
-                    }
-
-                    UIColor.white.setStroke()
-                    path.lineWidth = 1.5
-                    path.stroke()
-                }
-            }
-
             for point in heatmapPoints {
                 let mapped = snapshot.point(for: point.coordinate)
                 let rawRatio = Double(point.intensity) / Double(max(1, point.maxIntensity))
@@ -859,10 +794,33 @@ struct DFKMapView: View {
                         return UIColor(Color.dfkDeepRed)
                     }
                 }()
-                let size = max(14.0, min(30.0, CGFloat(point.intensity) * 3))
-                let rect = CGRect(x: mapped.x - size / 2, y: mapped.y - size / 2, width: size, height: size)
+                let sizeValue = max(14.0, min(30.0, CGFloat(point.intensity) * 3))
+                let rect = CGRect(x: mapped.x - sizeValue / 2, y: mapped.y - sizeValue / 2, width: sizeValue, height: sizeValue)
                 ctx.cgContext.setFillColor(color.withAlphaComponent(0.28).cgColor)
                 ctx.cgContext.fillEllipse(in: rect)
+            }
+
+            if shouldDrawStandalonePhotosInSnapshot {
+                for entry in validPhotoAnnotations {
+                    let point = snapshot.point(for: entry.coordinate)
+                    let markerSize: CGFloat = 24
+                    let rect = CGRect(x: point.x - markerSize / 2, y: point.y - markerSize / 2, width: markerSize, height: markerSize)
+                    let path = UIBezierPath(roundedRect: rect, cornerRadius: 6)
+
+                    if let photoImage = standalonePhotoImages[entry.asset.localIdentifier] {
+                        ctx.cgContext.saveGState()
+                        path.addClip()
+                        drawImageAspectFill(photoImage, in: rect)
+                        ctx.cgContext.restoreGState()
+                    } else {
+                        UIColor.white.withAlphaComponent(0.92).setFill()
+                        path.fill()
+                    }
+
+                    UIColor.white.setStroke()
+                    path.lineWidth = 1.5
+                    path.stroke()
+                }
             }
 
             if let mainAnnotationCoordinate {
@@ -875,6 +833,22 @@ struct DFKMapView: View {
                 ctx.cgContext.strokeEllipse(in: rect)
             }
         }
+    }
+
+    private func drawImageAspectFill(_ image: UIImage, in rect: CGRect) {
+        let imageAspect = image.size.width / image.size.height
+        let rectAspect = rect.width / rect.height
+        
+        var drawRect = rect
+        if imageAspect > rectAspect {
+            let newWidth = rect.height * imageAspect
+            drawRect = CGRect(x: rect.midX - newWidth / 2, y: rect.origin.y, width: newWidth, height: rect.height)
+        } else {
+            let newHeight = rect.width / imageAspect
+            drawRect = CGRect(x: rect.origin.x, y: rect.midY - newHeight / 2, width: rect.width, height: newHeight)
+        }
+        
+        image.draw(in: drawRect)
     }
 
     private func snapshotRegion(for size: CGSize) -> MKCoordinateRegion? {
@@ -906,19 +880,6 @@ struct DFKMapView: View {
             region.span.longitudeDelta *= 1.5
         }
         return region
-    }
-
-    private func loadWidgetSnapshotImage(offset: Int) -> UIImage? {
-        let themeName = UITraitCollection.current.userInterfaceStyle == .dark ? "dark" : "light"
-        let fileName = "widget_snapshot_medium_\(themeName)_\(offset)_\(WidgetDataSyncManager.snapshotFileVersion).jpg"
-        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppConfig.shared.appGroupID) else {
-            return nil
-        }
-        let fileURL = containerURL.appendingPathComponent(fileName)
-        guard let data = try? Data(contentsOf: fileURL) else {
-            return nil
-        }
-        return UIImage(data: data)
     }
 
     private func loadSnapshotFootprintPhotoImages(targetSide: CGFloat) async -> [String: UIImage] {
@@ -1305,6 +1266,16 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             view.image = annotation.image
             view.canShowCallout = false
             view.centerOffset = annotation.centerOffset
+            
+            // Ensure photos are on the top layer
+            if case .photo = annotation.kind {
+                view.zPriority = .max
+                view.displayPriority = .required
+            } else {
+                view.zPriority = .min
+                view.displayPriority = .defaultLow
+            }
+            
             return view
         }
 

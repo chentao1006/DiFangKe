@@ -614,27 +614,19 @@ struct TimelinePageView: View {
                 finalAssets = Array(filtered.suffix(10))
             } else {
                 for item in items {
-                    let itemStart = item.startTime
-                    let itemEnd = item.endTime
-                    
-                    let cluster = filtered.filter { asset in
-                        guard let creation = asset.creationDate else { return false }
-                        return creation >= itemStart && creation <= itemEnd
+                    if case .footprint(let footprint) = item {
+                        // 仅显示明确关联到该足迹的照片
+                        let linkedIDs = Set(footprint.photoAssetIDs)
+                        let linkedAssets = filtered.filter { linkedIDs.contains($0.localIdentifier) }
+                        finalAssets.append(contentsOf: linkedAssets)
                     }
-                    
-                    // 每个段取最新的 10 张
-                    finalAssets.append(contentsOf: cluster.suffix(10))
                 }
-                
-                // 补充那些不在任何段里的零散照片（比如段与段之间的间隙），也限制 10 张
-                let orphans = filtered.filter { asset in
-                    guard let creation = asset.creationDate else { return false }
-                    return !items.contains { creation >= $0.startTime && creation <= $0.endTime }
-                }
-                finalAssets.append(contentsOf: orphans.suffix(10))
             }
             
-            self.dayPhotoAssets = finalAssets
+            DispatchQueue.main.async {
+                self.dayPhotoAssets = finalAssets
+            }
+
         }
         
         locationManager.backfillGaps(for: targetDate)

@@ -152,19 +152,24 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
     }
     
-    func loadImage(for assetID: String, targetSize: CGSize, completion: @escaping (UIImage?, Bool, PHAuthorizationStatus) -> Void) {
+    func loadImage(for assetID: String, targetSize: CGSize, contentMode: PHImageContentMode = .aspectFill, progressHandler: ((Double) -> Void)? = nil, completion: @escaping (UIImage?, Bool, PHAuthorizationStatus, Bool) -> Void) {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else {
-            DispatchQueue.main.async { completion(nil, true, status) }
+            DispatchQueue.main.async { completion(nil, true, status, false) }
             return
         }
         
         DispatchQueue.global(qos: .userInitiated).async {
-            let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+            let fetchOptions = PHFetchOptions()
+            fetchOptions.includeHiddenAssets = true
+            fetchOptions.includeAllBurstAssets = true
+            
+            let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: fetchOptions)
+
             guard let asset = assets.firstObject else {
                 DispatchQueue.main.async {
                     let exists = (status == .limited)
-                    completion(nil, exists, status)
+                    completion(nil, exists, status, false)
                 }
                 return
             }
@@ -172,8 +177,17 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             let options = PHImageRequestOptions()
             options.isNetworkAccessAllowed = true
             options.deliveryMode = .opportunistic
-            PHImageManager.default().requestImage(for: asset, targetSize: targetSize, contentMode: .aspectFill, options: options) { image, _ in
-                DispatchQueue.main.async { completion(image, true, status) }
+            options.progressHandler = { progress, _, _, _ in
+                DispatchQueue.main.async {
+                    progressHandler?(progress)
+                }
+            }
+            
+            PHImageManager.default().requestImage(for: asset, targetSize: targetSize, contentMode: contentMode, options: options) { image, info in
+                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                DispatchQueue.main.async {
+                    completion(image, true, status, isDegraded)
+                }
             }
         }
     }
