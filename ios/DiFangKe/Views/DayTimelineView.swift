@@ -10,6 +10,7 @@ struct DayTimelineView: View {
     @Query(sort: \Footprint.startTime, order: .reverse) private var footprints: [Footprint]
     
     @State private var selectedDate: Date
+    @State private var activatedDate: Date
     @State private var scrollID: Date?
     @Environment(LocationManager.self) private var locationManager
     
@@ -32,10 +33,12 @@ struct DayTimelineView: View {
     @State private var showingCalendar = false
     @State private var updateTask: Task<Void, Never>?
     @State private var preLoadTask: Task<Void, Never>?
+    @State private var activationTask: Task<Void, Never>?
     
 
     init(selectedDate: Date = Calendar.current.startOfDay(for: Date())) {
         self._selectedDate = State(initialValue: selectedDate)
+        self._activatedDate = State(initialValue: selectedDate)
         self._scrollID = State(initialValue: selectedDate)
     }
     
@@ -67,6 +70,7 @@ struct DayTimelineView: View {
             .onDisappear {
                 stopRepeatTimer()
                 updateTask?.cancel()
+                activationTask?.cancel()
             }
             .onChange(of: manualSelections) { _, _ in
                 updateData()
@@ -87,7 +91,7 @@ struct DayTimelineView: View {
             }
             .alert("重新生成本日数据", isPresented: $showingResetAlert) {
                 Button("确定重新生成", role: .destructive) {
-                    locationManager.resetData(for: selectedDate)
+                    locationManager.resetData(for: activatedDate)
                 }
                 Button("取消", role: .cancel) { }
             } message: {
@@ -130,7 +134,7 @@ struct DayTimelineView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            NavigationLink(destination: HistoryListView(initialDate: selectedDate)) {
+            NavigationLink(destination: HistoryListView(initialDate: activatedDate)) {
                 Image(systemName: "calendar.badge.clock")
             }
         }
@@ -214,6 +218,7 @@ struct DayTimelineView: View {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }
         selectedDate = newValue
+        scheduleDateActivation(for: newValue)
         if !Calendar.current.isDate(newValue, inSameDayAs: Date()) {
             UserDefaults.standard.set(true, forKey: "hasSwiped")
         }
@@ -222,6 +227,15 @@ struct DayTimelineView: View {
             try? await Task.sleep(nanoseconds: 50_000_000)
             if Task.isCancelled { return }
             preLoadNeighborDates(around: newValue)
+        }
+    }
+
+    private func scheduleDateActivation(for date: Date) {
+        activationTask?.cancel()
+        activationTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            if Task.isCancelled { return }
+            activatedDate = date
         }
     }
     
@@ -268,7 +282,7 @@ struct DayTimelineView: View {
             offset: offset, 
             locationManager: locationManager, 
             pastLimitOffset: pastLimitOffset,
-            isActivePage: scrollID == date || selectedDate == date
+            isActivePage: activatedDate == date
         )
         .frame(width: UIScreen.main.bounds.width)
         .id(date)
@@ -282,7 +296,7 @@ struct DayTimelineView: View {
         
         updateTask = Task { @MainActor in
             // 清理当前选中日期的缓存，确保刷新后能看到最新结果
-            TimelineBuilder.timelineCache.removeValue(forKey: selectedDate)
+            TimelineBuilder.timelineCache.removeValue(forKey: activatedDate)
             
             try? await Task.sleep(nanoseconds: 300_000_000)
             if Task.isCancelled { return }
@@ -468,7 +482,7 @@ struct DayTimelineView: View {
             }
             .contextMenu {
                 Button {
-                    showingRawPointsDate = IdentifiableDate(date: selectedDate)
+                    showingRawPointsDate = IdentifiableDate(date: activatedDate)
                 } label: {
                     Label("查看所有轨迹点", systemImage: "dot.radiowaves.left.and.right")
                 }
@@ -598,35 +612,35 @@ struct DayTimelineView: View {
     
     private var dateHeader: String {
         let calendar = Calendar.current
-        if calendar.isDateInToday(selectedDate) { return "今天" }
-        if calendar.isDateInYesterday(selectedDate) { return "昨天" }
-        if calendar.isDateInTomorrow(selectedDate) { return "明天" }
+        if calendar.isDateInToday(activatedDate) { return "今天" }
+        if calendar.isDateInYesterday(activatedDate) { return "昨天" }
+        if calendar.isDateInTomorrow(activatedDate) { return "明天" }
         
         let today = calendar.startOfDay(for: Date())
         if let dby = calendar.date(byAdding: .day, value: -2, to: today),
-           calendar.isDate(selectedDate, inSameDayAs: dby) {
+           calendar.isDate(activatedDate, inSameDayAs: dby) {
             return "前天"
         }
         
-        let isCurrentYear = calendar.component(.year, from: selectedDate) == calendar.component(.year, from: today)
-        return isCurrentYear ? selectedDate.formatted(.dateTime.month().day()) : selectedDate.formatted(.dateTime.year().month().day())
+        let isCurrentYear = calendar.component(.year, from: activatedDate) == calendar.component(.year, from: today)
+        return isCurrentYear ? activatedDate.formatted(.dateTime.month().day()) : activatedDate.formatted(.dateTime.year().month().day())
     }
     
     private var secondaryHeader: String {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
         let dby = calendar.date(byAdding: .day, value: -2, to: today)!
-        let isRelative = calendar.isDateInToday(selectedDate) || 
-                         calendar.isDateInYesterday(selectedDate) || 
-                         calendar.isDateInTomorrow(selectedDate) ||
-                         calendar.isDate(selectedDate, inSameDayAs: dby)
+        let isRelative = calendar.isDateInToday(activatedDate) || 
+                         calendar.isDateInYesterday(activatedDate) || 
+                         calendar.isDateInTomorrow(activatedDate) ||
+                         calendar.isDate(activatedDate, inSameDayAs: dby)
         
         if isRelative {
-            let isCurrentYear = calendar.component(.year, from: selectedDate) == calendar.component(.year, from: today)
-            let dateStr = isCurrentYear ? selectedDate.formatted(.dateTime.month().day()) : selectedDate.formatted(.dateTime.year().month().day())
-            return "\(dateStr) \(selectedDate.formatted(.dateTime.weekday(.wide)))"
+            let isCurrentYear = calendar.component(.year, from: activatedDate) == calendar.component(.year, from: today)
+            let dateStr = isCurrentYear ? activatedDate.formatted(.dateTime.month().day()) : activatedDate.formatted(.dateTime.year().month().day())
+            return "\(dateStr) \(activatedDate.formatted(.dateTime.weekday(.wide)))"
         } else {
-            return selectedDate.formatted(.dateTime.weekday(.wide))
+            return activatedDate.formatted(.dateTime.weekday(.wide))
         }
     }
     

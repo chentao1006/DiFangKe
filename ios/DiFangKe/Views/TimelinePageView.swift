@@ -80,50 +80,33 @@ struct TimelinePageView: View {
     var body: some View {
         timelineScrollView
         .onAppear {
-            appearanceTask?.cancel()
-            appearanceTask = Task { @MainActor in
-                // 只有停留超过 400ms 才开始业务逻辑，防止快速划过时的卡顿
-                try? await Task.sleep(nanoseconds: AppConfig.shared.uiDebounceIntervalNS)
-                if Task.isCancelled { return }
-                
-                NotificationManager.shared.getAuthorizationStatus { status in
-                    self.notificationAuthStatus = status
-                }
-                
-                // 即使已有缓存数据，也要执行刷新任务以加载原始轨迹路径（Trajectory Points）和照片
-                refreshTimeline()
-                
-                // AI 每日摘要检查：仅在缺失时静默生成，不强制刷新
-                let currentSummary = pageInsights.first?.content
-                if isAiAssistantEnabled && !footprints.isEmpty && (currentSummary == nil || currentSummary?.isEmpty == true) {
-                    let startOfDate = Calendar.current.startOfDay(for: date)
-                    if startOfDate < Calendar.current.startOfDay(for: Date()) {
-                        let endOfDate = Calendar.current.date(byAdding: .day, value: 1, to: startOfDate)!
-                        let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                            $0.startTime >= startOfDate && $0.startTime < endOfDate && $0.statusRaw == "active"
-                        })
-                        let transports = (try? modelContext.fetch(tpDesc)) ?? []
-                        OpenAIService.shared.enqueueDailySummary(for: date, footprints: footprints, transports: transports)
-                    }
-                }
-                
-                checkDeepLink(targetID: locationManager.deepLinkFootprintID)
+            activatePageIfNeeded()
+        }
+        .onChange(of: isActivePage) { _, newValue in
+            if newValue {
+                activatePageIfNeeded()
+            } else {
+                deactivatePage()
             }
         }
         .onDisappear {
-            appearanceTask?.cancel()
-            refreshTask?.cancel()
+            deactivatePage()
         }
         .onChange(of: footprints) { _, _ in
+            guard isActivePage else { return }
             // 安全刷新：仅重新获取数据库内容刷新 UI，不触发 syncDay 算法，彻底杜绝死循环
             let items = PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
             applyTimelineItems(items, triggerAiIfChanged: true)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
+            guard isActivePage else { return }
             // 当后台完成活动匹配时，仅刷新 UI，不触发 AI 重新总结
             refreshTimeline(force: false)
         }
-        .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in refreshTimeline(force: false) }
+        .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in
+            guard isActivePage else { return }
+            refreshTimeline(force: false)
+        }
         .sheet(item: $selectedFootprint) { footprint in
             FootprintModalView(
                 footprint: footprint, 
@@ -172,8 +155,46 @@ struct TimelinePageView: View {
             .environment(locationManager)
         }
         .onChange(of: locationManager.deepLinkFootprintID) { _, newValue in
+            guard isActivePage else { return }
             checkDeepLink(targetID: newValue)
         }
+    }
+
+    @MainActor
+    private func activatePageIfNeeded() {
+        guard isActivePage else { return }
+
+        appearanceTask?.cancel()
+        appearanceTask = Task { @MainActor in
+            NotificationManager.shared.getAuthorizationStatus { status in
+                self.notificationAuthStatus = status
+            }
+
+            // 只在真正停留到当前页后才执行刷新，避免快速划过时触发重计算。
+            refreshTimeline()
+
+            // AI 每日摘要检查：仅在缺失时静默生成，不强制刷新
+            let currentSummary = pageInsights.first?.content
+            if isAiAssistantEnabled && !footprints.isEmpty && (currentSummary == nil || currentSummary?.isEmpty == true) {
+                let startOfDate = Calendar.current.startOfDay(for: date)
+                if startOfDate < Calendar.current.startOfDay(for: Date()) {
+                    let endOfDate = Calendar.current.date(byAdding: .day, value: 1, to: startOfDate)!
+                    let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                        $0.startTime >= startOfDate && $0.startTime < endOfDate && $0.statusRaw == "active"
+                    })
+                    let transports = (try? modelContext.fetch(tpDesc)) ?? []
+                    OpenAIService.shared.enqueueDailySummary(for: date, footprints: footprints, transports: transports)
+                }
+            }
+
+            checkDeepLink(targetID: locationManager.deepLinkFootprintID)
+        }
+    }
+
+    @MainActor
+    private func deactivatePage() {
+        appearanceTask?.cancel()
+        refreshTask?.cancel()
     }
     
     // 过滤掉与当前正在进行的实时停留重合的足迹，避免双重视图
@@ -709,11 +730,18 @@ struct TimelinePageView: View {
             Spacer()
         }
         .onAppear {
-            if offset == 1 {
+            if offset == 1 && isActivePage {
                 OpenAIService.shared.enqueueTomorrowQuote { title, sub in
                     self.tomorrowQuoteTitle = title
                     self.tomorrowQuoteSubtitle = sub
                 }
+            }
+        }
+        .onChange(of: isActivePage) { _, newValue in
+            guard newValue, offset == 1 else { return }
+            OpenAIService.shared.enqueueTomorrowQuote { title, sub in
+                self.tomorrowQuoteTitle = title
+                self.tomorrowQuoteSubtitle = sub
             }
         }
     }
@@ -744,6 +772,14 @@ struct TimelinePageView: View {
             Spacer()
         }
         .onAppear {
+            guard isActivePage else { return }
+            OpenAIService.shared.enqueuePastQuote { title, sub in
+                self.pastQuoteTitle = title
+                self.pastQuoteSubtitle = sub
+            }
+        }
+        .onChange(of: isActivePage) { _, newValue in
+            guard newValue else { return }
             OpenAIService.shared.enqueuePastQuote { title, sub in
                 self.pastQuoteTitle = title
                 self.pastQuoteSubtitle = sub
