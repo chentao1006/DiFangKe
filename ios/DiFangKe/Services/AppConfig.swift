@@ -204,8 +204,7 @@ class AppConfig {
     }
     
     var physicalMaxSpeedThreshold: Double {
-        let val = double(forKey: "PHYSICAL_MAX_SPEED_THRESHOLD")
-        return val > 0 ? val : 600.0 // Default to user's example 600 m/s (3km/5s)
+        double(forKey: "PHYSICAL_MAX_SPEED_THRESHOLD")
     }
 
     var stationaryDiameterThreshold: Double {
@@ -248,8 +247,11 @@ class AppConfig {
         double(forKey: "TRANSPORT_TYPE_CHANGE_DURATION_THRESHOLD")
     }
     
+    var photoLinkingMaxDistance: Double {
+        double(forKey: "PHOTO_LINKING_MAX_DISTANCE")
+    }
+    
     var appGroupID: String {
-        let val = string(forKey: "APP_GROUP_ID")
-        return val.isEmpty ? "group.com.ct106.difangke" : val
+        string(forKey: "APP_GROUP_ID")
     }
 }

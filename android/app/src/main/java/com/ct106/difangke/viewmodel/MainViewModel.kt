@@ -85,7 +85,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             db.footprintDao().observeBetween(start, end),
             db.transportRecordDao().observeForDay(start, end)
         ) { fps, tps ->
-            (fps.map { TimelineItem.FootprintItem(it) } + tps.map { TimelineItem.TransportItem(it) })
+            // 足迹的时间范围要限制在0点到次日0点：裁切跨天记录
+            val boundedFps = fps.map { fp ->
+                val bStart = if (fp.startTime.before(start)) start else fp.startTime
+                val bEnd = if (fp.endTime.after(end)) end else fp.endTime
+                if (bStart != fp.startTime || bEnd != fp.endTime) {
+                    fp.copy(startTime = bStart, endTime = bEnd)
+                } else fp
+            }
+            val boundedTps = tps.map { tp ->
+                val bStart = if (tp.startTime.before(start)) start else tp.startTime
+                val bEnd = if (tp.endTime.after(end)) end else tp.endTime
+                if (bStart != tp.startTime || bEnd != tp.endTime) {
+                    tp.copy(startTime = bStart, endTime = bEnd)
+                } else tp
+            }
+
+            (boundedFps.map { TimelineItem.FootprintItem(it) } + boundedTps.map { TimelineItem.TransportItem(it) })
                 .sortedByDescending { it.startTime }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -164,10 +180,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 db.transportRecordDao().observeForDay(start, end)
             ) { fps, tps ->
                 val visibleFps = fps.filter { it.statusValue != "ignored" }
-                val rawItems = (fps.map { TimelineItem.FootprintItem(it) } + tps.map { TimelineItem.TransportItem(it) })
+                
+                // 足迹的时间范围要限制在0点到次日0点：裁切跨天记录
+                val boundedFps = visibleFps.map { fp ->
+                    val bStart = if (fp.startTime.before(start)) start else fp.startTime
+                    val bEnd = if (fp.endTime.after(end)) end else fp.endTime
+                    if (bStart != fp.startTime || bEnd != fp.endTime) {
+                        fp.copy(startTime = bStart, endTime = bEnd)
+                    } else fp
+                }
+                val boundedTps = tps.map { tp ->
+                    val bStart = if (tp.startTime.before(start)) start else tp.startTime
+                    val bEnd = if (tp.endTime.after(end)) end else tp.endTime
+                    if (bStart != tp.startTime || bEnd != tp.endTime) {
+                        tp.copy(startTime = bStart, endTime = bEnd)
+                    } else tp
+                }
+
+                val rawItems = (boundedFps.map { TimelineItem.FootprintItem(it) } + boundedTps.map { TimelineItem.TransportItem(it) })
                     .sortedByDescending { it.startTime }
                 
-                alignTransportItems(rawItems, visibleFps)
+                alignTransportItems(rawItems, boundedFps)
             }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
         }
     }

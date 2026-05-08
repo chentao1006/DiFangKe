@@ -35,6 +35,8 @@ struct DFKMapView: View {
     var photoAssets: [PHAsset] = []
     var widgetSnapshotOffset: Int? = nil
     var allowsGeneratedSnapshot: Bool = true
+    var showsStandalonePhotos: Bool = false
+    var prefersActivityIcons: Bool = false
 
     struct HeatmapPoint: Identifiable {
         let id: String
@@ -78,6 +80,8 @@ struct DFKMapView: View {
         timelineItems: [TimelineItem] = [],
         photoAssets: [PHAsset] = [],
         heatmapPoints: [HeatmapPoint] = [],
+        showsStandalonePhotos: Bool = false,
+        prefersActivityIcons: Bool = false,
         onTimelineItemTap: ((TimelineItem) -> Void)? = nil,
         onPhotoTap: ((PHAsset) -> Void)? = nil
     ) {
@@ -92,6 +96,8 @@ struct DFKMapView: View {
         self.timelineItems = timelineItems
         self.photoAssets = photoAssets
         self.heatmapPoints = heatmapPoints
+        self.showsStandalonePhotos = showsStandalonePhotos
+        self.prefersActivityIcons = prefersActivityIcons
         self.onTimelineItemTap = onTimelineItemTap
         self.onPhotoTap = onPhotoTap
     }
@@ -138,10 +144,10 @@ struct DFKMapView: View {
     }
 
     private var validPhotoAnnotations: [(asset: PHAsset, coordinate: CLLocationCoordinate2D)] {
-        aggregatedFootprints.compactMap { aggregated -> (PHAsset, CLLocationCoordinate2D)? in
-            guard let assetID = latestPhotoAssetID(for: aggregated) else { return nil }
-            guard let asset = photoAssets.first(where: { $0.localIdentifier == assetID }) else { return nil }
-            return (asset, aggregated.coordinate)
+        guard showsStandalonePhotos else { return [] }
+        return photoAssets.compactMap { asset in
+            guard let coord = asset.location?.gcj02.coordinate else { return nil }
+            return (asset, coord)
         }
     }
 
@@ -283,12 +289,10 @@ struct DFKMapView: View {
 
                             ForEach(validAggregatedFootprints) { aggregated in
                                 Annotation("", coordinate: aggregated.coordinate) {
-                                    Button {
-                                        handleFootprintTap(for: aggregated)
-                                    } label: {
-                                        aggregatedAnnotationContent(for: aggregated)
-                                    }
-                                    .buttonStyle(.plain)
+                                    aggregatedAnnotationContent(for: aggregated)
+                                        .onTapGesture {
+                                            handleFootprintTap(for: aggregated)
+                                        }
                                 }
                             }
 
@@ -445,22 +449,23 @@ struct DFKMapView: View {
         let scale = calculateScale(for: aggregated.totalDuration)
         let size = markerSize(for: aggregated.totalDuration)
 
+        let activity = fp.getActivityType(from: allActivities)
+        let activityColor = activity?.color ?? Color.secondary.opacity(0.5)
+        let iconName = activity?.icon ?? "questionmark.circle.dashed"
+        let iconSize: CGFloat = (activity?.icon == nil ? 18 : 13) * scale
+
         return ZStack {
-            if let latestPhotoAssetID = latestPhotoAssetID(for: aggregated) {
+            // 根据 prefersActivityIcons 决定显示活动图标还是照片封面
+            if !prefersActivityIcons, let latestPhotoAssetID = latestPhotoAssetID(for: aggregated) {
                 AssetThumbnailView(assetID: latestPhotoAssetID)
                     .frame(width: size, height: size)
                     .clipShape(RoundedRectangle(cornerRadius: 8 * scale, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 8 * scale, style: .continuous)
-                            .stroke(Color.white, lineWidth: 1.5 * scale)
+                            .stroke(Color(uiColor: .systemBackground), lineWidth: 1.5 * scale)
                     )
                     .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
             } else {
-                let activity = fp.getActivityType(from: allActivities)
-                let activityColor = activity?.color ?? Color.secondary.opacity(0.5)
-                let iconName = activity?.icon ?? "questionmark.circle.dashed"
-                let iconSize: CGFloat = (activity?.icon == nil ? 18 : 13) * scale
-
                 Circle()
                     .fill(activityColor)
                     .frame(width: size, height: size)
@@ -490,12 +495,10 @@ struct DFKMapView: View {
 
         if let onTimelineItemTap {
             return AnyView(
-                Button {
-                    onTimelineItemTap(.transport(transport))
-                } label: {
-                    transportIcon
-                }
-                .buttonStyle(.plain)
+                transportIcon
+                    .onTapGesture {
+                        onTimelineItemTap(.transport(transport))
+                    }
             )
         } else {
             return AnyView(transportIcon)
@@ -585,18 +588,15 @@ struct DFKMapView: View {
         let content = AssetThumbnailView(assetID: asset.localIdentifier)
             .frame(width: 46, height: 46)
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.5))
-            .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(uiColor: .systemBackground), lineWidth: 1.5))
             .contentShape(Rectangle())
 
         if let onPhotoTap {
             return AnyView(
-                Button {
-                    onPhotoTap(asset)
-                } label: {
-                    content
-                }
-                .buttonStyle(.plain)
+                content
+                    .onTapGesture {
+                        onPhotoTap(asset)
+                    }
             )
         }
 
@@ -750,7 +750,8 @@ struct DFKMapView: View {
                 let markerSize = 28 * dotScale
                 let rect = CGRect(x: point.x - markerSize / 2, y: point.y - markerSize / 2, width: markerSize, height: markerSize)
 
-                if let latestPhotoAssetID = latestPhotoAssetID(for: aggregated),
+                // 快照逻辑同步：若 prefersActivityIcons 为 false 且有照片，则显示封面
+                if !prefersActivityIcons, let latestPhotoAssetID = latestPhotoAssetID(for: aggregated),
                    let photoImage = footprintPhotoImages[latestPhotoAssetID] {
                     let clipPath = UIBezierPath(roundedRect: rect, cornerRadius: 8 * dotScale)
                     ctx.cgContext.saveGState()
@@ -758,7 +759,7 @@ struct DFKMapView: View {
                     drawImageAspectFill(photoImage, in: rect)
                     ctx.cgContext.restoreGState()
 
-                    ctx.cgContext.setStrokeColor(UIColor.white.cgColor)
+                    ctx.cgContext.setStrokeColor(strokeColor.cgColor)
                     ctx.cgContext.setLineWidth(1.5)
                     ctx.cgContext.addPath(clipPath.cgPath)
                     ctx.cgContext.strokePath()
@@ -803,7 +804,7 @@ struct DFKMapView: View {
             if shouldDrawStandalonePhotosInSnapshot {
                 for entry in validPhotoAnnotations {
                     let point = snapshot.point(for: entry.coordinate)
-                    let markerSize: CGFloat = 24
+                    let markerSize: CGFloat = 40 // Standalone photos should be larger to be visible
                     let rect = CGRect(x: point.x - markerSize / 2, y: point.y - markerSize / 2, width: markerSize, height: markerSize)
                     let path = UIBezierPath(roundedRect: rect, cornerRadius: 6)
 
@@ -812,14 +813,13 @@ struct DFKMapView: View {
                         path.addClip()
                         drawImageAspectFill(photoImage, in: rect)
                         ctx.cgContext.restoreGState()
+                        
+                        strokeColor.setStroke()
+                        path.lineWidth = 1.5
+                        path.stroke()
                     } else {
-                        UIColor.white.withAlphaComponent(0.92).setFill()
-                        path.fill()
+                        // If image not loaded, just a dot or skip? Skip for now to keep it clean.
                     }
-
-                    UIColor.white.setStroke()
-                    path.lineWidth = 1.5
-                    path.stroke()
                 }
             }
 

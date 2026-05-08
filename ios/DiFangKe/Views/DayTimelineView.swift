@@ -18,6 +18,7 @@ struct DayTimelineView: View {
     @State private var repeatTimerInterval: Double = 0.2
     @State private var isPressingArrow = false
     @State private var currentPressDirection = 0
+    @State private var repeatStepCount = 0
     
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query private var manualSelections: [TransportManualSelection]
@@ -215,16 +216,25 @@ struct DayTimelineView: View {
     private func handleScrollChange(oldValue: Date?, newValue: Date?) {
         guard let newValue = newValue else { return }
         if newValue != oldValue {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            // 限制振动频率，避免连续切换时马达过载
+            if !isPressingArrow {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
         }
         selectedDate = newValue
-        scheduleDateActivation(for: newValue)
+        
+        // 如果是手动长按中，不在这里触发 activatedDate 更新，等松手时一次性更新
+        if !isPressingArrow {
+            scheduleDateActivation(for: newValue)
+        }
+        
         if !Calendar.current.isDate(newValue, inSameDayAs: Date()) {
             UserDefaults.standard.set(true, forKey: "hasSwiped")
         }
+        
         preLoadTask?.cancel()
         preLoadTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            try? await Task.sleep(nanoseconds: 100_000_000) // 增加到 100ms
             if Task.isCancelled { return }
             preLoadNeighborDates(around: newValue)
         }
@@ -232,10 +242,16 @@ struct DayTimelineView: View {
 
     private func scheduleDateActivation(for date: Date) {
         activationTask?.cancel()
+        
+        // 增加防抖时间，防止快速滑动时频繁触发重绘
+        let delay: UInt64 = isPressingArrow ? 300_000_000 : 200_000_000
+        
         activationTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            try? await Task.sleep(nanoseconds: delay)
             if Task.isCancelled { return }
-            activatedDate = date
+            withAnimation(.easeInOut(duration: 0.2)) {
+                activatedDate = date
+            }
         }
     }
     
@@ -584,6 +600,7 @@ struct DayTimelineView: View {
     private func startRepeatTimer(direction: Int) {
         stopRepeatTimer()
         repeatTimerInterval = 0.2 // 初始间隔 0.2s
+        repeatStepCount = 0
         
         // 延迟一段时间后开始连续触发
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -595,10 +612,26 @@ struct DayTimelineView: View {
     private func triggerNextStep(direction: Int) {
         guard isPressingArrow && currentPressDirection == direction else { return }
         
+        repeatStepCount += 1
         step(direction: direction)
         
-        // 速度递增逻辑：每次缩短 10% 的间隔，直到达到最快 0.05s
-        repeatTimerInterval = max(0.05, repeatTimerInterval * 0.9)
+        // 模拟连续切换的震动感
+        // 当速度很快时，进一步降低震动频率，避免马达过热或体感粘滞
+        if repeatTimerInterval > 0.1 {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } else if repeatTimerInterval > 0.05 {
+            if repeatStepCount % 2 == 0 {
+                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+            }
+        } else {
+            // 极速模式：每 4 步震一次，模拟高速滚轮感
+            if repeatStepCount % 4 == 0 {
+                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+            }
+        }
+        
+        // 速度递增逻辑：更快的加速度，更小的最小间隔
+        repeatTimerInterval = max(0.02, repeatTimerInterval * 0.85)
         
         repeatTimer = Timer.scheduledTimer(withTimeInterval: repeatTimerInterval, repeats: false) { _ in
             self.triggerNextStep(direction: direction)
@@ -608,46 +641,53 @@ struct DayTimelineView: View {
     private func stopRepeatTimer() {
         repeatTimer?.invalidate()
         repeatTimer = nil
+        
+        // 长按结束，确保最后停下的日期被激活并渲染
+        if activatedDate != selectedDate {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                activatedDate = selectedDate
+            }
+        }
     }
     
     private var dateHeader: String {
         let calendar = Calendar.current
-        if calendar.isDateInToday(activatedDate) { return "今天" }
-        if calendar.isDateInYesterday(activatedDate) { return "昨天" }
-        if calendar.isDateInTomorrow(activatedDate) { return "明天" }
+        if calendar.isDateInToday(selectedDate) { return "今天" }
+        if calendar.isDateInYesterday(selectedDate) { return "昨天" }
+        if calendar.isDateInTomorrow(selectedDate) { return "明天" }
         
         let today = calendar.startOfDay(for: Date())
         if let dby = calendar.date(byAdding: .day, value: -2, to: today),
-           calendar.isDate(activatedDate, inSameDayAs: dby) {
+           calendar.isDate(selectedDate, inSameDayAs: dby) {
             return "前天"
         }
         
-        let isCurrentYear = calendar.component(.year, from: activatedDate) == calendar.component(.year, from: today)
-        return isCurrentYear ? activatedDate.formatted(.dateTime.month().day()) : activatedDate.formatted(.dateTime.year().month().day())
+        let isCurrentYear = calendar.component(.year, from: selectedDate) == calendar.component(.year, from: today)
+        return isCurrentYear ? selectedDate.formatted(.dateTime.month().day()) : selectedDate.formatted(.dateTime.year().month().day())
     }
     
     private var secondaryHeader: String {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
         let dby = calendar.date(byAdding: .day, value: -2, to: today)!
-        let isRelative = calendar.isDateInToday(activatedDate) || 
-                         calendar.isDateInYesterday(activatedDate) || 
-                         calendar.isDateInTomorrow(activatedDate) ||
-                         calendar.isDate(activatedDate, inSameDayAs: dby)
+        let isRelative = calendar.isDateInToday(selectedDate) || 
+                         calendar.isDateInYesterday(selectedDate) || 
+                         calendar.isDateInTomorrow(selectedDate) ||
+                         calendar.isDate(selectedDate, inSameDayAs: dby)
         
         if isRelative {
-            let isCurrentYear = calendar.component(.year, from: activatedDate) == calendar.component(.year, from: today)
-            let dateStr = isCurrentYear ? activatedDate.formatted(.dateTime.month().day()) : activatedDate.formatted(.dateTime.year().month().day())
-            return "\(dateStr) \(activatedDate.formatted(.dateTime.weekday(.wide)))"
+            let isCurrentYear = calendar.component(.year, from: selectedDate) == calendar.component(.year, from: today)
+            let dateStr = isCurrentYear ? selectedDate.formatted(.dateTime.month().day()) : selectedDate.formatted(.dateTime.year().month().day())
+            return "\(dateStr) \(selectedDate.formatted(.dateTime.weekday(.wide)))"
         } else {
-            return activatedDate.formatted(.dateTime.weekday(.wide))
+            return selectedDate.formatted(.dateTime.weekday(.wide))
         }
     }
     
     private func step(direction: Int) {
         let isDisabled = (direction == -1) ? isAtStart : isAtEnd
         if !isDisabled {
-            changeDate(by: direction)
+            changeDate(by: direction, isContinuous: true)
         } else {
             stopRepeatTimer()
         }
@@ -658,16 +698,20 @@ struct DayTimelineView: View {
         let days = abs(Calendar.current.dateComponents([.day], from: selectedDate, to: today).day ?? 0)
         
         // 动态计算响应时间：日期间隔越远，滚动越慢
-        // 基准 0.5s，每增加 1 天约增加 0.01s，上限 1.2s (约 70 天时达到上限)
         let response = min(1.2, 0.5 + Double(days) * 0.01)
         
         withAnimation(.spring(response: response, dampingFraction: 0.95)) {
             selectedDate = today
             scrollID = today
         }
+        
+        // 既然是主动跳转今天，直接激活
+        withAnimation(.easeInOut(duration: 0.2)) {
+            activatedDate = today
+        }
     }
     
-    private func changeDate(by direction: Int) {
+    private func changeDate(by direction: Int, isContinuous: Bool = false) {
         guard let currentIndex = cachedDates.firstIndex(of: selectedDate) else {
             jumpToToday()
             return
@@ -676,9 +720,19 @@ struct DayTimelineView: View {
         let nextIndex = currentIndex + direction
         if nextIndex >= 0 && nextIndex < cachedDates.count {
             let targetDate = cachedDates[nextIndex]
-            withAnimation(.spring()) {
-                selectedDate = targetDate
-                scrollID = targetDate
+            
+            if isContinuous {
+                // 连续切换时：使用响应极快的交互式弹簧，模拟滑动手感，但不开启全量重绘
+                withAnimation(.interactiveSpring(response: 0.2, dampingFraction: 0.85, blendDuration: 0.1)) {
+                    selectedDate = targetDate
+                    scrollID = targetDate
+                }
+            } else {
+                // 单次点击：保持标准弹性滑动动画，提供明确的反馈感
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
+                    selectedDate = targetDate
+                    scrollID = targetDate
+                }
             }
         }
     }

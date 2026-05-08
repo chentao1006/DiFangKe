@@ -2277,10 +2277,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return }
         
-        // 如果已经关联过照片，且这些照片在本地是有效的，说明已经稳定，不再重复抓取。
-        // 对于多设备同步过来的足迹，其 photoAssetIDs 在本地通常是无效的，此时需要重新触发关联。
-        if !footprint.photoAssetIDs.isEmpty && PhotoService.shared.validateAssetIDs(footprint.photoAssetIDs) { 
-            return 
+        // 核心修复：即使照片在本地有效，如果缺失云端元数据（导致无法同步），也必须继续执行以补全元数据。
+        if !footprint.photoAssetIDs.isEmpty && PhotoService.shared.validateAssetIDs(footprint.photoAssetIDs) {
+            let hasMetadataForAll = footprint.photoAssetIDs.allSatisfy { id in
+                footprint.photoMetadata.contains(where: { $0.localIdentifier == id && $0.cloudIdentifier != nil })
+            }
+            if hasMetadataForAll {
+                return 
+            }
         }
         
         // 核心修复：必须有 context 才能访问 persistentModelID 并在主线程恢复，否则说明是 UI Lite 对象
@@ -2295,17 +2299,125 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             startTime: startTime,
             endTime: endTime,
             near: coordinate,
-            maxDistance: 1500 // 放宽关联半径至 1.5km，确保更大概率能根据时间线寻回照片
+            maxDistance: AppConfig.shared.photoLinkingMaxDistance
         ) { assets in
-            guard !assets.isEmpty else { return }
-            let ids = assets.map { $0.localIdentifier }
+            let autoIDs = assets.map { $0.localIdentifier }
             
-            // 使用 Task 在主线程执行更新，确保持久化生效且不卡顿
-            Task { @MainActor in
-                if let fp = context.model(for: id) as? Footprint {
-                    fp.photoAssetIDs = ids
-                    try? context.save()
-                    print("[\(Date())] PhotoLinker: Successfully linked \(ids.count) photos to footprint \(id)")
+            Task {
+                // 强制触发一次 CloudKit 数据拉取脉冲
+                CloudSettingsManager.shared.triggerDataSyncPulse()
+                
+                // 先在主线程获取当前状态
+                let (currentIDs, currentMetadata): ([String], [PhotoMetadata]) = await MainActor.run {
+                    guard let fp = context.model(for: id) as? Footprint else { return ([], []) }
+                    return (fp.photoAssetIDs, fp.photoMetadata)
+                }
+                
+                if currentIDs.isEmpty && autoIDs.isEmpty { return }
+                
+                var workingIDs = currentIDs
+                var workingMetadata = currentMetadata
+                var hasChanged = false
+                
+                // 1. 同步本地 -> 云端 (后台执行)
+                let idsMissingCloud = workingIDs.filter { id in
+                    !workingMetadata.contains(where: { $0.localIdentifier == id && $0.cloudIdentifier != nil })
+                }
+                if !idsMissingCloud.isEmpty {
+                    let mappings = await PhotoService.shared.getCloudIdentifiers(for: idsMissingCloud)
+                    for (localID, cloudID) in mappings {
+                        if let idx = workingMetadata.firstIndex(where: { $0.localIdentifier == localID }) {
+                            workingMetadata[idx].cloudIdentifier = cloudID
+                        } else {
+                            workingMetadata.append(PhotoMetadata(localIdentifier: localID, cloudIdentifier: cloudID))
+                        }
+                        hasChanged = true
+                    }
+                }
+                
+                // 2. 同步云端 -> 本地 (后台执行)
+                let invalidLocalWithCloud = workingMetadata.filter { meta in
+                    meta.cloudIdentifier != nil && !PhotoService.shared.validateAssetIDs([meta.localIdentifier])
+                }
+                
+                if !invalidLocalWithCloud.isEmpty {
+                    let cloudIDs = invalidLocalWithCloud.compactMap { $0.cloudIdentifier }
+                    let mappings = await PhotoService.shared.getLocalIdentifiers(for: cloudIDs)
+                    for (cloudID, localID) in mappings {
+                        if let meta = invalidLocalWithCloud.first(where: { $0.cloudIdentifier == cloudID }) {
+                            let oldID = meta.localIdentifier
+                            if let idx = workingIDs.firstIndex(of: oldID) {
+                                workingIDs[idx] = localID
+                            } else {
+                                workingIDs.append(localID)
+                            }
+                            if let metaIdx = workingMetadata.firstIndex(where: { $0.localIdentifier == oldID }) {
+                                workingMetadata[metaIdx].localIdentifier = localID
+                            }
+                            hasChanged = true
+                            print("[\(Date())] PhotoLinker: Resolved cloud ID \(cloudID) to local ID \(localID)")
+                        }
+                    }
+                }
+                
+                // 3. 自动关联补充与基于云端 ID 的去重
+                var newFoundIDs: [String] = []
+                if !autoIDs.isEmpty {
+                    // 获取扫描到的照片的云端 ID
+                    let autoMappings = await PhotoService.shared.getCloudIdentifiers(for: autoIDs)
+                    
+                    for (localID, cloudID) in autoMappings {
+                        // 检查这个云端 ID 是否已经存在于我们的元数据中（即使本地 ID 不同）
+                        if let existingMetaIdx = workingMetadata.firstIndex(where: { $0.cloudIdentifier == cloudID }) {
+                            let oldLocalID = workingMetadata[existingMetaIdx].localIdentifier
+                            if oldLocalID != localID {
+                                // 找到了匹配！将旧的无效 ID 替换为新的有效本地 ID
+                                if let idIdx = workingIDs.firstIndex(of: oldLocalID) {
+                                    workingIDs[idIdx] = localID
+                                }
+                                workingMetadata[existingMetaIdx].localIdentifier = localID
+                                hasChanged = true
+                                print("[\(Date())] PhotoLinker: Scanned photo \(localID) matches existing cloud ID \(cloudID). Updated local reference.")
+                            }
+                        } else {
+                            // 这是一个全新的照片
+                            newFoundIDs.append(localID)
+                        }
+                    }
+                }
+                
+                // 合并剩余的真正新发现的 ID
+                if !newFoundIDs.isEmpty {
+                    let combinedIDs = NSMutableOrderedSet(array: workingIDs)
+                    combinedIDs.addObjects(from: newFoundIDs)
+                    let newMergedIDs = combinedIDs.array as? [String] ?? workingIDs
+                    
+                    if newMergedIDs != workingIDs {
+                        workingIDs = newMergedIDs
+                        hasChanged = true
+                        
+                        // 为新发现的 ID 补充元数据
+                        let autoMappings = await PhotoService.shared.getCloudIdentifiers(for: newFoundIDs)
+                        for (localID, cloudID) in autoMappings {
+                            workingMetadata.append(PhotoMetadata(localIdentifier: localID, cloudIdentifier: cloudID))
+                        }
+                    }
+                }
+                
+                // 3.5 清理仍然无效且没有云端 ID 的残留 ID（可选，增加鲁棒性）
+                // 如果一个 ID 既不能在本地找到，又没有云端 ID 记录，且我们已经有了其他有效的扫描结果，可以考虑清理它。
+                // 但为了安全，目前先保留，仅靠上面的替换逻辑解决占位符优先问题。
+                
+                // 4. 回写主线程
+                if hasChanged {
+                    await MainActor.run {
+                        if let fp = context.model(for: id) as? Footprint {
+                            fp.photoAssetIDs = workingIDs
+                            fp.photoMetadata = workingMetadata
+                            try? context.save()
+                            print("[\(Date())] PhotoLinker: Finished CloudID sync and auto-link for \(id)")
+                        }
+                    }
                 }
             }
         }

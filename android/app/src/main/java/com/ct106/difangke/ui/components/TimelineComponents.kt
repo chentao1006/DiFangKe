@@ -41,6 +41,24 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 
+@Composable
+fun Modifier.breathing(isActive: Boolean): Modifier {
+    if (!isActive) return this
+    
+    val infiniteTransition = rememberInfiniteTransition(label = "breathing")
+    val opacity by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.4f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = LinearOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "opacity"
+    )
+    
+    return this.graphicsLayer(alpha = opacity)
+}
+
 private val TIME_FORMAT = SimpleDateFormat("HH:mm", Locale.CHINA)
 private val DURATION_FORMAT = { durationSec: Int -> 
     val min = durationSec / 60
@@ -52,7 +70,7 @@ fun TimelineLine(isFirst: Boolean, isLast: Boolean, isTransport: Boolean = false
     val color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
     val dashColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
     
-    Canvas(modifier = Modifier.width(30.dp).fillMaxHeight()) {
+    Canvas(modifier = Modifier.width(54.dp).fillMaxHeight()) {
         val strokeWidth = 1.5.dp.toPx()
         val centerX = size.width / 2
         
@@ -119,7 +137,7 @@ fun FootprintCardView(
             }
 
             // 时间轴指示器 (在卡片内部)
-            Box(modifier = Modifier.width(60.dp), contentAlignment = Alignment.TopCenter) {
+            Box(modifier = Modifier.width(54.dp), contentAlignment = Alignment.TopCenter) {
                 if (showTimeline) {
                     TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = false)
                 }
@@ -304,7 +322,7 @@ fun TransportCardView(
                 .height(IntrinsicSize.Min)
         ) {
             // 1. 左侧时间轴连线
-            Box(modifier = Modifier.width(60.dp), contentAlignment = Alignment.TopCenter) {
+            Box(modifier = Modifier.width(54.dp), contentAlignment = Alignment.TopCenter) {
                 if (showTimeline) {
                     TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = true)
                 }
@@ -312,7 +330,7 @@ fun TransportCardView(
                 // 交通工具图标 (代替原本的小圆点)
                 Box(
                     modifier = Modifier
-                        .padding(top = 12.dp)
+                        .padding(top = 10.dp)
                         .size(32.dp)
                         .clip(CircleShape)
                         .background(cardColor),
@@ -327,77 +345,51 @@ fun TransportCardView(
                 }
             }
             
-            // 2. 内容区 (iOS A->B 风格布局)
-            Row(
+            // 2. 内容区 (极简单行风格)
+            Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(vertical = 14.dp)
+                    .padding(vertical = 12.dp)
                     .padding(end = 16.dp),
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.Center
             ) {
-                // 起点
-                Column(modifier = Modifier.weight(1f)) {
-                    val startIsImportant = allPlaces.any { it.isUserDefined && it.name == transport.startLocation }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    // 时间范围
                     Text(
-                        text = transport.startLocation,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = if (startIsImportant) Color(0xFFFF9800) else titleColor,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = TIME_FORMAT.format(transport.startTime),
+                        text = "${TIME_FORMAT.format(transport.startTime)}-${TIME_FORMAT.format(transport.endTime)}",
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        color = subtitleColor
-                    )
-                }
-
-                // 中间装饰性图标与距离
-                Column(
-                    modifier = Modifier.width(70.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Icon(
-                        imageVector = if (transport.startLocation == transport.endLocation) Icons.Default.SwapHoriz else Icons.AutoMirrored.Filled.ArrowForward,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = subtitleColor.copy(alpha = 0.4f)
-                    )
-                    
-                    val distanceKm = transport.distance / 1000.0
-                    val distanceText = if (distanceKm < 1.0) {
-                        "${transport.distance.toInt()}米"
-                    } else {
-                        String.format("%.1f公里", distanceKm)
-                    }
-                    Text(
-                        text = distanceText,
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                        fontWeight = FontWeight.Bold,
                         color = subtitleColor.copy(alpha = 0.6f)
                     )
-                }
-
-                // 终点
-                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                    val endIsImportant = allPlaces.any { it.isUserDefined && it.name == transport.endLocation }
+                    
+                    Text("·", color = subtitleColor.copy(alpha = 0.3f))
+                    
+                    // 总时长
                     Text(
-                        text = transport.endLocation,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = if (endIsImportant) Color(0xFFFF9800) else titleColor,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.End
-                    )
-                    Text(
-                        text = TIME_FORMAT.format(transport.endTime),
+                        text = DURATION_FORMAT((transport.endTime.time - transport.startTime.time).toInt() / 1000),
                         style = MaterialTheme.typography.labelSmall,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        color = subtitleColor,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.End
+                        color = subtitleColor.copy(alpha = 0.6f)
+                    )
+                    
+                    Text("·", color = subtitleColor.copy(alpha = 0.3f))
+                    
+                    // 里程
+                    val distanceKm = transport.distance / 1000.0
+                    val distanceText = if (distanceKm < 1.0) "${transport.distance.toInt()}米" else String.format("%.1f公里", distanceKm)
+                    Text(
+                        text = distanceText,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    
+                    Text("·", color = subtitleColor.copy(alpha = 0.3f))
+                    
+                    // 速度
+                    Text(
+                        text = String.format("%.1fkm/h", transport.averageSpeed * 3.6),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = subtitleColor.copy(alpha = 0.6f)
                     )
                 }
             }
@@ -456,7 +448,7 @@ fun RecordingStatusCard(
         Row(modifier = Modifier.fillMaxWidth()) {
             // 1. 左侧时间轴指示器 (在内部)
             Column(
-                modifier = Modifier.width(52.dp),
+                modifier = Modifier.width(54.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Spacer(modifier = Modifier.height(28.dp))
@@ -658,37 +650,56 @@ fun DaySummaryCard(
         shadowElevation = 3.dp,
         tonalElevation = 0.dp
     ) {
-        Column(modifier = Modifier.padding(20.dp)) {
-            Text(
-                text = summary ?: "当日概览", 
-                style = MaterialTheme.typography.titleMedium, 
-                fontWeight = FontWeight.Bold,
-                color = titleColor,
-                maxLines = 2
-            )
-            
-            Spacer(modifier = Modifier.height(12.dp))
-            
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(20.dp),
-                verticalAlignment = Alignment.CenterVertically
+        Row(modifier = Modifier.fillMaxWidth()) {
+            // 左侧指示器
+            Column(
+                modifier = Modifier.width(54.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                DayStatItem(value = "$footprintCount", label = "足迹")
-                DayStatSeparator()
-                DayStatItem(value = formatDistance(mileage), label = "里程数")
+                Spacer(modifier = Modifier.height(18.dp))
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(26.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
             }
-            
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            // 全天小地图预览 (与 iOS 一致)
-            MiniMapView(
-                lat = centerLat,
-                lon = centerLon,
-                pointsJson = pointsJson,
-                markersJson = markersJson,
-                onClick = onNavigateToMap
-            )
+
+            // 右侧内容
+            Column(modifier = Modifier.padding(vertical = 20.dp, horizontal = 0.dp).padding(end = 20.dp)) {
+                val isGenerating = summary == "正在生成概览..." || summary == null
+                Text(
+                    text = summary ?: "当日概览", 
+                    style = MaterialTheme.typography.titleMedium, 
+                    fontWeight = FontWeight.Bold,
+                    color = titleColor,
+                    maxLines = 2,
+                    modifier = Modifier.breathing(isActive = isGenerating)
+                )
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    DayStatItem(value = "$footprintCount", label = "足迹")
+                    DayStatSeparator()
+                    DayStatItem(value = formatDistance(mileage), label = "里程数")
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // 全天小地图预览 (与 iOS 一致)
+                MiniMapView(
+                    lat = centerLat,
+                    lon = centerLon,
+                    pointsJson = pointsJson,
+                    markersJson = markersJson,
+                    onClick = onNavigateToMap
+                )
+            }
         }
     }
 }

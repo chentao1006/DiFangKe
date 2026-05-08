@@ -10,6 +10,12 @@ enum FootprintStatus: String, Codable {
     case manual // 人工修改或添加
 }
 
+// 照片元数据，用于跨设备找回照片（Cloud Identifier 方案）
+struct PhotoMetadata: Codable, Equatable {
+    var localIdentifier: String
+    var cloudIdentifier: String?
+}
+
 @Model
 final class Footprint {
     var footprintID: UUID = UUID()
@@ -33,6 +39,7 @@ final class Footprint {
     var placeID: UUID?
     
     var photoAssetIDsData: Data = Data()
+    var photoMetadataData: Data = Data() // 存储云端同步元数据
     var address: String?
     
     var isHighlight: Bool?
@@ -117,16 +124,31 @@ final class Footprint {
         }
     }
  
-    var photoAssetIDs: [String] {
-        get { 
-            if let cached = _cachedPhotoIDs { return cached }
-            let decoded = (try? JSONDecoder().decode([String].self, from: photoAssetIDsData)) ?? []
-            _cachedPhotoIDs = decoded
+    @Transient private var _cachedPhotoMetadata: [PhotoMetadata]?
+ 
+     var photoAssetIDs: [String] {
+         get { 
+             if let cached = _cachedPhotoIDs { return cached }
+             let decoded = (try? JSONDecoder().decode([String].self, from: photoAssetIDsData)) ?? []
+             _cachedPhotoIDs = decoded
+             return decoded
+         }
+         set { 
+             _cachedPhotoIDs = newValue
+             photoAssetIDsData = (try? JSONEncoder().encode(newValue)) ?? Data() 
+         }
+     }
+  
+    var photoMetadata: [PhotoMetadata] {
+        get {
+            if let cached = _cachedPhotoMetadata { return cached }
+            let decoded = (try? JSONDecoder().decode([PhotoMetadata].self, from: photoMetadataData)) ?? []
+            _cachedPhotoMetadata = decoded
             return decoded
         }
-        set { 
-            _cachedPhotoIDs = newValue
-            photoAssetIDsData = (try? JSONEncoder().encode(newValue)) ?? Data() 
+        set {
+            _cachedPhotoMetadata = newValue
+            photoMetadataData = (try? JSONEncoder().encode(newValue)) ?? Data()
         }
     }
  

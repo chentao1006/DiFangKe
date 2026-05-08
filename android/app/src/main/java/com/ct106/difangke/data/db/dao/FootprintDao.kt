@@ -14,13 +14,13 @@ interface FootprintDao {
     @Query("SELECT * FROM footprints WHERE statusValue != 'ignored' ORDER BY startTime DESC")
     suspend fun getAll(): List<FootprintEntity>
 
-    @Query("SELECT * FROM footprints WHERE date(startTime/1000, 'unixepoch', 'localtime') = date(:dayMs/1000, 'unixepoch', 'localtime') AND statusValue != 'ignored' ORDER BY startTime ASC")
-    suspend fun getForDay(dayMs: Long): List<FootprintEntity>
+    @Query("SELECT * FROM footprints WHERE startTime < :end AND endTime > :start AND statusValue != 'ignored' ORDER BY startTime ASC")
+    suspend fun getForDay(start: Date, end: Date): List<FootprintEntity>
 
-    @Query("SELECT * FROM footprints WHERE startTime >= :start AND startTime < :end AND statusValue != 'ignored' ORDER BY startTime ASC")
+    @Query("SELECT * FROM footprints WHERE startTime < :end AND endTime > :start AND statusValue != 'ignored' ORDER BY startTime ASC")
     suspend fun getBetween(start: Date, end: Date): List<FootprintEntity>
 
-    @Query("SELECT * FROM footprints WHERE startTime >= :start AND startTime < :end AND statusValue != 'ignored' ORDER BY startTime ASC")
+    @Query("SELECT * FROM footprints WHERE startTime < :end AND endTime > :start AND statusValue != 'ignored' ORDER BY startTime ASC")
     fun observeBetween(start: Date, end: Date): Flow<List<FootprintEntity>>
 
     @Query("SELECT * FROM footprints WHERE footprintID = :id LIMIT 1")

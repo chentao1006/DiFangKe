@@ -10,10 +10,10 @@ import java.util.Date
 @Dao
 interface TransportRecordDao {
 
-    @Query("SELECT * FROM transport_records WHERE startTime >= :start AND startTime < :end AND statusRaw = 'active' ORDER BY startTime ASC")
+    @Query("SELECT * FROM transport_records WHERE startTime < :end AND endTime > :start AND statusRaw = 'active' ORDER BY startTime ASC")
     suspend fun getForDay(start: Date, end: Date): List<TransportRecordEntity>
 
-    @Query("SELECT * FROM transport_records WHERE startTime >= :start AND startTime < :end AND statusRaw = 'active' ORDER BY startTime ASC")
+    @Query("SELECT * FROM transport_records WHERE startTime < :end AND endTime > :start AND statusRaw = 'active' ORDER BY startTime ASC")
     fun observeForDay(start: Date, end: Date): Flow<List<TransportRecordEntity>>
 
     @Query("SELECT * FROM transport_records ORDER BY startTime DESC")

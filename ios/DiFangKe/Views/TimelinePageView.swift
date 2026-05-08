@@ -624,7 +624,13 @@ struct TimelinePageView: View {
             }
             
             DispatchQueue.main.async {
-                self.dayPhotoAssets = finalAssets
+                // Ensure unique assets by ID
+                var seen = Set<String>()
+                self.dayPhotoAssets = finalAssets.filter { asset in
+                    if seen.contains(asset.localIdentifier) { return false }
+                    seen.insert(asset.localIdentifier)
+                    return true
+                }
             }
 
         }
@@ -652,9 +658,12 @@ struct TimelinePageView: View {
                     }
                 }
             case .footprint(let footprint):
-                // 1. 自动关联缺失或无效的照片（仅对已持久化的真实模型）
-                if footprint.modelContext != nil {
-                    locationManager.linkPhotos(to: footprint, context: modelContext)
+                // 1. 自动关联缺失或无效的照片（仅在页面激活且确实需要时执行）
+                if isActivePage && footprint.modelContext != nil {
+                    let needsSync = footprint.photoAssetIDs.isEmpty || !PhotoService.shared.validateAssetIDs(footprint.photoAssetIDs)
+                    if needsSync {
+                        locationManager.linkPhotos(to: footprint, context: modelContext)
+                    }
                 }
                 
                 // 2. 解析缺失的地址/标题
@@ -828,8 +837,15 @@ struct TimelinePageView: View {
                 _ = await (syncTask, siftTask)
             }
             
-            // 3. 异步刷新，仅从数据库获取最新记录，绝对不触发重新同步构建
-            await refreshTimelineAsync(force: false)
+            // 3. 异步刷新，【强制】触发重新同步构建（保证下拉能拉取最新轨迹并转为足迹）
+            await refreshTimelineAsync(force: true)
+            
+            // 3.5 手动下拉强制触发照片关联检查（针对当前所有足迹）
+            for item in timelineItems {
+                if case .footprint(let footprint) = item {
+                    locationManager.linkPhotos(to: footprint, context: modelContext)
+                }
+            }
             
             // 4. 手动触发 AI 摘要强制重新生成（仅针对过去日期，今日不重复生成）
             if isAiAssistantEnabled && !isToday {

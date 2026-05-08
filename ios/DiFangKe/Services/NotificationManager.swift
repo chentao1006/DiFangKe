@@ -83,7 +83,7 @@ class NotificationManager {
         let finalHour = UserDefaults.standard.object(forKey: "dailyNotificationHour") != nil ? hour : 21
 
         let mileageStr = mileage < 1000 ? "\(Int(mileage))m" : String(format: "%.1fkm", mileage / 1000.0)
-        let statsInfo = "今日记录 \(pointsCount) 个位置点，留下 \(footprintCount) 个足迹，行程 \(mileageStr)。"
+        let statsInfo = "今日留下 \(footprintCount) 个足迹，行程 \(mileageStr)。"
         let staticPreamble = "忙碌的一天结束了，快来看看你今天留下的足迹吧。"
         
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")

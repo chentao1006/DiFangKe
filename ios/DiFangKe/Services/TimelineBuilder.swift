@@ -221,8 +221,8 @@ class TimelineBuilder {
         if calendar.isDateInToday(date) {
             dayLimit = min(endOfDay, now)
         } else {
-            // For historical days, if there's data, stop at the last point; otherwise don't fill at all.
-            dayLimit = latestDataTime.map { min(endOfDay, $0) } ?? startOfDay
+            // 足迹的时间范围要限制在0点到次日0点：对于历史日期，如果存在任何轨迹或记录，则强制补齐到 24:00
+            dayLimit = latestDataTime != nil ? endOfDay : startOfDay
         }
         
         let sortedFootprints = footprints
@@ -661,19 +661,12 @@ class TimelineBuilder {
             }
         } else if let l1 = loc1 {
             // 核心修复：如果是只有起点（由于是最后一段且后面没点）
-            // 只有当这段时间后面还有别的内容（由上面的 if 闭环处理）或者是今天显示实时状态时，才应该守着起点。
-            // 否则（历史日期且没点），不应强行补足到 0 点。
-            let isToday = Calendar.current.isDateInToday(start)
-            if isToday {
-               addStationaryStay(from: start, to: end, gapPoints: [], items: &items, allPlaces: allPlaces, coordinateOverride: l1.coordinate)
-            }
+            // 补全到当日结束（或实时状态）的停留
+            addStationaryStay(from: start, to: end, gapPoints: [], items: &items, allPlaces: allPlaces, coordinateOverride: l1.coordinate)
         } else if let l2 = loc2 {
             // 核心修复：只有终点（由于是开头的一段且前面没点）
-            // 同样只有在今天显示实时状态时，才补全从 0 点出发的停留
-            let isToday = Calendar.current.isDateInToday(start)
-            if isToday {
-                addStationaryStay(from: start, to: end, gapPoints: [], items: &items, allPlaces: allPlaces, coordinateOverride: l2.coordinate)
-            }
+            // 补全从 0 点出发的停留
+            addStationaryStay(from: start, to: end, gapPoints: [], items: &items, allPlaces: allPlaces, coordinateOverride: l2.coordinate)
         }
     }
 
@@ -2123,12 +2116,13 @@ extension PersistentTimelineBuilder {
         let startOfDay = Calendar.current.startOfDay(for: date)
         let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
         
+        // 足迹的时间范围要限制在0点到次日0点：包含所有与当天有交集的记录
         let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue != "ignored"
         })
         let fps = (try? context.fetch(fpDescriptor)) ?? []
 
-        // 兜底自愈：历史异常数据可能出现跨天结束时间（例如 46h），读取时裁回当天窗口。
+        // 兜底自愈：裁回当天窗口。
         var hasFootprintCorrections = false
         for fp in fps {
             let boundedStart = max(fp.startTime, startOfDay)
@@ -2152,7 +2146,7 @@ extension PersistentTimelineBuilder {
         }
         
         let tpDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
         })
         let tps = (try? context.fetch(tpDescriptor)) ?? []
         
@@ -2161,6 +2155,13 @@ extension PersistentTimelineBuilder {
             items.append(.footprint(fp))
         }
         for tp in tps {
+            // 同样对交通记录进行跨天裁剪
+            let boundedStart = max(tp.startTime, startOfDay)
+            let boundedEnd = min(max(tp.endTime, boundedStart), endOfDay)
+            if tp.startTime != boundedStart || tp.endTime != boundedEnd {
+                tp.startTime = boundedStart
+                tp.endTime = boundedEnd
+            }
             var pts: [CLLocationCoordinate2D] = []
             if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: tp.pointsData) {
                 pts = decoded.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }

@@ -57,9 +57,88 @@ struct DiFangKeApp: App {
     @AppStorage("isFirstLaunch") private var isFirstLaunch = true
     @State private var showSplash = true
     
-    @State private var modelContainer: ModelContainer
+    @State private var modelContainer: ModelContainer?
     
     init() {
+        // We move the heavy ModelContainer initialization to a background task
+        // but we need to ensure basic App setup is fast.
+        print("[DiFangKeApp] Initializing...")
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            Group {
+                if let container = modelContainer {
+                    ZStack {
+                        if showSplash {
+                            SplashScreenView()
+                                .transition(.opacity)
+                        } else if isFirstLaunch {
+                            OnboardingView(isFirstLaunch: $isFirstLaunch, locationManager: locationManager)
+                                .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
+                        } else {
+                            ContentView()
+                                .environment(locationManager)
+                                .onAppear {
+                                    CloudSettingsManager.shared.startSyncing()
+                                    let context = container.mainContext
+                                    locationManager.modelContext = context
+                                    PhotoService.shared.modelContext = context
+                                    OpenAIService.shared.modelContainer = container
+                                    
+                                    let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
+                                    if isEnabled {
+                                        locationManager.startTracking()
+                                    }
+                                    
+                                    setupDefaultData(context: context)
+                                    WidgetDataSyncManager.shared.updateContainer(container)
+                                }
+                                .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RefreshModelContainer"))) { _ in
+                                    Task {
+                                        await refreshContainer()
+                                    }
+                                }
+                                .transition(.opacity)
+                        }
+                    }
+                    .modelContainer(container)
+                } else {
+                    // While the model container is loading, show the splash screen
+                    SplashScreenView()
+                }
+            }
+            .animation(.easeInOut(duration: 0.8), value: showSplash)
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active {
+                    let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
+                    if isEnabled {
+                        locationManager.startTracking()
+                    }
+                } else if newPhase == .background {
+                    if modelContainer != nil {
+                        Task {
+                            await WidgetDataSyncManager.shared.syncAll()
+                        }
+                    }
+                }
+            }
+            .task {
+                if modelContainer == nil {
+                    await initializeModelContainer()
+                }
+                
+                // 给初始化一点缓冲时间，让首页数据在后台能加载出一部分，避免首屏瞬间白屏或卡顿
+                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s 缓冲
+                print("[DiFangKeApp] Dismissing splash screen...")
+                withAnimation {
+                    showSplash = false
+                }
+            }
+        }
+    }
+    
+    private func initializeModelContainer() async {
         let schema = Schema([
             Footprint.self,
             Place.self,
@@ -69,13 +148,10 @@ struct DiFangKeApp: App {
             TransportRecord.self
         ])
         
-        // 检测是否需要暂停同步（卸载重装且尚未决定时）
         let isFirstLaunch = !UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
         let kvs = NSUbiquitousKeyValueStore.default
         kvs.synchronize()
         let hasHistoricalData = kvs.bool(forKey: "hasSeededDefaultData")
-        
-        // 如果是重装且还没做过选择，先不要开启 CloudKit
         let shouldPauseSync = isFirstLaunch && hasHistoricalData && !UserDefaults.standard.bool(forKey: "isSyncChoiceMade")
         
         let modelConfiguration = ModelConfiguration(
@@ -87,80 +163,28 @@ struct DiFangKeApp: App {
         )
         
         do {
-            self._modelContainer = State(initialValue: try ModelContainer(for: schema, configurations: [modelConfiguration]))
-            if isFirstLaunch {
-                UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+            // 使用 Task.detached 确保在后台线程创建容器，绝对不阻塞主线程
+            let container = try await Task.detached(priority: .userInitiated) {
+                try ModelContainer(for: schema, configurations: [modelConfiguration])
+            }.value
+            
+            await MainActor.run {
+                self.modelContainer = container
+                if isFirstLaunch {
+                    UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+                }
+                print("[DiFangKeApp] ModelContainer initialized successfully.")
             }
         } catch {
             print("SwiftData CRITICAL ERROR: \(error)")
-            self._modelContainer = State(initialValue: try! ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)]))
-        }
-    }
-
-    var body: some Scene {
-        WindowGroup {
-            ZStack {
-                if showSplash {
-                    SplashScreenView()
-                        .transition(.opacity)
-                } else if isFirstLaunch {
-                    OnboardingView(isFirstLaunch: $isFirstLaunch, locationManager: locationManager)
-                        .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
-                } else {
-                    ContentView()
-                        .environment(locationManager)
-                        .onAppear {
-                            CloudSettingsManager.shared.startSyncing()
-                            let context = modelContainer.mainContext
-                            locationManager.modelContext = context
-                            PhotoService.shared.modelContext = context
-                            OpenAIService.shared.modelContainer = modelContainer
-                            
-                            // 核心修复：使用与 startTracking() 内部一致的判断逻辑
-                            // bool(forKey:) 在 key 不存在时返回 false，会导致新安装后追踪无法启动
-                            let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
-                            if isEnabled {
-                                locationManager.startTracking()
-                            }
-                            
-                            setupDefaultData(context: context)
-                            
-                            // 更新同步管理器的容器
-                            WidgetDataSyncManager.shared.updateContainer(modelContainer)
-                        }
-                        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RefreshModelContainer"))) { _ in
-                            refreshContainer()
-                        }
-                        .transition(.opacity)
-                }
-            }
-            .animation(.easeInOut(duration: 0.8), value: showSplash)
-            .onChange(of: scenePhase) { _, newPhase in
-                if newPhase == .active {
-                    // App 回到前台：重新激活定位，防止系统暂停后遇到出门的情却没有记录
-                    let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
-                    if isEnabled {
-                        locationManager.startTracking()
-                    }
-                } else if newPhase == .background {
-                    Task {
-                        await WidgetDataSyncManager.shared.syncAll()
-                    }
-                }
-            }
-            .task {
-                // 给初始化一点缓冲时间，让首页数据在后台能加载出一部分，避免首屏瞬间白屏或卡顿
-                try? await Task.sleep(nanoseconds: 1_200_000_000) // 1.2s 缓冲
-                print("[DiFangKeApp] Dismissing splash screen...")
-                withAnimation {
-                    showSplash = false
-                }
+            let fallbackContainer = try! ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
+            await MainActor.run {
+                self.modelContainer = fallbackContainer
             }
         }
-        .modelContainer(modelContainer)
     }
     
-    private func refreshContainer() {
+    private func refreshContainer() async {
         let schema = Schema([
             Footprint.self, Place.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self, TransportRecord.self
         ])
@@ -172,18 +196,20 @@ struct DiFangKeApp: App {
             cloudKitDatabase: .automatic
         )
         if let newContainer = try? ModelContainer(for: schema, configurations: [modelConfiguration]) {
-            self.modelContainer = newContainer
-            
-            // 重要：重置所有服务所持有的 Context
-            let context = newContainer.mainContext
-            locationManager.modelContext = context
-            PhotoService.shared.modelContext = context
-            OpenAIService.shared.modelContainer = newContainer
-            
-            // 同步更新 Widget 管理器中的容器
-            WidgetDataSyncManager.shared.updateContainer(newContainer)
-            
-            print("[DiFangKeApp] ModelContainer Refreshed with CloudKit enabled.")
+            await MainActor.run {
+                self.modelContainer = newContainer
+                
+                // 重要：重置所有服务所持有的 Context
+                let context = newContainer.mainContext
+                locationManager.modelContext = context
+                PhotoService.shared.modelContext = context
+                OpenAIService.shared.modelContainer = newContainer
+                
+                // 同步更新 Widget 管理器中的容器
+                WidgetDataSyncManager.shared.updateContainer(newContainer)
+                
+                print("[DiFangKeApp] ModelContainer Refreshed with CloudKit enabled.")
+            }
         }
     }
     

@@ -217,6 +217,8 @@ struct FullFrameTrajectoryMapView: View {
                 points: points,
                 timelineItems: timelineItems,
                 photoAssets: photoAssets,
+                showsStandalonePhotos: false,
+                prefersActivityIcons: false,
                 onTimelineItemTap: { item in
                     switch item {
                     case .footprint(let footprint):
@@ -588,14 +590,7 @@ struct FootprintCardView: View {
                             Color.clear // Expand to fill parent
                             
                             ZStack(alignment: .topTrailing) {
-                                AssetThumbnailView(assetID: firstID, onAssetMissing: {
-                                    withAnimation {
-                                        var ids = footprint.photoAssetIDs
-                                        ids.removeAll { $0 == firstID }
-                                        footprint.photoAssetIDs = ids
-                                        try? modelContext.save()
-                                    }
-                                })
+                                AssetThumbnailView(assetID: firstID, showsTime: false)
                                     .id(firstID)
                                     .frame(width: 60, height: 60)
                                     .clipShape(RoundedRectangle(cornerRadius: 8))

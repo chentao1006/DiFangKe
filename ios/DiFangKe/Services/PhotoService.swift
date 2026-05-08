@@ -71,7 +71,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         guard status == .authorized || status == .limited else { return false }
         
         let result = PHAsset.fetchAssets(withLocalIdentifiers: assetIDs, options: nil)
-        return result.count > 0
+        return result.count == assetIDs.count
     }
     
     func syncDeletedPhotos(in container: ModelContainer) async {
@@ -85,27 +85,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             let footprintsWithPhotos = allFootprints.filter { !$0.photoAssetIDs.isEmpty }
             if footprintsWithPhotos.isEmpty { return }
             
-            let allAssetIDs = Array(Set(footprintsWithPhotos.flatMap { $0.photoAssetIDs }))
-            let result = PHAsset.fetchAssets(withLocalIdentifiers: allAssetIDs, options: nil)
-            var existingIDs = Set<String>()
-            result.enumerateObjects { asset, _, _ in
-                existingIDs.insert(asset.localIdentifier)
-            }
-            let deletedIDs = Set(allAssetIDs).subtracting(existingIDs)
-
-            if !deletedIDs.isEmpty {
-                var changed = false
-                for footprint in footprintsWithPhotos {
-                    let originalCount = footprint.photoAssetIDs.count
-                    var ids = footprint.photoAssetIDs
-                    ids.removeAll { deletedIDs.contains($0) }
-                    if originalCount != ids.count {
-                        footprint.photoAssetIDs = ids
-                        changed = true
-                    }
-                }
-                if changed { try? context.save() }
-            }
+            // 核心修复提示：已禁用自动清理逻辑。
+            // 因为在多设备同步环境下，本地无法获取到的 ID 不代表已被删除。
         } catch {
             print("Failed to sync deleted photos: \(error)")
         }
@@ -116,8 +97,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         guard status == .authorized || status == .limited else { return 0 }
         
         let options = PHFetchOptions()
-        let bufferStart = startTime.addingTimeInterval(-60)
-        let bufferEnd = endTime.addingTimeInterval(60)
+        let bufferStart = startTime.addingTimeInterval(-300) // 增加到 5 分钟缓冲
+        let bufferEnd = endTime.addingTimeInterval(300)
         let predicate = NSPredicate(format: "creationDate > %@ AND creationDate < %@", bufferStart as NSDate, bufferEnd as NSDate)
         options.predicate = predicate
         return PHAsset.fetchAssets(with: .image, options: options).count
@@ -150,6 +131,44 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             }
             DispatchQueue.main.async { completion(assets) }
         }
+    }
+
+    /// 获取本地 ID 对应的云端 ID 映射（异步后台执行）
+    func getCloudIdentifiers(for localIDs: [String]) async -> [String: String] {
+        guard !localIDs.isEmpty else { return [:] }
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return [:] }
+        
+        return await Task.detached(priority: .userInitiated) {
+            let mappings = PHPhotoLibrary.shared().cloudIdentifierMappings(forLocalIdentifiers: localIDs)
+            var result: [String: String] = [:]
+            for (localID, mapping) in mappings {
+                if case .success(let cloudID) = mapping {
+                    result[localID] = cloudID.stringValue
+                }
+            }
+            return result
+        }.value
+    }
+    
+    /// 获取云端 ID 对应的本地 ID 映射（异步后台执行）
+    func getLocalIdentifiers(for cloudIDs: [String]) async -> [String: String] {
+        guard !cloudIDs.isEmpty else { return [:] }
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return [:] }
+        
+        return await Task.detached(priority: .userInitiated) {
+            let cloudIdentifiers = cloudIDs.map { PHCloudIdentifier(stringValue: $0) }
+            let mappings = PHPhotoLibrary.shared().localIdentifierMappings(for: cloudIdentifiers)
+            
+            var result: [String: String] = [:]
+            for (cloudID, mapping) in mappings {
+                if case .success(let localID) = mapping {
+                    result[cloudID.stringValue] = localID
+                }
+            }
+            return result
+        }.value
     }
     
     func loadImage(for assetID: String, targetSize: CGSize, contentMode: PHImageContentMode = .aspectFill, progressHandler: ((Double) -> Void)? = nil, completion: @escaping (UIImage?, Bool, PHAuthorizationStatus, Bool) -> Void) {

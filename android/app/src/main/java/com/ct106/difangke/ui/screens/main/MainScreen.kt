@@ -499,27 +499,8 @@ fun TimelineContent(
     centerLat: Double? = null,
     centerLon: Double? = null
 ) {
-    // 过滤掉与当前正在进行的实时停留重合的足迹 (iOS Parity)
-    val filteredItems = remember(items, trackingState, isToday) {
-        if (!isToday || trackingState !is LocationTrackingService.TrackingState.OngoingStay) items
-        else {
-            val ongoing = trackingState
-            items.filter { item ->
-                when (item) {
-                    is TimelineItem.FootprintItem -> {
-                        // 如果地点相近且时间重合，隐藏
-                        val dist = haversine(item.latitude, item.longitude, ongoing.lat, ongoing.lon)
-                        val isOverlap = item.footprint.endTime.time > ongoing.since.time - (AppConfig.TIMELINE_OVERLAP_TIME_TOLERANCE * 1000).toLong()
-                        !(dist < AppConfig.TIMELINE_OVERLAP_DISTANCE_TOLERANCE && isOverlap)
-                    }
-                    is TimelineItem.TransportItem -> {
-                        // 移除在当前停留开始之后结束的交通段
-                        item.transport.endTime.time < ongoing.since.time + (AppConfig.TIMELINE_OVERLAP_TIME_TOLERANCE / 2 * 1000).toLong()
-                    }
-                }
-            }
-        }
-    }
+    // 不再过滤重合项，保持与 iOS 同步 (iOS 已取消此过滤以简化逻辑)
+    val filteredItems = items
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(

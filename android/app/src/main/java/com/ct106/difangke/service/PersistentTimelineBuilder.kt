@@ -82,6 +82,28 @@ class PersistentTimelineBuilder(private val context: Context) {
         val queue = mutableListOf<RawLocationStore.RawPoint>()
         val footprints = mutableListOf<FootprintEntity>()
         var lastFp: FootprintEntity? = null
+        
+        // --- 足迹的时间范围要限制在0点到次日0点：边界填补 (0:00 到首个点位) ---
+        if (points.isNotEmpty()) {
+            val firstPoint = points[0]
+            val gapToStart = (firstPoint.timestamp.time - startOfDay.time) / 1000L
+            if (gapToStart >= AppConfig.STAY_DURATION_THRESHOLD) {
+                val entity = FootprintEntity(
+                    footprintID = UUID.randomUUID().toString(),
+                    date = startOfDay,
+                    startTime = startOfDay,
+                    endTime = firstPoint.timestamp,
+                    latitudeJson = gson.toJson(listOf(firstPoint.latitude)),
+                    longitudeJson = gson.toJson(listOf(firstPoint.longitude)),
+                    locationHash = FootprintEntity.generateLocationHash(firstPoint.latitude, firstPoint.longitude),
+                    title = "",
+                    statusValue = "candidate",
+                    address = geocoder.reverseGeocode(firstPoint.latitude, firstPoint.longitude)
+                )
+                db.footprintDao().insert(entity)
+                lastFp = entity
+            }
+        }
 
         for (point in points) {
             val candidate = processor.processNewLocation(point, queue, isHistorical = true)
@@ -131,6 +153,31 @@ class PersistentTimelineBuilder(private val context: Context) {
             val finalEntity = createFootprintEntity(lastCandidate)
             db.footprintDao().insert(finalEntity)
             lastFp?.let { generateTransportSegment(it, finalEntity, points, preferredAuto, preferredCycling) }
+            lastFp = finalEntity
+        }
+
+        // --- 足迹的时间范围要限制在0点到次日0点：边界填补 (最后记录到 24:00) ---
+        lastFp?.let { last ->
+            val isToday = getStartOfDay(Date()) == startOfDay
+            if (!isToday) {
+                val gapToEnd = (endOfDay.time - last.endTime.time) / 1000L
+                if (gapToEnd >= AppConfig.STAY_DURATION_THRESHOLD) {
+                    val entity = FootprintEntity(
+                        footprintID = UUID.randomUUID().toString(),
+                        date = startOfDay,
+                        startTime = last.endTime,
+                        endTime = endOfDay,
+                        latitudeJson = last.latitudeJson,
+                        longitudeJson = last.longitudeJson,
+                        locationHash = last.locationHash,
+                        title = "",
+                        statusValue = "candidate",
+                        address = last.address,
+                        placeID = last.placeID
+                    )
+                    db.footprintDao().insert(entity)
+                }
+            }
         }
 
         // 5. 合并连续交通段 (iOS Parity: mergeConsecutiveTransports)

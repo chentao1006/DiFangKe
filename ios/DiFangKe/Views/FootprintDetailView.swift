@@ -195,12 +195,21 @@ struct FootprintModalView: View {
                            }
                         }
                         if let id = localID {
+                            // Eagerly fetch cloud identifier to ensure sync metadata is ready
+                            let mappings = await PhotoService.shared.getCloudIdentifiers(for: [id])
+                            let cloudID = mappings[id]
+                            
                             await MainActor.run {
                                 ensureFootprintManaged()
                                 withAnimation {
                                     var ids = footprint.photoAssetIDs
                                     ids.append(id)
                                     footprint.photoAssetIDs = ids
+                                    
+                                    if let cloudID = cloudID {
+                                        footprint.photoMetadata.append(PhotoMetadata(localIdentifier: id, cloudIdentifier: cloudID))
+                                    }
+                                    
                                     hasChanged = true
                                 }
                                 try? modelContext.save()
@@ -294,14 +303,28 @@ extension FootprintModalView {
         let newIdentifiers = resolvedIdentifiers.filter { !existingIdentifiers.contains($0) }
         guard !newIdentifiers.isEmpty else { return }
 
-        withAnimation {
-            footprint.photoAssetIDs.append(contentsOf: newIdentifiers)
-            footprint.status = .manual
-            hasChanged = true
-        }
+        Task {
+            // Eagerly fetch cloud identifiers for sync
+            let mappings = await PhotoService.shared.getCloudIdentifiers(for: newIdentifiers)
+            
+            await MainActor.run {
+                withAnimation {
+                    footprint.photoAssetIDs.append(contentsOf: newIdentifiers)
+                    
+                    for id in newIdentifiers {
+                        if let cloudID = mappings[id] {
+                            footprint.photoMetadata.append(PhotoMetadata(localIdentifier: id, cloudIdentifier: cloudID))
+                        }
+                    }
+                    
+                    footprint.status = .manual
+                    hasChanged = true
+                }
 
-        try? modelContext.save()
-        refreshMapPhotos()
+                try? modelContext.save()
+                refreshMapPhotos()
+            }
+        }
     }
 
     private func refreshMapPhotos() {
@@ -322,7 +345,7 @@ extension FootprintModalView {
             fetchedAssets.first(where: { $0.localIdentifier == assetID })
         }
 
-        mapPhotos = Array(orderedAssets.suffix(10))
+        mapPhotos = orderedAssets
     }
 
     private func deletePhoto() {
@@ -689,7 +712,7 @@ extension FootprintModalView {
             Button {
                 showFullscreenMap = true
             } label: {
-                FootprintDetailMapView(footprint: footprint, photoAssets: mapPhotos, isInteractive: false)
+                FootprintDetailMapView(footprint: footprint, photoAssets: mapPhotos, isInteractive: false, showsStandalonePhotos: true)
                     .frame(height: 220)
                     .cornerRadius(16)
                     .shadow(color: .black.opacity(0.06), radius: 10, x: 0, y: 4)
@@ -769,8 +792,11 @@ extension FootprintModalView {
                                 // Trigger refresh immediately if granted
                                 PhotoService.shared.fetchAssets(startTime: footprint.startTime, endTime: footprint.endTime, near: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)) { assets in
                                     if !assets.isEmpty {
+                                        let foundIDs = assets.map { $0.localIdentifier }
                                         withAnimation {
-                                            footprint.photoAssetIDs = assets.map { $0.localIdentifier }
+                                            let combined = NSMutableOrderedSet(array: footprint.photoAssetIDs)
+                                            combined.addObjects(from: foundIDs)
+                                            footprint.photoAssetIDs = combined.array as? [String] ?? foundIDs
                                             hasChanged = true
                                             if !isDraft { try? modelContext.save() }
                                         }
@@ -823,15 +849,7 @@ extension FootprintModalView {
                 let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
                 LazyVGrid(columns: columns, spacing: 8) {
                     ForEach(footprint.photoAssetIDs, id: \.self) { assetID in
-                        AssetThumbnailView(assetID: assetID, onAssetMissing: {
-                            withAnimation {
-                                var ids = footprint.photoAssetIDs
-                                ids.removeAll { $0 == assetID }
-                                footprint.photoAssetIDs = ids
-                                hasChanged = true
-                                try? modelContext.save()
-                            }
-                        })
+                        AssetThumbnailView(assetID: assetID, showsTime: true)
                             .aspectRatio(1, contentMode: .fit)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                             .onTapGesture { selectedPhotoID = assetID }
@@ -867,7 +885,7 @@ struct FullFrameMapView: View {
     
     var body: some View {
         NavigationStack {
-            FootprintDetailMapView(footprint: footprint, photoAssets: photoAssets, isInteractive: true)
+            FootprintDetailMapView(footprint: footprint, photoAssets: photoAssets, isInteractive: true, showsStandalonePhotos: true)
                 .navigationTitle("足迹地图")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -1136,11 +1154,13 @@ private struct MiniMapView: View {
 
 struct AssetThumbnailView: View {
     let assetID: String
+    var showsTime: Bool = true
     var onAssetMissing: (() -> Void)? = nil
     @State private var image: UIImage?
     @State private var authStatus: PHAuthorizationStatus = .notDetermined
     @State private var isLoading = true
     @State private var isMissing = false
+    @State private var creationDate: Date?
     
     var body: some View {
         GeometryReader { geo in
@@ -1155,26 +1175,13 @@ struct AssetThumbnailView: View {
                 } else if !isLoading {
                     Group {
                         if authStatus == .denied || authStatus == .restricted {
-                            VStack(spacing: 4) {
-                                Image(systemName: "lock.fill").font(.caption2)
-                                Text("无权限").font(.system(size: 8))
-                            }
+                            Image(systemName: "lock.fill").font(.caption2)
                         } else if authStatus == .notDetermined {
-                            VStack(spacing: 4) {
-                                Image(systemName: "photo.badge.plus").font(.caption2)
-                                Text("待授权").font(.system(size: 8))
-                            }
+                            Image(systemName: "photo.badge.plus").font(.caption2)
                         } else if isMissing {
-                            VStack(spacing: 4) {
-                                Image(systemName: "photo.badge.exclamationmark").font(.caption2)
-                                Text("已丢失").font(.system(size: 8))
-                            }
+                            Image(systemName: "photo").font(.caption2)
                         } else {
-                            // Probably limited access and not selected
-                            VStack(spacing: 4) {
-                                Image(systemName: "hand.raised.fill").font(.caption2)
-                                Text("未选择").font(.system(size: 8))
-                            }
+                            Image(systemName: "hand.raised.fill").font(.caption2)
                         }
                     }
                     .foregroundColor(.secondary.opacity(0.5))
@@ -1188,6 +1195,18 @@ struct AssetThumbnailView: View {
                 }
             }
             .clipped()
+            .overlay(alignment: .bottomLeading) {
+                if showsTime, let date = creationDate {
+                    Text(date, format: .dateTime.hour(.twoDigits(amPM: .abbreviated)).minute(.twoDigits))
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(Color.black.opacity(0.4))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .padding(4)
+                }
+            }
         }
         .onAppear {
             loadImage()
@@ -1217,6 +1236,11 @@ struct AssetThumbnailView: View {
         PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 400, height: 400)) { img, exists, status, isDegraded in
             self.authStatus = status
             
+            if exists {
+                let result = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+                self.creationDate = result.firstObject?.creationDate
+            }
+            
             if !exists {
                 self.isLoading = false
                 self.isMissing = true
@@ -1244,9 +1268,10 @@ struct PhotoFullscreenView: View {
     let assetIDs: [String]
     @State var currentIndex: Int
     @Environment(\.dismiss) private var dismiss
+    @State private var currentCreationDate: Date?
     
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .top) {
             Color.black.ignoresSafeArea()
             
             TabView(selection: $currentIndex) {
@@ -1258,18 +1283,49 @@ struct PhotoFullscreenView: View {
             .tabViewStyle(.page(indexDisplayMode: .always))
             .ignoresSafeArea()
             
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(.white)
-                    .padding(10)
-                    .background(.ultraThinMaterial)
-                    .clipShape(Circle())
+            // Custom Title Bar
+            HStack {
+                Spacer()
+                
+                if let date = currentCreationDate {
+                    Text(date, format: .dateTime.year().month().day().hour().minute().second())
+                        .font(.system(size: 14, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Capsule())
+                }
+                
+                Spacer()
+                
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(10)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Circle())
+                }
             }
-            .padding(16)
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
         }
+        .onAppear {
+            fetchCurrentDate()
+        }
+        .onChange(of: currentIndex) { _, _ in
+            fetchCurrentDate()
+        }
+    }
+    
+    private func fetchCurrentDate() {
+        guard currentIndex < assetIDs.count else { return }
+        let assetID = assetIDs[currentIndex]
+        let result = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+        currentCreationDate = result.firstObject?.creationDate
     }
 }
 
@@ -1280,9 +1336,10 @@ struct FullscreenImageItem: View {
     @State private var isDownloading: Bool = false
     @State private var isDegraded: Bool = true
     @State private var loadFailed: Bool = false
+    @State private var creationDate: Date?
     
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             if let image = image {
                 ZoomableImageView(image: image)
                     .overlay {
@@ -1341,6 +1398,10 @@ struct FullscreenImageItem: View {
                 }
             }
         }) { img, exists, _, degraded in
+            if exists {
+                let result = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+                self.creationDate = result.firstObject?.creationDate
+            }
 
             if let img = img {
                 withAnimation(.easeInOut) {
@@ -1438,6 +1499,8 @@ struct FootprintDetailMapView: View {
     let footprint: Footprint
     var photoAssets: [PHAsset] = []
     var isInteractive: Bool = false
+    var showsStandalonePhotos: Bool = true
+    var prefersActivityIcons: Bool = true
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var selectedPhotoAsset: IdentifiableString?
 
@@ -1449,13 +1512,22 @@ struct FootprintDetailMapView: View {
             points: footprint.coordinates,
             timelineItems: [.footprint(footprint)],
             photoAssets: photoAssets,
+            showsStandalonePhotos: showsStandalonePhotos,
+            prefersActivityIcons: prefersActivityIcons,
             onPhotoTap: { asset in
                 self.selectedPhotoAsset = IdentifiableString(value: asset.localIdentifier)
             }
         )
         .onAppear {
-            if let region = footprint.region {
+            if let region = footprint.calculateRegion(with: photoAssets) {
                 cameraPosition = .region(region)
+            }
+        }
+        .onChange(of: photoAssets) { _, newAssets in
+             if let region = footprint.calculateRegion(with: newAssets) {
+                withAnimation {
+                    cameraPosition = .region(region)
+                }
             }
         }
         .sheet(item: $selectedPhotoAsset) { item in
@@ -1467,11 +1539,20 @@ struct FootprintDetailMapView: View {
 }
 
 extension Footprint {
-    var region: MKCoordinateRegion? {
-        guard !coordinates.isEmpty else { return nil }
+    func calculateRegion(with photoAssets: [PHAsset] = []) -> MKCoordinateRegion? {
+        var allCoords = coordinates
         
-        let lats = coordinates.map { $0.latitude }
-        let lons = coordinates.map { $0.longitude }
+        // Include photo locations (using gcj02 for mainland China)
+        for asset in photoAssets {
+            if let loc = asset.location?.gcj02.coordinate {
+                allCoords.append(loc)
+            }
+        }
+        
+        guard !allCoords.isEmpty else { return nil }
+        
+        let lats = allCoords.map { $0.latitude }
+        let lons = allCoords.map { $0.longitude }
         
         let maxLat = lats.max()!
         let minLat = lats.min()!
@@ -1479,9 +1560,16 @@ extension Footprint {
         let minLon = lons.min()!
         
         let center = CLLocationCoordinate2D(latitude: (maxLat + minLat) / 2, longitude: (maxLon + minLon) / 2)
-        let span = MKCoordinateSpan(latitudeDelta: (maxLat - minLat) * 1.5 + 0.005, longitudeDelta: (maxLon - minLon) * 1.5 + 0.005)
         
-        return MKCoordinateRegion(center: center, span: span)
+        // 使用更紧凑的边距，尽可能放大
+        let latDelta = (maxLat - minLat) * 1.15
+        let lonDelta = (maxLon - minLon) * 1.15
+        
+        // 减小最小跨度，允许更近的缩放
+        let finalLatDelta = max(latDelta, 0.0015)
+        let finalLonDelta = max(lonDelta, 0.0015)
+        
+        return MKCoordinateRegion(center: center, span: MKCoordinateSpan(latitudeDelta: finalLatDelta, longitudeDelta: finalLonDelta))
     }
 }
 
