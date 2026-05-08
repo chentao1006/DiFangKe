@@ -9,36 +9,48 @@ DEPLOY_DIR="$ROOT_DIR/download"
 APK_DEST="$DEPLOY_DIR/difangke.apk"
 JSON_DEST="$DEPLOY_DIR/update_android.json"
 
+# --- 参数解析 ---
+ONLY_RELEASE=false
+for arg in "$@"; do
+  if [ "$arg" == "-r" ]; then
+    ONLY_RELEASE=true
+  fi
+done
+
 # --- 自动版本更新 ---
 VERSION_PROPS="$ROOT_DIR/android/version.properties"
 CURRENT_VERSION_CODE=$(grep "^VERSION_CODE=" "$VERSION_PROPS" | cut -d'=' -f2 | tr -d '[:space:]')
 CURRENT_VERSION_NAME=$(grep "^VERSION_NAME=" "$VERSION_PROPS" | cut -d'=' -f2 | tr -d '[:space:]')
 
-echo "----------------------------------------"
-echo "📦 当前项目版本: $CURRENT_VERSION_NAME (Build $CURRENT_VERSION_CODE)"
-read -p "请输入新的版本号 [回车保持 $CURRENT_VERSION_NAME]: " NEW_VERSION_NAME
-[ -z "$NEW_VERSION_NAME" ] && NEW_VERSION_NAME=$CURRENT_VERSION_NAME
+if [ "$ONLY_RELEASE" = false ]; then
+    echo "----------------------------------------"
+    echo "📦 当前项目版本: $CURRENT_VERSION_NAME (Build $CURRENT_VERSION_CODE)"
+    read -p "请输入新的版本号 [回车保持 $CURRENT_VERSION_NAME]: " NEW_VERSION_NAME
+    [ -z "$NEW_VERSION_NAME" ] && NEW_VERSION_NAME=$CURRENT_VERSION_NAME
 
-# 自动递增 Version Code
-NEW_VERSION_CODE=$((CURRENT_VERSION_CODE + 1))
+    # 自动递增 Version Code
+    NEW_VERSION_CODE=$((CURRENT_VERSION_CODE + 1))
 
-echo "🔄 正在更新版本号到 $NEW_VERSION_NAME ($NEW_VERSION_CODE)..."
-sed -i '' "s/^VERSION_CODE=.*/VERSION_CODE=$NEW_VERSION_CODE/" "$VERSION_PROPS"
-sed -i '' "s/^VERSION_NAME=.*/VERSION_NAME=$NEW_VERSION_NAME/" "$VERSION_PROPS"
-echo "----------------------------------------"
-echo ""
+    echo "🔄 正在更新版本号到 $NEW_VERSION_NAME ($NEW_VERSION_CODE)..."
+    sed -i '' "s/^VERSION_CODE=.*/VERSION_CODE=$NEW_VERSION_CODE/" "$VERSION_PROPS"
+    sed -i '' "s/^VERSION_NAME=.*/VERSION_NAME=$NEW_VERSION_NAME/" "$VERSION_PROPS"
+    echo "----------------------------------------"
+    echo ""
 
-echo "🏗️  开始打包 APK (assembleRelease)..."
+    echo "🏗️  开始打包 APK (assembleRelease)..."
 
-# 1. 运行打包命令 (确保 gradlew 有执行权限)
-cd "$ROOT_DIR/android"
-chmod +x gradlew
-./gradlew clean assembleRelease --no-configuration-cache
-if [ $? -ne 0 ]; then
-    echo "❌ 错误: 打包失败，请检查上面的编译报错。"
-    exit 1
+    # 1. 运行打包命令 (确保 gradlew 有执行权限)
+    cd "$ROOT_DIR/android"
+    chmod +x gradlew
+    ./gradlew clean assembleRelease --no-configuration-cache
+    if [ $? -ne 0 ]; then
+        echo "❌ 错误: 打包失败，请检查上面的编译报错。"
+        exit 1
+    fi
+    cd "$ROOT_DIR"
+else
+    echo "⏩ 跳过打包步骤，直接进行发布流程..."
 fi
-cd "$ROOT_DIR"
 
 echo "🚀 开始自动化发布流程..."
 
