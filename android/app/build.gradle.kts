@@ -44,7 +44,6 @@ android {
 
         ndk {
             abiFilters.add("arm64-v8a")
-            abiFilters.add("armeabi-v7a")
         }
 
         // 地图 Key 配置：直接从 AppConfig.kt 源码中读取，确保单一事实来源
