@@ -72,7 +72,6 @@ struct LocationSearchSheet: View {
     @State private var searchResults: [LocationSuggestion] = []
     @State private var isSearching = false
     @FocusState private var isFocused: Bool
-    @State private var searchTask: Task<Void, Never>? = nil
 
     var body: some View {
         NavigationStack {
@@ -83,17 +82,19 @@ struct LocationSearchSheet: View {
                         .textFieldStyle(.plain)
                         .autocorrectionDisabled()
                         .focused($isFocused)
-                        .onChange(of: searchText) { oldValue, newValue in
-                            searchTask?.cancel()
-                            searchTask = Task {
-                                try? await Task.sleep(nanoseconds: 500_000_000)
-                                if !Task.isCancelled {
-                                    performFullSearch(query: newValue)
-                                }
+                        .task(id: searchText) {
+                            let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !query.isEmpty else {
+                                searchResults = []
+                                isSearching = false
+                                return
                             }
+
+                            try? await Task.sleep(nanoseconds: 500_000_000)
+                            if Task.isCancelled { return }
+                            performFullSearch(query: query)
                         }
                         .onSubmit {
-                            searchTask?.cancel()
                             performFullSearch(query: searchText)
                         }
                     if !searchText.isEmpty {
@@ -148,10 +149,14 @@ struct LocationSearchSheet: View {
     }
 
     private func performFullSearch(query: String) {
-        guard !query.isEmpty else { return }
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty else {
+            searchResults = []
+            return
+        }
         isSearching = true
         let request = MKLocalSearch.Request()
-        request.naturalLanguageQuery = query
+        request.naturalLanguageQuery = normalizedQuery
         if let center = coordinate {
             request.region = MKCoordinateRegion(center: center, latitudinalMeters: 5000, longitudinalMeters: 5000)
         }

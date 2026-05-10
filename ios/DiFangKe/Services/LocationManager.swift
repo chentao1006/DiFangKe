@@ -860,7 +860,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 快速检测云端是否有数据 (通过 KVS)
     func hasExistingCloudData() -> Bool {
         let kvs = NSUbiquitousKeyValueStore.default
-        kvs.synchronize()
         return kvs.bool(forKey: "hasSeededDefaultData")
     }
     
@@ -921,16 +920,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             self?.refreshAvailableRawDates()
         }
         
-        // Listen for remote data change signals (from iCloud KVS) to trigger immediate raw data sync
-        NotificationCenter.default.addObserver(
-            forName: NSNotification.Name("RemoteDataChanged"),
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                await self?.performRawDataSync()
-            }
-        }
+        // 不再根据 RemoteDataChanged 自动触发同步。
+        // 同步策略改为：定时 + 手动下拉。
         
         // Listen for "Live Status" changes to sync ongoing stay duration across devices
         NotificationCenter.default.addObserver(
@@ -997,7 +988,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         // 2. 提升精度，但避免长期停留在导航级满额采样导致发热
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        locationManager.distanceFilter = 10.0
+        locationManager.distanceFilter = 5.0
         locationManager.activityType = .fitness
         
         // 3. 核心补救：立即请求一次单次精确定位，强制拉高硬件功率
@@ -1197,17 +1188,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         locationManager.requestAlwaysAuthorization()
         
-        // --- 核心：集成健康数据与运动传感器 ---
-        // 注意：已在 init() 中启动，此处调用是为了确保 startTracking() 重入时状态正确
-        HealthManager.shared.requestAuthorization { success in
-            if success {
-                print("HealthKit authorized")
-            }
-        }
-        // 防止重复启动：stopActivityTracking 后再重启
-        HealthManager.shared.stopActivityTracking()
-        HealthManager.shared.startActivityTracking()
-        
         // Re-enable updates if they were stopped
         locationManager.startUpdatingLocation()
         locationManager.startMonitoringSignificantLocationChanges()
@@ -1317,6 +1297,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 let baseLoc = CLLocation(latitude: base.latitude, longitude: base.longitude)
                 let nextLoc = CLLocation(latitude: next.latitude, longitude: next.longitude)
                 let dist = baseLoc.distance(from: nextLoc)
+
+                // 硬规则：若两段停留之间存在交通记录，则禁止合并，避免“出门回来仍是一条长足迹”。
+                let bEnd = base.endTime
+                let nStart = next.startTime
+                let tpBetweenDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                    $0.statusRaw != "ignored" && $0.endTime > bEnd && $0.startTime < nStart
+                })
+                let hasTransportBetween = ((try? context.fetch(tpBetweenDesc))?.isEmpty == false)
+                if hasTransportBetween {
+                    i += 1
+                    continue
+                }
 
                 if timeGap <= mergeTime && dist <= mergeDist {
                     // 合并：取最早 start、最晚 end
@@ -1542,7 +1534,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         if let p = place, p.isIgnored {
             // 已忽略地点：进入强制低功耗
-            if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters {
+            if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters || manager.distanceFilter != 100.0 || manager.activityType != .other {
                 manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
                 manager.distanceFilter = 100.0
                 manager.activityType = .other
@@ -1550,7 +1542,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             updateRegionMonitoring(isStationary: true)
         } else if isStationary {
             // 真正停留了：进入节能模式
-            if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters {
+            if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters || manager.distanceFilter != 10.0 || manager.activityType != .other {
                 manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
                 // 将 30m 缩减为 10m，配合计步器双重保护，确保出门瞬间就能被捕捉
                 manager.distanceFilter = 10.0 
@@ -1565,17 +1557,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             // 高速驾驶优先走车载导航模式，但仍保留距离过滤，避免无限采样
             if motion == .automotive || speed > 15.0 {
-                if manager.desiredAccuracy != kCLLocationAccuracyBest {
+                if manager.desiredAccuracy != kCLLocationAccuracyBest || manager.distanceFilter != 10.0 || manager.activityType != .automotiveNavigation {
                     manager.desiredAccuracy = kCLLocationAccuracyBest
-                    manager.distanceFilter = 15.0
+                    manager.distanceFilter = 10.0
                     manager.activityType = .automotiveNavigation
                 }
             // 只要传感器认为在动，或者速度 > 0.5m/s
             } else if isMovingBySensor || speed > 0.5 {
                 let targetAccuracy = kCLLocationAccuracyBest
-                if manager.desiredAccuracy != targetAccuracy {
+                if manager.desiredAccuracy != targetAccuracy || manager.distanceFilter != 5.0 || manager.activityType != .fitness {
                     manager.desiredAccuracy = targetAccuracy
-                    manager.distanceFilter = 10.0
+                    manager.distanceFilter = 5.0
                     manager.activityType = .fitness
                 }
             }
@@ -1608,14 +1600,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 1. 永久保存原始点（RawLocationStore 内部已实现异步队列写入，不会阻塞主线程）
         RawLocationStore.shared.saveLocation(location)
         // 同步最后位置给小组件
-        if let sharedDefaults = UserDefaults(suiteName: AppConfig.shared.appGroupID) {
-            sharedDefaults.set(location.coordinate.latitude, forKey: "lastLat")
-            sharedDefaults.set(location.coordinate.longitude, forKey: "lastLon")
-            sharedDefaults.set(Date().timeIntervalSince1970, forKey: "lastLocationTime")
-            
-            // 提醒小组件更新位置
-            Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
-        }
+        let sharedDefaults = widgetSharedDefaults()
+        sharedDefaults.set(location.coordinate.latitude, forKey: "lastLat")
+        sharedDefaults.set(location.coordinate.longitude, forKey: "lastLon")
+        sharedDefaults.set(Date().timeIntervalSince1970, forKey: "lastLocationTime")
+
+        // 提醒小组件更新位置
+        Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
         
         // 同步今日地图显示区域给小组件
         self.updateSharedWidgetRegion()
@@ -2527,8 +2518,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     /// 同步今日所有点位的包围盒给小组件，避免小组件去读 CSV 导致超时
     private func updateSharedWidgetRegion() {
-        let groupID = AppConfig.shared.appGroupID
-        guard let sharedDefaults = UserDefaults(suiteName: groupID) else { return }
+        let sharedDefaults = widgetSharedDefaults()
         
         let allCoords = self.allTodayPoints.map { $0.coordinate }
         guard !allCoords.isEmpty else { return }
@@ -2552,6 +2542,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         sharedDefaults.set((minLon + maxLon) / 2, forKey: "widgetRegionCenterLon")
         sharedDefaults.set(latDelta, forKey: "widgetRegionLatDelta")
         sharedDefaults.set(lonDelta, forKey: "widgetRegionLonDelta")
+    }
+
+    private func widgetSharedDefaults() -> UserDefaults {
+#if targetEnvironment(simulator)
+        return .standard
+#else
+        let groupID = AppConfig.shared.appGroupID
+        return UserDefaults(suiteName: groupID) ?? .standard
+#endif
     }
 
 
@@ -2990,15 +2989,23 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     @MainActor
     func resetData(for date: Date) {
         guard let context = modelContext else { return }
+
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+
+        // 清理当天缓存并提前通知页面释放旧模型引用，避免删除后访问失效对象。
+        TimelineBuilder.timelineCache.removeValue(forKey: startOfDay)
+        NotificationCenter.default.post(
+            name: NSNotification.Name("FootprintDataWillReset"),
+            object: nil,
+            userInfo: ["date": startOfDay]
+        )
         
         isResettingData = true
         UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
         
         Task {
-            let calendar = Calendar.current
-            let startOfDay = calendar.startOfDay(for: date)
-            let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
-            
             // 1. 物理清空当天所有相关记录
             let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
                 $0.startTime >= startOfDay && $0.startTime < endOfDay
@@ -3367,7 +3374,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // 清理 KVS
             let kvs = NSUbiquitousKeyValueStore.default
             kvs.removeObject(forKey: "hasSeededDefaultData")
-            kvs.synchronize()
             
             if let context = modelContext {
                 // 清理可能已经同步下来的本地数据

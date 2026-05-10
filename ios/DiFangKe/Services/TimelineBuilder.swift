@@ -901,7 +901,9 @@ class TimelineBuilder {
                     // 允许更紧凑的停留范围和更短的跳出距离
                     if diameter < AppConfig.shared.stationaryDiameterThreshold && distFromStart > AppConfig.shared.stayExitDistanceThreshold {
                         if let transport = finalizeTransport(currentPoints) { transports.append(transport) }
-                        currentPoints = [prevP, p]; currentSegmentType = nil; continue
+                        // 只沿用上一点的坐标作为锚点，不沿用它的旧时间，避免长停留后起点时间被拉得过早
+                        let anchoredStart = locationWithTimestamp(from: prevP, timestamp: p.timestamp)
+                        currentPoints = [anchoredStart, p]; currentSegmentType = nil; continue
                     }
                 }
             }
@@ -933,7 +935,9 @@ class TimelineBuilder {
                     let wType = TransportType.from(speed: wt > 0 ? wd / wt : 0)
                     if let segType = currentSegmentType, isSignificantTypeChange(from: segType, to: wType) && wt > AppConfig.shared.transportTypeChangeDurationThreshold {
                         if let transport = finalizeTransport(currentPoints) { transports.append(transport) }
-                        currentPoints = [prevP, p]; currentSegmentType = nil; continue
+                        // 类型切换时同样只借用坐标，不继承旧时间
+                        let anchoredStart = locationWithTimestamp(from: prevP, timestamp: p.timestamp)
+                        currentPoints = [anchoredStart, p]; currentSegmentType = nil; continue
                     }
                 }
             }
@@ -963,6 +967,19 @@ class TimelineBuilder {
             }
         }
         return category(of: t1) != category(of: t2)
+    }
+
+    /// 复制一个点的空间信息，并将时间锚到新时刻，用于“只取地点不取时间”的交通起点修正
+    private static func locationWithTimestamp(from point: CLLocation, timestamp: Date) -> CLLocation {
+        CLLocation(
+            coordinate: point.coordinate,
+            altitude: point.altitude,
+            horizontalAccuracy: point.horizontalAccuracy,
+            verticalAccuracy: point.verticalAccuracy,
+            course: point.course,
+            speed: point.speed,
+            timestamp: timestamp
+        )
     }
     
     private static func finalizeTransport(_ points: [CLLocation]) -> Transport? {
@@ -1388,6 +1405,7 @@ class PersistentTimelineBuilder {
         try? context.save()
         
         // 5. 后置清理：合并可能因分片产生的小碎块，补齐微小缝隙
+        await splitFootprintsByTransports(for: date, in: context)
         await mergeConsecutiveFootprints(for: date, in: context, allRawPoints: allRawPoints, threshold: AppConfig.shared.mergeDistanceThreshold)
         await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
         await fillGapsBetweenItems(for: date, in: context, allRawPoints: allRawPoints, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
@@ -1747,6 +1765,108 @@ class PersistentTimelineBuilder {
         return "未知位置"
     }
 
+    @MainActor
+    private static func splitFootprintsByTransports(for date: Date, in context: ModelContext) async {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+
+        let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let fps = (try? context.fetch(fpDesc)) ?? []
+        guard !fps.isEmpty else { return }
+
+        let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let transports = (try? context.fetch(tpDesc)) ?? []
+        guard !transports.isEmpty else { return }
+
+        let minSegment = max(AppConfig.shared.liveStayMinDurationThreshold, 120)
+        var hasChanges = false
+
+        for fp in fps {
+            let overlaps = transports.compactMap { t -> (start: Date, end: Date)? in
+                let s = max(fp.startTime, t.startTime)
+                let e = min(fp.endTime, t.endTime)
+                return e.timeIntervalSince(s) > 60 ? (s, e) : nil
+            }.sorted { $0.start < $1.start }
+
+            guard !overlaps.isEmpty else { continue }
+
+            var blocked: [(start: Date, end: Date)] = []
+            for interval in overlaps {
+                if var last = blocked.last, interval.start <= last.end.addingTimeInterval(60) {
+                    last.end = max(last.end, interval.end)
+                    blocked[blocked.count - 1] = last
+                } else {
+                    blocked.append(interval)
+                }
+            }
+
+            var segments: [(start: Date, end: Date)] = []
+            var cursor = fp.startTime
+            for b in blocked {
+                if b.start.timeIntervalSince(cursor) >= minSegment {
+                    segments.append((cursor, b.start))
+                }
+                cursor = max(cursor, b.end)
+            }
+            if fp.endTime.timeIntervalSince(cursor) >= minSegment {
+                segments.append((cursor, fp.endTime))
+            }
+
+            guard segments.count >= 2 else { continue }
+
+            let baseCoords = fp.footprintLocations.isEmpty
+                ? [CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)]
+                : fp.footprintLocations
+
+            for (idx, seg) in segments.enumerated() {
+                let segDuration = seg.end.timeIntervalSince(seg.start)
+                if idx == 0 {
+                    fp.startTime = seg.start
+                    fp.endTime = seg.end
+                    fp.date = calendar.startOfDay(for: seg.start)
+                    fp.duration = segDuration
+                    fp.locationHash = "SPLIT_BY_TRANSPORT"
+                    continue
+                }
+
+                let newFp = Footprint(
+                    date: calendar.startOfDay(for: seg.start),
+                    startTime: seg.start,
+                    endTime: seg.end,
+                    footprintLocations: baseCoords,
+                    locationHash: "SPLIT_BY_TRANSPORT",
+                    duration: segDuration,
+                    reason: nil,
+                    status: fp.status,
+                    aiScore: fp.aiScore,
+                    isHighlight: nil,
+                    placeID: fp.placeID,
+                    photoAssetIDs: [],
+                    address: fp.address,
+                    isPlaceSuggestionIgnored: fp.isPlaceSuggestionIgnored,
+                    aiAnalyzed: false,
+                    isAddressEditedByHand: fp.isAddressEditedByHand,
+                    activityTypeValue: fp.activityTypeValue,
+                    stepCount: fp.stepCount,
+                    walkingDistance: fp.walkingDistance,
+                    floorsAscended: fp.floorsAscended
+                )
+                context.insert(newFp)
+            }
+
+            hasChanges = true
+        }
+
+        if hasChanges {
+            try? context.save()
+        }
+    }
+
 
 
     
@@ -1779,6 +1899,18 @@ class PersistentTimelineBuilder {
             // 如果两个足迹距离小于阈值，且间隔小于配置的合并时长，则视作同一地点
             let mergeThreshold = isSameLogicalPlace ? max(threshold, AppConfig.shared.samePlaceMergeBonusThreshold) : threshold
             let mergeGapLimit = isSameLogicalPlace ? 3600.0 : AppConfig.shared.stayMergeGapThreshold
+
+            // 硬规则：只要两个足迹之间存在有效交通记录，就绝不能合并。
+            let cEnd = current.endTime
+            let nStart = next.startTime
+            let transportBetweenDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                $0.statusRaw != "ignored" && $0.endTime > cEnd && $0.startTime < nStart
+            })
+            let hasTransportBetween = ((try? context.fetch(transportBetweenDesc))?.isEmpty == false)
+            if hasTransportBetween {
+                i += 1
+                continue
+            }
 
             if dist < mergeThreshold && gap < mergeGapLimit {
                 // 核心修复：使用传入的原始点位检查是否有交通位移 (使用 Lite 转换进行更精细判定)
@@ -1822,18 +1954,6 @@ class PersistentTimelineBuilder {
                 // 如果当前名称不包含地点名，但已知地点，同步名称
                 if let pid = current.placeID, let matched = allPlaces.first(where: { $0.placeID == pid }) {
                     current.address = matched.name
-                }
-
-                // --- 核心修复：既然合并了，中间夹杂的任何微小交通（通常是漂移产生的）都应被清理 ---
-                let midStart = current.endTime.addingTimeInterval(-AppConfig.shared.midPointSamplingOffset)
-                let midEnd = next.startTime.addingTimeInterval(AppConfig.shared.midPointSamplingOffset)
-                let tDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                    $0.startTime >= midStart && $0.endTime <= midEnd
-                })
-                if let overlappingTransports = try? context.fetch(tDesc) {
-                    for t in overlappingTransports {
-                        t.statusRaw = "ignored"
-                    }
                 }
 
                 // 标记下一个为忽略 (逻辑上合并了)

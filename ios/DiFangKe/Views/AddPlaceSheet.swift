@@ -176,16 +176,24 @@ struct AddPlaceSheet: View {
         HStack {
             Image(systemName: "magnifyingglass").foregroundColor(.secondary)
             TextField("搜索地址", text: $searchText)
-                .onChange(of: searchText) { oldValue, newValue in
-                    if isSkippingNextSearch { isSkippingNextSearch = false; return }
-                    if newValue.count > 1 {
-                        vm.search(query: newValue, userCoord: locationManager.lastLocation?.coordinate)
-                    } else if newValue.isEmpty {
-                        vm.searchResults = []
+                .task(id: searchText) {
+                    if isSkippingNextSearch {
+                        isSkippingNextSearch = false
+                        return
                     }
+
+                    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard query.count > 1 else {
+                        vm.searchResults = []
+                        return
+                    }
+
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if Task.isCancelled { return }
+                    vm.search(query: query, userCoord: locationManager.lastLocation?.coordinate)
                 }
             if !searchText.isEmpty {
-                Button { searchText = ""; vm.searchResults = [] } label: {
+                Button { searchText = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
                 }
             }

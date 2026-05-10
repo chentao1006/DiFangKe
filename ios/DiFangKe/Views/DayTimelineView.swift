@@ -35,6 +35,14 @@ struct DayTimelineView: View {
     @State private var updateTask: Task<Void, Never>?
     @State private var preLoadTask: Task<Void, Never>?
     @State private var activationTask: Task<Void, Never>?
+    @State private var arrowTapTargetDate: Date?
+    @State private var arrowTapPreviewDate: Date?
+    @State private var isArrowTapAnimating = false
+    @State private var arrowTapFinalizeTask: Task<Void, Never>?
+    @State private var arrowTapPreviewTask: Task<Void, Never>?
+    @State private var jumpToTodayHapticTask: Task<Void, Never>?
+    @State private var longPressPreviewDate: Date?
+    @State private var longPressStartDate: Date?
     
 
     init(selectedDate: Date = Calendar.current.startOfDay(for: Date())) {
@@ -45,9 +53,11 @@ struct DayTimelineView: View {
     
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                dateNavigator
-                pagedTimelineScrollView
+            ScrollViewReader { proxy in
+                VStack(spacing: 0) {
+                    dateNavigator(proxy: proxy)
+                    pagedTimelineScrollView
+                }
             }
             .navigationTitle("地方客")
             .navigationBarTitleDisplayMode(.inline)
@@ -72,6 +82,9 @@ struct DayTimelineView: View {
                 stopRepeatTimer()
                 updateTask?.cancel()
                 activationTask?.cancel()
+                arrowTapFinalizeTask?.cancel()
+                arrowTapPreviewTask?.cancel()
+                jumpToTodayHapticTask?.cancel()
             }
             .onChange(of: manualSelections) { _, _ in
                 updateData()
@@ -117,6 +130,9 @@ struct DayTimelineView: View {
             .onChange(of: scrollID) { oldValue, newValue in
                 handleScrollChange(oldValue: oldValue, newValue: newValue)
             }
+            .modifier(ArrowTapScrollPhaseModifier {
+                finalizeArrowTapSwipeIfNeeded()
+            })
             
             // Date Switcher Bottom Gradient Fade
             LinearGradient(
@@ -215,36 +231,41 @@ struct DayTimelineView: View {
     
     private func handleScrollChange(oldValue: Date?, newValue: Date?) {
         guard let newValue = newValue else { return }
+        let isArrowTapSwipe = {
+            guard let target = arrowTapTargetDate else { return false }
+            return isArrowTapAnimating && Calendar.current.isDate(target, inSameDayAs: newValue)
+        }()
+
         if newValue != oldValue {
             // 限制振动频率，避免连续切换时马达过载
             if !isPressingArrow {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
         }
-        selectedDate = newValue
-        
-        // 如果是手动长按中，不在这里触发 activatedDate 更新，等松手时一次性更新
+        if isArrowTapSwipe {
+            arrowTapPreviewDate = newValue
+            // 不提前写 selectedDate/activatedDate，等动画收尾 finalize
+            return
+        }
         if !isPressingArrow {
+            selectedDate = newValue
             scheduleDateActivation(for: newValue)
         }
-        
         if !Calendar.current.isDate(newValue, inSameDayAs: Date()) {
             UserDefaults.standard.set(true, forKey: "hasSwiped")
         }
-        
         preLoadTask?.cancel()
         preLoadTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 100_000_000) // 增加到 100ms
             if Task.isCancelled { return }
             preLoadNeighborDates(around: newValue)
         }
     }
 
-    private func scheduleDateActivation(for date: Date) {
+    private func scheduleDateActivation(for date: Date, delayOverride: UInt64? = nil) {
         activationTask?.cancel()
         
         // 增加防抖时间，防止快速滑动时频繁触发重绘
-        let delay: UInt64 = isPressingArrow ? 300_000_000 : 200_000_000
+        let delay: UInt64 = delayOverride ?? (isPressingArrow ? 300_000_000 : 200_000_000)
         
         activationTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: delay)
@@ -252,6 +273,37 @@ struct DayTimelineView: View {
             withAnimation(.easeInOut(duration: 0.2)) {
                 activatedDate = date
             }
+        }
+    }
+
+    private func finalizeArrowTapSwipeIfNeeded() {
+        guard isArrowTapAnimating, let targetDate = arrowTapTargetDate else { return }
+        arrowTapFinalizeTask?.cancel()
+        arrowTapPreviewTask?.cancel()
+        jumpToTodayHapticTask?.cancel()
+
+        // proxy.scrollTo 不保证总会及时回写 scrollID，收尾必须以目标日期为准。
+        scrollID = targetDate
+        selectedDate = targetDate
+        scheduleDateActivation(for: targetDate, delayOverride: 0)
+
+        preLoadTask?.cancel()
+        preLoadTask = Task { @MainActor in
+            preLoadNeighborDates(around: targetDate)
+        }
+
+        isArrowTapAnimating = false
+        arrowTapTargetDate = nil
+        arrowTapPreviewDate = nil
+    }
+
+    private func scheduleArrowTapFinalizeFallbackIfNeeded(duration: TimeInterval) {
+        arrowTapFinalizeTask?.cancel()
+        arrowTapFinalizeTask = Task { @MainActor in
+            let nanos = UInt64((duration + 0.05) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
+            if Task.isCancelled { return }
+            finalizeArrowTapSwipeIfNeeded()
         }
     }
     
@@ -467,9 +519,9 @@ struct DayTimelineView: View {
         }
     }
     
-    private var dateNavigator: some View {
+    private func dateNavigator(proxy: ScrollViewProxy) -> some View {
         HStack {
-            navigationArrow(direction: -1)
+            navigationArrow(direction: -1, proxy: proxy)
             
             Spacer()
             Button {
@@ -508,13 +560,13 @@ struct DayTimelineView: View {
                 Button(role: .destructive) {
                     showingResetAlert = true
                 } label: {
-                    Label("重新生成今日数据", systemImage: "arrow.counterclockwise")
+                    Label("重新生成本日数据", systemImage: "arrow.counterclockwise")
                 }
             }
             
             Spacer()
             
-            navigationArrow(direction: 1)
+            navigationArrow(direction: 1, proxy: proxy)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -529,7 +581,7 @@ struct DayTimelineView: View {
     }
     
     @ViewBuilder
-    private func navigationArrow(direction: Int) -> some View {
+    private func navigationArrow(direction: Int, proxy: ScrollViewProxy) -> some View {
         let isDisabled = (direction == -1) ? isAtStart : isAtEnd
         let icon = (direction == -1) ? "chevron.left" : rightArrowIcon
         
@@ -543,18 +595,18 @@ struct DayTimelineView: View {
             .onLongPressGesture(minimumDuration: 0.3, perform: {}) { pressing in
                 self.isPressingArrow = pressing
                 self.currentPressDirection = pressing ? direction : 0
-                if pressing && !isDisabled {
-                    startRepeatTimer(direction: direction)
+                if pressing && !isDisabled && !isArrowTapAnimating {
+                    startRepeatTimer(direction: direction, proxy: proxy)
                 } else {
                     stopRepeatTimer()
                 }
             }
             .onTapGesture {
-                if !isDisabled {
+                if !isDisabled && !isArrowTapAnimating {
                     if direction == 1 && isFarFromToday {
-                        jumpToToday()
+                        simulateArrowTapSwipeToToday(proxy: proxy)
                     } else {
-                        changeDate(by: direction)
+                        simulateArrowTapSwipe(by: direction, proxy: proxy)
                     }
                 }
             }
@@ -562,6 +614,16 @@ struct DayTimelineView: View {
     
     private var rightArrowIcon: String {
         isFarFromToday ? "chevron.right.to.line" : "chevron.right"
+    }
+
+    private var displayDate: Date {
+        if isPressingArrow {
+            return longPressPreviewDate ?? scrollID ?? selectedDate
+        }
+        if isArrowTapAnimating {
+            return arrowTapPreviewDate ?? scrollID ?? selectedDate
+        }
+        return selectedDate
     }
     
     private let sharedCalendar = Calendar.current
@@ -573,15 +635,17 @@ struct DayTimelineView: View {
     }
     
     private var isAtEnd: Bool {
+        let referenceDate = isPressingArrow ? (longPressPreviewDate ?? scrollID ?? selectedDate) : selectedDate
         if !cachedDates.isEmpty {
-            return (cachedDates.firstIndex(of: selectedDate) ?? 0) >= (cachedDates.count - 1)
+            return (cachedDates.firstIndex(of: referenceDate) ?? 0) >= (cachedDates.count - 1)
         }
         return true
     }
     
     private var isAtStart: Bool {
+        let referenceDate = isPressingArrow ? (longPressPreviewDate ?? scrollID ?? selectedDate) : selectedDate
         if !cachedDates.isEmpty {
-             return (cachedDates.firstIndex(of: selectedDate) ?? 0) <= 0
+             return (cachedDates.firstIndex(of: referenceDate) ?? 0) <= 0
         }
         return true
     }
@@ -593,106 +657,249 @@ struct DayTimelineView: View {
     /// 距离今天超过5天时显示跳回图标
     private var isFarFromToday: Bool {
         let today = Calendar.current.startOfDay(for: Date())
-        let days = Calendar.current.dateComponents([.day], from: selectedDate, to: today).day ?? 0
+        let days = Calendar.current.dateComponents([.day], from: displayDate, to: today).day ?? 0
         return days >= 5
     }
     
-    private func startRepeatTimer(direction: Int) {
+    private func startRepeatTimer(direction: Int, proxy: ScrollViewProxy) {
         stopRepeatTimer()
-        repeatTimerInterval = 0.2 // 初始间隔 0.2s
+        let startDate = scrollID ?? selectedDate
+        longPressStartDate = startDate
+        longPressPreviewDate = startDate
+        repeatTimerInterval = 0.24
         repeatStepCount = 0
         
         // 延迟一段时间后开始连续触发
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             guard self.isPressingArrow && self.currentPressDirection == direction else { return }
-            self.triggerNextStep(direction: direction)
+            self.triggerNextStep(direction: direction, proxy: proxy)
         }
     }
     
-    private func triggerNextStep(direction: Int) {
+    private func triggerNextStep(direction: Int, proxy: ScrollViewProxy) {
         guard isPressingArrow && currentPressDirection == direction else { return }
         
         repeatStepCount += 1
-        step(direction: direction)
-        
-        // 模拟连续切换的震动感
-        // 当速度很快时，进一步降低震动频率，避免马达过热或体感粘滞
-        if repeatTimerInterval > 0.1 {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        } else if repeatTimerInterval > 0.05 {
-            if repeatStepCount % 2 == 0 {
-                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-            }
-        } else {
-            // 极速模式：每 4 步震一次，模拟高速滚轮感
-            if repeatStepCount % 4 == 0 {
-                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-            }
-        }
-        
+        let daysToAdvance = longPressStepSpan(for: repeatStepCount, interval: repeatTimerInterval)
+        let duration = longPressAnimationDuration(for: daysToAdvance)
+        let didAdvance = step(direction: direction, days: daysToAdvance, duration: duration, proxy: proxy)
+        guard didAdvance else { return }
+
+        // 对齐小日历：每推进一步给一次 light impact。
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
         // 速度递增逻辑：更快的加速度，更小的最小间隔
-        repeatTimerInterval = max(0.02, repeatTimerInterval * 0.85)
+        let nextInterval = max(0.08, repeatTimerInterval * 0.85)
+        repeatTimerInterval = nextInterval
         
-        repeatTimer = Timer.scheduledTimer(withTimeInterval: repeatTimerInterval, repeats: false) { _ in
-            self.triggerNextStep(direction: direction)
+        let nextTick = max(0.08, min(duration * 0.82, repeatTimerInterval))
+        repeatTimer = Timer.scheduledTimer(withTimeInterval: nextTick, repeats: false) { _ in
+            self.triggerNextStep(direction: direction, proxy: proxy)
         }
     }
     
     private func stopRepeatTimer() {
         repeatTimer?.invalidate()
         repeatTimer = nil
+
+        let finalDate = longPressPreviewDate ?? scrollID ?? selectedDate
+        selectedDate = finalDate
+        longPressPreviewDate = nil
+        longPressStartDate = nil
         
         // 长按结束，确保最后停下的日期被激活并渲染
         if activatedDate != selectedDate {
+            scrollID = selectedDate
             withAnimation(.easeInOut(duration: 0.2)) {
                 activatedDate = selectedDate
+            }
+            preLoadTask?.cancel()
+            preLoadTask = Task { @MainActor in
+                preLoadNeighborDates(around: selectedDate)
             }
         }
     }
     
     private var dateHeader: String {
         let calendar = Calendar.current
-        if calendar.isDateInToday(selectedDate) { return "今天" }
-        if calendar.isDateInYesterday(selectedDate) { return "昨天" }
-        if calendar.isDateInTomorrow(selectedDate) { return "明天" }
+        let display = displayDate
+        if calendar.isDateInToday(display) { return "今天" }
+        if calendar.isDateInYesterday(display) { return "昨天" }
+        if calendar.isDateInTomorrow(display) { return "明天" }
         
         let today = calendar.startOfDay(for: Date())
         if let dby = calendar.date(byAdding: .day, value: -2, to: today),
-           calendar.isDate(selectedDate, inSameDayAs: dby) {
+           calendar.isDate(display, inSameDayAs: dby) {
             return "前天"
         }
         
-        let isCurrentYear = calendar.component(.year, from: selectedDate) == calendar.component(.year, from: today)
-        return isCurrentYear ? selectedDate.formatted(.dateTime.month().day()) : selectedDate.formatted(.dateTime.year().month().day())
+        let isCurrentYear = calendar.component(.year, from: display) == calendar.component(.year, from: today)
+        return isCurrentYear ? display.formatted(.dateTime.month().day()) : display.formatted(.dateTime.year().month().day())
     }
     
     private var secondaryHeader: String {
         let calendar = Calendar.current
+        let display = displayDate
         let today = calendar.startOfDay(for: Date())
         let dby = calendar.date(byAdding: .day, value: -2, to: today)!
-        let isRelative = calendar.isDateInToday(selectedDate) || 
-                         calendar.isDateInYesterday(selectedDate) || 
-                         calendar.isDateInTomorrow(selectedDate) ||
-                         calendar.isDate(selectedDate, inSameDayAs: dby)
+        let isRelative = calendar.isDateInToday(display) || 
+                         calendar.isDateInYesterday(display) || 
+                         calendar.isDateInTomorrow(display) ||
+                         calendar.isDate(display, inSameDayAs: dby)
         
         if isRelative {
-            let isCurrentYear = calendar.component(.year, from: selectedDate) == calendar.component(.year, from: today)
-            let dateStr = isCurrentYear ? selectedDate.formatted(.dateTime.month().day()) : selectedDate.formatted(.dateTime.year().month().day())
-            return "\(dateStr) \(selectedDate.formatted(.dateTime.weekday(.wide)))"
+            let isCurrentYear = calendar.component(.year, from: display) == calendar.component(.year, from: today)
+            let dateStr = isCurrentYear ? display.formatted(.dateTime.month().day()) : display.formatted(.dateTime.year().month().day())
+            return "\(dateStr) \(display.formatted(.dateTime.weekday(.wide)))"
         } else {
-            return selectedDate.formatted(.dateTime.weekday(.wide))
+            return display.formatted(.dateTime.weekday(.wide))
         }
     }
     
-    private func step(direction: Int) {
+    private func step(direction: Int, days: Int, duration: TimeInterval, proxy: ScrollViewProxy) -> Bool {
         let isDisabled = (direction == -1) ? isAtStart : isAtEnd
         if !isDisabled {
-            changeDate(by: direction, isContinuous: true)
+            return fastContinuousScroll(by: direction, days: days, duration: duration, proxy: proxy)
         } else {
             stopRepeatTimer()
+            return false
         }
     }
-    
+
+    private func fastContinuousScroll(by direction: Int, days: Int, duration: TimeInterval, proxy: ScrollViewProxy) -> Bool {
+        let anchorDate = longPressPreviewDate ?? scrollID ?? selectedDate
+        guard let currentIndex = cachedDates.firstIndex(of: anchorDate) else { return false }
+
+        let nextIndex = currentIndex + direction * max(1, days)
+        guard nextIndex >= 0 && nextIndex < cachedDates.count else { return false }
+
+        let targetDate = cachedDates[nextIndex]
+        longPressPreviewDate = targetDate
+
+        withAnimation(.linear(duration: duration)) {
+            proxy.scrollTo(targetDate, anchor: .center)
+        }
+        return true
+    }
+
+    private func longPressStepSpan(for stepCount: Int, interval: Double) -> Int {
+        if stepCount < 5 { return 1 }
+        if interval > 0.18 { return 2 }
+        if interval > 0.13 { return 3 }
+        return 4
+    }
+
+    private func longPressAnimationDuration(for days: Int) -> TimeInterval {
+        let scaled = 0.22 + Double(max(days, 1)) * 0.06
+        return min(0.55, max(0.22, scaled))
+    }
+
+    private func simulateArrowTapSwipe(by direction: Int, proxy: ScrollViewProxy) {
+        let anchorDate = scrollID ?? selectedDate
+        guard let currentIndex = cachedDates.firstIndex(of: anchorDate) else { return }
+
+        let nextIndex = currentIndex + direction
+        guard nextIndex >= 0 && nextIndex < cachedDates.count else { return }
+
+        let targetDate = cachedDates[nextIndex]
+        arrowTapTargetDate = targetDate
+        isArrowTapAnimating = true
+        withAnimation(.linear(duration: 0.4)) {
+            proxy.scrollTo(targetDate, anchor: .center)
+        }
+    }
+
+    private func simulateArrowTapSwipeToToday(proxy: ScrollViewProxy) {
+        let anchorDate = scrollID ?? selectedDate
+        let today = Calendar.current.startOfDay(for: Date())
+        guard !Calendar.current.isDate(anchorDate, inSameDayAs: today) else { return }
+
+        let distance = abs(Calendar.current.dateComponents([.day], from: anchorDate, to: today).day ?? 0)
+        let duration = jumpToTodayAnimationDuration(for: distance)
+
+        arrowTapTargetDate = today
+        arrowTapPreviewDate = anchorDate
+        isArrowTapAnimating = true
+        animateArrowTapPreview(from: anchorDate, to: today, duration: duration)
+        scheduleArrowTapFinalizeFallbackIfNeeded(duration: duration)
+        startJumpToTodayHaptics(duration: duration)
+        withAnimation(.linear(duration: duration)) {
+            proxy.scrollTo(today, anchor: .center)
+        }
+    }
+
+    private func animateArrowTapPreview(from startDate: Date, to endDate: Date, duration: TimeInterval) {
+        arrowTapPreviewTask?.cancel()
+
+        guard let startIndex = cachedDates.firstIndex(of: startDate),
+              let endIndex = cachedDates.firstIndex(of: endDate),
+              startIndex != endIndex else {
+            arrowTapPreviewDate = endDate
+            return
+        }
+
+        let total = abs(endIndex - startIndex)
+        let direction = endIndex > startIndex ? 1 : -1
+
+        arrowTapPreviewTask = Task { @MainActor in
+            let start = Date()
+            var lastStep = -1
+
+            while !Task.isCancelled {
+                let elapsed = Date().timeIntervalSince(start)
+                let progress = min(1, elapsed / max(duration, 0.001))
+                let stepped = min(total, Int((Double(total) * progress).rounded(.down)))
+
+                if stepped != lastStep {
+                    let idx = startIndex + stepped * direction
+                    if idx >= 0 && idx < cachedDates.count {
+                        arrowTapPreviewDate = cachedDates[idx]
+                    }
+                    lastStep = stepped
+                }
+
+                if progress >= 1 { break }
+                try? await Task.sleep(nanoseconds: 30_000_000)
+            }
+
+            arrowTapPreviewDate = endDate
+        }
+    }
+
+    private func startJumpToTodayHaptics(duration: TimeInterval) {
+        jumpToTodayHapticTask?.cancel()
+        jumpToTodayHapticTask = Task { @MainActor in
+            let start = Date()
+            var tick = 0
+
+            while !Task.isCancelled, Date().timeIntervalSince(start) < duration {
+                let elapsed = Date().timeIntervalSince(start)
+                let progress = min(1, elapsed / max(duration, 0.001))
+
+                if progress < 0.45 {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                } else if progress < 0.8 {
+                    if tick % 2 == 0 {
+                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    }
+                } else {
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.7)
+                }
+
+                tick += 1
+                let interval = max(0.06, 0.16 - progress * 0.1)
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+        }
+    }
+
+    private func jumpToTodayAnimationDuration(for distance: Int) -> TimeInterval {
+        guard distance > 1 else { return 0.3 }
+        // 距离越远滚动越慢，确保能感知到跨多天滑动效果。
+        let scaled = 0.24 + Double(distance) * 0.11
+        return min(2.0, max(0.3, scaled))
+    }
+
     private func jumpToToday() {
         let today = Calendar.current.startOfDay(for: Date())
         let days = abs(Calendar.current.dateComponents([.day], from: selectedDate, to: today).day ?? 0)
@@ -825,6 +1032,22 @@ struct DayTimelineView: View {
             }
         } message: {
             Text("这将会永久删除 iCloud 中的所有记录，且无法恢复。如果您想开启全新的记录体验，请选择确定。")
+        }
+    }
+}
+
+private struct ArrowTapScrollPhaseModifier: ViewModifier {
+    let onIdle: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollPhaseChange { _, newPhase in
+                if newPhase == .idle {
+                    onIdle()
+                }
+            }
+        } else {
+            content
         }
     }
 }

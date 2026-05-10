@@ -5,7 +5,9 @@ class CloudSettingsManager: ObservableObject {
     static let shared = CloudSettingsManager()
     
     private var cancellables = Set<AnyCancellable>()
+    private var periodicSyncCancellable: AnyCancellable?
     private let kvs = NSUbiquitousKeyValueStore.default
+    private let periodicSyncInterval: TimeInterval = 600
     
     private let syncedKeys = [
         "isAiAssistantEnabled",
@@ -35,40 +37,70 @@ class CloudSettingsManager: ObservableObject {
                 self?.handleExternalChange(notification)
             }
             .store(in: &cancellables)
-        
-        // 初始同步
-        kvs.synchronize()
+
+        // 初始同步仅在真机且 iCloud 可用时执行；模拟器/未登录账号不强求。
+        if shouldUseCloudServices {
+            kvs.synchronize()
+        }
     }
     
     /// 开始监听本地变化并同步到云端
     func startSyncing() {
+        guard shouldUseCloudServices else {
+            print("[CloudSettings] iCloud unavailable or disabled; skipping cloud sync startup.")
+            periodicSyncCancellable?.cancel()
+            periodicSyncCancellable = nil
+            return
+        }
+
+        if periodicSyncCancellable != nil {
+            return
+        }
+
         print("[CloudSettings] Starting sync...")
+        _ = syncFromCloudNow()
+
+        // 改为定时同步，避免每次本地设置波动都触发云端写入。
+        periodicSyncCancellable?.cancel()
+        periodicSyncCancellable = Timer.publish(every: periodicSyncInterval, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.syncAllLocalToCloud()
+            }
+    }
+
+    @discardableResult
+    func syncFromCloudNow() -> Set<String> {
+        guard shouldUseCloudServices else { return [] }
+
+        var changedKeys = Set<String>()
         var notificationChanged = false
-        // 第一次运行，确保本地有最新的云端数据
+
         for key in syncedKeys {
             if let cloudValue = kvs.object(forKey: key) {
                 let localValue = UserDefaults.standard.object(forKey: key)
                 if !isEqual(cloudValue, localValue) {
-                    print("[CloudSettings] Key '\(key)' updated from cloud: \(localValue ?? "nil") -> \(cloudValue)")
+                    let localValueDescription = localValue ?? "nil"
+                    print("[CloudSettings] Key '\(key)' updated from cloud: \(localValueDescription) -> \(cloudValue)")
                     UserDefaults.standard.set(cloudValue, forKey: key)
+                    changedKeys.insert(key)
                     if key.contains("Notification") {
                         notificationChanged = true
                     }
                 }
             }
         }
-        
+
         if notificationChanged {
             NotificationManager.shared.refreshSettings()
         }
-        
-        // 监听本地变化并同步到云端 (合并为一个发布者，更高效)
-        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
-            .debounce(for: .seconds(1), scheduler: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.syncAllLocalToCloud()
-            }
-            .store(in: &cancellables)
+
+        return changedKeys
+    }
+
+    /// 用户手动触发：立即将本地设置推送到云端。
+    func manualSyncNow() {
+        syncAllLocalToCloud()
     }
     
     private func syncAllLocalToCloud() {
@@ -84,7 +116,6 @@ class CloudSettingsManager: ObservableObject {
         if let localValue = localValue, !isEqual(localValue, cloudValue) {
             print("[CloudSettings] Syncing local key '\(key)' to cloud: \(cloudValue ?? "nil") -> \(localValue)")
             kvs.set(localValue, forKey: key)
-            kvs.synchronize()
         }
     }
     
@@ -124,12 +155,16 @@ class CloudSettingsManager: ObservableObject {
     
     /// 当重要数据（如地点、活动类型）变更时，触发一个云端脉冲，通过 KVS 几乎瞬间通知其他设备数据已变
     func triggerDataSyncPulse() {
+        // 按新策略：不再自动触发脉冲，避免导致远端立即同步风暴。
+    }
+
+    /// 手动触发数据同步脉冲（用于下拉刷新等用户主动操作）。
+    func triggerDataSyncPulseManual() {
         let now = Date().timeIntervalSince1970
         print("[CloudSettings] Triggering data sync pulse: \(now)")
         UserDefaults.standard.set(now, forKey: "dataSyncPulse")
         // Set it in KVS to notify other devices
         kvs.set(now, forKey: "dataSyncPulse")
-        kvs.synchronize()
         
         // Also post locally so the current device can perform immediate raw data sync if needed
         NotificationCenter.default.post(name: NSNotification.Name("RemoteDataChanged"), object: nil)
@@ -138,6 +173,10 @@ class CloudSettingsManager: ObservableObject {
     private func isEqual(_ a: Any?, _ b: Any?) -> Bool {
         if a == nil && b == nil { return true }
         guard let a = a, let b = b else { return false }
+
+        if let aObj = a as? NSObject, let bObj = b as? NSObject {
+            return aObj.isEqual(bObj)
+        }
         
         // Handle numbers correctly (Int, Double, Bool can sometimes be cross-cast as NSNumber)
         if let aNum = a as? NSNumber, let bNum = b as? NSNumber {
@@ -147,5 +186,14 @@ class CloudSettingsManager: ObservableObject {
         if let aStr = a as? String, let bStr = b as? String { return aStr == bStr }
         
         return false
+    }
+
+    private var shouldUseCloudServices: Bool {
+#if targetEnvironment(simulator)
+        return false
+#else
+        let isICloudSyncEnabled = UserDefaults.standard.object(forKey: "isICloudSyncEnabled") as? Bool ?? true
+        return isICloudSyncEnabled && FileManager.default.ubiquityIdentityToken != nil
+#endif
     }
 }

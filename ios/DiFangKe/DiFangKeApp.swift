@@ -150,8 +150,8 @@ struct DiFangKeApp: App {
         
         let isFirstLaunch = !UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
         let kvs = NSUbiquitousKeyValueStore.default
-        kvs.synchronize()
-        let hasHistoricalData = kvs.bool(forKey: "hasSeededDefaultData")
+        let shouldEnableCloudKit = shouldUseCloudServices
+        let hasHistoricalData = shouldEnableCloudKit ? kvs.bool(forKey: "hasSeededDefaultData") : false
         let shouldPauseSync = isFirstLaunch && hasHistoricalData && !UserDefaults.standard.bool(forKey: "isSyncChoiceMade")
         
         let modelConfiguration = ModelConfiguration(
@@ -159,7 +159,7 @@ struct DiFangKeApp: App {
             schema: schema, 
             isStoredInMemoryOnly: false,
             groupContainer: AppConfig.shared.appGroupID.isEmpty ? .none : .identifier(AppConfig.shared.appGroupID),
-            cloudKitDatabase: shouldPauseSync ? .none : .automatic
+            cloudKitDatabase: shouldPauseSync || !shouldEnableCloudKit ? .none : .automatic
         )
         
         do {
@@ -188,12 +188,13 @@ struct DiFangKeApp: App {
         let schema = Schema([
             Footprint.self, Place.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self, TransportRecord.self
         ])
+        let shouldEnableCloudKit = shouldUseCloudServices
         let modelConfiguration = ModelConfiguration(
             "dfk_v5_stable",
             schema: schema, 
             isStoredInMemoryOnly: false,
             groupContainer: AppConfig.shared.appGroupID.isEmpty ? .none : .identifier(AppConfig.shared.appGroupID),
-            cloudKitDatabase: .automatic
+            cloudKitDatabase: shouldEnableCloudKit ? .automatic : .none
         )
         if let newContainer = try? ModelContainer(for: schema, configurations: [modelConfiguration]) {
             await MainActor.run {
@@ -211,6 +212,15 @@ struct DiFangKeApp: App {
                 print("[DiFangKeApp] ModelContainer Refreshed with CloudKit enabled.")
             }
         }
+    }
+
+    private var shouldUseCloudServices: Bool {
+#if targetEnvironment(simulator)
+        return false
+#else
+        let isICloudSyncEnabled = UserDefaults.standard.object(forKey: "isICloudSyncEnabled") as? Bool ?? true
+        return isICloudSyncEnabled && FileManager.default.ubiquityIdentityToken != nil
+#endif
     }
     
     private func setupDefaultData(context: ModelContext) {

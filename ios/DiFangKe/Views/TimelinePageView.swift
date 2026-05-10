@@ -64,10 +64,14 @@ struct TimelinePageView: View {
         
         let cached = TimelineBuilder.timelineCache[date] ?? []
         // 初始化时立即执行重链接，确保首次渲染就是数据库真实模型
-        let linkedItems = cached.map { item -> TimelineItem in
+        let linkedItems = cached.compactMap { item -> TimelineItem? in
             if case .footprint(let tempFp) = item {
                 if let realFp = footprints.first(where: { $0.footprintID == tempFp.footprintID }) {
                     return .footprint(realFp)
+                }
+                // 丢弃已删除且无法重链的持久化足迹，避免访问失效实例。
+                if tempFp.modelContext != nil {
+                    return nil
                 }
             }
             return item
@@ -102,6 +106,20 @@ struct TimelinePageView: View {
             guard isActivePage else { return }
             // 当后台完成活动匹配时，仅刷新 UI，不触发 AI 重新总结
             refreshTimeline(force: false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataWillReset"))) { notification in
+            guard isActivePage else { return }
+            if let resetDate = notification.userInfo?["date"] as? Date,
+               !Calendar.current.isDate(resetDate, inSameDayAs: date) {
+                return
+            }
+
+            // 重置前先释放当前页引用，避免 SwiftData 删除后渲染到无效对象。
+            selectedFootprint = nil
+            selectedTransport = nil
+            timelineItems = []
+            dayPhotoAssets = []
+            refreshTask?.cancel()
         }
         .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in
             guard isActivePage else { return }
@@ -226,7 +244,19 @@ struct TimelinePageView: View {
 
             let footprintLocation = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
             let distance = startLocation.distance(from: footprintLocation)
-            return distance < 120 && footprint.endTime >= startTime.addingTimeInterval(-300)
+            guard distance < 120 else { return false }
+
+            let userPinned = !(footprint.reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !footprint.photoAssetIDs.isEmpty
+                || footprint.isHighlight == true
+                || footprint.status == .manual
+
+            if userPinned {
+                let pinnedGrace = max(AppConfig.shared.liveStayMergeTimeThreshold, 1800)
+                return endTime.timeIntervalSince(footprint.endTime) <= pinnedGrace
+            }
+
+            return footprint.endTime >= startTime.addingTimeInterval(-300)
         }
 
         guard !alreadyCovered else { return nil }
@@ -543,13 +573,8 @@ struct TimelinePageView: View {
         
         if Task.isCancelled { return }
         
-        // 增量同步逻辑调整：
-        // 1. 如果是【强制刷新】（如下拉刷新或重置），必然同步
-        // 2. 如果是【今天】，因为数据在实时增加，需要自动同步以显示最新足迹
-        // 3. 如果是【过去某天】且数据库【完全没有记录】但有原始轨迹，说明是首次访问该日期，自动同步一次
-        // 4. 其他情况（已有记录的历史日期）严禁自动同步，必须由用户手动下拉刷新触发，以保护人工修改结果
-        let isDayEmpty = !hasExistingFootprints
-        let shouldSync = force || isToday || (isDayEmpty && hasRawData && !isFromHistory)
+        // 同步策略：仅在手动/强制刷新时执行，不再自动触发。
+        let shouldSync = force
         
         if shouldSync {
             await PersistentTimelineBuilder.syncDay(date: targetDate, in: modelContext)
@@ -560,20 +585,36 @@ struct TimelinePageView: View {
         let items = PersistentTimelineBuilder.fetchTimeline(for: targetDate, in: modelContext)
         applyTimelineItems(items, triggerAiIfChanged: true)
         
+        struct FootprintSnapshot: Sendable {
+            let startTime: Date
+            let latitude: Double
+            let longitude: Double
+        }
+
+        let footprintSnapshots = items.compactMap { item -> FootprintSnapshot? in
+            guard case .footprint(let fp) = item else { return nil }
+            return FootprintSnapshot(
+                startTime: fp.startTime,
+                latitude: fp.latitude,
+                longitude: fp.longitude
+            )
+        }
+
+        let linkedPhotoAssetIDs = Set(items.compactMap { item -> [String]? in
+            guard case .footprint(let footprint) = item else { return nil }
+            return footprint.photoAssetIDs
+        }.flatMap { $0 })
+
         let result = await Task.detached(priority: .userInitiated) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
             var totalMileage = LocationManager.calculatePathDistance(rawPoints)
             
             // 核心改进：如果没有原始轨迹点（如仅导入了照片），则尝试通过所有足迹点（包含照片生成的足迹）计算直线距离之和
-            if totalMileage < 50 && items.count >= 2 {
+            if totalMileage < 50 && footprintSnapshots.count >= 2 {
                 var estimatedDist: Double = 0
-                let sortedItems = items.sorted { $0.startTime < $1.startTime }
-                let fpCoords = sortedItems.compactMap { item -> CLLocation? in
-                    if case .footprint(let fp) = item {
-                        return CLLocation(latitude: fp.latitude, longitude: fp.longitude)
-                    }
-                    return nil
-                }
+                let fpCoords = footprintSnapshots
+                    .sorted { $0.startTime < $1.startTime }
+                    .map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
                 if fpCoords.count >= 2 {
                     for i in 0..<fpCoords.count - 1 {
                         estimatedDist += fpCoords[i].distance(from: fpCoords[i+1])
@@ -613,14 +654,9 @@ struct TimelinePageView: View {
                 // 如果还没有生成时间线（比如刚进入），先取全局前 10 作为占位
                 finalAssets = Array(filtered.suffix(10))
             } else {
-                for item in items {
-                    if case .footprint(let footprint) = item {
-                        // 仅显示明确关联到该足迹的照片
-                        let linkedIDs = Set(footprint.photoAssetIDs)
-                        let linkedAssets = filtered.filter { linkedIDs.contains($0.localIdentifier) }
-                        finalAssets.append(contentsOf: linkedAssets)
-                    }
-                }
+                // 仅显示明确关联到当天时间线足迹的照片，避免闭包内访问已失效模型。
+                let linkedAssets = filtered.filter { linkedPhotoAssetIDs.contains($0.localIdentifier) }
+                finalAssets.append(contentsOf: linkedAssets)
             }
             
             DispatchQueue.main.async {
@@ -829,12 +865,21 @@ struct TimelinePageView: View {
             let isToday = Calendar.current.isDateInToday(date)
             
             if isToday {
-                // 并行执行耗时操作：仅下载远程数据（不上传本地轨迹） 与 整理本地足迹
-                async let syncTask: () = locationManager.performRawDataSync(onlyRecent: true, skipUpload: true)
+                let cloudChangedKeys = CloudSettingsManager.shared.syncFromCloudNow()
+                if cloudChangedKeys.contains("raw_recording_source_device_id") {
+                    await locationManager.refreshForRecordingDeviceChange()
+                }
+
+                // 手动下拉应先上传本地轨迹，再拉取其他设备更新，保证多设备刷新可见最新足迹。
+                async let syncTask: () = locationManager.performRawDataSync(onlyRecent: true, skipUpload: false)
                 async let siftTask: () = locationManager.triggerTimelineSift()
+                async let cloudSettingsSyncTask: () = {
+                    CloudSettingsManager.shared.manualSyncNow()
+                    CloudSettingsManager.shared.triggerDataSyncPulseManual()
+                }()
                 
                 // 等待两者完成
-                _ = await (syncTask, siftTask)
+                _ = await (syncTask, siftTask, cloudSettingsSyncTask)
             }
             
             // 3. 异步刷新，【强制】触发重新同步构建（保证下拉能拉取最新轨迹并转为足迹）

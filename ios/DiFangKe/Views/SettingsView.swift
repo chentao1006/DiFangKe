@@ -64,15 +64,13 @@ struct SettingsView: View {
                 
                 Toggle("开启 iCloud 同步", isOn: $isICloudSyncEnabled)
                 if isICloudSyncEnabled {
-                    Toggle("以该设备记录为准", isOn: useCurrentDeviceForRawRecordingBinding)
+                    Toggle("以当前设备记录为准", isOn: useCurrentDeviceForRawRecordingBinding)
                 }
                 Toggle("自动关联照片到足迹", isOn: $isAutoPhotoLinkEnabled)
             }
             
-            .onChange(of: rawRecordingSourceDeviceID) { _, _ in
-                Task { @MainActor in
-                    await locationManager.refreshForRecordingDeviceChange()
-                }
+            .task(id: rawRecordingSourceDeviceID) {
+                await locationManager.refreshForRecordingDeviceChange()
             }
             .onChange(of: isICloudSyncEnabled) { _, _ in
                 Task { @MainActor in

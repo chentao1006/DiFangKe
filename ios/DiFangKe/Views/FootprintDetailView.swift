@@ -76,6 +76,8 @@ struct FootprintModalView: View {
             // 注意：幻影足迹的 hash 是带时间戳后缀的 (如 GAP_STAY_12345)，所以必须用 hasPrefix
             if footprint.locationHash.hasPrefix("GAP_STAY") {
                 footprint.locationHash = "MANUAL_STAY"
+            } else if footprint.locationHash == "ONGOING_STAY" {
+                footprint.locationHash = "MANUAL_STAY"
             }
             try? modelContext.save()
         }
@@ -737,7 +739,17 @@ extension FootprintModalView {
             HStack(alignment: .top, spacing: 6) {
                 TextField("输入感悟...", text: Binding(
                     get: { footprint.reason ?? "" },
-                    set: { footprint.reason = $0; footprint.aiAnalyzed = true; hasChanged = true }
+                    set: {
+                        ensureFootprintManaged()
+                        footprint.reason = $0
+                        footprint.aiAnalyzed = true
+                        footprint.status = .manual
+                        if footprint.locationHash == "ONGOING_STAY" {
+                            footprint.locationHash = "MANUAL_STAY"
+                        }
+                        hasChanged = true
+                        if !isDraft { try? modelContext.save() }
+                    }
                 ), axis: Axis.vertical)
                 .font(.body)
                 .foregroundColor(Color.dfkMainText.opacity(0.85))
@@ -1211,7 +1223,7 @@ struct AssetThumbnailView: View {
         .onAppear {
             loadImage()
         }
-        .onChange(of: assetID) { _, _ in
+        .task(id: assetID) {
             loadImage()
         }
     }
@@ -1383,7 +1395,7 @@ struct FullscreenImageItem: View {
         .onAppear {
             loadImage()
         }
-        .onChange(of: assetID) { _, _ in
+        .task(id: assetID) {
             loadImage()
         }
     }

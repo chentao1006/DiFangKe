@@ -104,6 +104,9 @@ struct DFKMapView: View {
 
     @State private var snapshotImage: UIImage?
     @State private var snapshotTask: Task<Void, Never>?
+    @State private var isSnapshotLoading = false
+    @State private var snapshotLoadFailed = false
+    @State private var lastSnapshotSize: CGSize = .zero
 
     @State private var isRequestingWidgetSnapshot = false
     @State private var selectedAggregatedFootprint: AggregatedFootprint?
@@ -344,13 +347,13 @@ struct DFKMapView: View {
                     loadSnapshot(for: geometry.size)
                 }
             }
-            .onChange(of: snapshotCacheKey(for: geometry.size)) { _, _ in
-                if !isInteractive {
-                    loadSnapshot(for: geometry.size, forceWidgetRefresh: true)
-                }
+            .task(id: snapshotCacheKey(for: geometry.size)) {
+                guard !isInteractive else { return }
+                loadSnapshot(for: geometry.size, forceWidgetRefresh: true)
             }
             .onDisappear {
                 snapshotTask?.cancel()
+                isSnapshotLoading = false
             }
         }
     }
@@ -430,12 +433,26 @@ struct DFKMapView: View {
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(Color.secondary.opacity(0.55))
 
-                if hasVisibleContent {
+                if !hasVisibleContent {
+                    Text("暂无地图数据")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else if isSnapshotLoading {
                     ProgressView()
                         .controlSize(.small)
                         .tint(.secondary)
+                } else if snapshotLoadFailed {
+                    VStack(spacing: 6) {
+                        Text("地图加载失败")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Button("重试") {
+                            triggerSnapshotRetry()
+                        }
+                        .font(.caption2)
+                    }
                 } else {
-                    Text("暂无地图数据")
+                    Text("地图暂不可用")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -606,11 +623,15 @@ struct DFKMapView: View {
     private func snapshotCacheKey(for size: CGSize) -> String {
         let footprintKey = timelineItems.compactMap { item -> String? in
             guard case .footprint(let fp) = item else { return nil }
+            let isOngoingStay = fp.locationHash == "ONGOING_STAY"
+            let startTs = Int(fp.startTime.timeIntervalSince1970)
+            // 正在记录的临时停留会随时间跳动 endTime，避免它触发每次快照重建。
+            let endToken = isOngoingStay ? "ongoing" : String(Int(fp.endTime.timeIntervalSince1970))
             return [
                 "f",
                 fp.footprintID.uuidString,
-                String(Int(fp.startTime.timeIntervalSince1970)),
-                String(Int(fp.endTime.timeIntervalSince1970)),
+                String(startTs),
+                endToken,
                 String(format: "%.4f", fp.latitude),
                 String(format: "%.4f", fp.longitude),
                 String(fp.photoAssetIDs.count),
@@ -645,29 +666,75 @@ struct DFKMapView: View {
     }
 
     private func loadSnapshot(for size: CGSize, forceWidgetRefresh: Bool = false) {
+        lastSnapshotSize = size
+
         guard size.width > 1, size.height > 1, hasVisibleContent else {
+            isSnapshotLoading = false
+            snapshotLoadFailed = false
             snapshotImage = nil
             return
         }
 
         guard allowsGeneratedSnapshot else {
             snapshotTask?.cancel()
+            isSnapshotLoading = false
+            snapshotLoadFailed = false
             snapshotImage = nil
             return
         }
 
         let cacheKey = snapshotCacheKey(for: size)
         if let cached = DFKMapSnapshotCache.shared.image(for: cacheKey) {
+            isSnapshotLoading = false
+            snapshotLoadFailed = false
             snapshotImage = cached
             return
         }
 
         snapshotTask?.cancel()
+        isSnapshotLoading = true
+        snapshotLoadFailed = false
+        // 保留上一帧，避免频繁刷新时出现闪白/占位图跳变。
+
         snapshotTask = Task { @MainActor in
-            guard let image = await buildSnapshotImage(size: size) else { return }
+            guard let image = await buildSnapshotImageWithTimeout(size: size, timeoutSeconds: 12) else {
+                if Task.isCancelled { return }
+                isSnapshotLoading = false
+                snapshotLoadFailed = true
+                return
+            }
             if Task.isCancelled { return }
             DFKMapSnapshotCache.shared.setImage(image, for: cacheKey)
             snapshotImage = image
+            isSnapshotLoading = false
+            snapshotLoadFailed = false
+        }
+    }
+
+    private func triggerSnapshotRetry() {
+        snapshotTask?.cancel()
+        snapshotImage = nil
+        isSnapshotLoading = false
+        snapshotLoadFailed = false
+        if lastSnapshotSize.width > 1, lastSnapshotSize.height > 1 {
+            loadSnapshot(for: lastSnapshotSize, forceWidgetRefresh: true)
+        }
+    }
+
+    private func buildSnapshotImageWithTimeout(size: CGSize, timeoutSeconds: UInt64) async -> UIImage? {
+        await withTaskGroup(of: UIImage?.self) { group in
+            group.addTask {
+                await buildSnapshotImage(size: size)
+            }
+
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
+                return nil
+            }
+
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
         }
     }
 

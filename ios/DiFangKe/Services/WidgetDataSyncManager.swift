@@ -239,7 +239,7 @@ final class WidgetDataSyncManager {
             let aggregatedFootprints = aggregatedFootprints(from: footprints)
             let footprintPhotoImages = await loadAggregatedFootprintPhotoImages(aggregatedFootprints, targetSide: 88)
             
-            let defaults = UserDefaults(suiteName: groupID)
+            let defaults = sharedDefaults()
             let lastLat = defaults?.double(forKey: "lastLat") ?? 39.9042
             let lastLon = defaults?.double(forKey: "lastLon") ?? 116.4074
             
@@ -395,7 +395,6 @@ final class WidgetDataSyncManager {
             // 更新元数据
             defaults?.set(footprints.count, forKey: "widgetCount_\(offset)")
             defaults?.set(Date().timeIntervalSince1970, forKey: "widgetUpdate_\(offset)")
-            defaults?.synchronize()
             
         } catch {
             print("[WidgetSync] Sync error for offset \(offset): \(error)")
@@ -407,6 +406,14 @@ final class WidgetDataSyncManager {
         let containerURL = manager.containerURL(forSecurityApplicationGroupIdentifier: groupID)
         let fileName = "widget_snapshot_\(sizeName)_\(themeName)_\(offset)_\(Self.snapshotFileVersion).jpg"
         return containerURL!.appendingPathComponent(fileName)
+    }
+
+    private func sharedDefaults() -> UserDefaults? {
+#if targetEnvironment(simulator)
+        return .standard
+#else
+        return UserDefaults(suiteName: groupID) ?? .standard
+#endif
     }
 }
 
