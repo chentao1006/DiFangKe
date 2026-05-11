@@ -43,6 +43,7 @@ struct DayTimelineView: View {
     @State private var jumpToTodayHapticTask: Task<Void, Never>?
     @State private var longPressPreviewDate: Date?
     @State private var longPressStartDate: Date?
+    @State private var navigatingToPlacesManager = false
     
 
     init(selectedDate: Date = Calendar.current.startOfDay(for: Date())) {
@@ -110,6 +111,12 @@ struct DayTimelineView: View {
                 Button("取消", role: .cancel) { }
             } message: {
                 Text("这将删除已手动修正或确认的足迹记录，并基于原始轨迹点重新分析生成时间线。")
+            }
+            .navigationDestination(isPresented: $navigatingToPlacesManager) {
+                PlacesManagerView(startInAddMode: true)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToImportantPlaces"))) { _ in
+                navigatingToPlacesManager = true
             }
         }
     }

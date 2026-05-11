@@ -386,9 +386,7 @@ struct TimelinePageView: View {
             }
             
             if allPlaces.isEmpty && !isGuideDismissed {
-                ImportantPlaceGuide(isGuideDismissed: $isGuideDismissed) {
-                    showingAddPlaceSheet = true
-                }
+                ImportantPlaceGuide(isGuideDismissed: $isGuideDismissed)
                 .padding(.top, 20)
                 .padding(.bottom, 20)
             }

@@ -841,6 +841,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var syncStatusMessage: String = ""
     var syncProgress: Double = 0.0
     var isResettingData: Bool = false
+    var rebuildProgress: Double = 0
+    var isRebuildingAll: Bool = false
+    private var rebuildTask: Task<Void, Never>? = nil
     
     // 从 View 同步过来的参数
     var allPlaces: [Place] = []
@@ -2810,6 +2813,77 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         simplified.append(coords.last!)
         return simplified
+    }
+
+    /// 重建所有有轨迹日期的足迹数据
+    @MainActor
+    func rebuildAllData() {
+        guard let context = modelContext else { return }
+        let dates = availableRawDates.sorted(by: <)
+        guard !dates.isEmpty else { return }
+        
+        rebuildTask?.cancel()
+        isRebuildingAll = true
+        rebuildProgress = 0
+        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+        
+        rebuildTask = Task {
+            let total = Double(dates.count)
+            var current = 0.0
+            
+            for date in dates {
+                if Task.isCancelled { break }
+                
+                let startOfDay = Calendar.current.startOfDay(for: date)
+                let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
+                
+                // 清理当天缓存
+                TimelineBuilder.timelineCache.removeValue(forKey: startOfDay)
+                
+                // 物理清空当天所有相关记录（保留照片足迹）
+                let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
+                    $0.startTime >= startOfDay && $0.startTime < endOfDay
+                })
+                let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                    $0.startTime >= startOfDay && $0.startTime < endOfDay
+                })
+                let insightDesc = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDay })
+                
+                if let fps = try? context.fetch(fpDesc) {
+                    for fp in fps {
+                        if fp.photoAssetIDs.isEmpty { context.delete(fp) }
+                    }
+                }
+                if let tps = try? context.fetch(tpDesc) { for tp in tps { context.delete(tp) } }
+                if let insights = try? context.fetch(insightDesc) { for i in insights { context.delete(i) } }
+                
+                try? context.save()
+                
+                // 调用新引擎重新构建
+                await PersistentTimelineBuilder.syncDay(date: date, in: context)
+                
+                current += 1
+                let p = current / total
+                await MainActor.run {
+                    self.rebuildProgress = p
+                }
+            }
+            
+            await MainActor.run {
+                self.isRebuildingAll = false
+                self.rebuildProgress = 1.0
+                self.lastRawDataUpdateTrigger = Date()
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            }
+        }
+    }
+    
+    @MainActor
+    func cancelRebuild() {
+        rebuildTask?.cancel()
+        rebuildTask = nil
+        isRebuildingAll = false
+        rebuildProgress = 0
     }
 
     /// 计算路径总长度 (所有点之间的距离之和)

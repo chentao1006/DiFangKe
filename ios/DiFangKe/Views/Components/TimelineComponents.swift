@@ -309,6 +309,8 @@ struct RecordingStatusCard: View {
     var photoAssets: [PHAsset] = []
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var showingGuide = false
+    @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
     
     private var displayTitle: String {
         let isStopped = !locationManager.isTracking
@@ -397,9 +399,18 @@ struct RecordingStatusCard: View {
                     // Duration/Status Section
                     HStack(spacing: 4) {
                         if !locationManager.isTracking {
-                            Text("点击开启或查看说明")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundColor(.orange.opacity(0.8))
+                            Button {
+                                if !isTrackingEnabled {
+                                    isTrackingEnabled = true
+                                    locationManager.startTracking()
+                                }
+                                showingGuide = true
+                            } label: {
+                                Text("点击开启位置记录")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(.orange.opacity(0.8))
+                            }
+                            .buttonStyle(.plain)
                         } else if let durationStr = locationManager.stayDuration {
                             Text("已停留 \(durationStr)")
                                 .font(.system(size: 14))
@@ -471,6 +482,9 @@ struct RecordingStatusCard: View {
                 photoAssets: photoAssets,
                 showsUserLocation: true
             )
+        }
+        .sheet(isPresented: $showingGuide) {
+            TrackingGuideView()
         }
     }
     
@@ -932,7 +946,6 @@ struct PlaceholderFootprintCard: View {
 // MARK: - Guides
 struct ImportantPlaceGuide: View {
     @Binding var isGuideDismissed: Bool
-    let onAddAction: () -> Void
     
     var body: some View {
         HStack(spacing: 14) {
@@ -950,7 +963,7 @@ struct ImportantPlaceGuide: View {
             
             HStack(spacing: 12) {
                 Button("立即添加") {
-                    onAddAction()
+                    NotificationCenter.default.post(name: NSNotification.Name("NavigateToImportantPlaces"), object: nil)
                 }
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.orange)
@@ -1071,5 +1084,85 @@ struct BreathingOpacityModifier: ViewModifier {
 extension View {
     func breathing(isActive: Bool) -> some View {
         self.modifier(BreathingOpacityModifier(isActive: isActive))
+    }
+}
+
+// MARK: - Tracking Guide View
+struct TrackingGuideView: View {
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("如何确保记录成功？")
+                            .font(.system(.title2, design: .rounded, weight: .bold))
+                        Text("地方客通过系统后台服务记录您的足迹，为了保证记录的连续性，请检查以下设置：")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.top, 10)
+                    
+                    GuideItem(icon: "location.fill", color: .blue, title: "定位权限", description: "请确保定位权限设置为「始终」，否则在 App 退出后台后将无法记录。")
+                    
+                    GuideItem(icon: "scope", color: .orange, title: "精确位置", description: "开启「精确位置」开关，以获得更准确的停留点识别和路径。")
+                    
+                    GuideItem(icon: "arrow.clockwise", color: .green, title: "后台 App 刷新", description: "在系统设置中允许「后台 App 刷新」，确保应用能及时处理定位更新。")
+                    
+                    GuideItem(icon: "battery.100", color: .yellow, title: "电池优化", description: "请勿将应用设置为「低电量模式」，这可能会限制后台定位频率。")
+                    
+                    Spacer(minLength: 40)
+                    
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        Text("前往系统设置")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.dfkAccent)
+                            .cornerRadius(14)
+                    }
+                }
+                .padding(24)
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+struct GuideItem: View {
+    let icon: String
+    let color: Color
+    let title: String
+    let description: String
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 20))
+                .foregroundColor(.white)
+                .frame(width: 44, height: 44)
+                .background(color)
+                .cornerRadius(12)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                Text(description)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }

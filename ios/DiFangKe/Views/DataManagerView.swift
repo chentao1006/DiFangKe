@@ -20,6 +20,8 @@ struct DataManagerView: View {
     @State private var alertMessage = ""
     @State private var showAlert = false
     @State private var isExporting = false
+    @State private var showRebuildAllAlert = false
+    @State private var isRebuildingAll = false
     
     var body: some View {
         ZStack {
@@ -39,6 +41,44 @@ struct DataManagerView: View {
                 .padding(30)
                 .background(RoundedRectangle(cornerRadius: 16).fill(Color(uiColor: .systemBackground).opacity(0.8)))
                 .shadow(radius: 10)
+            }
+            
+            if locationManager.isRebuildingAll {
+                Color.black.opacity(0.4)
+                    .ignoresSafeArea()
+                
+                VStack(spacing: 24) {
+                    ProgressView(value: locationManager.rebuildProgress, total: 1.0)
+                        .progressViewStyle(.linear)
+                        .tint(.orange)
+                        .frame(width: 240)
+                        .scaleEffect(x: 1, y: 1.5, anchor: .center)
+                    
+                    VStack(spacing: 8) {
+                        Text("正在重建时间轴...")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        Text("\(Int(locationManager.rebuildProgress * 100))%")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                    
+                    Button {
+                        locationManager.cancelRebuild()
+                    } label: {
+                        Text("取消重建")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 8)
+                            .background(Capsule().stroke(Color.white, lineWidth: 1))
+                    }
+                }
+                .padding(32)
+                .background(.ultraThinMaterial)
+                .cornerRadius(28)
+                .shadow(radius: 20)
+                .transition(.opacity.combined(with: .scale))
             }
         }
     }
@@ -79,20 +119,33 @@ struct DataManagerView: View {
                 }
             }
             
-            Section(header: Text("危险操作"), footer: Text("彻底清空所有产生的足迹和自定义地点。")) {
+            Section(header: Text("危险操作")) {
+                Button(role: .destructive, action: {
+                    showRebuildAllAlert = true
+                }) {
+                    Label("重建所有时间轴", systemImage: "arrow.counterclockwise.circle")
+                }
+                .alert("确认重建", isPresented: $showRebuildAllAlert) {
+                    Button("开始重建", role: .destructive) { rebuildAllTimelines() }
+                    Button("取消", role: .cancel) { }
+                } message: {
+                    Text("这将基于所有原始轨迹点重新生成全量时间线。您手动修正过的地点或交通方式将被覆盖，此过程可能需要较长时间。")
+                }
+
                 Button(role: .destructive, action: {
                     showDeleteAlert = true
                 }) {
-                    Text("清空所有数据")
+                    Label("清空本地数据", systemImage: "trash")
                 }
-                .alert("确认删除", isPresented: $showDeleteAlert) {
-                    Button("删除", role: .destructive) { deleteAllData() }
+                .alert("确认清空", isPresented: $showDeleteAlert) {
+                    Button("立即清空", role: .destructive) { deleteAllData() }
                     Button("取消", role: .cancel) { }
                 } message: {
-                    Text("这将删除所有本地的足迹数据，操作不可逆！")
+                    Text("仅清空此设备上的本地足迹、地点及配置。\n\n⚠️ 注意：由于 iCloud 开启了实时同步，本地删除操作通常会被同步到云端。如果您仅希望重置本设备而不影响其他设备，请先在‘设置-数据同步’中关闭 iCloud 同步，执行清空后再重新开启（此时会从云端重新拉取数据）。")
                 }
             }
         }
+        .disabled(isExporting || locationManager.isRebuildingAll)
         .navigationTitle("数据操作")
         .sheet(isPresented: $showingShareSheet) {
             if let url = exportURL {
@@ -182,24 +235,36 @@ struct DataManagerView: View {
     }
     
     private func deleteAllData() {
+        // 按照用户要求：自动关闭同步开关以确保“仅清空本地”
+        UserDefaults.standard.set(false, forKey: "isICloudSyncEnabled")
+        // 同步刷新设置状态
+        CloudSettingsManager.shared.startSyncing() 
+
         do {
+            // 注意：SwiftData + CloudKit 模式下，即便关闭了开关，当前运行中的 Container 可能仍持有云端连接。
+            // 这里的操作通过禁用开关并清空本地模型来最大程度保证本地重置。
             try modelContext.delete(model: Footprint.self)
             try modelContext.delete(model: Place.self)
             try modelContext.delete(model: ActivityType.self)
             try modelContext.delete(model: TransportRecord.self)
+            try modelContext.delete(model: DailyInsight.self)
             
             try modelContext.save()
-            CloudSettingsManager.shared.triggerDataSyncPulse()
+            
             locationManager.allTodayPoints = []
             
-            self.alertTitle = "数据清空"
-            self.alertMessage = "所有数据已彻底清空。"
+            self.alertTitle = "本地重置成功"
+            self.alertMessage = "iCloud 同步已自动关闭，且所有本地数据已清空。如果您想从云端恢复数据，请在设置中重新开启同步。"
             self.showAlert = true
         } catch {
             self.alertTitle = "操作失败"
             self.alertMessage = error.localizedDescription
             self.showAlert = true
         }
+    }
+    
+    private func rebuildAllTimelines() {
+        locationManager.rebuildAllData()
     }
 }
 
