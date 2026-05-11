@@ -15,7 +15,6 @@ class CloudSettingsManager: ObservableObject {
         "isICloudSyncEnabled",
         "isAutoPhotoLinkEnabled",
         "hasSeenPhotoPermissionGuide",
-        "isTrackingEnabled",
         "raw_recording_source_device_id",
         "dataSyncPulse",
         "customAiUrl",
