@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import CoreData
 import Photos
+import BackgroundTasks
 import PhotosUI
 import WidgetKit
 
@@ -17,13 +18,100 @@ extension Color {
 }
 
 class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    
+    /// BGAppRefreshTask 标识符，必须与 Info.plist 中的 BGTaskSchedulerPermittedIdentifiers 一致
+    static let bgRefreshTaskID = "com.ct106.difangke.locationKeepAlive"
+    
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
         // 注册远程通知是激活 iCloud 实时同步的关键，它能让设备及时收到云端的变更推送
         application.registerForRemoteNotifications()
         
         // 设置通知代理以响应通知点击
         UNUserNotificationCenter.current().delegate = self
+        
+        // ── 核心修复：无论前台还是后台启动，都立即激活 Significant Location Monitoring ──
+        // 这是 iOS 唯一可以在 App 被系统杀死后自动重新启动的机制之一。
+        // 必须在 didFinishLaunching 中调用，否则系统杀掉进程后不会因位置变化重新拉起。
+        let isTrackingEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
+        if isTrackingEnabled {
+            // 提前触发 LocationManager 单例初始化（内部会配置 CLLocationManager 并开启 Visit 监听）
+            let _ = LocationManager.shared
+            // 确保 Significant Location Changes 独立于 startTracking() 存在
+            LocationManager.shared.ensureSignificantMonitoringActive()
+            print("[AppDelegate] Significant location monitoring activated at launch.")
+        }
+        
+        // ── 检测是否为系统因位置变化而重新启动的后台启动 ──
+        if let _ = launchOptions?[.location] {
+            print("[AppDelegate] ⚡ App relaunched by system due to location change!")
+            // 强制启动完整追踪（包括 startUpdatingLocation、Region Monitoring 等）
+            if isTrackingEnabled {
+                LocationManager.shared.startTracking()
+            }
+        }
+        
+        // ── 注册 BGAppRefreshTask：定期唤醒以确保定位服务不被系统回收 ──
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.bgRefreshTaskID, using: nil) { task in
+            self.handleBackgroundRefresh(task: task as! BGAppRefreshTask)
+        }
+        scheduleBackgroundRefresh()
+        
         return true
+    }
+    
+    // MARK: - BGAppRefreshTask 处理
+    
+    /// 调度下一次后台刷新（系统会在适当时机唤醒，通常 15 分钟 ~ 数小时不等）
+    func scheduleBackgroundRefresh() {
+        let request = BGAppRefreshTaskRequest(identifier: Self.bgRefreshTaskID)
+        // 请求最早 15 分钟后执行（系统会根据用户使用模式智能调度）
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            print("[AppDelegate] BGAppRefreshTask scheduled successfully.")
+        } catch {
+            print("[AppDelegate] Failed to schedule BGAppRefreshTask: \(error)")
+        }
+    }
+    
+    /// 后台刷新任务执行体：确认定位服务仍在运行，并重新调度下一次刷新
+    private func handleBackgroundRefresh(task: BGAppRefreshTask) {
+        print("[AppDelegate] ⏰ BGAppRefreshTask fired!")
+        
+        // 立即调度下一次，保持周期性唤醒
+        scheduleBackgroundRefresh()
+        
+        task.expirationHandler = {
+            print("[AppDelegate] BGAppRefreshTask expired.")
+        }
+        
+        let isTrackingEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
+        if isTrackingEnabled {
+            Task { @MainActor in
+                // 确保定位服务仍然活跃
+                LocationManager.shared.ensureSignificantMonitoringActive()
+                
+                // 如果定位更新已停止（系统可能在极端内存压力下停止），重新启动
+                if !LocationManager.shared.isTracking {
+                    print("[AppDelegate] Tracking was stopped, restarting...")
+                    LocationManager.shared.startTracking()
+                }
+                
+                // 请求一次精确定位，让系统知道我们仍需要位置服务
+                LocationManager.shared.requestSingleLocation()
+                
+                task.setTaskCompleted(success: true)
+            }
+        } else {
+            task.setTaskCompleted(success: true)
+        }
+    }
+    
+    // MARK: - 应用生命周期
+    
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        // 每次进入后台时重新调度后台刷新任务
+        scheduleBackgroundRefresh()
     }
     
     // 处理用户点击通知进入 App 的行为
@@ -121,6 +209,8 @@ struct DiFangKeApp: App {
                             await WidgetDataSyncManager.shared.syncAll()
                         }
                     }
+                    // 进入后台时重新调度 BGAppRefreshTask
+                    (UIApplication.shared.delegate as? AppDelegate)?.scheduleBackgroundRefresh()
                 }
             }
             .task {

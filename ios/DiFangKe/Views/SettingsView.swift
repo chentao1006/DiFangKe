@@ -210,10 +210,12 @@ struct SettingsView: View {
         .tint(.dfkAccent)
         .onAppear {
             NotificationManager.shared.getAuthorizationStatus { status in
-                if status != .authorized && status != .provisional && status != .ephemeral {
-                    // 如果系统没有授权通知，则内部状态应强制关闭，便于用户手动开启来触发权限申请
+                if status == .denied {
+                    // 仅在系统权限明确被拒绝时，才同步将内部开关关闭
+                    // 避免在 .notDetermined (尚未询问) 状态下误将用户默认开启的选项重置为关闭
                     isDailyNotificationEnabled = false
                     isHighlightNotificationEnabled = false
+                    isPastMemoriesNotificationEnabled = false
                 }
             }
         }

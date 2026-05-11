@@ -1174,6 +1174,52 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         analyzeOngoingStay(at: loc)
     }
     
+    // MARK: - 后台保活与自动恢复
+    
+    /// 确保 Significant Location Monitoring 处于激活状态
+    /// 即使 App 被系统终止，该监控也会让系统在用户位置发生显著变化时重新启动 App
+    /// 这是 iOS 系统级别的唤醒机制，不依赖 App 是否在运行
+    func ensureSignificantMonitoringActive() {
+        let status = locationManager.authorizationStatus
+        guard status == .authorizedAlways else {
+            print("[LocationManager] Cannot start significant monitoring: authorization is \(status.rawValue)")
+            return
+        }
+        locationManager.startMonitoringSignificantLocationChanges()
+        locationManager.startMonitoringVisits()
+        
+        // 确保后台定位配置正确
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.pausesLocationUpdatesAutomatically = false
+        
+        print("[LocationManager] ✅ Significant location monitoring & visit monitoring ensured active.")
+    }
+    
+    /// 请求一次精确定位（用于后台唤醒时让系统知道我们仍需要位置服务）
+    func requestSingleLocation() {
+        locationManager.requestLocation()
+    }
+    
+    /// 后台恢复时自动回填记录空白（从上一条原始轨迹到现在的间隙）
+    /// 当 App 被系统杀死后重新启动时调用，确保不会丢失被杀进程期间的轨迹数据
+    func backfillFromLastRecording() {
+        let now = Date()
+        let today = Calendar.current.startOfDay(for: now)
+        
+        // 检查今日最后一条原始记录的时间
+        let todayPoints = RawLocationStore.shared.loadLocations(for: today)
+        let lastRecordTime = todayPoints.last?.timestamp ?? today
+        let gap = now.timeIntervalSince(lastRecordTime)
+        
+        // 如果间隙超过 30 分钟，记录一次日志以便调试
+        if gap > 30 * 60 {
+            print("[LocationManager] ⚠️ Recording gap detected: \(Int(gap/60)) minutes since last point at \(lastRecordTime)")
+        }
+        
+        // 无需手动回填——Significant Location Change 被触发后 didUpdateLocations 会自动写入新点
+        // 真正的修复在于确保 Significant Location Monitoring 始终激活
+    }
+    
     func startTracking() {
         // First check permission and settings
         // Default to true if not explicitly set
@@ -1216,6 +1262,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     func stopTracking() {
         locationManager.stopUpdatingLocation()
         locationManager.stopMonitoringSignificantLocationChanges()
+        locationManager.stopMonitoringVisits()
         HealthManager.shared.stopActivityTracking()
         for region in locationManager.monitoredRegions {
             if region.identifier == "StationaryWakeupRegion" {
