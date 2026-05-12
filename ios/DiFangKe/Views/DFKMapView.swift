@@ -3,22 +3,73 @@ import MapKit
 import SwiftData
 import Photos
 import UIKit
+import CryptoKit
 
 @MainActor
-private final class DFKMapSnapshotCache {
+final class DFKMapSnapshotCache {
     static let shared = DFKMapSnapshotCache()
-    private let cache = NSCache<NSString, UIImage>()
+    private let memoryCache = NSCache<NSString, UIImage>()
+    private let fileManager = FileManager.default
+    private let cacheDirectory: URL
 
     private init() {
-        cache.countLimit = 24
+        memoryCache.countLimit = 24
+        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        cacheDirectory = caches.appendingPathComponent("DFKMapSnapshots", isDirectory: true)
+        if !fileManager.fileExists(atPath: cacheDirectory.path) {
+            try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        }
+    }
+
+    private func cacheURL(for key: String) -> URL {
+        let data = Data(key.utf8)
+        let hash = SHA256.hash(data: data)
+        let filename = hash.compactMap { String(format: "%02x", $0) }.joined()
+        return cacheDirectory.appendingPathComponent(filename + ".png")
     }
 
     func image(for key: String) -> UIImage? {
-        cache.object(forKey: key as NSString)
+        if let memoryImage = memoryCache.object(forKey: key as NSString) {
+            return memoryImage
+        }
+        
+        let url = cacheURL(for: key)
+        if let data = try? Data(contentsOf: url), let diskImage = UIImage(data: data) {
+            memoryCache.setObject(diskImage, forKey: key as NSString)
+            return diskImage
+        }
+        
+        return nil
     }
 
     func setImage(_ image: UIImage, for key: String) {
-        cache.setObject(image, forKey: key as NSString)
+        memoryCache.setObject(image, forKey: key as NSString)
+        
+        let url = cacheURL(for: key)
+        Task.detached(priority: .background) {
+            if let data = image.pngData() {
+                try? data.write(to: url)
+            }
+        }
+    }
+
+    func calculateCacheSize() -> Int64 {
+        let files = (try? fileManager.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        var totalSize: Int64 = 0
+        for file in files {
+            if let attrs = try? file.resourceValues(forKeys: [.fileSizeKey]), let size = attrs.fileSize {
+                totalSize += Int64(size)
+            }
+        }
+        return totalSize
+    }
+
+    func clearCache() {
+        memoryCache.removeAllObjects()
+        let files = (try? fileManager.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil)) ?? []
+        for file in files {
+            try? fileManager.removeItem(at: file)
+        }
     }
 }
 
@@ -203,7 +254,7 @@ struct DFKMapView: View {
     }
 
     private func markerSize(for duration: TimeInterval) -> CGFloat {
-        let baseSize: CGFloat = 28
+        let baseSize: CGFloat = isInteractive ? 34 : 28
         return baseSize * calculateScale(for: duration)
     }
 
@@ -316,7 +367,7 @@ struct DFKMapView: View {
                                 Annotation(mainAnnotationTitle ?? "", coordinate: coordinate) {
                                     Circle()
                                         .fill(Color.dfkAccent)
-                                        .frame(width: 14, height: 14)
+                                        .frame(width: isInteractive ? 18 : 14, height: isInteractive ? 18 : 14)
                                         .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
                                 }
                             }
@@ -349,7 +400,7 @@ struct DFKMapView: View {
             }
             .task(id: snapshotCacheKey(for: geometry.size)) {
                 guard !isInteractive else { return }
-                loadSnapshot(for: geometry.size, forceWidgetRefresh: true)
+                loadSnapshot(for: geometry.size, forceWidgetRefresh: false)
             }
             .onDisappear {
                 snapshotTask?.cancel()
@@ -469,12 +520,12 @@ struct DFKMapView: View {
         let activity = fp.getActivityType(from: allActivities)
         let activityColor = activity?.color ?? Color.secondary.opacity(0.5)
         let iconName = activity?.icon ?? "questionmark.circle.dashed"
-        let iconSize: CGFloat = (activity?.icon == nil ? 18 : 13) * scale
+        let iconSize: CGFloat = (activity?.icon == nil ? 22 : 16) * scale
 
         return ZStack {
             // 根据 prefersActivityIcons 决定显示活动图标还是照片封面
             if !prefersActivityIcons, let latestPhotoAssetID = latestPhotoAssetID(for: aggregated) {
-                AssetThumbnailView(assetID: latestPhotoAssetID)
+                AssetThumbnailView(assetID: latestPhotoAssetID, showsTime: false)
                     .frame(width: size, height: size)
                     .clipShape(RoundedRectangle(cornerRadius: 8 * scale, style: .continuous))
                     .overlay(
@@ -499,13 +550,13 @@ struct DFKMapView: View {
 
     private func transportAnnotationContent(for transport: Transport) -> some View {
         let transportIcon = ZStack {
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: isInteractive ? 8 : 6)
                 .fill(Color.dfkAccent)
-                .frame(width: 20, height: 20)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(uiColor: .systemBackground), lineWidth: 1.2))
+                .frame(width: isInteractive ? 28 : 20, height: isInteractive ? 28 : 20)
+                .overlay(RoundedRectangle(cornerRadius: isInteractive ? 8 : 6).stroke(Color(uiColor: .systemBackground), lineWidth: 1.2))
 
             Image(systemName: transport.currentType.sfSymbol)
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: isInteractive ? 14 : 10, weight: .bold))
                 .foregroundColor(Color(uiColor: .systemBackground))
         }
         .contentShape(RoundedRectangle(cornerRadius: 6))
@@ -528,15 +579,17 @@ struct DFKMapView: View {
         let foregroundLineWidth: CGFloat = isInteractive ? 5 : 3
 
         ForEach(transportItems) { transport in
-            MapPolyline(coordinates: transport.points)
+            let smoothedPoints = transport.points.smoothed()
+            
+            MapPolyline(coordinates: smoothedPoints)
                 .stroke(
                     Color(uiColor: .systemBackground),
                     style: StrokeStyle(lineWidth: backgroundLineWidth, lineCap: .round, lineJoin: .round)
                 )
 
-            MapPolyline(coordinates: transport.points)
+            MapPolyline(coordinates: smoothedPoints)
                 .stroke(
-                    Color.dfkAccent,
+                    Color.dfkAccent.opacity(0.7),
                     style: StrokeStyle(lineWidth: foregroundLineWidth, lineCap: .round, lineJoin: .round)
                 )
 
@@ -584,9 +637,9 @@ struct DFKMapView: View {
             }
         }()
 
-        let baseSize: CGFloat = isInteractive ? 24 : 14
-        let multiplier: CGFloat = isInteractive ? 6 : 3
-        let maxSize: CGFloat = isInteractive ? 60 : 30
+        let baseSize: CGFloat = isInteractive ? 30 : 14
+        let multiplier: CGFloat = isInteractive ? 8 : 3
+        let maxSize: CGFloat = isInteractive ? 80 : 30
         let size = CGFloat(max(baseSize, min(maxSize, CGFloat(point.intensity) * multiplier)))
 
         return Circle()
@@ -602,10 +655,10 @@ struct DFKMapView: View {
     }
 
     private func photoAnnotationContent(for asset: PHAsset) -> some View {
-        let content = AssetThumbnailView(assetID: asset.localIdentifier)
-            .frame(width: 46, height: 46)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(uiColor: .systemBackground), lineWidth: 1.5))
+        let content = AssetThumbnailView(assetID: asset.localIdentifier, showsTime: false)
+            .frame(width: isInteractive ? 60 : 46, height: isInteractive ? 60 : 46)
+            .clipShape(RoundedRectangle(cornerRadius: isInteractive ? 8 : 6))
+            .overlay(RoundedRectangle(cornerRadius: isInteractive ? 8 : 6).stroke(Color(uiColor: .systemBackground), lineWidth: 1.5))
             .contentShape(Rectangle())
 
         if let onPhotoTap {
@@ -684,7 +737,7 @@ struct DFKMapView: View {
         }
 
         let cacheKey = snapshotCacheKey(for: size)
-        if let cached = DFKMapSnapshotCache.shared.image(for: cacheKey) {
+        if !forceWidgetRefresh, let cached = DFKMapSnapshotCache.shared.image(for: cacheKey) {
             isSnapshotLoading = false
             snapshotLoadFailed = false
             snapshotImage = cached
@@ -785,11 +838,28 @@ struct DFKMapView: View {
                 let projected = transport.points.map { snapshot.point(for: $0) }
 
                 ctx.cgContext.beginPath()
-                ctx.cgContext.move(to: projected[0])
-                for point in projected.dropFirst() {
-                    ctx.cgContext.addLine(to: point)
+                if projected.count == 2 {
+                    ctx.cgContext.move(to: projected[0])
+                    ctx.cgContext.addLine(to: projected[1])
+                } else if projected.count > 2 {
+                    // 使用二次贝塞尔曲线平滑处理：以线段中点为目标点，原有点为控制点
+                    ctx.cgContext.move(to: projected[0])
+                    
+                    // 第一个点到第二个点中点
+                    let firstMid = CGPoint(x: (projected[0].x + projected[1].x) / 2, y: (projected[0].y + projected[1].y) / 2)
+                    ctx.cgContext.addLine(to: firstMid)
+                    
+                    for i in 1..<projected.count - 1 {
+                        let p0 = projected[i]
+                        let p1 = projected[i+1]
+                        let mid = CGPoint(x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2)
+                        ctx.cgContext.addQuadCurve(to: mid, control: p0)
+                    }
+                    
+                    ctx.cgContext.addLine(to: projected.last!)
                 }
-                ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(0.85).cgColor)
+                
+                ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(0.65).cgColor)
                 ctx.cgContext.setLineWidth(4)
                 ctx.cgContext.strokePath()
 
@@ -804,7 +874,7 @@ struct DFKMapView: View {
                     path.stroke()
 
                     if let iconImage = UIImage(systemName: transport.currentType.sfSymbol) {
-                        iconImage.withTintColor(strokeColor).draw(in: CGRect(x: midPoint.x - 6, y: midPoint.y - 6, width: 12, height: 12))
+                        drawImageAspectFit(iconImage.withTintColor(strokeColor), in: CGRect(x: midPoint.x - 6, y: midPoint.y - 6, width: 12, height: 12))
                     }
                 }
             }
@@ -842,7 +912,7 @@ struct DFKMapView: View {
                     ctx.cgContext.strokeEllipse(in: rect)
                     if let iconImage = UIImage(systemName: iconName) {
                         let iconSize = markerSize * 0.55
-                        iconImage.withTintColor(strokeColor).draw(in: CGRect(x: point.x - iconSize / 2, y: point.y - iconSize / 2, width: iconSize, height: iconSize))
+                        drawImageAspectFit(iconImage.withTintColor(strokeColor), in: CGRect(x: point.x - iconSize / 2, y: point.y - iconSize / 2, width: iconSize, height: iconSize))
                     }
                 }
             }
@@ -905,17 +975,28 @@ struct DFKMapView: View {
     private func drawImageAspectFill(_ image: UIImage, in rect: CGRect) {
         let imageAspect = image.size.width / image.size.height
         let rectAspect = rect.width / rect.height
-        
         var drawRect = rect
+
         if imageAspect > rectAspect {
-            let newWidth = rect.height * imageAspect
-            drawRect = CGRect(x: rect.midX - newWidth / 2, y: rect.origin.y, width: newWidth, height: rect.height)
+            drawRect.size.width = rect.height * imageAspect
+            drawRect.origin.x = rect.midX - drawRect.width / 2
         } else {
-            let newHeight = rect.width / imageAspect
-            drawRect = CGRect(x: rect.origin.x, y: rect.midY - newHeight / 2, width: rect.width, height: newHeight)
+            drawRect.size.height = rect.width / imageAspect
+            drawRect.origin.y = rect.midY - drawRect.height / 2
         }
-        
         image.draw(in: drawRect)
+    }
+
+    private func drawImageAspectFit(_ image: UIImage, in rect: CGRect) {
+        let imageSize = image.size
+        let aspectWidth = rect.width / imageSize.width
+        let aspectHeight = rect.height / imageSize.height
+        let aspectRatio = min(aspectWidth, aspectHeight)
+
+        let newSize = CGSize(width: imageSize.width * aspectRatio, height: imageSize.height * aspectRatio)
+        let newOrigin = CGPoint(x: rect.origin.x + (rect.width - newSize.width) / 2, y: rect.origin.y + (rect.height - newSize.height) / 2)
+
+        image.draw(in: CGRect(origin: newOrigin, size: newSize))
     }
 
     private func snapshotRegion(for size: CGSize) -> MKCoordinateRegion? {
@@ -1605,7 +1686,56 @@ extension Array where Element == CLLocationCoordinate2D {
     }
 }
 
-private extension CLLocationCoordinate2D {
+extension Array where Element == CLLocationCoordinate2D {
+    /// 使用 Catmull-Rom 插值算法对坐标点进行平滑处理，使其呈现出优雅的曲线感
+    func smoothed(granularity: Int = 10) -> [CLLocationCoordinate2D] {
+        guard count >= 3 else { return self }
+        
+        var result: [CLLocationCoordinate2D] = []
+        
+        // 预处理：过滤掉极近的点，避免插值抖动
+        var filtered: [CLLocationCoordinate2D] = [self[0]]
+        for i in 1..<count {
+            let p1 = filtered.last!
+            let p2 = self[i]
+            let dist = sqrt(pow(p2.latitude - p1.latitude, 2) + pow(p2.longitude - p1.longitude, 2))
+            if dist > 0.00001 { // 约 1 米
+                filtered.append(p2)
+            }
+        }
+        
+        guard filtered.count >= 3 else { return self }
+        
+        for i in 0..<filtered.count - 1 {
+            let p0 = filtered[Swift.max(i - 1, 0)]
+            let p1 = filtered[i]
+            let p2 = filtered[i + 1]
+            let p3 = filtered[Swift.min(i + 2, filtered.count - 1)]
+            
+            for t in 0..<granularity {
+                let s = Double(t) / Double(granularity)
+                let lat = catmullRom(p0.latitude, p1.latitude, p2.latitude, p3.latitude, t: s)
+                let lon = catmullRom(p0.longitude, p1.longitude, p2.longitude, p3.longitude, t: s)
+                result.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
+            }
+        }
+        result.append(filtered.last!)
+        return result
+    }
+    
+    private func catmullRom(_ p0: Double, _ p1: Double, _ p2: Double, _ p3: Double, t: Double) -> Double {
+        let t2 = t * t
+        let t3 = t2 * t
+        return 0.5 * (
+            (2 * p1) +
+            (-p0 + p2) * t +
+            (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+            (-p0 + 3 * p1 - 3 * p2 + p3) * t3
+        )
+    }
+}
+
+extension CLLocationCoordinate2D {
     var isRenderableMapCoordinate: Bool {
         latitude.isFinite && longitude.isFinite && CLLocationCoordinate2DIsValid(self)
     }

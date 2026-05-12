@@ -286,21 +286,23 @@ struct TransportModalView: View {
                                 }
                             }
                             
-                            // Route Polyline Background Border
-                            MapPolyline(coordinates: validTransportPoints)
+                            // Route
+                            let smoothedPoints = validTransportPoints.smoothed()
+                            
+                            MapPolyline(coordinates: smoothedPoints)
                                 .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: 7.5, lineCap: .round, lineJoin: .round))
                             
                             // Route Polyline Main
-                            MapPolyline(coordinates: validTransportPoints)
-                                .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                            MapPolyline(coordinates: smoothedPoints)
+                                .stroke(Color.dfkAccent.opacity(0.7), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
                             
                             // Photos along the route
                             ForEach(validMapPhotos, id: \.asset.localIdentifier) { entry in
                                 Annotation("", coordinate: entry.coordinate) {
-                                    AssetThumbnailView(assetID: entry.asset.localIdentifier)
-                                        .frame(width: 40, height: 40)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white, lineWidth: 1.5))
+                                    AssetThumbnailView(assetID: entry.asset.localIdentifier, showsTime: false)
+                                        .frame(width: 56, height: 56)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white, lineWidth: 1.5))
                                         .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
                                         .contentShape(Rectangle())
                                         .onTapGesture {

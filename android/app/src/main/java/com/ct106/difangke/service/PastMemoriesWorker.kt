@@ -108,16 +108,17 @@ class PastMemoriesWorker(
 
             val highlight = filtered.first()
             val cal = Calendar.getInstance().apply { time = highlight.startTime }
-            val yearsAgo = currentYear - cal.get(Calendar.YEAR)
+            val fpYear = cal.get(Calendar.YEAR)
+            val yearsAgo = currentYear - fpYear
             val placeName = highlight.title.ifEmpty { highlight.address ?: "某个地方" }
 
             NotificationHelper.sendHighlightNotification(
                 context,
                 "往年今日 · ${yearsAgo}年前",
-                "在那年的今天，你去了「$placeName」。点此重温那段时光。",
+                "在 ${fpYear} 年的今天，你去了「$placeName」。点此重温那段时光。",
                 highlight.startTime.time.hashCode(),
                 highlight.startTime.time,
-                highlight.footprintID
+                null // 点开通知只要跳到那一天即可,不用打开足迹详情
             )
 
             Result.success()

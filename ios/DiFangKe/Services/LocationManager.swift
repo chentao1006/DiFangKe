@@ -1112,35 +1112,21 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     var stayDuration: String? {
-        guard let startLocation = potentialStopStartLocation else { return nil }
-        
         let now = Date()
-        let start = startLocation.timestamp
+        let start: Date
         
-        // 核心逻辑：如果本设备正在记录，则通过位移判断是否离开
-        if isTracking, let currentLoc = lastLocation {
-            let distance = currentLoc.distance(from: startLocation)
-            if distance > 300 { return nil }
+        if let localStart = potentialStopStartLocation?.timestamp {
+            start = localStart
+        } else if let status = UserDefaults.standard.dictionary(forKey: "liveStayStatus"),
+                  let ts = status["start"] as? Double {
+            start = Date(timeIntervalSince1970: ts)
+        } else if let firstPoint = allTodayPoints.first?.timestamp {
+            start = firstPoint
+        } else {
+            return nil
         }
-        
-        // 跨设备逻辑：如果该状态来自云端同步，检查其“鲜活度”
-        if let status = UserDefaults.standard.dictionary(forKey: "liveStayStatus"),
-           let updateTS = status["update"] as? Double,
-           let device = status["device"] as? String,
-           device != deviceID {
-            let updateDate = Date(timeIntervalSince1970: updateTS)
-            // 如果远程设备超过 30 分钟未更新状态，我们认为该停留可能已结束或数据断联，不再显示“正在停留”
-            if now.timeIntervalSince(updateDate) > 30 * 60 {
-                return nil
-            }
-        }
-        
+
         let duration = now.timeIntervalSince(start)
-        let totalMinutes = Int(duration / 60)
-        
-        // --- 核心调整：根据用户要求，10 分钟以下不算停留，因此不显示正在进行的停留时长 ---
-        if totalMinutes < 10 { return nil }
-        
         return duration.formattedStayDuration
     }
 
@@ -1729,12 +1715,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let lastCheck = UserDefaults.standard.string(forKey: "lastPastMemoriesCheckDate")
         guard lastCheck != dateString else { return }
         
+        // 立即标记为已检查，防止并发 location updates 触发多次
+        UserDefaults.standard.set(dateString, forKey: "lastPastMemoriesCheckDate")
+        
         // 检查设置是否开启
         guard UserDefaults.standard.bool(forKey: "isPastMemoriesNotificationEnabled") else { return }
         
         Task { @MainActor in
             await sendPastMemoriesNotificationIfAvailable(for: now)
-            UserDefaults.standard.set(dateString, forKey: "lastPastMemoriesCheckDate")
         }
     }
     
@@ -1775,16 +1763,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         guard let highlight = filteredFootprints.first else { return }
         
-        let yearsAgo = currentYear - calendar.component(.year, from: highlight.startTime)
+        let fpYear = calendar.component(.year, from: highlight.startTime)
+        let yearsAgo = currentYear - fpYear
         let placeName = highlight.address ?? "某个地方"
         
         let title = "往年今日 · \(yearsAgo)年前"
-        let body = "在那年的今天，你去了「\(placeName)」。点此重温那段时光。"
+        let body = "在 \(fpYear) 年的今天，你去了「\(placeName)」。点此重温那段时光。"
         
         NotificationManager.shared.sendHighlightNotification(
             title: title,
             body: body,
-            footprintID: highlight.footprintID,
+            footprintID: nil, // 点开通知只要跳到那一天即可,不用打开足迹详情
             date: highlight.startTime
         )
     }

@@ -22,6 +22,7 @@ struct DataManagerView: View {
     @State private var isExporting = false
     @State private var showRebuildAllAlert = false
     @State private var isRebuildingAll = false
+    @State private var cacheSize: Int64 = 0
     
     var body: some View {
         ZStack {
@@ -113,11 +114,27 @@ struct DataManagerView: View {
                 }
             }
 
-            Section(header: Text("回收站")) {
-                NavigationLink(destination: RecycleBinView()) {
-                    Label("足迹回收站", systemImage: "trash.circle")
+            Section(header: Text("缓存管理")) {
+                HStack {
+                    Label("地图快照缓存", systemImage: "map")
+                    Spacer()
+                    Text(formatBytes(cacheSize))
+                        .foregroundColor(.secondary)
+                }
+                
+                Button(role: .destructive) {
+                    DFKMapSnapshotCache.shared.clearCache()
+                    updateCacheSize()
+                } label: {
+                    Label("清空地图缓存", systemImage: "trash")
                 }
             }
+
+            // Section(header: Text("回收站")) {
+            //     NavigationLink(destination: RecycleBinView()) {
+            //         Label("足迹回收站", systemImage: "trash.circle")
+            //     }
+            // }
             
             Section(header: Text("危险操作")) {
                 Button(role: .destructive, action: {
@@ -144,6 +161,9 @@ struct DataManagerView: View {
                     Text("仅清空此设备上的本地足迹、地点及配置。\n\n⚠️ 注意：由于 iCloud 开启了实时同步，本地删除操作通常会被同步到云端。如果您仅希望重置本设备而不影响其他设备，请先在‘设置-数据同步’中关闭 iCloud 同步，执行清空后再重新开启（此时会从云端重新拉取数据）。")
                 }
             }
+        }
+        .onAppear {
+            updateCacheSize()
         }
         .disabled(isExporting || locationManager.isRebuildingAll)
         .navigationTitle("数据操作")
@@ -265,6 +285,17 @@ struct DataManagerView: View {
     
     private func rebuildAllTimelines() {
         locationManager.rebuildAllData()
+    }
+
+    private func updateCacheSize() {
+        cacheSize = DFKMapSnapshotCache.shared.calculateCacheSize()
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useAll]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }
 

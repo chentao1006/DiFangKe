@@ -119,17 +119,22 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         let userInfo = response.notification.request.content.userInfo
         
         if let type = userInfo["type"] as? String, type == "highlight_footprint",
-           let idString = userInfo["footprintID"] as? String,
-           let footprintID = UUID(uuidString: idString),
            let timestamp = userInfo["date"] as? Double {
             
             let date = Date(timeIntervalSince1970: timestamp)
+            let idString = userInfo["footprintID"] as? String
+            let footprintID = idString != nil ? UUID(uuidString: idString!) : nil
             
             // 使用 NotificationCenter 发送内部跳转通知
+            var notificationInfo: [String: Any] = ["date": date]
+            if let fid = footprintID {
+                notificationInfo["footprintID"] = fid
+            }
+            
             NotificationCenter.default.post(
                 name: NSNotification.Name("DFKDeepLinkNotification"),
                 object: nil,
-                userInfo: ["footprintID": footprintID, "date": date]
+                userInfo: notificationInfo
             )
         }
         

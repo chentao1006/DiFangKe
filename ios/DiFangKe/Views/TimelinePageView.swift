@@ -191,19 +191,6 @@ struct TimelinePageView: View {
             // 只在真正停留到当前页后才执行刷新，避免快速划过时触发重计算。
             refreshTimeline()
 
-            // AI 每日摘要检查：仅在缺失时静默生成，不强制刷新
-            let currentSummary = pageInsights.first?.content
-            if isAiAssistantEnabled && !footprints.isEmpty && (currentSummary == nil || currentSummary?.isEmpty == true) {
-                let startOfDate = Calendar.current.startOfDay(for: date)
-                if startOfDate < Calendar.current.startOfDay(for: Date()) {
-                    let endOfDate = Calendar.current.date(byAdding: .day, value: 1, to: startOfDate)!
-                    let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                        $0.startTime >= startOfDate && $0.startTime < endOfDate && $0.statusRaw == "active"
-                    })
-                    let transports = (try? modelContext.fetch(tpDesc)) ?? []
-                    OpenAIService.shared.enqueueDailySummary(for: date, footprints: footprints, transports: transports)
-                }
-            }
 
             checkDeepLink(targetID: locationManager.deepLinkFootprintID)
         }
@@ -502,12 +489,15 @@ struct TimelinePageView: View {
         lastSummaryTimelineSignature = signature
 
         guard triggerAiIfChanged,
-              isAiAssistantEnabled,
-              previousSignature != nil,
-              previousSignature != signature else { return }
+              isAiAssistantEnabled else { return }
+
+        let isMissingSummary = pageInsights.first?.content?.isEmpty ?? true
+        let signatureChanged = previousSignature != nil && previousSignature != signature
+        
+        guard signatureChanged || (previousSignature == nil && isMissingSummary) else { return }
 
         Task {
-            await refreshAiSummary(force: true)
+            await refreshAiSummary(force: false)
         }
     }
 
@@ -1019,7 +1009,10 @@ struct TimelinePageView: View {
         })
         let latestTransports = (try? modelContext.fetch(tpDesc)) ?? []
 
-        let summaryFootprints = latestFootprints.filter { $0.isUserModifiedForDailySummary }
+        let isPastDay = startOfDay < Calendar.current.startOfDay(for: Date())
+        let summaryFootprints = latestFootprints.filter { 
+            $0.isUserModifiedForDailySummary || (isPastDay && $0.statusValue != "ignored")
+        }
 
         if summaryFootprints.isEmpty {
             let insightDescriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate {

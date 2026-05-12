@@ -220,7 +220,10 @@ class OpenAIService {
             return
         }
 
-        let summaryFootprints = footprints.filter { $0.isUserModifiedForDailySummary }
+        let isPastDay = startOfDate < Calendar.current.startOfDay(for: Date())
+        let summaryFootprints = footprints.filter { 
+            $0.isUserModifiedForDailySummary || (isPastDay && $0.status != .ignored)
+        }
 
         guard !summaryFootprints.isEmpty else {
             dailySummaryDateSet.remove(startOfDate)
@@ -423,10 +426,13 @@ class OpenAIService {
         var totalTransportDistance: Double = 0
         var footprintCoordsByTime: [(Date, CLLocationCoordinate2D)] = []
         
+        let startOfDate = Calendar.current.startOfDay(for: Date())
+        
         for id in fpIds {
             let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
             if let fp = (try? context.fetch(fpDescriptor))?.first {
-                guard fp.isUserModifiedForDailySummary else { continue }
+                let isPastDay = Calendar.current.startOfDay(for: fp.date) < startOfDate
+                guard fp.isUserModifiedForDailySummary || (isPastDay && fp.status != .ignored) else { continue }
                 let factLine = dailySummaryFactLine(for: fp, places: allPlaces, activities: allActivities)
                 if !factLine.isEmpty {
                     events.append((fp.startTime, factLine))

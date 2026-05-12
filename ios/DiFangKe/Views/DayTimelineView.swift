@@ -315,10 +315,13 @@ struct DayTimelineView: View {
     }
     
     private func handleDeepLink(_ notification: Notification) {
-        if let footprintID = notification.userInfo?["footprintID"] as? UUID,
-           let date = notification.userInfo?["date"] as? Date {
+        if let date = notification.userInfo?["date"] as? Date {
             let dayStart = Calendar.current.startOfDay(for: date)
-            locationManager.deepLinkFootprintID = footprintID
+            
+            if let footprintID = notification.userInfo?["footprintID"] as? UUID {
+                locationManager.deepLinkFootprintID = footprintID
+            }
+            
             locationManager.deepLinkDate = dayStart
             withAnimation(.spring()) {
                 self.selectedDate = dayStart

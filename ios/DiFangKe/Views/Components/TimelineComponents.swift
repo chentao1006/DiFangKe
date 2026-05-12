@@ -45,7 +45,7 @@ struct DaySummaryCard: View {
                         let isGenerating = OpenAIService.shared.currentlyProcessingDate != nil && 
                                           Calendar.current.isDate(OpenAIService.shared.currentlyProcessingDate!, inSameDayAs: date)
                         
-                        Text(summary ?? (isGenerating ? "正在生成概览..." : "当日概览"))
+                        Text(summary ?? "当日概览")
                             .font(.system(.headline, design: .rounded))
                             .foregroundColor(Color.dfkMainText)
                             .lineLimit(2)
@@ -411,11 +411,14 @@ struct RecordingStatusCard: View {
                                     .foregroundColor(.orange.opacity(0.8))
                             }
                             .buttonStyle(.plain)
-                        } else if let durationStr = locationManager.stayDuration {
-                            Text("已停留 \(durationStr)")
-                                .font(.system(size: 14))
-                                .foregroundColor(.secondary)
-                                .id("duration-\(durationStr)")
+                        } else {
+                            TimelineView(.periodic(from: .now, by: 60)) { _ in
+                                if let durationStr = locationManager.stayDuration {
+                                    Text("已停留 \(durationStr)")
+                                        .font(.system(size: 14))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
                         }
                     }
                 }
