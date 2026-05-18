@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import com.google.gson.Gson
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.model.FootprintTitles
 import com.ct106.difangke.service.LocationTrackingService
@@ -195,12 +196,8 @@ fun FootprintCardView(
                         .padding(vertical = 14.dp)
                         .padding(end = if (photoIds.isNotEmpty()) 84.dp else 16.dp)
                 ) {
-                    val matchedPlace = allPlaces.find { place ->
-                        (place.placeID == footprint.placeID && place.isUserDefined) ||
-                        (place.isUserDefined && (
-                            place.name.trim() == (footprint.address ?: "").trim() ||
-                            (place.address?.trim() ?: "") == (footprint.address ?: "").trim()
-                        ))
+                    val matchedPlace = footprint.placeID?.let { placeID ->
+                        allPlaces.find { place -> place.placeID == placeID && place.isUserDefined }
                     }
                     val locationText = when {
                         matchedPlace != null -> matchedPlace.name
@@ -421,12 +418,15 @@ private fun getTransportIcon(typeRaw: String): ImageVector {
 fun RecordingStatusCard(
     trackingState: LocationTrackingService.TrackingState,
     isTracking: Boolean,
+    isTrackingEnabled: Boolean,
     footprintCount: Int,
     mileage: Double = 0.0,
     pointCount: Int = 0,
     pointsJson: String? = null,
     markersJson: String? = null,
+    allPlaces: List<PlaceEntity> = emptyList(),
     onNavigateToMap: () -> Unit,
+    onEnableTracking: () -> Unit,
     onRequestPermission: () -> Unit,
     hasLocationPermission: Boolean
 ) {
@@ -537,7 +537,9 @@ fun RecordingStatusCard(
                     Spacer(modifier = Modifier.height(18.dp))
                     
                     // 标题
-                    val displayTitle = when (trackingState) {
+                    val displayTitle = if (!isTrackingEnabled) {
+                        "定位记录已关闭"
+                    } else when (trackingState) {
                         is LocationTrackingService.TrackingState.Idle -> "定位记录已关闭"
                         is LocationTrackingService.TrackingState.Tracking -> "正在寻找位置..."
                         is LocationTrackingService.TrackingState.OngoingStay -> "正在此处停留"
@@ -559,7 +561,17 @@ fun RecordingStatusCard(
                     Spacer(modifier = Modifier.height(4.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (!isTracking) {
-                            Text("点击开启或查看说明", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                            TextButton(
+                                onClick = onEnableTracking,
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Text(
+                                    "点击开启位置记录",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFFF9500),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         } else {
                             if (ongoing != null) {
                                 val durationMins = (System.currentTimeMillis() - ongoing.since.time) / 60000
@@ -581,6 +593,7 @@ fun RecordingStatusCard(
                         MiniMapView(
                             pointsJson = pointsJson,
                             markersJson = markersJson,
+                            allPlaces = allPlaces,
                             onClick = onNavigateToMap
                         )
                     } else if (currentLat != null && currentLon != null) {
@@ -588,6 +601,7 @@ fun RecordingStatusCard(
                             lat = currentLat, 
                             lon = currentLon,
                             isCurrentLocation = true,
+                            allPlaces = allPlaces,
                             onClick = onNavigateToMap
                         )
                     }
@@ -634,6 +648,7 @@ fun DaySummaryCard(
     markersJson: String? = null,
     centerLat: Double? = null,
     centerLon: Double? = null,
+    allPlaces: List<PlaceEntity> = emptyList(),
     onNavigateToMap: () -> Unit
 ) {
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
@@ -697,6 +712,7 @@ fun DaySummaryCard(
                     lon = centerLon,
                     pointsJson = pointsJson,
                     markersJson = markersJson,
+                    allPlaces = allPlaces,
                     onClick = onNavigateToMap
                 )
             }
@@ -713,7 +729,15 @@ private fun formatDistance(meters: Double): String {
 }
 
 @Composable
-fun MiniMapView(lat: Double? = null, lon: Double? = null, pointsJson: String? = null, markersJson: String? = null, isCurrentLocation: Boolean = false, onClick: () -> Unit) {
+fun MiniMapView(
+    lat: Double? = null,
+    lon: Double? = null,
+    pointsJson: String? = null,
+    markersJson: String? = null,
+    isCurrentLocation: Boolean = false,
+    allPlaces: List<PlaceEntity> = emptyList(),
+    onClick: () -> Unit
+) {
     val context = LocalContext.current
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
@@ -750,6 +774,7 @@ fun MiniMapView(lat: Double? = null, lon: Double? = null, pointsJson: String? = 
             }
             
             amap.clear()
+            amap.addImportantPlaceCircles(allPlaces)
             
             if (isCurrentLocation && lat != null && lon != null) {
                 val myLocationStyle = com.amap.api.maps.model.MyLocationStyle()
@@ -805,21 +830,7 @@ fun MiniMapView(lat: Double? = null, lon: Double? = null, pointsJson: String? = 
             
             // 绘制足迹点标记 (实心圆点)
             if (markersJson != null) {
-                try {
-                    val mArray = org.json.JSONArray(markersJson)
-                    for (i in 0 until mArray.length()) {
-                        val p = mArray.getJSONArray(i)
-                        val pos = com.amap.api.maps.model.LatLng(p.getDouble(0), p.getDouble(1))
-                        amap.addCircle(
-                            com.amap.api.maps.model.CircleOptions()
-                                .center(pos)
-                                .radius(30.0) // 约 30 米
-                                .fillColor(primaryColor)
-                                .strokeColor(androidx.compose.ui.graphics.Color.White.toArgb())
-                                .strokeWidth(2f)
-                        )
-                    }
-                } catch (e: Exception) {}
+                amap.addFootprintMarkers(parseFootprintMapMarkers(markersJson))
             }
         }
 

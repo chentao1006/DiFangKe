@@ -22,12 +22,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         
-        // 强制开启定位开启状态（全自动模式）
         val app = (application as DiFangKeApp)
         val prefs = app.preferences
         val db = app.database
         lifecycleScope.launch {
-            prefs.setTrackingEnabled(true)
             com.ct106.difangke.data.db.DefaultDataSeeder.seedIfNeeded(db, prefs)
             
             // 检查电池优化

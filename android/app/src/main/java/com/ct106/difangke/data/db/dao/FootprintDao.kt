@@ -71,6 +71,16 @@ interface FootprintDao {
     @Query("DELETE FROM footprints WHERE startTime >= :start AND startTime < :end")
     suspend fun deleteBetween(start: Date, end: Date)
 
-    @Query("DELETE FROM footprints WHERE startTime >= :start AND startTime < :end AND statusValue = 'candidate'")
+    @Query("DELETE FROM footprints WHERE startTime >= :start AND startTime < :end AND statusValue = 'candidate' AND isTitleEditedByHand = 0")
     suspend fun deleteCandidatesBetween(start: Date, end: Date)
+
+    @Query("""
+        DELETE FROM footprints 
+        WHERE startTime = :start 
+        AND endTime > :start 
+        AND statusValue = 'candidate'
+        AND json_array_length(latitudeJson) <= 1
+        AND json_array_length(longitudeJson) <= 1
+    """)
+    suspend fun deleteStartBoundaryCandidates(start: Date)
 }

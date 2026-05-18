@@ -29,7 +29,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.data.model.FootprintTitles
+import com.ct106.difangke.ui.components.addFootprintMarkers
+import com.ct106.difangke.ui.components.addImportantPlaceCircles
+import com.ct106.difangke.ui.components.buildFootprintMapMarkers
 import com.ct106.difangke.ui.components.getIconForName
 import java.text.SimpleDateFormat
 import java.util.*
@@ -44,10 +48,14 @@ fun FootprintDetailScreen(
 ) {
     val footprint by viewModel.footprint.collectAsState()
     val activityTypes by viewModel.activityTypes.collectAsState()
+    val allPlaces by viewModel.allPlaces.collectAsState()
     
     var title by remember { mutableStateOf("") }
     var reason by remember { mutableStateOf("") }
     var addressText by remember { mutableStateOf("") }
+    var selectedPlaceID by remember { mutableStateOf<String?>(null) }
+    var selectedLocationIsSaved by remember { mutableStateOf(false) }
+    var didEditLocation by remember { mutableStateOf(false) }
     var selectedActivityType by remember { mutableStateOf<String?>(null) }
     var isHighlight by remember { mutableStateOf(false) }
     val nearbyPOIs by viewModel.nearbyPOIs.collectAsState()
@@ -91,14 +99,15 @@ fun FootprintDetailScreen(
         footprint?.let {
             title = it.title
             reason = it.reason ?: ""
+            selectedPlaceID = it.placeID
+            selectedLocationIsSaved = it.placeID != null
             selectedActivityType = it.activityTypeValue
             isHighlight = it.isHighlight == true
             
-            // 只有当当前输入框为空时才初始化（防止输入时被覆盖）
-            if (addressText.isEmpty()) {
+            if (!didEditLocation) {
                 addressText = when {
-                    !it.address.isNullOrEmpty() && it.address != "null" && it.address != "[]" -> it.address!!
                     matchedPlace != null -> matchedPlace!!.name
+                    !it.address.isNullOrEmpty() && it.address != "null" && it.address != "[]" -> it.address!!
                     else -> ""
                 }.ifEmpty { "" }
             }
@@ -130,8 +139,9 @@ fun FootprintDetailScreen(
                         )
                     }
                     TextButton(onClick = {
-                        viewModel.updateFootprint(title, reason, addressText, selectedActivityType, isHighlight)
-                        onBack()
+                        viewModel.updateFootprint(title, reason, addressText, selectedPlaceID, selectedActivityType, isHighlight) {
+                            onBack()
+                        }
                     }) {
                         Text("保存", fontWeight = FontWeight.Bold)
                     }
@@ -161,14 +171,14 @@ fun FootprintDetailScreen(
                                 .padding(vertical = 8.dp)
                         ) {
                             val mPlace = matchedPlace
-                            val locationText = mPlace?.name ?: addressText.ifEmpty { "未知位置" }
+                            val locationText = addressText.ifEmpty { mPlace?.name ?: "未知位置" }
                             
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     text = locationText,
                                     style = MaterialTheme.typography.titleLarge,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (mPlace?.isUserDefined == true) Color(0xFFFF9800) else MaterialTheme.colorScheme.onSurface,
+                                    color = if (selectedLocationIsSaved || mPlace?.isUserDefined == true) Color(0xFFFF9800) else MaterialTheme.colorScheme.onSurface,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f, fill = false)
@@ -281,6 +291,9 @@ fun FootprintDetailScreen(
                                                     leadingContent = { Icon(Icons.Default.LocationOn, contentDescription = null, tint = Color.Gray.copy(alpha = 0.5f)) },
                                                     modifier = Modifier.clickable {
                                                         addressText = poi.name
+                                                        selectedPlaceID = poi.placeID
+                                                        selectedLocationIsSaved = poi.isSavedPlace
+                                                        didEditLocation = true
                                                         showLocationPicker = false
                                                     }
                                                 )
@@ -336,7 +349,11 @@ fun FootprintDetailScreen(
                         .clip(RoundedCornerShape(20.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                 ) {
-                    DetailMapView(footprint = footprint!!)
+                    DetailMapView(
+                        footprint = footprint!!,
+                        allPlaces = allPlaces,
+                        activityTypes = activityTypes
+                    )
                 }
 
                 // 4. 感想备注
@@ -494,7 +511,11 @@ fun ActivitySuggestions(
 }
 
 @Composable
-fun DetailMapView(footprint: FootprintEntity) {
+fun DetailMapView(
+    footprint: FootprintEntity,
+    allPlaces: List<PlaceEntity> = emptyList(),
+    activityTypes: List<ActivityTypeEntity> = emptyList()
+) {
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
     
@@ -536,6 +557,7 @@ fun DetailMapView(footprint: FootprintEntity) {
             }
             
             amap.clear()
+            amap.addImportantPlaceCircles(allPlaces)
             amap.addPolyline(
                 com.amap.api.maps.model.PolylineOptions()
                     .addAll(points)
@@ -543,6 +565,7 @@ fun DetailMapView(footprint: FootprintEntity) {
                     .color(primaryColor)
                     .useGradient(true)
             )
+            amap.addFootprintMarkers(buildFootprintMapMarkers(listOf(footprint), activityTypes))
             
             // 移动相机到轨迹范围 (优化版)
             if (points.size == 1) {
@@ -565,6 +588,3 @@ fun DetailMapView(footprint: FootprintEntity) {
         }
     }
 }
-
-
-

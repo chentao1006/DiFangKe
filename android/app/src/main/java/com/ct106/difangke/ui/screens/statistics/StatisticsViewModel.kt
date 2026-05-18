@@ -41,6 +41,9 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
     private val _heatmapPoints = MutableStateFlow<List<HeatmapPoint>>(emptyList())
     val heatmapPoints: StateFlow<List<HeatmapPoint>> = _heatmapPoints.asStateFlow()
 
+    val allPlaces = db.placeDao().observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     private val _activityRank = MutableStateFlow<List<ActivityRankItem>>(emptyList())
     val activityRank: StateFlow<List<ActivityRankItem>> = _activityRank.asStateFlow()
 

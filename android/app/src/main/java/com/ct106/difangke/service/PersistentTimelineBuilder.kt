@@ -76,6 +76,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         // 3. 清理自动生成的旧数据（保留 Confirmed 和 Manual 记录）
         // iOS 逻辑：仅重整非人工干预的部分
         db.footprintDao().deleteCandidatesBetween(startOfDay, endOfDay)
+        db.footprintDao().deleteStartBoundaryCandidates(startOfDay)
         db.transportRecordDao().deleteAutoForDay(startOfDay, endOfDay)
 
         // 3. 构建时间线
@@ -83,28 +84,6 @@ class PersistentTimelineBuilder(private val context: Context) {
         val footprints = mutableListOf<FootprintEntity>()
         var lastFp: FootprintEntity? = null
         
-        // --- 足迹的时间范围要限制在0点到次日0点：边界填补 (0:00 到首个点位) ---
-        if (points.isNotEmpty()) {
-            val firstPoint = points[0]
-            val gapToStart = (firstPoint.timestamp.time - startOfDay.time) / 1000L
-            if (gapToStart >= AppConfig.STAY_DURATION_THRESHOLD) {
-                val entity = FootprintEntity(
-                    footprintID = UUID.randomUUID().toString(),
-                    date = startOfDay,
-                    startTime = startOfDay,
-                    endTime = firstPoint.timestamp,
-                    latitudeJson = gson.toJson(listOf(firstPoint.latitude)),
-                    longitudeJson = gson.toJson(listOf(firstPoint.longitude)),
-                    locationHash = FootprintEntity.generateLocationHash(firstPoint.latitude, firstPoint.longitude),
-                    title = "",
-                    statusValue = "candidate",
-                    address = geocoder.reverseGeocode(firstPoint.latitude, firstPoint.longitude)
-                )
-                db.footprintDao().insert(entity)
-                lastFp = entity
-            }
-        }
-
         for (point in points) {
             val candidate = processor.processNewLocation(point, queue, isHistorical = true)
             candidate?.let {
@@ -273,9 +252,12 @@ class PersistentTimelineBuilder(private val context: Context) {
         val locationHash = FootprintEntity.generateLocationHash(candidate.latitude, candidate.longitude)
         
         // 尝试匹配已知地点
-        val matchedPlace = db.placeDao().getAll().firstOrNull { place ->
-            processor.haversineMeters(place.latitude, place.longitude, candidate.latitude, candidate.longitude) <= place.radius + AppConfig.TAG_INHERITANCE_DISTANCE
-        }
+        val matchedPlace = PlaceMatcher.bestPlaceForCoordinate(
+            latitude = candidate.latitude,
+            longitude = candidate.longitude,
+            places = db.placeDao().getAll(),
+            processor = processor
+        )
 
         val entity = FootprintEntity(
             footprintID = UUID.randomUUID().toString(),

@@ -23,6 +23,8 @@ import com.amap.api.maps.model.LatLng
 import com.amap.api.maps.model.LatLngBounds
 import com.amap.api.maps.model.MyLocationStyle
 import com.amap.api.maps.model.PolylineOptions
+import com.ct106.difangke.ui.components.addFootprintMarkers
+import com.ct106.difangke.ui.components.addImportantPlaceCircles
 import java.util.Calendar
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -37,6 +39,8 @@ fun DFKMapScreen(
     }
     val polylineColor = MaterialTheme.colorScheme.primary.toArgb()
     val pathPoints by viewModel.pathPoints.collectAsState()
+    val footprintMarkers by viewModel.footprintMarkers.collectAsState()
+    val allPlaces by viewModel.allPlaces.collectAsState()
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
     var hasCentredToNow by remember { mutableStateOf(false) }
 
@@ -104,10 +108,12 @@ fun DFKMapScreen(
             }
             amap.myLocationStyle = myLocationStyle
             amap.isMyLocationEnabled = true
+
+            amap.clear()
+            amap.addImportantPlaceCircles(allPlaces)
             
             // 绘制轨迹
             if (pathPoints.isNotEmpty()) {
-                amap.clear()
                 val latLngs = pathPoints.map { LatLng(it.first, it.second) }
                 amap.addPolyline(
                     PolylineOptions()
@@ -116,6 +122,8 @@ fun DFKMapScreen(
                         .color(polylineColor)
                         .useGradient(true)
                 )
+
+                amap.addFootprintMarkers(footprintMarkers)
                 
                 // 核心优化：自动调整缩放和范围，使轨迹完整显示
                 if (!hasCentredToNow) {

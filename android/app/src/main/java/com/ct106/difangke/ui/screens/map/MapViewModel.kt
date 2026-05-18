@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.location.RawLocationStore
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.ui.components.FootprintMapMarker
+import com.ct106.difangke.ui.components.buildFootprintMapMarkers
 import com.google.gson.Gson
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -20,6 +22,12 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     val pathPoints: StateFlow<List<Pair<Double, Double>>> = _pathPoints.map { list ->
         list.map { it.first }
     }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    private val _footprintMarkers = MutableStateFlow<List<FootprintMapMarker>>(emptyList())
+    val footprintMarkers: StateFlow<List<FootprintMapMarker>> = _footprintMarkers.asStateFlow()
+
+    val allPlaces = db.placeDao().observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
         // 初始加载由 Screen 的 LaunchedEffect 触发，或者默认加载今天
@@ -40,6 +48,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
             // 1. 加载数据库中的已结算足迹
             val footprints = db.footprintDao().getBetween(startOfTarget, Date(startOfTarget.time + 86400000L))
+            _footprintMarkers.value = buildFootprintMapMarkers(footprints, db.activityTypeDao().getAll())
             val dbPoints = mutableListOf<Pair<Double, Double>>()
             footprints.forEach { fp ->
                 try {

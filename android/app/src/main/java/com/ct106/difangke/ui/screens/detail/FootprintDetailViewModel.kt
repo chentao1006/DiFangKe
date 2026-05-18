@@ -18,6 +18,9 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
     private val _matchedPlace = MutableStateFlow<com.ct106.difangke.data.db.entity.PlaceEntity?>(null)
     val matchedPlace: StateFlow<com.ct106.difangke.data.db.entity.PlaceEntity?> = _matchedPlace.asStateFlow()
 
+    val allPlaces: StateFlow<List<com.ct106.difangke.data.db.entity.PlaceEntity>> = db.placeDao().observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     private val _activityTypes = MutableStateFlow<List<ActivityTypeEntity>>(emptyList())
     val activityTypes: StateFlow<List<ActivityTypeEntity>> = _activityTypes.asStateFlow()
 
@@ -40,12 +43,8 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
             _footprint.value = fp
             
             val allPlaces = db.placeDao().getAll()
-            _matchedPlace.value = allPlaces.find { place ->
-                (place.placeID == fp?.placeID && place.isUserDefined) ||
-                (place.isUserDefined && (
-                    place.name.trim() == (fp?.address ?: "").trim() ||
-                    (place.address?.trim() ?: "") == (fp?.address ?: "").trim()
-                ))
+            _matchedPlace.value = fp?.placeID?.let { placeID ->
+                allPlaces.find { place -> place.placeID == placeID && place.isUserDefined }
             }
 
             // 加载周边 POI
@@ -71,7 +70,8 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
                                 address = it.address ?: "已保存地点",
                                 latitude = it.latitude,
                                 longitude = it.longitude,
-                                isSavedPlace = true
+                                isSavedPlace = true,
+                                placeID = it.placeID
                             )
                         }
                         
@@ -119,13 +119,22 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 
-    fun updateFootprint(title: String, reason: String, address: String, activityTypeValue: String? = null, isHighlight: Boolean = false) {
+    fun updateFootprint(
+        title: String,
+        reason: String,
+        address: String,
+        placeID: String? = null,
+        activityTypeValue: String? = null,
+        isHighlight: Boolean = false,
+        onSaved: () -> Unit = {}
+    ) {
         val current = _footprint.value ?: return
         viewModelScope.launch {
             val updated = current.copy(
                 title = title, 
                 reason = reason,
                 address = address.ifBlank { null },
+                placeID = placeID,
                 activityTypeValue = activityTypeValue ?: current.activityTypeValue,
                 isHighlight = isHighlight,
                 isTitleEditedByHand = true,
@@ -133,6 +142,11 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
             )
             db.footprintDao().update(updated)
             _footprint.value = updated
+            val allPlaces = db.placeDao().getAll()
+            _matchedPlace.value = updated.placeID?.let { id ->
+                allPlaces.find { place -> place.placeID == id && place.isUserDefined }
+            }
+            onSaved()
         }
     }
 
@@ -144,4 +158,3 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 }
-

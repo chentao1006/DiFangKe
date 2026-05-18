@@ -34,7 +34,9 @@ import com.amap.api.maps.AMap
 import com.amap.api.maps.CameraUpdateFactory
 import com.amap.api.maps.TextureMapView
 import com.amap.api.maps.model.*
+import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.location.RawLocationStore
+import com.ct106.difangke.ui.components.addImportantPlaceCircles
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -53,6 +55,8 @@ fun RawPointsScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val rawStore = remember { RawLocationStore.getInstance(context) }
+    val allPlaces by remember { DiFangKeApp.instance.database.placeDao().observeAll() }
+        .collectAsState(initial = emptyList())
     
     var points by remember { mutableStateOf<List<RawLocationStore.RawPoint>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
@@ -166,9 +170,11 @@ fun RawPointsScreen(
                         )
                     }
                     
+                    map.clear()
+                    map.addImportantPlaceCircles(allPlaces)
+
                     // 只有在点加载完成后更新
                     if (points.isNotEmpty()) {
-                        map.clear()
                         val latLngs = points.map { LatLng(it.latitude, it.longitude) }
                         map.addPolyline(
                             PolylineOptions().addAll(latLngs).width(10f).color(primaryColor.toArgb()).useGradient(true)

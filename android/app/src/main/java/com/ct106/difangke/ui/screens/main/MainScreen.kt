@@ -72,6 +72,7 @@ fun MainScreen(
     val activityTypes by viewModel.activityTypes.collectAsState()
     val allPlaces by viewModel.allPlaces.collectAsState()
     val trackingState by viewModel.trackingState.collectAsState()
+    val isTrackingEnabled by viewModel.isTrackingEnabled.collectAsState()
     
     val pagerState = rememberPagerState(
         initialPage = 0, 
@@ -138,7 +139,9 @@ fun MainScreen(
         val fineGranted = perms[Manifest.permission.ACCESS_FINE_LOCATION] == true
         if (fineGranted) {
             hasPermissionState = true
-            LocationTrackingService.start(context) // 授权后立即开启服务
+            if (isTrackingEnabled) {
+                LocationTrackingService.start(context) // 授权后立即开启服务
+            }
         }
     }
     
@@ -167,12 +170,16 @@ fun MainScreen(
     val backgroundLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) {
+        if (granted && isTrackingEnabled) {
             LocationTrackingService.start(context) // 后台授权后也尝试开启/刷新服务
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(isTrackingEnabled) {
+        if (!isTrackingEnabled) {
+            return@LaunchedEffect
+        }
+
         // 1. 检查并申请基础权限
         if (!hasPermissionState) {
             launcher.launch(permissionsToRequest)
@@ -292,6 +299,7 @@ fun MainScreen(
                         date = dateAtPage,
                         viewModel = viewModel,
                         trackingState = trackingState,
+                        isTrackingEnabled = isTrackingEnabled,
                         activityTypes = activityTypes,
                         allPlaces = allPlaces,
                         isFirstPage = pageIndex == 0,
@@ -402,6 +410,7 @@ fun TimelinePage(
     date: Date,
     viewModel: MainViewModel,
     trackingState: LocationTrackingService.TrackingState,
+    isTrackingEnabled: Boolean,
     activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
     allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
     isFirstPage: Boolean,
@@ -461,6 +470,7 @@ fun TimelinePage(
             centerLon = centerPoint?.second,
             isToday = isToday,
             trackingState = trackingState,
+            isTrackingEnabled = isTrackingEnabled,
             activityTypes = activityTypes,
             allPlaces = allPlaces,
             hasLocationPermission = hasLocationPermission,
@@ -469,6 +479,7 @@ fun TimelinePage(
             onRequestPermission = onRequestPermission,
             onRequestNotification = onRequestNotification,
             onDismissNotificationGuide = onDismissNotificationGuide,
+            onEnableTracking = { viewModel.setTrackingEnabled(true) },
             onItemClick = onItemClick,
             onMapClick = onMapClick
         )
@@ -483,6 +494,7 @@ fun TimelineContent(
     totalMileage: Double,
     totalPoints: Int,
     trackingState: LocationTrackingService.TrackingState,
+    isTrackingEnabled: Boolean,
     activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
     allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
     isToday: Boolean,
@@ -492,6 +504,7 @@ fun TimelineContent(
     onRequestPermission: () -> Unit,
     onRequestNotification: () -> Unit,
     onDismissNotificationGuide: () -> Unit,
+    onEnableTracking: () -> Unit,
     onItemClick: (String) -> Unit,
     onMapClick: () -> Unit,
     dailyPoints: String? = null,
@@ -512,13 +525,16 @@ fun TimelineContent(
                 if (isToday) {
                     RecordingStatusCard(
                         trackingState = trackingState,
-                        isTracking = trackingState !is LocationTrackingService.TrackingState.Idle,
+                        isTracking = isTrackingEnabled && trackingState !is LocationTrackingService.TrackingState.Idle,
+                        isTrackingEnabled = isTrackingEnabled,
                         footprintCount = items.filterIsInstance<TimelineItem.FootprintItem>().size,
                         mileage = totalMileage,
                         pointCount = totalPoints,
                         pointsJson = dailyPoints,
                         markersJson = dailyMarkers,
+                        allPlaces = allPlaces,
                         onNavigateToMap = onMapClick,
+                        onEnableTracking = onEnableTracking,
                         onRequestPermission = onRequestPermission,
                         hasLocationPermission = hasLocationPermission
                     )
@@ -532,6 +548,7 @@ fun TimelineContent(
                         markersJson = dailyMarkers,
                         centerLat = centerLat,
                         centerLon = centerLon,
+                        allPlaces = allPlaces,
                         onNavigateToMap = onMapClick
                     )
                 }

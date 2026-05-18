@@ -26,7 +26,8 @@ class GeocodeService private constructor() {
         val address: String,
         val latitude: Double,
         val longitude: Double,
-        val isSavedPlace: Boolean = false
+        val isSavedPlace: Boolean = false,
+        val placeID: String? = null
     )
 
     /**

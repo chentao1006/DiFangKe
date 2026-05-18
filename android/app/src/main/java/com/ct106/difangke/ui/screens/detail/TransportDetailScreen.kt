@@ -28,6 +28,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.model.TransportType
+import com.ct106.difangke.ui.components.addImportantPlaceCircles
 import java.text.SimpleDateFormat
 import java.util.*
 import org.json.JSONArray
@@ -375,6 +376,7 @@ fun TransportDetailMapView(
         }
 
         amap.clear()
+        amap.addImportantPlaceCircles(allPlaces)
         if (points.isNotEmpty()) {
             // Polyline
             amap.addPolyline(

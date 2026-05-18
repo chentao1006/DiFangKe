@@ -156,6 +156,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val dailyMarkers: StateFlow<String?> = _dailyMarkers.asStateFlow()
 
     val trackingState = LocationTrackingService.stateFlow
+    val isTrackingEnabled: StateFlow<Boolean> = DiFangKeApp.instance.preferences.isTrackingEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     private val _lastDataSyncTrigger = MutableStateFlow(Date())
     val lastDataSyncTrigger: StateFlow<Date> = _lastDataSyncTrigger.asStateFlow()
@@ -281,25 +283,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val start = zeroTime(date)
             val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
 
-            db.footprintDao().observeBetween(start, end).map { footprints ->
-                val markersList = mutableListOf<List<Double>>()
-                footprints.forEach { fp ->
-                    try {
-                        val lats = org.json.JSONArray(fp.latitudeJson)
-                        val lons = org.json.JSONArray(fp.longitudeJson)
-                        if (lats.length() > 0 && lons.length() > 0) {
-                            markersList.add(listOf(lats.getDouble(0), lons.getDouble(0)))
-                        }
-                    } catch (e: Exception) {}
-                }
-                if (markersList.isNotEmpty()) {
-                    val array = org.json.JSONArray()
-                    markersList.forEach { m ->
-                        val mArr = org.json.JSONArray().put(m[0]).put(m[1])
-                        array.put(mArr)
-                    }
-                    array.toString()
-                } else null
+            combine(
+                db.footprintDao().observeBetween(start, end),
+                db.activityTypeDao().observeAll()
+            ) { footprints, activityTypes ->
+                buildFootprintMarkersJson(footprints, activityTypes)
             }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
         }
     }
@@ -392,6 +380,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun observeTrackingPreference() {
         viewModelScope.launch {
             DiFangKeApp.instance.preferences.isTrackingEnabled
+                .distinctUntilChanged()
                 .collectLatest { enabled ->
                     if (enabled) {
                         // 检查权限并启动服务
@@ -403,6 +392,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         LocationTrackingService.stop(getApplication())
                     }
                 }
+        }
+    }
+
+    fun setTrackingEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            DiFangKeApp.instance.preferences.setTrackingEnabled(enabled)
+            if (enabled) {
+                val context = getApplication<Application>()
+                if (hasLocationPermissions(context)) {
+                    LocationTrackingService.start(context)
+                }
+            } else {
+                LocationTrackingService.stop(getApplication())
+            }
         }
     }
 
@@ -484,27 +487,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _dailyTrajectory.value = null
             }
 
-            // 6. 聚合足迹中心点以便在大/小地图显示标记
-            val markersList = mutableListOf<List<Double>>()
-            footprints.forEach { fp ->
-                try {
-                    val lats = org.json.JSONArray(fp.latitudeJson)
-                    val lons = org.json.JSONArray(fp.longitudeJson)
-                    if (lats.length() > 0 && lons.length() > 0) {
-                        markersList.add(listOf(lats.getDouble(0), lons.getDouble(0)))
-                    }
-                } catch (e: Exception) {}
-            }
-            if (markersList.isNotEmpty()) {
-                val array = org.json.JSONArray()
-                markersList.forEach { m ->
-                    val mArr = org.json.JSONArray().put(m[0]).put(m[1])
-                    array.put(mArr)
-                }
-                _dailyMarkers.value = array.toString()
-            } else {
-                _dailyMarkers.value = null
-            }
+            // 6. 聚合足迹中心点以便在大/小地图显示活动图标标记
+            _dailyMarkers.value = buildFootprintMarkersJson(footprints, db.activityTypeDao().getAll())
 
             // 发起 AI 分析任务
             triggerAiAnalysis(footprints, transports, startOfDay)
@@ -582,9 +566,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleTracking() {
         viewModelScope.launch {
-            val prefs = DiFangKeApp.instance.preferences
-            val currentState = trackingState.value != LocationTrackingService.TrackingState.Idle
-            prefs.setTrackingEnabled(!currentState)
+            val currentState = DiFangKeApp.instance.preferences.isTrackingEnabled.first()
+            setTrackingEnabled(!currentState)
         }
     }
 
@@ -629,5 +612,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-}
 
+    private fun buildFootprintMarkersJson(
+        footprints: List<FootprintEntity>,
+        activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>
+    ): String? {
+        val activityById = activityTypes.associateBy { it.id }
+        val array = org.json.JSONArray()
+        footprints.forEach { fp ->
+            try {
+                val lats = org.json.JSONArray(fp.latitudeJson)
+                val lons = org.json.JSONArray(fp.longitudeJson)
+                if (lats.length() > 0 && lons.length() > 0) {
+                    val activity = activityById[fp.activityTypeValue]
+                    array.put(
+                        org.json.JSONObject()
+                            .put("lat", lats.getDouble(0))
+                            .put("lon", lons.getDouble(0))
+                            .put("icon", activity?.icon ?: "place")
+                            .put("color", activity?.colorHex ?: "#00A0AC")
+                            .put("duration", fp.duration)
+                    )
+                }
+            } catch (e: Exception) {}
+        }
+        return if (array.length() > 0) array.toString() else null
+    }
+}

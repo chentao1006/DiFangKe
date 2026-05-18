@@ -31,6 +31,7 @@ fun DailyTimelineScreen(
     viewModel: MainViewModel = viewModel()
 ) {
     val trackingState by viewModel.trackingState.collectAsState()
+    val isTrackingEnabled by viewModel.isTrackingEnabled.collectAsState()
     val activityTypes by viewModel.activityTypes.collectAsState()
     val allPlaces by viewModel.allPlaces.collectAsState()
     
@@ -118,6 +119,7 @@ fun DailyTimelineScreen(
                 date = date,
                 viewModel = viewModel,
                 trackingState = trackingState,
+                isTrackingEnabled = isTrackingEnabled,
                 activityTypes = activityTypes,
                 allPlaces = allPlaces,
                 isFirstPage = false,

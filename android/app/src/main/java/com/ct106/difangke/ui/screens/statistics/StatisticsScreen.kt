@@ -31,6 +31,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import android.util.Log
 import android.os.Bundle
 import com.ct106.difangke.ui.theme.DfkAccent
+import com.ct106.difangke.data.db.entity.PlaceEntity
+import com.ct106.difangke.ui.components.addImportantPlaceCircles
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -42,6 +44,7 @@ fun StatisticsScreen(
 ) {
     val selectedRange by viewModel.selectedRange.collectAsState()
     val heatmapPoints by viewModel.heatmapPoints.collectAsState()
+    val allPlaces by viewModel.allPlaces.collectAsState()
     val activityRank by viewModel.activityRank.collectAsState()
     val trendData by viewModel.trendData.collectAsState()
     val aiSummary by viewModel.aiSummary.collectAsState()
@@ -98,7 +101,7 @@ fun StatisticsScreen(
                     AiSummarySection(summary = aiSummary, isGenerating = isGeneratingSummary)
 
                     // Heatmap (Keep as card but matching iOS border radius)
-                    HeatmapSection(points = heatmapPoints)
+                    HeatmapSection(points = heatmapPoints, allPlaces = allPlaces)
 
                     // Activity Rank (iOS Style: Progress bars)
                     ActivityRankSection(items = activityRank)
@@ -226,7 +229,7 @@ fun AiSummarySection(summary: String?, isGenerating: Boolean) {
 }
 
 @Composable
-fun HeatmapSection(points: List<HeatmapPoint>) {
+fun HeatmapSection(points: List<HeatmapPoint>, allPlaces: List<PlaceEntity> = emptyList()) {
     val isDark = isSystemInDarkTheme()
     Column(modifier = Modifier.fillMaxWidth()) {
         SectionHeader("热点地区", Icons.Default.Map)
@@ -290,8 +293,10 @@ fun HeatmapSection(points: List<HeatmapPoint>) {
                     // 彻底禁止地图互动，防止滚动冲突
                     amap.uiSettings.setAllGesturesEnabled(false)
                     
+                    amap.clear()
+                    amap.addImportantPlaceCircles(allPlaces)
+
                     if (points.isNotEmpty()) {
-                        amap.clear()
                         try {
                             val latLngs = points.map { com.amap.api.maps.model.LatLng(it.lat, it.lon) }
                             
@@ -501,4 +506,3 @@ fun SectionHeader(title: String, icon: ImageVector) {
         Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold)
     }
 }
-

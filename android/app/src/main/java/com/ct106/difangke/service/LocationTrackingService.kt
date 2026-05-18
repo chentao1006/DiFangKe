@@ -48,11 +48,8 @@ class LocationTrackingService : Service() {
         }
 
         fun stop(context: Context) {
-            context.startService(
-                Intent(context, LocationTrackingService::class.java).apply {
-                    action = ACTION_STOP
-                }
-            )
+            context.stopService(Intent(context, LocationTrackingService::class.java))
+            stateFlow.value = TrackingState.Idle
         }
     }
 
@@ -81,9 +78,11 @@ class LocationTrackingService : Service() {
     private val trackingQueue = mutableListOf<RawLocationStore.RawPoint>()
     private var ongoingStayStart: RawLocationStore.RawPoint? = null
     private var ongoingStayAddress: String? = null
+    private var ongoingFootprintID: String? = null
     private var lastNotificationText: String? = null
     private var lastNotifiedStayStart: Long? = null
     private var currentIntervalTier = -1 // -1: initial, 0: stationary, 1: moving, 2: fast
+    private val ongoingStayMaxPointGapMs = (AppConfig.TRANSPORT_MAX_GAP_THRESHOLD * 1000).toLong()
 
     private val locationListener = AMapLocationListener { location ->
         if (location != null && location.errorCode == 0) {
@@ -160,7 +159,7 @@ class LocationTrackingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        when (intent?.action ?: ACTION_START) {
             ACTION_START -> {
                 Log.d(TAG, "ACTION_START received, starting foreground...")
                 val notification = NotificationHelper.buildTrackingNotification(this)
@@ -198,6 +197,7 @@ class LocationTrackingService : Service() {
                 stopSelf()
                 stateFlow.value = TrackingState.Idle
                 Log.i(TAG, "Amap Tracking stopped")
+                return START_NOT_STICKY
             }
         }
         return START_STICKY
@@ -237,7 +237,7 @@ class LocationTrackingService : Service() {
         }
     }
 
-    private fun updateOngoingState(current: RawLocationStore.RawPoint, currentAddress: String?) {
+    private suspend fun updateOngoingState(current: RawLocationStore.RawPoint, currentAddress: String?) {
         val queueSize = trackingQueue.size
         // 至少有三个点才能判定停留趋势
         if (queueSize >= 3) {
@@ -249,12 +249,20 @@ class LocationTrackingService : Service() {
             if (distFromCenter < AppConfig.STAY_DISTANCE_THRESHOLD) {
                 // 如果当前已经在 OngoingStay 且中心位移不大，不要重设 start 时间
                 if (ongoingStayStart == null) {
-                    ongoingStayStart = trackingQueue.first()
+                    ongoingStayStart = resolveOngoingStayStart(centerLat, centerLon, trackingQueue.first(), current)
                     // 持久化保存
                     serviceScope.launch {
                         prefs.savePendingStay(centerLat, centerLon, ongoingStayStart?.timestamp?.time, currentAddress)
                     }
                 } else {
+                    val earliestStayPoint = resolveOngoingStayStart(centerLat, centerLon, ongoingStayStart!!, current)
+                    if (earliestStayPoint.timestamp.before(ongoingStayStart!!.timestamp)) {
+                        ongoingStayStart = earliestStayPoint
+                        serviceScope.launch {
+                            prefs.savePendingStay(centerLat, centerLon, ongoingStayStart?.timestamp?.time, currentAddress ?: ongoingStayAddress)
+                        }
+                    }
+
                     // 核心修复：如果已有的停留点距离当前新识别的中心太远，说明用户已经大幅度移动过
                     // 之前的 ongoingStayStart 是陈旧的（可能是重启后恢复的），应以当前窗口为准重设
                     val distFromStart = processor.haversineMeters(
@@ -263,7 +271,7 @@ class LocationTrackingService : Service() {
                     )
                     if (distFromStart > AppConfig.STAY_DISTANCE_THRESHOLD * 2.5) {
                         Log.i(TAG, "Restored stay location is too far ($distFromStart m), resetting stay start time.")
-                        ongoingStayStart = trackingQueue.first()
+                        ongoingStayStart = resolveOngoingStayStart(centerLat, centerLon, trackingQueue.first(), current)
                         ongoingStayAddress = null
                         serviceScope.launch {
                             prefs.savePendingStay(centerLat, centerLon, ongoingStayStart?.timestamp?.time, currentAddress)
@@ -285,6 +293,8 @@ class LocationTrackingService : Service() {
                         address = address ?: ongoingStayAddress,
                         speed = current.speed
                     )
+
+                    upsertOngoingFootprint(centerLat, centerLon, current, address ?: ongoingStayAddress)
                     
                     val stayStart = ongoingStayStart!!.timestamp.time
                     if (lastNotifiedStayStart != stayStart) {
@@ -306,12 +316,158 @@ class LocationTrackingService : Service() {
                 if (ongoingStayStart != null) {
                     ongoingStayStart = null
                     ongoingStayAddress = null
+                    ongoingFootprintID = null
                     serviceScope.launch {
                         prefs.savePendingStay(null, null, null, null)
                     }
                 }
             }
         }
+    }
+
+    private suspend fun resolveOngoingStayStart(
+        centerLat: Double,
+        centerLon: Double,
+        fallback: RawLocationStore.RawPoint,
+        current: RawLocationStore.RawPoint
+    ): RawLocationStore.RawPoint {
+        val lowerBound = maxOf(
+            getStartOfDay(current.timestamp).time,
+            latestFootprintEndBefore(current.timestamp, centerLat, centerLon)?.time ?: Long.MIN_VALUE
+        )
+        val points = rawStore.loadRecentLocations(AppConfig.LOCATION_LOOKBACK_MAX_HOURS)
+            .asSequence()
+            .filter { it.timestamp.time in lowerBound..current.timestamp.time }
+            .filter { it.accuracy > 0 && it.accuracy < AppConfig.MAX_LOCATION_ACCURACY }
+            .toList()
+
+        if (points.isEmpty()) return fallback
+
+        var earliest: RawLocationStore.RawPoint? = null
+        var previousLaterPoint: RawLocationStore.RawPoint? = null
+        for (point in points.asReversed()) {
+            val laterPoint = previousLaterPoint
+            if (laterPoint != null && laterPoint.timestamp.time - point.timestamp.time > ongoingStayMaxPointGapMs) {
+                break
+            }
+
+            val distance = processor.haversineMeters(
+                centerLat, centerLon,
+                point.latitude, point.longitude
+            )
+            if (distance <= AppConfig.STAY_DISTANCE_THRESHOLD) {
+                earliest = point
+                previousLaterPoint = point
+            } else if (earliest != null) {
+                break
+            }
+        }
+
+        val boundedFallback = if (fallback.timestamp.time < lowerBound) current else fallback
+        return listOfNotNull(earliest, boundedFallback).minByOrNull { it.timestamp.time } ?: boundedFallback
+    }
+
+    private suspend fun latestFootprintEndBefore(current: Date, centerLat: Double, centerLon: Double): Date? {
+        val dayStart = getStartOfDay(current)
+        return db.footprintDao().getBetween(dayStart, current)
+            .filter { footprint ->
+                val lats = gson.fromJson(footprint.latitudeJson, Array<Double>::class.java).toList()
+                val lons = gson.fromJson(footprint.longitudeJson, Array<Double>::class.java).toList()
+                if (lats.isEmpty() || lons.isEmpty()) return@filter false
+                val lat = lats.average()
+                val lon = lons.average()
+                processor.haversineMeters(lat, lon, centerLat, centerLon) <= AppConfig.LIVE_STAY_MERGE_DISTANCE_THRESHOLD
+            }
+            .maxByOrNull { it.endTime.time }
+            ?.endTime
+    }
+
+    private suspend fun upsertOngoingFootprint(
+        centerLat: Double,
+        centerLon: Double,
+        current: RawLocationStore.RawPoint,
+        address: String?
+    ) {
+        val start = ongoingStayStart ?: return
+        val durationSec = (current.timestamp.time - start.timestamp.time) / 1000.0
+        if (durationSec < AppConfig.STAY_DURATION_THRESHOLD) return
+
+        val rawPoints = rawStore.loadRecentLocations(AppConfig.LOCATION_LOOKBACK_MAX_HOURS)
+            .filter { it.timestamp >= start.timestamp && it.timestamp <= current.timestamp }
+            .filter { it.accuracy > 0 && it.accuracy < AppConfig.MAX_LOCATION_ACCURACY }
+            .filter {
+                processor.haversineMeters(centerLat, centerLon, it.latitude, it.longitude) <= AppConfig.STAY_DISTANCE_THRESHOLD
+            }
+            .dropWhile { it.timestamp.before(start.timestamp) }
+            .ifEmpty { listOf(start, current) }
+
+        val latJson = gson.toJson(rawPoints.map { it.latitude })
+        val lonJson = gson.toJson(rawPoints.map { it.longitude })
+        val locationHash = FootprintEntity.generateLocationHash(centerLat, centerLon)
+        val places = db.placeDao().getAll()
+        val matchedPlace = PlaceMatcher.bestPlaceForCoordinate(centerLat, centerLon, places, processor)
+        val resolvedAddress = address ?: geocoder.reverseGeocode(centerLat, centerLon)
+
+        val existing = ongoingFootprintID?.let { db.footprintDao().getById(it) }
+            ?: findExistingOngoingFootprint(start.timestamp, current.timestamp, centerLat, centerLon)
+
+        if (existing != null) {
+            ongoingFootprintID = existing.footprintID
+            val keepManualLocation = existing.isTitleEditedByHand
+            val updated = existing.copy(
+                endTime = maxOf(existing.endTime, current.timestamp),
+                latitudeJson = latJson,
+                longitudeJson = lonJson,
+                locationHash = locationHash,
+                placeID = if (keepManualLocation) existing.placeID else matchedPlace?.placeID ?: existing.placeID,
+                address = if (keepManualLocation) existing.address else resolvedAddress ?: existing.address
+            )
+            db.footprintDao().update(updated)
+            return
+        }
+
+        val entity = FootprintEntity(
+            footprintID = UUID.randomUUID().toString(),
+            date = getStartOfDay(start.timestamp),
+            startTime = start.timestamp,
+            endTime = current.timestamp,
+            latitudeJson = latJson,
+            longitudeJson = lonJson,
+            locationHash = locationHash,
+            title = if (matchedPlace != null) {
+                FootprintTitles.generate(matchedPlace.name, start.timestamp.time / 1000)
+            } else if (resolvedAddress != null) {
+                FootprintTitles.generate(resolvedAddress, start.timestamp.time / 1000)
+            } else {
+                FootprintTitles.generate("此处", start.timestamp.time / 1000)
+            },
+            statusValue = "candidate",
+            placeID = matchedPlace?.placeID,
+            address = resolvedAddress
+        )
+
+        db.footprintDao().insert(entity)
+        ongoingFootprintID = entity.footprintID
+    }
+
+    private suspend fun findExistingOngoingFootprint(
+        start: Date,
+        end: Date,
+        centerLat: Double,
+        centerLon: Double
+    ): FootprintEntity? {
+        val dayStart = getStartOfDay(start)
+        val dayEnd = Date(dayStart.time + 86_400_000L)
+        return db.footprintDao().getBetween(dayStart, dayEnd)
+            .filter { it.endTime >= Date(start.time - AppConfig.LIVE_STAY_MERGE_TIME_THRESHOLD.toLong() * 1000) && it.startTime <= end }
+            .firstOrNull { footprint ->
+                val lats = gson.fromJson(footprint.latitudeJson, Array<Double>::class.java).toList()
+                val lons = gson.fromJson(footprint.longitudeJson, Array<Double>::class.java).toList()
+                if (lats.isEmpty() || lons.isEmpty()) return@firstOrNull false
+                val lat = lats.average()
+                val lon = lons.average()
+                processor.haversineMeters(lat, lon, centerLat, centerLon) <= AppConfig.LIVE_STAY_MERGE_DISTANCE_THRESHOLD
+            }
     }
 
     private fun checkAndSendNewPlaceNotification(lat: Double, lon: Double, startTime: Long, address: String?) {
@@ -321,9 +477,7 @@ class LocationTrackingService : Service() {
 
             val startTimeDate = Date(startTime)
             val places = db.placeDao().getAll()
-            val matchedPlace = places.firstOrNull { place ->
-                processor.haversineMeters(place.latitude, place.longitude, lat, lon) <= place.radius + AppConfig.TAG_INHERITANCE_DISTANCE
-            }
+            val matchedPlace = PlaceMatcher.bestPlaceForCoordinate(lat, lon, places, processor)
 
             var lastVisit: FootprintEntity? = null
             var isNewPlace = false
@@ -427,9 +581,7 @@ class LocationTrackingService : Service() {
         val address = geocoder.reverseGeocode(candidate.latitude, candidate.longitude)
         val locationHash = FootprintEntity.generateLocationHash(candidate.latitude, candidate.longitude)
         val places = db.placeDao().getAll()
-        val matchedPlace = places.firstOrNull { place ->
-            processor.haversineMeters(place.latitude, place.longitude, candidate.latitude, candidate.longitude) <= place.radius + AppConfig.TAG_INHERITANCE_DISTANCE
-        }
+        val matchedPlace = PlaceMatcher.bestPlaceForCoordinate(candidate.latitude, candidate.longitude, places, processor)
 
         val entity = FootprintEntity(
             footprintID = UUID.randomUUID().toString(),
@@ -542,10 +694,13 @@ class LocationTrackingService : Service() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        locationClient?.disableBackgroundLocation(true)
         locationClient?.stopLocation()
         locationClient?.onDestroy()
+        locationClient = null
         serviceScope.cancel()
+        stateFlow.value = TrackingState.Idle
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
