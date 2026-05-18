@@ -40,14 +40,12 @@ class OpenAIService {
         case dailySummary(Date, [UUID], [UUID], Bool)
         case tomorrowQuote
         case pastQuote
-        case notificationSummary([String])
         case ongoing(([(Double, Double)], TimeInterval, Date, Date, String?, String?, String?))
     }
     
     // 用于保存异步队列完成后的回调
     private var tomorrowQuoteCompletions: [(String, String) -> Void] = []
     private var pastQuoteCompletions: [(String, String) -> Void] = []
-    private var notificationSummaryCompletions: [(String) -> Void] = []
     private var ongoingCompletions: [(String) -> Void] = []
     
     // 快速查找集合，避免线性搜索导致卡顿
@@ -285,12 +283,6 @@ class OpenAIService {
         self.processQueue()
     }
     
-    func enqueueNotificationSummary(footprintTitles: [String], completion: @escaping (String) -> Void) {
-        self.notificationSummaryCompletions.append(completion)
-        self.taskQueue.append(.notificationSummary(footprintTitles))
-        self.processQueue()
-    }
-    
     func enqueueOngoingAnalysis(locations: [(Double, Double)], duration: TimeInterval, startTime: Date, endTime: Date, placeName: String?, address: String?, activityName: String?, completion: @escaping (String) -> Void) {
         self.ongoingCompletions.append(completion)
         self.taskQueue.append(.ongoing((locations, duration, startTime, endTime, placeName, address, activityName)))
@@ -348,8 +340,6 @@ class OpenAIService {
                 await self.processTomorrowQuoteTask()
             case .pastQuote:
                 await self.processPastQuoteTask()
-            case .notificationSummary(let titles):
-                await self.processNotificationSummaryTask(titles: titles)
             case .ongoing(let data):
                 await self.processOngoingTask(data: data)
             }
@@ -370,6 +360,46 @@ class OpenAIService {
         let fingerprint: String
         let fallbackSummary: String
     }
+
+    func generateLiveDailyOverviewSummary(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], completion: @escaping (String) -> Void) {
+        guard let container = modelContainer else {
+            completion("平凡的一天")
+            return
+        }
+
+        let startOfDate = Calendar.current.startOfDay(for: date)
+        let fpIds = footprints.map(\.footprintID)
+        let tpIds = transports.map(\.recordID)
+
+        Task {
+            let context = ModelContext(container)
+            let resolved = await self.resolveDailySummary(
+                date: startOfDate,
+                fpIds: fpIds,
+                tpIds: tpIds,
+                context: context,
+                includeTodayData: true
+            )
+            if let resolved {
+                let descriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate {
+                    $0.date == startOfDate
+                })
+                if let existing = (try? context.fetch(descriptor))?.first {
+                    existing.content = resolved.content
+                    existing.aiGenerated = true
+                    existing.dataFingerprint = resolved.fingerprint
+                } else {
+                    let newSummary = DailyInsight(date: startOfDate, content: resolved.content, aiGenerated: true)
+                    newSummary.dataFingerprint = resolved.fingerprint
+                    context.insert(newSummary)
+                }
+                try? context.save()
+            }
+            await MainActor.run {
+                completion(resolved?.content ?? "平凡的一天")
+            }
+        }
+    }
     
     private func processDailySummaryTask(date: Date, fpIds: [UUID], tpIds: [UUID], context: ModelContext, force: Bool = false) async {
         let startOfDate = Calendar.current.startOfDay(for: date)
@@ -384,9 +414,18 @@ class OpenAIService {
         let existingContent = existing?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasMeaningfulExistingContent = !(existingContent?.isEmpty ?? true)
 
-        guard let profile = buildDailySummaryProfile(fpIds: fpIds, tpIds: tpIds, context: context) else { return }
+        guard let resolved = await resolveDailySummary(
+            date: startOfDate,
+            fpIds: fpIds,
+            tpIds: tpIds,
+            context: context,
+            includeTodayData: false
+        ) else {
+            dailySummaryDateSet.remove(startOfDate)
+            return
+        }
         
-        let currentFingerprint = profile.fingerprint
+        let currentFingerprint = resolved.fingerprint
         
         // 只有在内容完全一致时才复用旧摘要
         if !force, existing?.aiGenerated == true, existing?.dataFingerprint == currentFingerprint, hasMeaningfulExistingContent {
@@ -394,19 +433,12 @@ class OpenAIService {
             return
         }
         
-        let summaryResult = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            self.generateDailySummary(date: startOfDate, footprintDescriptions: profile.lines) { res in
-                continuation.resume(returning: res)
-            }
-        }
-        let finalizedSummary = dailySummaryCleanedSummary(summaryResult) ?? profile.fallbackSummary
-        
         if let existing = existing {
-            existing.content = finalizedSummary
+            existing.content = resolved.content
             existing.aiGenerated = true
             existing.dataFingerprint = currentFingerprint
         } else {
-            let newSummary = DailyInsight(date: startOfDate, content: finalizedSummary, aiGenerated: true)
+            let newSummary = DailyInsight(date: startOfDate, content: resolved.content, aiGenerated: true)
             newSummary.dataFingerprint = currentFingerprint
             context.insert(newSummary)
         }
@@ -415,7 +447,35 @@ class OpenAIService {
         dailySummaryDateSet.remove(startOfDate)
     }
 
-    private func buildDailySummaryProfile(fpIds: [UUID], tpIds: [UUID], context: ModelContext) -> DailySummaryProfile? {
+    private func resolveDailySummary(
+        date: Date,
+        fpIds: [UUID],
+        tpIds: [UUID],
+        context: ModelContext,
+        includeTodayData: Bool
+    ) async -> (content: String, fingerprint: String)? {
+        guard let profile = buildDailySummaryProfile(
+            fpIds: fpIds,
+            tpIds: tpIds,
+            context: context,
+            includeTodayData: includeTodayData
+        ) else {
+            return nil
+        }
+
+        let summaryResult = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            self.generateDailySummary(date: date, footprintDescriptions: profile.lines) { res in
+                continuation.resume(returning: res)
+            }
+        }
+
+        return (
+            dailySummaryCleanedSummary(summaryResult) ?? profile.fallbackSummary,
+            profile.fingerprint
+        )
+    }
+
+    private func buildDailySummaryProfile(fpIds: [UUID], tpIds: [UUID], context: ModelContext, includeTodayData: Bool) -> DailySummaryProfile? {
         let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
         let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
         
@@ -432,7 +492,10 @@ class OpenAIService {
             let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
             if let fp = (try? context.fetch(fpDescriptor))?.first {
                 let isPastDay = Calendar.current.startOfDay(for: fp.date) < startOfDate
-                guard fp.isUserModifiedForDailySummary || (isPastDay && fp.status != .ignored) else { continue }
+                let shouldInclude = includeTodayData
+                    ? fp.status != .ignored
+                    : (fp.isUserModifiedForDailySummary || (isPastDay && fp.status != .ignored))
+                guard shouldInclude else { continue }
                 let factLine = dailySummaryFactLine(for: fp, places: allPlaces, activities: allActivities)
                 if !factLine.isEmpty {
                     events.append((fp.startTime, factLine))
@@ -661,17 +724,6 @@ class OpenAIService {
         let calls = self.pastQuoteCompletions
         self.pastQuoteCompletions.removeAll()
         calls.forEach { $0(result.0, result.1) }
-    }
-    
-    private func processNotificationSummaryTask(titles: [String]) async {
-        let result = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            self.generateDailySummary(date: Date(), footprintDescriptions: titles) { res in
-                continuation.resume(returning: res)
-            }
-        }
-        let calls = self.notificationSummaryCompletions
-        self.notificationSummaryCompletions.removeAll()
-        calls.forEach { $0(result ?? "平凡的一天") }
     }
     
     private func processOngoingTask(data: ([(Double, Double)], TimeInterval, Date, Date, String?, String?, String?)) async {

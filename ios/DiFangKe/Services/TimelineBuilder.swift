@@ -1450,6 +1450,12 @@ class PersistentTimelineBuilder {
         if lastEndTime == startOfDay && gap > 23 * 3600 { return }
 
         if gap >= AppConfig.shared.gapFillingThreshold { // 使用配置的缺口阈值
+            let transportDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                $0.statusRaw != "ignored" && $0.endTime > lastEndTime && $0.startTime < syncLimit
+            })
+            let hasTransportOverlap = ((try? context.fetch(transportDesc))?.isEmpty == false)
+            if hasTransportOverlap { return }
+
             // 尝试寻找该日期的上一个足迹，如果没有，寻找该日期之前的绝对最后一条记录
             var fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
                 $0.startTime < lastEndTime
@@ -1548,7 +1554,16 @@ class PersistentTimelineBuilder {
                     current.typeRaw = next.typeRaw
                 } else if current.manualTypeRaw == nil {
                     // 只有在两段都没有手动干预的情况下，才重新自动识别
-                    current.typeRaw = TransportType.from(speed: current.averageSpeed, motionType: mergedMotionType, stepCount: mergedMetrics.steps, duration: current.endTime.timeIntervalSince(current.startTime), preferredAutomotive: preferredAuto, preferredCycling: preferredCycling).rawValue
+                    current.typeRaw = TransportType.from(
+                        speed: current.averageSpeed,
+                        motionType: mergedMotionType,
+                        stepCount: mergedMetrics.steps,
+                        walkingDistance: mergedMetrics.distance,
+                        floorsClimbed: mergedMetrics.floors,
+                        duration: current.endTime.timeIntervalSince(current.startTime),
+                        preferredAutomotive: preferredAuto,
+                        preferredCycling: preferredCycling
+                    ).rawValue
                 }
                 
                 if let decodedCurrent = try? JSONDecoder().decode([CodableCoordinate].self, from: current.pointsData),
@@ -1652,7 +1667,16 @@ class PersistentTimelineBuilder {
 #else
                 let motionType = MotionType.unknown
 #endif
-                    let determinedType = TransportType.from(speed: speed, motionType: motionType, stepCount: metrics.steps, duration: duration, preferredAutomotive: preferredAuto, preferredCycling: preferredCycling)
+                    let determinedType = TransportType.from(
+                        speed: speed,
+                        motionType: motionType,
+                        stepCount: metrics.steps,
+                        walkingDistance: metrics.distance,
+                        floorsClimbed: metrics.floors,
+                        duration: duration,
+                        preferredAutomotive: preferredAuto,
+                        preferredCycling: preferredCycling
+                    )
                     
                     let tp = TransportRecord(
                         day: startOfDay,
@@ -1787,6 +1811,11 @@ class PersistentTimelineBuilder {
         var hasChanges = false
 
         for fp in fps {
+            let hasUserEdits = fp.isAddressEditedByHand
+                || !(fp.reason ?? "").isEmpty
+                || !fp.photoAssetIDs.isEmpty
+                || (fp.isHighlight ?? false)
+
             let overlaps = transports.compactMap { t -> (start: Date, end: Date)? in
                 let s = max(fp.startTime, t.startTime)
                 let e = min(fp.endTime, t.endTime)
@@ -1817,7 +1846,29 @@ class PersistentTimelineBuilder {
                 segments.append((cursor, fp.endTime))
             }
 
-            guard segments.count >= 2 else { continue }
+            if segments.isEmpty {
+                let isFullyCovered = blocked.first.map { first in
+                    first.start <= fp.startTime.addingTimeInterval(60) &&
+                    blocked.last!.end >= fp.endTime.addingTimeInterval(-60)
+                } ?? false
+
+                if isFullyCovered && !hasUserEdits {
+                    context.delete(fp)
+                    hasChanges = true
+                }
+                continue
+            }
+
+            if segments.count == 1 {
+                let seg = segments[0]
+                fp.startTime = seg.start
+                fp.endTime = seg.end
+                fp.date = calendar.startOfDay(for: seg.start)
+                fp.duration = seg.end.timeIntervalSince(seg.start)
+                fp.locationHash = "SPLIT_BY_TRANSPORT"
+                hasChanges = true
+                continue
+            }
 
             let baseCoords = fp.footprintLocations.isEmpty
                 ? [CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)]
@@ -2127,7 +2178,16 @@ class PersistentTimelineBuilder {
 #else
                 let motionType = MotionType.unknown
 #endif
-                    let determinedType = TransportType.from(speed: avgSpeed, motionType: motionType, stepCount: metrics.steps, duration: tEnd.timeIntervalSince(tStart), preferredAutomotive: preferredAuto, preferredCycling: preferredCycling)
+                    let determinedType = TransportType.from(
+                        speed: avgSpeed,
+                        motionType: motionType,
+                        stepCount: metrics.steps,
+                        walkingDistance: metrics.distance,
+                        floorsClimbed: metrics.floors,
+                        duration: tEnd.timeIntervalSince(tStart),
+                        preferredAutomotive: preferredAuto,
+                        preferredCycling: preferredCycling
+                    )
                     
                     let tp = TransportRecord(
                         day: startOfDay,

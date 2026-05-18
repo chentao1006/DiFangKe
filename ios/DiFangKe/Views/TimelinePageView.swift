@@ -285,19 +285,13 @@ struct TimelinePageView: View {
         var items = filteredTimelineItems
         guard let ongoingFootprintItem else { return items }
 
-        // 保持原时间线顺序，不做全量重排；仅按现有方向插入当前停留项。
-        if items.count < 2 {
-            items.append(ongoingFootprintItem)
-            return items
+        items.append(ongoingFootprintItem)
+        return items.sorted {
+            if $0.startTime == $1.startTime {
+                return $0.endTime > $1.endTime
+            }
+            return $0.startTime > $1.startTime
         }
-
-        let isDescending = (items.first?.startTime ?? .distantPast) >= (items.last?.startTime ?? .distantPast)
-        if isDescending {
-            items.insert(ongoingFootprintItem, at: 0)
-        } else {
-            items.append(ongoingFootprintItem)
-        }
-        return items
     }
     
     private var timelineScrollView: some View {

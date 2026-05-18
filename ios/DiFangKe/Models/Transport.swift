@@ -68,8 +68,25 @@ enum TransportType: String, CaseIterable, Codable {
         }
     }
     
-    static func from(speed: Double, motionType: MotionType = .unknown, stepCount: Int = 0, duration: TimeInterval = 0, preferredAutomotive: TransportType = .car, preferredCycling: TransportType = .bicycle) -> TransportType {
+    static func from(
+        speed: Double,
+        motionType: MotionType = .unknown,
+        stepCount: Int = 0,
+        walkingDistance: Double = 0,
+        floorsClimbed: Int = 0,
+        duration: TimeInterval = 0,
+        preferredAutomotive: TransportType = .car,
+        preferredCycling: TransportType = .bicycle
+    ) -> TransportType {
         let kmh = speed * 3.6
+        let minutes = max(duration / 60, 0)
+        let estimatedDistance = max(speed * duration, 0)
+        let stepsPerMinute = minutes > 0 ? Double(stepCount) / minutes : 0
+        let walkingDistanceRatio = estimatedDistance > 0 ? min(1.5, walkingDistance / estimatedDistance) : 0
+        let hasStrongOnFootEvidence =
+            (walkingDistance > 250 && walkingDistanceRatio > 0.55) ||
+            (stepsPerMinute > 35 && walkingDistance > 120) ||
+            (floorsClimbed >= 2 && walkingDistance > 80)
         
         // --- 物理常识铁律：最高速度约束 ---
         var effectiveMotionType = motionType
@@ -84,6 +101,9 @@ enum TransportType: String, CaseIterable, Codable {
         }
         if kmh > 100 && motionType == .cycling {
             effectiveMotionType = .automotive 
+        }
+        if effectiveMotionType == .automotive && hasStrongOnFootEvidence && kmh < 22 {
+            effectiveMotionType = .walking
         }
 
         // 1. 优先使用传感器数据 (Core Motion)
@@ -103,9 +123,14 @@ enum TransportType: String, CaseIterable, Codable {
             break
         }
         
-        // 2. 结合步数判定 (HealthKit)
+        // 2. 结合健康数据判定 (HealthKit)
+        if hasStrongOnFootEvidence {
+            if stepsPerMinute > 140 && kmh < 35 { return .running }
+            if stepsPerMinute > 65 && kmh < 18 { return .slow }
+            if walkingDistanceRatio > 0.7 && kmh < 15 { return .slow }
+        }
+
         if stepCount > 100 && duration > 0 {
-            let stepsPerMinute = Double(stepCount) / (duration / 60)
             if stepsPerMinute > 140 && kmh < 35 { return .running }
             if stepsPerMinute > 30 && kmh < 15 { return .slow }
         }
@@ -113,13 +138,14 @@ enum TransportType: String, CaseIterable, Codable {
         // 3. 速度兜底 (传统逻辑)
         if kmh < 4.5 { 
             // 如果速度极低，但步数也很少（每分钟不到 5 步），说明大概率是在车里堵车，而不是真的在走
-            let stepsPerMin = duration > 0 ? Double(stepCount) / (duration / 60) : 0
-            if stepsPerMin < 5 && stepCount < 20 {
+            if stepsPerMinute < 5 && stepCount < 20 && walkingDistance < 80 {
                 return preferredAutomotive 
             }
             return .slow 
         }
+        if kmh < 9 && hasStrongOnFootEvidence { return .slow }
         if kmh < 12 { return .bicycle }
+        if kmh < 22 && hasStrongOnFootEvidence && walkingDistanceRatio > 0.45 { return preferredCycling }
         if kmh < 25 { return preferredCycling } 
         if kmh < 120 { return preferredAutomotive }
         if kmh < 350 { return .train }

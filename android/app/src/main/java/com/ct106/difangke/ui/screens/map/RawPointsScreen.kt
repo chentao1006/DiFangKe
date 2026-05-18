@@ -1,5 +1,7 @@
 package com.ct106.difangke.ui.screens.map
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -27,6 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import android.widget.Toast
 import com.amap.api.maps.AMap
 import com.amap.api.maps.CameraUpdateFactory
 import com.amap.api.maps.TextureMapView
@@ -35,6 +38,7 @@ import com.ct106.difangke.data.location.RawLocationStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.OutputStreamWriter
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.*
@@ -54,6 +58,28 @@ fun RawPointsScreen(
     var isLoading by remember { mutableStateOf(true) }
     var showOnlySuspicious by remember { mutableStateOf(false) }
     var selectedPoint by remember { mutableStateOf<RawLocationStore.RawPoint?>(null) }
+    val exportDateFormat = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US) }
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use { output ->
+                        OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
+                            writer.write(rawPointsCsv(points))
+                        }
+                    } ?: error("无法打开导出文件")
+                }
+            }
+            Toast.makeText(
+                context,
+                if (result.isSuccess) "轨迹点已导出" else "导出失败：${result.exceptionOrNull()?.localizedMessage ?: "未知错误"}",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
     
     val filteredPoints = remember(points, showOnlySuspicious) {
         if (!showOnlySuspicious) points.mapIndexed { index, p -> index to p }
@@ -97,6 +123,14 @@ fun RawPointsScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = {
+                            exportLauncher.launch("DiFangKe_RawPoints_${exportDateFormat.format(date)}.csv")
+                        },
+                        enabled = points.isNotEmpty()
+                    ) {
+                        Icon(Icons.Default.FileDownload, contentDescription = "导出当天轨迹点")
+                    }
                     IconButton(onClick = { showOnlySuspicious = !showOnlySuspicious }) {
                         Icon(
                             imageVector = if (showOnlySuspicious) Icons.Default.FilterList else Icons.Default.FilterListOff,
@@ -215,6 +249,29 @@ fun RawPointsScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+private fun rawPointsCsv(points: List<RawLocationStore.RawPoint>): String {
+    val isoFormatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.US).apply {
+        timeZone = TimeZone.getDefault()
+    }
+    return buildString {
+        appendLine("timestamp_iso,timestamp_unix,latitude,longitude,accuracy,speed")
+        points.forEach { point ->
+            append(isoFormatter.format(point.timestamp))
+            append(',')
+            append(String.format(Locale.US, "%.3f", point.timestamp.time / 1000.0))
+            append(',')
+            append(String.format(Locale.US, "%.8f", point.latitude))
+            append(',')
+            append(String.format(Locale.US, "%.8f", point.longitude))
+            append(',')
+            append(String.format(Locale.US, "%.2f", point.accuracy))
+            append(',')
+            append(String.format(Locale.US, "%.2f", point.speed))
+            appendLine()
         }
     }
 }

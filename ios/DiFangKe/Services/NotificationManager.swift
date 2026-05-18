@@ -71,7 +71,7 @@ class NotificationManager {
         }
     }
     
-    func refreshDailySummary(footprintCount: Int, footprintTitles: [String], pointsCount: Int, mileage: Double) {
+    func refreshDailySummary(footprintCount: Int, pointsCount: Int, mileage: Double, overviewSummary: String? = nil) {
         let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }
         
@@ -88,20 +88,10 @@ class NotificationManager {
         
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
         
-        if isAiEnabled && !footprintTitles.isEmpty {
-            // 1. 先立即发送/更新一个基础版本，保证用户能看到最新的统计数据
-            self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: "每日足迹汇总", body: "\(staticPreamble)\n\(statsInfo)")
-            
-            // 2. 异步请求 AI 生成更具文采的内容并更新
-            Task { @MainActor in
-                OpenAIService.shared.enqueueNotificationSummary(footprintTitles: footprintTitles) { aiSummary in
-                    // AI 成功生成后，用 AI 摘要替换掉静态前导语
-                    let finalBody = "\(aiSummary)\n\(statsInfo)"
-                    self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: "每日足迹汇总", body: finalBody)
-                }
-            }
+        if isAiEnabled, let overviewSummary, !overviewSummary.isEmpty {
+            let finalBody = "\(overviewSummary)\n\(statsInfo)"
+            self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: "每日足迹汇总", body: finalBody)
         } else {
-            // AI 未开启或无足迹标题，使用静态模版
             self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: "每日足迹汇总", body: "\(staticPreamble)\n\(statsInfo)")
         }
     }

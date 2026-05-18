@@ -318,16 +318,19 @@ struct RecordingStatusCard: View {
             return "定位记录已关闭"
         }
         
-        // 探测实时移动状态
-        if let location = locationManager.lastLocation, location.speed > 1.0 {
-            let speedKmh = location.speed * 3.6
-            if speedKmh > 90 {
-                return "正在高速移动"
-            } else if speedKmh > 30 {
-                return "正在快速移动"
-            } else if speedKmh > 5 {
-                return "正在持续移动"
+        // 优先使用 LocationManager 的稳定移动判断（带滞回），避免走路时标题频繁切换“停留”
+        if locationManager.uiIsMoving {
+            if let location = locationManager.lastLocation, location.speed > 0 {
+                let speedKmh = location.speed * 3.6
+                if speedKmh > 90 {
+                    return "正在高速移动"
+                } else if speedKmh > 30 {
+                    return "正在快速移动"
+                } else if speedKmh > 5 {
+                    return "正在持续移动"
+                }
             }
+            return "正在移动"
         }
         
         // 优先显示重要地点名称

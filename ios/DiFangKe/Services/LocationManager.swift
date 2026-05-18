@@ -796,6 +796,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var pathMonitor: NWPathMonitor?
     private var lastInterfaceType: NWInterface.InterfaceType?
     
+    /// UI 层“是否在移动”的稳定判断（带滞回），用于“今日正在记录”卡片标题等。
+    /// 目标：避免走路时因为 speed 抖动/传感器短暂 stationay 而快速切回“正在停留”。
+    var uiIsMoving: Bool = false
+    private var lastMovingEvidenceTime: Date = .distantPast
+    
     var trackingPoints: [CLLocation] = [] // 用于足迹识别的内存滑动窗口
     var allTodayPoints: [CLLocation] = [] { // 本日流水缓存，从 RawLocationStore 加载
         didSet {
@@ -894,6 +899,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var habitFrequencyThreshold: Int { AppConfig.shared.habitFrequencyThreshold }
     
     private var refreshTimer: AnyCancellable?
+    private var locationWatchdogTimer: AnyCancellable?
     
     override init() {
         super.init()
@@ -945,12 +951,33 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 if isMoving {
                     self?.forceHighAccuracyBoost()
                 }
+                self?.updateUIMovementState(isMovingEvidence: isMoving, source: "motion:isMoving")
             }
             .store(in: &cancellables)
         // 核心修复：在 init() 里就启动运动传感器 + 健康授权
         // 这样即使 App 从后台被系统唤醒（不走 startTracking），运动状态变化也能触发 boost
         HealthManager.shared.requestAuthorization { _ in }
         HealthManager.shared.startActivityTracking()
+    }
+
+    /// 将“移动证据”转成 UI 稳定状态：有移动证据立刻切到 moving；无证据需要保持一段时间才切回 stationary。
+    private func updateUIMovementState(isMovingEvidence: Bool, source: String) {
+        let now = Date()
+        if isMovingEvidence {
+            lastMovingEvidenceTime = now
+            if !uiIsMoving {
+                uiIsMoving = true
+                print("[LocationManager] UI moving=true (\(source))")
+            }
+            return
+        }
+        
+        // 无移动证据：必须连续一段时间都没有证据，才允许切回“停留”，避免抖动
+        let holdSeconds: TimeInterval = 120
+        if uiIsMoving, now.timeIntervalSince(lastMovingEvidenceTime) > holdSeconds {
+            uiIsMoving = false
+            print("[LocationManager] UI moving=false (\(source))")
+        }
     }
     
     private var cancellables = Set<AnyCancellable>()
@@ -977,6 +1004,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 出门保护期截止时间 —— 在此时间之前 isStationary 强制返回 false
     /// 防止节能逻辑在 GPS/传感器还没稳定时把精度降回低频
     private var departureBoostEndTime: Date = .distantPast
+    
+    /// 防抖：避免看门狗/系统回调频繁重启定位导致耗电抖动
+    private var lastRecoveryBoostTime: Date = .distantPast
 
     /// 强制激活高精度模式（通常由计步器、运动传感器或网络变化触发，早于 GPS 位移）
     private func forceHighAccuracyBoost() {
@@ -1042,11 +1072,49 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     await self?.performRawDataSync()
                 }
             }
+
+        // Location watchdog: if we're "moving" but location updates stop arriving,
+        // proactively restart high-accuracy updates to avoid multi-minute gaps.
+        locationWatchdogTimer = Timer.publish(every: 60, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.runLocationWatchdog()
+            }
         
         // Initial check on launch
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             self.checkMidnightSift()
         }
+    }
+
+    private func runLocationWatchdog() {
+        guard isTracking else { return }
+
+        let status = locationManager.authorizationStatus
+        guard status == .authorizedAlways else { return }
+
+        // Only intervene when we believe the user is actually moving.
+        let motion = HealthManager.shared.currentMotionType
+        let isMovingBySensor = HealthManager.shared.isMoving
+            || motion == .walking
+            || motion == .running
+            || motion == .cycling
+            || motion == .automotive
+        guard isMovingBySensor else { return }
+
+        guard let last = lastUpdateTime else { return }
+        let gap = Date().timeIntervalSince(last)
+        guard gap > 2 * 60 else { return }
+        
+        // Throttle recovery attempts to at most once per 5 minutes.
+        if Date().timeIntervalSince(lastRecoveryBoostTime) < 5 * 60 {
+            return
+        }
+        lastRecoveryBoostTime = Date()
+
+        print("[LocationManager] ⚠️ No location updates for \(Int(gap))s while moving. Restarting updates…")
+        ensureSignificantMonitoringActive()
+        forceHighAccuracyBoost()
     }
     
     private func checkMidnightSift() {
@@ -1454,30 +1522,39 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 let totalPoints = Double(coords.count)
                 let totalDuration = fp.duration
                 let baseStart = fp.startTime
-                
-                // 进行逻辑拆分
-                var splitFootprints: [Footprint] = []
-                for (idx, cluster) in distinctClusters.enumerated() {
+                let minDuration = AppConfig.shared.stayDurationThreshold
+                let splitRanges = distinctClusters.map { cluster -> (start: Date, end: Date, coords: [CLLocationCoordinate2D], duration: TimeInterval) in
                     let subCoords = Array(coords[cluster.start...cluster.end])
                     let sTime = baseStart.addingTimeInterval(totalDuration * (Double(cluster.start) / totalPoints))
                     let eTime = baseStart.addingTimeInterval(totalDuration * (Double(cluster.end) / totalPoints))
-                    
+                    let duration = eTime.timeIntervalSince(sTime)
+                    return (sTime, eTime, subCoords, duration)
+                }
+
+                // 拆分后的每一段都必须满足最小时长门槛，否则保留原足迹，避免制造 3 分钟碎片。
+                guard splitRanges.allSatisfy({ $0.duration >= minDuration }) else {
+                    return
+                }
+                
+                // 进行逻辑拆分
+                var splitFootprints: [Footprint] = []
+                for (idx, segment) in splitRanges.enumerated() {
                     if idx == 0 {
-                        fp.footprintLocations = subCoords
-                        fp.startTime = sTime
-                        fp.endTime = eTime
-                        fp.date = Calendar.current.startOfDay(for: sTime)
-                        fp.duration = eTime.timeIntervalSince(sTime)
+                        fp.footprintLocations = segment.coords
+                        fp.startTime = segment.start
+                        fp.endTime = segment.end
+                        fp.date = Calendar.current.startOfDay(for: segment.start)
+                        fp.duration = segment.duration
                         fp.locationHash = "SPLIT_FIXED"
                         splitFootprints.append(fp)
                     } else {
                         let newFp = Footprint(
-                            date: Calendar.current.startOfDay(for: sTime),
-                            startTime: sTime,
-                            endTime: eTime,
-                            footprintLocations: subCoords,
+                            date: Calendar.current.startOfDay(for: segment.start),
+                            startTime: segment.start,
+                            endTime: segment.end,
+                            footprintLocations: segment.coords,
                             locationHash: "SPLIT_FIXED",
-                            duration: eTime.timeIntervalSince(sTime),
+                            duration: segment.duration,
                             address: nil
                         )
                         context.insert(newFp)
@@ -1506,6 +1583,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         lastLocation = location
         lastUpdateTime = Date()
         accuracy = location.horizontalAccuracy
+
+        // --- UI 移动状态证据（用于卡片标题稳定显示） ---
+        let motion = HealthManager.shared.currentMotionType
+        let isMovingBySensor = HealthManager.shared.isMoving
+            || motion == .walking
+            || motion == .running
+            || motion == .cycling
+            || motion == .automotive
+        let isMovingByGPS = location.speed > 0.5
+        updateUIMovementState(isMovingEvidence: (isMovingBySensor || isMovingByGPS), source: "didUpdateLocations")
         
         // --- 核心改进：预先过滤离谱漂移点，防止污染原始轨迹 CSV ---
         if let last = trackingPoints.last {
@@ -1650,13 +1737,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 2. 更新内存数据并处理足迹分析
         self.updateTodayTotalPoints()
         self.allTodayPoints.append(location)
-        self.trackingPoints.append(location)
         
         // 处理候选足迹逻辑
-        var unclassifiedQueue = self.trackingPoints.filter { $0.timestamp > (self.lastProcessedTimestamp ?? .distantPast) }
+        var unclassifiedQueue = self.trackingPoints.filter {
+            $0.timestamp > (self.lastProcessedTimestamp ?? .distantPast) &&
+            $0.timestamp < location.timestamp
+        }
         if let candidate = self.footprintProcessor.processNewLocation(location, queue: &unclassifiedQueue) {
             self.handleNewCandidateFootprint(candidate)
         }
+        self.trackingPoints.append(location)
         
         // 3. 更新当前停留状态用于 UI 显示
         if let startLoc = potentialStopStartLocation {
@@ -1842,6 +1932,31 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         updateAuthStatus()
         print("Location authorization changed: \(authStatus.rawValue)")
+    }
+
+    func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
+        let motion = HealthManager.shared.currentMotionType
+        let isMovingBySensor = HealthManager.shared.isMoving
+            || motion == .walking
+            || motion == .running
+            || motion == .cycling
+            || motion == .automotive
+
+        print("[LocationManager] ⏸️ Location updates paused by system. isTracking=\(isTracking) moving=\(isMovingBySensor)")
+        guard isTracking, isMovingBySensor else { return }
+        
+        if Date().timeIntervalSince(lastRecoveryBoostTime) < 5 * 60 {
+            return
+        }
+        lastRecoveryBoostTime = Date()
+
+        // Best-effort recovery: restart high-accuracy updates and keep Significant Monitoring alive.
+        ensureSignificantMonitoringActive()
+        forceHighAccuracyBoost()
+    }
+
+    func locationManagerDidResumeLocationUpdates(_ manager: CLLocationManager) {
+        print("[LocationManager] ▶️ Location updates resumed by system.")
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
@@ -2294,6 +2409,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
         
         try? context.save()
+
+        if !isHistorical {
+            let syncDate = Calendar.current.startOfDay(for: boundedCandidate.startTime)
+            Task { @MainActor in
+                await PersistentTimelineBuilder.syncDay(date: syncDate, in: context)
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            }
+        }
+
         triggerNotificationSummaryRefresh()
     }
 
@@ -2520,36 +2644,47 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // Filter out ignored footprints and include ongoing stay
         let validFootprints = todayFootprints.filter { $0.status != .ignored }
         let footprintCount = validFootprints.count
-        let footprintTitles = validFootprints.map { fp in
-            var title = fp.address ?? "未知地点"
-            if let reason = fp.reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
-                title += " (备注: \(reason))"
-            }
-            return title
-        }.filter { !$0.isEmpty }
-        
+        let transportDescriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate { $0.startTime >= targetDate && $0.startTime < tomorrowStart && $0.statusRaw == "active" },
+            sortBy: [SortDescriptor(\.startTime, order: .forward)]
+        )
+        let todayTransports = (try? context.fetch(transportDescriptor)) ?? []
+        let insightDescriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == targetDate })
+        let existingOverview = (try? context.fetch(insightDescriptor))?.first?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
         
         // Calculate points and mileage using TimelineBuilder logic
         Task.detached(priority: .background) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
-            
-            
             let mileage = LocationManager.calculatePathDistance(rawPoints)
-            
+
+            let resolvedOverview: String?
+            if let existingOverview, !existingOverview.isEmpty {
+                resolvedOverview = existingOverview
+            } else if !validFootprints.isEmpty {
+                resolvedOverview = await withCheckedContinuation { continuation in
+                    Task { @MainActor in
+                        OpenAIService.shared.generateLiveDailyOverviewSummary(
+                            for: targetDate,
+                            footprints: validFootprints,
+                            transports: todayTransports
+                        ) { summary in
+                            continuation.resume(returning: summary)
+                        }
+                    }
+                }
+            } else {
+                resolvedOverview = nil
+            }
+
             await MainActor.run {
                 NotificationManager.shared.refreshDailySummary(
                     footprintCount: footprintCount,
-                    footprintTitles: footprintTitles,
                     pointsCount: rawPoints.count,
-                    mileage: mileage
+                    mileage: mileage,
+                    overviewSummary: resolvedOverview
                 )
-                
-                // 同时提醒小组件更新统计数据
+
                 Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
-            }
-            
-            // 同时更新共享区域
-            await MainActor.run {
                 self.updateSharedWidgetRegion()
             }
         }
@@ -2899,24 +3034,29 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             guard !rawPoints.isEmpty else { return }
             
-            // 2. 获取当天现有的足迹 (主线程获取快照)
-            let existingRanges = await MainActor.run { () -> [(start: Date, end: Date)] in
+            // 2. 获取当天现有的足迹与交通覆盖区间，避免在交通上再回填一个足迹
+            let occupiedRanges = await MainActor.run { () -> [(start: Date, end: Date)] in
                 guard let currentContext = self.modelContext else { return [] }
                 
-                let fetchDescriptor = FetchDescriptor<Footprint>(
+                let footprintDescriptor = FetchDescriptor<Footprint>(
                     predicate: #Predicate { $0.startTime < endOfDay && $0.endTime >= startOfDay },
                     sortBy: [SortDescriptor(\.startTime)]
                 )
+                let transportDescriptor = FetchDescriptor<TransportRecord>(
+                    predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < endOfDay && $0.endTime >= startOfDay },
+                    sortBy: [SortDescriptor(\.startTime)]
+                )
                 
-                let existing = (try? currentContext.fetch(fetchDescriptor)) ?? []
-                return existing.map { ($0.startTime, $0.endTime) }
+                let footprintRanges = ((try? currentContext.fetch(footprintDescriptor)) ?? []).map { ($0.startTime, $0.endTime) }
+                let transportRanges = ((try? currentContext.fetch(transportDescriptor)) ?? []).map { ($0.startTime, $0.endTime) }
+                return (footprintRanges + transportRanges).sorted { $0.start < $1.start }
             }
             
             // 3. 寻找间隙并在后台处理
             var currentTime = startOfDay
             var gapsToInsert: [(start: Date, end: Date, center: CLLocationCoordinate2D, points: [CLLocationCoordinate2D], duration: TimeInterval)] = []
             
-            for range in existingRanges {
+            for range in occupiedRanges {
                 if range.start > currentTime.addingTimeInterval(120) {
                     if let gap = identifyGapStay(from: currentTime, to: range.start, rawPoints: rawPoints) {
                         gapsToInsert.append(gap)
@@ -2971,7 +3111,19 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                         await MainActor.run {
                             guard let context = self.modelContext else { return }
                             var insertedFootprints: [Footprint] = []
+                            let transportDescriptor = FetchDescriptor<TransportRecord>(
+                                predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < endOfDay && $0.endTime >= startOfDay },
+                                sortBy: [SortDescriptor(\.startTime)]
+                            )
+                            let transportRanges = ((try? context.fetch(transportDescriptor)) ?? []).map { ($0.startTime, $0.endTime) }
                             for gap in itemsToInsert {
+                                let overlapsTransport = transportRanges.contains { range in
+                                    let overlapStart = max(range.0, gap.start)
+                                    let overlapEnd = min(range.1, gap.end)
+                                    return overlapEnd.timeIntervalSince(overlapStart) > 60
+                                }
+                                if overlapsTransport { continue }
+
                                 let newFp = Footprint(
                                     date: Calendar.current.startOfDay(for: gap.start),
                                     startTime: gap.start,

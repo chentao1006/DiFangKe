@@ -6,7 +6,7 @@ struct RawPointsListView: View {
     let date: Date
     @Environment(\.dismiss) private var dismiss
     @Environment(LocationManager.self) private var locationManager
-    
+
     @State private var points: [CLLocation] = []
     @State private var isLoading = true
     @State private var isShowingDeleteConfirmation = false
@@ -14,11 +14,14 @@ struct RawPointsListView: View {
     @State private var showOnlySuspicious = false
     @State private var selectedPoint: CLLocation? = nil
     @State private var position: MapCameraPosition = .automatic
-    
+    @State private var exportURL: URL?
+    @State private var showingShareSheet = false
+    @State private var exportErrorMessage: String?
+
     private var allCoordinates: [CLLocationCoordinate2D] {
         points.map { $0.coordinate }
     }
-    
+
     private var filteredPoints: [(index: Int, point: CLLocation)] {
         let enumerated = Array(points.enumerated())
         if !showOnlySuspicious {
@@ -28,7 +31,7 @@ struct RawPointsListView: View {
             isSuspicious(index: index, point: point)
         }.map { ($0.offset, $0.element) }
     }
-    
+
     var body: some View {
         NavigationStack {
             Group {
@@ -44,7 +47,7 @@ struct RawPointsListView: View {
                                     Map(position: $position) {
                                         MapPolyline(coordinates: allCoordinates)
                                             .stroke(Color.dfkAccent.opacity(0.5), lineWidth: 3)
-                                        
+
                                         if let selected = selectedPoint {
                                             Annotation("选中点", coordinate: selected.coordinate, anchor: .bottom) {
                                                 VStack(spacing: 0) {
@@ -84,7 +87,7 @@ struct RawPointsListView: View {
                             }
                             .frame(height: 220)
                         }
-                        
+
                         ScrollViewReader { scrollProxy in
                             List {
                                 Section {
@@ -92,7 +95,7 @@ struct RawPointsListView: View {
                                         .font(.caption)
                                         .foregroundColor(showOnlySuspicious ? .orange : .secondary)
                                 }
-                                
+
                                 ForEach(filteredPoints, id: \.index) { index, point in
                                     pointRow(index: index, point: point)
                                         .id(index) // Important for ScrollViewReader
@@ -143,14 +146,6 @@ struct RawPointsListView: View {
             .navigationTitle("\(date.formatted(.dateTime.month().day())) 原始轨迹")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                    }
-                }
-                
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         withAnimation {
@@ -161,27 +156,56 @@ struct RawPointsListView: View {
                             .foregroundColor(showOnlySuspicious ? .orange : .accentColor)
                     }
                 }
+
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        exportRawPoints()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .accessibilityLabel("导出当天轨迹点")
+                    .disabled(points.isEmpty)
+
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                }
+            }
+            .sheet(isPresented: $showingShareSheet) {
+                if let exportURL {
+                    ActivityView(activityItems: [exportURL])
+                }
+            }
+            .alert("导出失败", isPresented: Binding(
+                get: { exportErrorMessage != nil },
+                set: { if !$0 { exportErrorMessage = nil } }
+            )) {
+                Button("确定", role: .cancel) { exportErrorMessage = nil }
+            } message: {
+                Text(exportErrorMessage ?? "")
             }
             .onAppear {
                 loadPoints()
             }
         }
     }
-    
+
     private func selectPoint(_ point: CLLocation, index: Int) {
         selectedPoint = point
         withAnimation(.easeInOut) {
             position = .camera(MapCamera(centerCoordinate: point.coordinate, distance: 500))
         }
     }
-    
+
     private func selectNearestPoint(to coordinate: CLLocationCoordinate2D) {
         let tapLocation = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-        
+
         // 只在当前可见（过滤后）的点中查找最近点
         var closestPoint: CLLocation?
         var minDistance: CLLocationDistance = Double.infinity
-        
+
         for item in filteredPoints {
             let dist = item.point.distance(from: tapLocation)
             if dist < minDistance {
@@ -189,14 +213,14 @@ struct RawPointsListView: View {
                 closestPoint = item.point
             }
         }
-        
+
         // 允许较大的点击误差，特别是在缩放级别较高时 (1000m)
         if let closest = closestPoint, minDistance < 1000 {
             selectedPoint = closest
             // 此时 onChange(of: selectedPoint) 会处理滚动
         }
     }
-    
+
     private func pointRow(index: Int, point: CLLocation) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -207,12 +231,12 @@ struct RawPointsListView: View {
                     .padding(.vertical, 2)
                     .background(Color.dfkAccent.opacity(0.1))
                     .cornerRadius(4)
-                
+
                 Text(point.timestamp.formatted(.dateTime.hour().minute().second()))
                     .font(.subheadline.monospaced().bold())
-                
+
                 Spacer()
-                
+
                 if index > 0 {
                     let prev = points[index - 1]
                     let dist = point.distance(from: prev)
@@ -221,14 +245,14 @@ struct RawPointsListView: View {
                         .foregroundColor(dist > 1000 ? .red : .secondary)
                 }
             }
-            
+
             HStack {
                 Text("\(String(format: "%.6f", point.coordinate.latitude)), \(String(format: "%.6f", point.coordinate.longitude))")
                     .font(.caption2.monospaced())
                     .foregroundColor(.secondary)
-                
+
                 Spacer()
-                
+
                 HStack(spacing: 4) {
                     Image(systemName: "scope")
                     Text("\(Int(point.horizontalAccuracy))m")
@@ -239,7 +263,7 @@ struct RawPointsListView: View {
         }
         .padding(.vertical, 4)
     }
-    
+
     private func loadPoints() {
         isLoading = true
         Task.detached(priority: .userInitiated) {
@@ -252,7 +276,7 @@ struct RawPointsListView: View {
             }
         }
     }
-    
+
     private func deletePoint(_ point: CLLocation) {
         RawLocationStore.shared.deleteLocation(at: point.timestamp.timeIntervalSince1970, for: date)
         if let idx = points.firstIndex(where: { $0.timestamp == point.timestamp }) {
@@ -261,40 +285,79 @@ struct RawPointsListView: View {
             }
         }
     }
-    
+
+    private func exportRawPoints() {
+        do {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd"
+            let filename = "DiFangKe_RawPoints_\(formatter.string(from: date)).csv"
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+            try rawPointsCSVData().write(to: tempURL, options: .atomic)
+            exportURL = tempURL
+            showingShareSheet = true
+        } catch {
+            exportErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func rawPointsCSVData() throws -> Data {
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let numberLocale = Locale(identifier: "en_US_POSIX")
+
+        var rows = ["timestamp_iso,timestamp_unix,latitude,longitude,accuracy,speed"]
+        rows += points.map { point in
+            let timestamp = point.timestamp.timeIntervalSince1970
+            return [
+                isoFormatter.string(from: point.timestamp),
+                String(format: "%.3f", locale: numberLocale, timestamp),
+                String(format: "%.8f", locale: numberLocale, point.coordinate.latitude),
+                String(format: "%.8f", locale: numberLocale, point.coordinate.longitude),
+                String(format: "%.2f", locale: numberLocale, point.horizontalAccuracy),
+                String(format: "%.2f", locale: numberLocale, point.speed)
+            ].joined(separator: ",")
+        }
+
+        guard let data = rows.joined(separator: "\n").appending("\n").data(using: .utf8) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return data
+    }
+
     private func formatDistance(_ d: Double) -> String {
         if d < 1000 { return "+\(Int(d))m" }
         return String(format: "+%.2fkm", d/1000)
     }
-    
+
     private func isSuspicious(index: Int, point: CLLocation) -> Bool {
         // 1. 精度判定：只要精度超过 100米就视为潜在问题点（之前是300m，调低阈值以捕捉更多）
         if point.horizontalAccuracy > 100 { return true }
-        
+
         // 2. 检查周边范围 (±5 个点)，判定异常跳变
         let checkRange = 5
         let start = max(0, index - checkRange)
         let end = min(points.count - 1, index + checkRange)
-        
+
         for i in start...end {
             if i == index { continue }
             let other = points[i]
             let dist = point.distance(from: other)
             let time = max(0.1, abs(point.timestamp.timeIntervalSince(other.timestamp)))
             let speed = dist / time
-            
+
             // --- 调低阈值以捕捉更多可能有问题的点 ---
-            
+
             // A. 速度异常：超过 30m/s (108km/h) 且有一定距离
             if speed > 30 && dist > 200 { return true }
-            
+
             // B. 距离跳变：单次跳跃超过 500m
             if dist > 500 { return true }
-            
+
             // C. 精度与移动：精度稍差 (>50m) 且发生了较明显移动 (>300m)
             if dist > 300 && point.horizontalAccuracy > 50 { return true }
         }
-        
+
         return false
     }
 }
