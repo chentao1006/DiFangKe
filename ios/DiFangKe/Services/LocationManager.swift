@@ -1093,21 +1093,22 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let status = locationManager.authorizationStatus
         guard status == .authorizedAlways else { return }
 
-        // Only intervene when we believe the user is actually moving.
+        // Intervene when we believe the user is actually moving OR when uiIsMoving is true.
         let motion = HealthManager.shared.currentMotionType
         let isMovingBySensor = HealthManager.shared.isMoving
             || motion == .walking
             || motion == .running
             || motion == .cycling
             || motion == .automotive
+            || uiIsMoving // 扩大监测范围：只要 UI 层认为在移动就介入
         guard isMovingBySensor else { return }
 
         guard let last = lastUpdateTime else { return }
         let gap = Date().timeIntervalSince(last)
-        guard gap > 2 * 60 else { return }
+        guard gap > 90 else { return } // 缩短：从 2 分钟降到 90 秒，更快发现断裂
         
-        // Throttle recovery attempts to at most once per 5 minutes.
-        if Date().timeIntervalSince(lastRecoveryBoostTime) < 5 * 60 {
+        // Throttle recovery attempts to at most once per 2 minutes (was 5 min).
+        if Date().timeIntervalSince(lastRecoveryBoostTime) < 2 * 60 {
             return
         }
         lastRecoveryBoostTime = Date()
@@ -1633,6 +1634,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 return false
             }
             
+            // ✅ 核心修复：移动锁定 — 只要 UI 层判定为"正在移动"（带 120 秒滞回），
+            // 就强制维持高频记录，绝不降频！这是防止走路时丢点的最关键保护。
+            // 实现用户要求："一旦侦测到移动,就要一直详细记,直到停留时间足够生成足迹"
+            if uiIsMoving {
+                return false
+            }
+            
             guard let startLoc = potentialStopStartLocation else { return false }
             let duration = Date().timeIntervalSince(startLoc.timestamp)
             let distance = location.distance(from: startLoc)
@@ -1657,19 +1665,19 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         if let p = place, p.isIgnored {
             // 已忽略地点：进入强制低功耗
-            if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters || manager.distanceFilter != 100.0 || manager.activityType != .other {
+            if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters || manager.distanceFilter != 100.0 || manager.activityType != .fitness {
                 manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
                 manager.distanceFilter = 100.0
-                manager.activityType = .other
+                manager.activityType = .fitness // ⚠️ 不用 .other — iOS 会极度压缩更新频率
             }
             updateRegionMonitoring(isStationary: true)
         } else if isStationary {
             // 真正停留了：进入节能模式
-            if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters || manager.distanceFilter != 10.0 || manager.activityType != .other {
+            if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters || manager.distanceFilter != 10.0 || manager.activityType != .fitness {
                 manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
                 // 将 30m 缩减为 10m，配合计步器双重保护，确保出门瞬间就能被捕捉
                 manager.distanceFilter = 10.0 
-                manager.activityType = .other
+                manager.activityType = .fitness // ⚠️ 不用 .other — iOS 会极度压缩更新频率
             }
             updateRegionMonitoring(isStationary: true)
         } else {

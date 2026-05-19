@@ -82,7 +82,7 @@ class HealthManager: ObservableObject {
         // 2. 计步器监控 (提供极速运动反馈)
         // 只要步数在增加，就强制标记为 isMoving，这对于解决刚出门时的“漏记”至关重要
         if CMPedometer.isStepCountingAvailable() {
-            pedometer.startUpdates(from: Date()) { [weak self] data, error in
+            pedometer.startUpdates(from: Date().addingTimeInterval(-30)) { [weak self] data, error in // 从 30 秒前开始，避免重启时丢失步数状态
                 guard let self = self, let data = data, error == nil else { return }
                 if data.numberOfSteps.intValue > 0 {
                     DispatchQueue.main.async {
