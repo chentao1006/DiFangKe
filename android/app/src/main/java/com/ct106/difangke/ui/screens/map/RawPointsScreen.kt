@@ -20,11 +20,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,7 +60,7 @@ fun RawPointsScreen(
     val allPlaces by remember { DiFangKeApp.instance.database.placeDao().observeAll() }
         .collectAsState(initial = emptyList())
     
-    var points by remember { mutableStateOf<List<RawLocationStore.RawPoint>>(emptyList()) }
+    var entries by remember { mutableStateOf<List<RawLocationStore.RawPointEntry>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var showOnlySuspicious by remember { mutableStateOf(false) }
     var selectedPoint by remember { mutableStateOf<RawLocationStore.RawPoint?>(null) }
@@ -72,7 +74,7 @@ fun RawPointsScreen(
                 runCatching {
                     context.contentResolver.openOutputStream(uri)?.use { output ->
                         OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
-                            writer.write(rawPointsCsv(points))
+                            writer.write(rawPointsEntryCsv(entries))
                         }
                     } ?: error("无法打开导出文件")
                 }
@@ -84,25 +86,29 @@ fun RawPointsScreen(
             ).show()
         }
     }
+
+    val driftCount = remember(entries) { entries.count { it.isDriftPoint } }
     
-    val filteredPoints = remember(points, showOnlySuspicious) {
-        if (!showOnlySuspicious) points.mapIndexed { index, p -> index to p }
-        else points.mapIndexed { index, p -> index to p }.filter { (index, p) -> isSuspicious(index, p, points) }
+    val filteredEntries = remember(entries, showOnlySuspicious) {
+        if (!showOnlySuspicious) entries
+        else entries.filter { entry ->
+            entry.isDriftPoint || isSuspiciousEntry(entry, entries)
+        }
     }
 
     var amapInstance by remember { mutableStateOf<AMap?>(null) }
 
     LaunchedEffect(date) {
         isLoading = true
-        points = withContext(Dispatchers.IO) {
-            rawStore.loadLocations(date, filtered = false)
+        entries = withContext(Dispatchers.IO) {
+            rawStore.loadLocationsWithDriftFlags(date)
         }
         isLoading = false
     }
 
-    LaunchedEffect(selectedPoint?.timestamp, showOnlySuspicious, filteredPoints) {
+    LaunchedEffect(selectedPoint?.timestamp, showOnlySuspicious, filteredEntries) {
         val selectedTimestamp = selectedPoint?.timestamp ?: return@LaunchedEffect
-        val filteredIndex = filteredPoints.indexOfFirst { (_, point) -> point.timestamp == selectedTimestamp }
+        val filteredIndex = filteredEntries.indexOfFirst { it.point.timestamp == selectedTimestamp }
         if (filteredIndex >= 0) {
             listState.animateScrollToItem(filteredIndex + 1)
         }
@@ -131,7 +137,7 @@ fun RawPointsScreen(
                         onClick = {
                             exportLauncher.launch("DiFangKe_RawPoints_${exportDateFormat.format(date)}.csv")
                         },
-                        enabled = points.isNotEmpty()
+                        enabled = entries.isNotEmpty()
                     ) {
                         Icon(Icons.Default.FileDownload, contentDescription = "导出当天轨迹点")
                     }
@@ -163,9 +169,9 @@ fun RawPointsScreen(
                     val map = view.map
                     map.mapType = if (isDark) AMap.MAP_TYPE_NIGHT else AMap.MAP_TYPE_NORMAL
                     map.setOnMapClickListener { latLng ->
-                        selectNearestPoint(
+                        selectNearestEntry(
                             tappedLatLng = latLng,
-                            candidates = filteredPoints,
+                            candidates = filteredEntries,
                             onPointSelected = { point -> selectedPoint = point }
                         )
                     }
@@ -173,20 +179,34 @@ fun RawPointsScreen(
                     map.clear()
                     map.addImportantPlaceCircles(allPlaces)
 
-                    // 只有在点加载完成后更新
-                    if (points.isNotEmpty()) {
-                        val latLngs = points.map { LatLng(it.latitude, it.longitude) }
-                        map.addPolyline(
-                            PolylineOptions().addAll(latLngs).width(10f).color(primaryColor.toArgb()).useGradient(true)
-                        )
+                    if (entries.isNotEmpty()) {
+                        // 有效轨迹线（仅连接非漂移点）
+                        val validLatLngs = entries.filter { !it.isDriftPoint }.map { LatLng(it.point.latitude, it.point.longitude) }
+                        if (validLatLngs.isNotEmpty()) {
+                            map.addPolyline(
+                                PolylineOptions().addAll(validLatLngs).width(10f).color(primaryColor.toArgb()).useGradient(true)
+                            )
+                        }
+
+                        // 漂移点用灰色圆点标注
+                        val driftLatLngs = entries.filter { it.isDriftPoint }.map { LatLng(it.point.latitude, it.point.longitude) }
+                        for (driftLatLng in driftLatLngs) {
+                            map.addCircle(
+                                CircleOptions()
+                                    .center(driftLatLng)
+                                    .radius(8.0)
+                                    .fillColor(Color.Gray.copy(alpha = 0.5f).toArgb())
+                                    .strokeColor(Color.Gray.copy(alpha = 0.3f).toArgb())
+                                    .strokeWidth(1f)
+                            )
+                        }
                         
                         selectedPoint?.let { p ->
                             map.addMarker(MarkerOptions().position(LatLng(p.latitude, p.longitude)).icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)))
                         }
 
-                        // 如果是初次加载或切换过滤，自动缩放
-                        if (selectedPoint == null) {
-                            val bounds = LatLngBounds.builder().apply { latLngs.forEach { include(it) } }.build()
+                        if (selectedPoint == null && validLatLngs.isNotEmpty()) {
+                            val bounds = LatLngBounds.builder().apply { validLatLngs.forEach { include(it) } }.build()
                             map.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100))
                         }
                     }
@@ -196,9 +216,9 @@ fun RawPointsScreen(
                 IconButton(
                     onClick = {
                         selectedPoint = null
-                        val latLngs = points.map { LatLng(it.latitude, it.longitude) }
-                        if (latLngs.isNotEmpty()) {
-                            val bounds = LatLngBounds.builder().apply { latLngs.forEach { include(it) } }.build()
+                        val validLatLngs = entries.filter { !it.isDriftPoint }.map { LatLng(it.point.latitude, it.point.longitude) }
+                        if (validLatLngs.isNotEmpty()) {
+                            val bounds = LatLngBounds.builder().apply { validLatLngs.forEach { include(it) } }.build()
                             scope.launch { amapInstance?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100)) }
                         }
                     },
@@ -212,7 +232,7 @@ fun RawPointsScreen(
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
                 }
-            } else if (points.isEmpty()) {
+            } else if (entries.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("该日期暂无轨迹数据", color = Color.Gray)
                 }
@@ -221,34 +241,64 @@ fun RawPointsScreen(
                     state = listState,
                     modifier = Modifier.fillMaxSize()
                 ) {
+                    // 统计信息栏
                     item {
-                        Text(
-                            text = if (showOnlySuspicious) "筛选出 ${filteredPoints.size} 个疑似问题点" else "共 ${points.size} 个记录点",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (showOnlySuspicious) MaterialTheme.colorScheme.primary else Color.Gray,
-                            modifier = Modifier.padding(16.dp)
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (showOnlySuspicious) "筛选出 ${filteredEntries.size} 个疑似问题点" else "共 ${entries.size} 个记录点",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (showOnlySuspicious) MaterialTheme.colorScheme.primary else Color.Gray
+                            )
+                            
+                            if (driftCount > 0) {
+                                Spacer(Modifier.weight(1f))
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = Color.Gray.copy(alpha = 0.12f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Warning,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(10.dp),
+                                            tint = Color.Gray
+                                        )
+                                        Text(
+                                            "$driftCount 个漂移点",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                            color = Color.Gray
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                     
-                    itemsIndexed(filteredPoints) { _, (originalIndex, point) ->
-                        PointRow(
-                            index = originalIndex,
-                            point = point,
-                            prevPoint = if (originalIndex > 0) points[originalIndex - 1] else null,
-                            isSelected = selectedPoint?.timestamp == point.timestamp,
+                    itemsIndexed(filteredEntries) { _, entry ->
+                        PointRowWithDrift(
+                            entry = entry,
+                            prevEntry = if (entry.originalIndex > 0) entries.getOrNull(entry.originalIndex - 1) else null,
+                            isSelected = selectedPoint?.timestamp == entry.point.timestamp,
                             onClick = {
-                                selectedPoint = point
+                                selectedPoint = entry.point
                                 scope.launch {
-                                    amapInstance?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), 17f))
+                                    amapInstance?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(entry.point.latitude, entry.point.longitude), 17f))
                                 }
                             },
                             onDelete = {
                                 scope.launch {
                                     withContext(Dispatchers.IO) {
-                                        rawStore.deleteLocation(point.timestamp.time / 1000.0, date, context)
+                                        rawStore.deleteLocation(entry.point.timestamp.time / 1000.0, date, context)
                                     }
-                                    points = points.filter { it.timestamp != point.timestamp }
-                                    if (selectedPoint?.timestamp == point.timestamp) selectedPoint = null
+                                    entries = entries.filter { it.point.timestamp != entry.point.timestamp }
+                                    if (selectedPoint?.timestamp == entry.point.timestamp) selectedPoint = null
                                 }
                             }
                         )
@@ -259,13 +309,15 @@ fun RawPointsScreen(
     }
 }
 
-private fun rawPointsCsv(points: List<RawLocationStore.RawPoint>): String {
+/** CSV 导出（带 is_drift 列） */
+private fun rawPointsEntryCsv(entries: List<RawLocationStore.RawPointEntry>): String {
     val isoFormatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.US).apply {
         timeZone = TimeZone.getDefault()
     }
     return buildString {
-        appendLine("timestamp_iso,timestamp_unix,latitude,longitude,accuracy,speed")
-        points.forEach { point ->
+        appendLine("timestamp_iso,timestamp_unix,latitude,longitude,accuracy,speed,is_drift")
+        entries.forEach { entry ->
+            val point = entry.point
             append(isoFormatter.format(point.timestamp))
             append(',')
             append(String.format(Locale.US, "%.3f", point.timestamp.time / 1000.0))
@@ -277,43 +329,46 @@ private fun rawPointsCsv(points: List<RawLocationStore.RawPoint>): String {
             append(String.format(Locale.US, "%.2f", point.accuracy))
             append(',')
             append(String.format(Locale.US, "%.2f", point.speed))
+            append(',')
+            append(if (entry.isDriftPoint) "1" else "0")
             appendLine()
         }
     }
 }
 
-private fun selectNearestPoint(
+private fun selectNearestEntry(
     tappedLatLng: LatLng,
-    candidates: List<Pair<Int, RawLocationStore.RawPoint>>,
+    candidates: List<RawLocationStore.RawPointEntry>,
     onPointSelected: (RawLocationStore.RawPoint) -> Unit
 ) {
-    val closest = candidates.minByOrNull { (_, point) ->
-        haversineMeters(tappedLatLng.latitude, tappedLatLng.longitude, point.latitude, point.longitude)
+    val closest = candidates.minByOrNull { entry ->
+        haversineMeters(tappedLatLng.latitude, tappedLatLng.longitude, entry.point.latitude, entry.point.longitude)
     } ?: return
 
     val distance = haversineMeters(
         tappedLatLng.latitude,
         tappedLatLng.longitude,
-        closest.second.latitude,
-        closest.second.longitude
+        closest.point.latitude,
+        closest.point.longitude
     )
 
     if (distance < 1000.0) {
-        onPointSelected(closest.second)
+        onPointSelected(closest.point)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun PointRow(
-    index: Int,
-    point: RawLocationStore.RawPoint,
-    prevPoint: RawLocationStore.RawPoint?,
+fun PointRowWithDrift(
+    entry: RawLocationStore.RawPointEntry,
+    prevEntry: RawLocationStore.RawPointEntry?,
     isSelected: Boolean,
     onClick: () -> Unit,
     onDelete: () -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
+    val isDrift = entry.isDriftPoint
+    val point = entry.point
     val cardBg = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.1f) else Color.Transparent
     
     val dismissState = rememberSwipeToDismissBoxState()
@@ -335,19 +390,35 @@ fun PointRow(
                 onLongClick = { /* 可以加长按删除 */ }
             )
             .padding(horizontal = 16.dp, vertical = 12.dp)
+            .alpha(if (isDrift) 0.65f else 1f)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // 序号标签
             Surface(
                 shape = RoundedCornerShape(4.dp),
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                color = if (isDrift) Color.Gray.copy(alpha = 0.1f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
             ) {
-                Text(
-                    "#${index + 1}",
+                Row(
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Text(
+                        "#${entry.originalIndex + 1}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = if (isDrift) Color.Gray else MaterialTheme.colorScheme.primary,
+                        textDecoration = if (isDrift) TextDecoration.LineThrough else TextDecoration.None
+                    )
+                    if (isDrift) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = "漂移点",
+                            modifier = Modifier.size(8.dp),
+                            tint = Color.Gray
+                        )
+                    }
+                }
             }
             
             Spacer(Modifier.width(8.dp))
@@ -355,17 +426,21 @@ fun PointRow(
             Text(
                 SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(point.timestamp),
                 style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = if (isDrift) Color.Gray else Color.Unspecified,
+                textDecoration = if (isDrift) TextDecoration.LineThrough else TextDecoration.None
             )
             
             Spacer(Modifier.weight(1f))
             
-            if (prevPoint != null) {
+            if (prevEntry != null) {
+                val prevPoint = prevEntry.point
                 val dist = haversineMeters(prevPoint.latitude, prevPoint.longitude, point.latitude, point.longitude)
                 Text(
                     formatDistance(dist),
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (dist > 1000) Color.Red else Color.Gray
+                    color = if (isDrift) Color.Gray.copy(alpha = 0.6f) else (if (dist > 1000) Color.Red else Color.Gray),
+                    textDecoration = if (isDrift) TextDecoration.LineThrough else TextDecoration.None
                 )
             }
         }
@@ -376,17 +451,34 @@ fun PointRow(
             Text(
                 String.format("%.6f, %.6f", point.latitude, point.longitude),
                 style = MaterialTheme.typography.labelSmall,
-                color = Color.Gray,
+                color = if (isDrift) Color.Gray.copy(alpha = 0.5f) else Color.Gray,
                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                textDecoration = if (isDrift) TextDecoration.LineThrough else TextDecoration.None,
                 modifier = Modifier.weight(1f)
             )
             
-            Icon(Icons.Default.MyLocation, null, modifier = Modifier.size(10.dp), tint = Color.Gray)
+            // 漂移标签
+            if (isDrift) {
+                Surface(
+                    shape = RoundedCornerShape(3.dp),
+                    color = Color.Gray.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(end = 6.dp)
+                ) {
+                    Text(
+                        "漂移",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                    )
+                }
+            }
+            
+            Icon(Icons.Default.MyLocation, null, modifier = Modifier.size(10.dp), tint = if (isDrift) Color.Gray.copy(alpha = 0.5f) else Color.Gray)
             Spacer(Modifier.width(2.dp))
             Text(
                 "${point.accuracy.toInt()}m",
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                color = if (point.accuracy > 100) Color(0xFFFF9800) else Color.Gray
+                color = if (isDrift) Color.Gray.copy(alpha = 0.5f) else (if (point.accuracy > 100) Color(0xFFFF9800) else Color.Gray)
             )
         }
     }
@@ -397,14 +489,18 @@ private fun formatDistance(d: Double): String {
     else String.format("+%.2fkm", d / 1000.0)
 }
 
-private fun isSuspicious(index: Int, point: RawLocationStore.RawPoint, allPoints: List<RawLocationStore.RawPoint>): Boolean {
+/** 判定可疑点（漂移点以外的其他异常） */
+private fun isSuspiciousEntry(entry: RawLocationStore.RawPointEntry, allEntries: List<RawLocationStore.RawPointEntry>): Boolean {
+    val point = entry.point
+    val index = entry.originalIndex
+    
     if (point.accuracy > 500) return true
     if (index > 0) {
-        val prev = allPoints[index - 1]
+        val prev = allEntries.getOrNull(index - 1)?.point ?: return false
         val dist = haversineMeters(prev.latitude, prev.longitude, point.latitude, point.longitude)
         val time = max(0.1, (point.timestamp.time - prev.timestamp.time) / 1000.0)
         val speed = dist / time
-        if (speed > 70.0) return true // > 250km/h
+        if (speed > 70.0) return true
         if (dist > 2000 && point.accuracy > 200) return true
     }
     return false
