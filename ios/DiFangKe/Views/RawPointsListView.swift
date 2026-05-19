@@ -7,7 +7,7 @@ struct RawPointsListView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(LocationManager.self) private var locationManager
 
-    @State private var points: [CLLocation] = []
+    @State private var entries: [RawPointEntry] = []
     @State private var isLoading = true
     @State private var isShowingDeleteConfirmation = false
     @State private var pointToDelete: CLLocation?
@@ -18,18 +18,27 @@ struct RawPointsListView: View {
     @State private var showingShareSheet = false
     @State private var exportErrorMessage: String?
 
-    private var allCoordinates: [CLLocationCoordinate2D] {
-        points.map { $0.coordinate }
+    /// 所有有效（非漂移）的坐标，用于地图轨迹线
+    private var validCoordinates: [CLLocationCoordinate2D] {
+        entries.filter { !$0.isDriftPoint }.map { $0.location.coordinate }
     }
 
-    private var filteredPoints: [(index: Int, point: CLLocation)] {
-        let enumerated = Array(points.enumerated())
+    /// 漂移点坐标，用于地图上灰色显示
+    private var driftCoordinates: [CLLocationCoordinate2D] {
+        entries.filter { $0.isDriftPoint }.map { $0.location.coordinate }
+    }
+
+    private var driftCount: Int {
+        entries.filter { $0.isDriftPoint }.count
+    }
+
+    private var filteredEntries: [RawPointEntry] {
         if !showOnlySuspicious {
-            return enumerated.map { ($0.offset, $0.element) }
+            return entries
         }
-        return enumerated.filter { index, point in
-            isSuspicious(index: index, point: point)
-        }.map { ($0.offset, $0.element) }
+        return entries.filter { entry in
+            entry.isDriftPoint || isSuspicious(entry: entry)
+        }
     }
 
     var body: some View {
@@ -37,7 +46,7 @@ struct RawPointsListView: View {
             Group {
                 if isLoading {
                     ProgressView("正在加载原始轨迹...")
-                } else if points.isEmpty {
+                } else if entries.isEmpty {
                     ContentUnavailableView("暂无轨迹点", systemImage: "mappin.slash", description: Text("该日期没有任何原始位置记录"))
                 } else {
                     VStack(spacing: 0) {
@@ -45,8 +54,18 @@ struct RawPointsListView: View {
                             GeometryReader { geometry in
                                 if geometry.size.width > 0 && geometry.size.height > 0 {
                                     Map(position: $position) {
-                                        MapPolyline(coordinates: allCoordinates)
+                                        // 有效轨迹线（正常颜色）
+                                        MapPolyline(coordinates: validCoordinates)
                                             .stroke(Color.dfkAccent.opacity(0.5), lineWidth: 3)
+
+                                        // 漂移点用灰色圆点标注
+                                        ForEach(Array(driftCoordinates.enumerated()), id: \.offset) { _, coord in
+                                            Annotation("", coordinate: coord, anchor: .center) {
+                                                Circle()
+                                                    .fill(Color.gray.opacity(0.5))
+                                                    .frame(width: 6, height: 6)
+                                            }
+                                        }
 
                                         if let selected = selectedPoint {
                                             Annotation("选中点", coordinate: selected.coordinate, anchor: .bottom) {
@@ -91,23 +110,46 @@ struct RawPointsListView: View {
                         ScrollViewReader { scrollProxy in
                             List {
                                 Section {
-                                    Text(showOnlySuspicious ? "发现 \(filteredPoints.count) 个疑似问题点" : "共 \(points.count) 个记录点")
-                                        .font(.caption)
-                                        .foregroundColor(showOnlySuspicious ? .orange : .secondary)
+                                    HStack {
+                                        if showOnlySuspicious {
+                                            Text("发现 \(filteredEntries.count) 个疑似问题点")
+                                                .font(.caption)
+                                                .foregroundColor(.orange)
+                                        } else {
+                                            Text("共 \(entries.count) 个记录点")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        
+                                        if driftCount > 0 {
+                                            Spacer()
+                                            HStack(spacing: 3) {
+                                                Image(systemName: "exclamationmark.triangle.fill")
+                                                    .font(.system(size: 9))
+                                                Text("\(driftCount) 个漂移点")
+                                                    .font(.caption2)
+                                            }
+                                            .foregroundColor(.gray)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.gray.opacity(0.12))
+                                            .cornerRadius(4)
+                                        }
+                                    }
                                 }
 
-                                ForEach(filteredPoints, id: \.index) { index, point in
-                                    pointRow(index: index, point: point)
-                                        .id(index) // Important for ScrollViewReader
-                                        .listRowBackground(selectedPoint?.timestamp == point.timestamp ? Color.dfkAccent.opacity(0.1) : nil)
+                                ForEach(filteredEntries, id: \.originalIndex) { entry in
+                                    pointRow(entry: entry)
+                                        .id(entry.originalIndex)
+                                        .listRowBackground(selectedPoint?.timestamp == entry.location.timestamp ? Color.dfkAccent.opacity(0.1) : nil)
                                         .contentShape(Rectangle())
                                         .onTapGesture {
-                                            selectPoint(point, index: index)
+                                            selectPoint(entry.location, index: entry.originalIndex)
                                         }
                                         .swipeActions(edge: .trailing) {
                                             Button(role: .destructive) {
-                                                pointToDelete = point
-                                                deletePoint(point)
+                                                pointToDelete = entry.location
+                                                deletePoint(entry.location)
                                             } label: {
                                                 Label("删除", systemImage: "trash")
                                             }
@@ -117,22 +159,19 @@ struct RawPointsListView: View {
                             .listStyle(.insetGrouped)
                             .onChange(of: selectedPoint) { _, newValue in
                                 if let selected = newValue,
-                                   let index = points.firstIndex(where: { $0.timestamp == selected.timestamp }) {
+                                   let entry = entries.first(where: { $0.location.timestamp == selected.timestamp }) {
                                     withAnimation {
-                                        scrollProxy.scrollTo(index, anchor: .center)
+                                        scrollProxy.scrollTo(entry.originalIndex, anchor: .center)
                                     }
                                 }
                             }
                             .onChange(of: showOnlySuspicious) { _, _ in
-                                // 切换过滤模式时，如果当前有选中点，自动滚动到该点
                                 if let selected = selectedPoint {
-                                    // 延迟一点点等待列表重新渲染
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                        if let index = points.firstIndex(where: { $0.timestamp == selected.timestamp }) {
-                                            // 检查该点是否在当前过滤后的列表中
-                                            if filteredPoints.contains(where: { $0.index == index }) {
+                                        if let entry = entries.first(where: { $0.location.timestamp == selected.timestamp }) {
+                                            if filteredEntries.contains(where: { $0.originalIndex == entry.originalIndex }) {
                                                 withAnimation {
-                                                    scrollProxy.scrollTo(index, anchor: .center)
+                                                    scrollProxy.scrollTo(entry.originalIndex, anchor: .center)
                                                 }
                                             }
                                         }
@@ -164,7 +203,7 @@ struct RawPointsListView: View {
                         Image(systemName: "square.and.arrow.up")
                     }
                     .accessibilityLabel("导出当天轨迹点")
-                    .disabled(points.isEmpty)
+                    .disabled(entries.isEmpty)
 
                     Button {
                         dismiss()
@@ -203,75 +242,104 @@ struct RawPointsListView: View {
         let tapLocation = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
 
         // 只在当前可见（过滤后）的点中查找最近点
-        var closestPoint: CLLocation?
+        var closestEntry: RawPointEntry?
         var minDistance: CLLocationDistance = Double.infinity
 
-        for item in filteredPoints {
-            let dist = item.point.distance(from: tapLocation)
+        for entry in filteredEntries {
+            let dist = entry.location.distance(from: tapLocation)
             if dist < minDistance {
                 minDistance = dist
-                closestPoint = item.point
+                closestEntry = entry
             }
         }
 
         // 允许较大的点击误差，特别是在缩放级别较高时 (1000m)
-        if let closest = closestPoint, minDistance < 1000 {
-            selectedPoint = closest
-            // 此时 onChange(of: selectedPoint) 会处理滚动
+        if let closest = closestEntry, minDistance < 1000 {
+            selectedPoint = closest.location
         }
     }
 
-    private func pointRow(index: Int, point: CLLocation) -> some View {
+    @ViewBuilder
+    private func pointRow(entry: RawPointEntry) -> some View {
+        let point = entry.location
+        let index = entry.originalIndex
+        let isDrift = entry.isDriftPoint
+        
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("#\(index + 1)")
-                    .font(.caption.monospaced())
-                    .foregroundColor(.dfkAccent)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(Color.dfkAccent.opacity(0.1))
-                    .cornerRadius(4)
+                // 序号标签
+                HStack(spacing: 3) {
+                    Text("#\(index + 1)")
+                        .font(.caption.monospaced())
+                        .foregroundColor(isDrift ? .gray : .dfkAccent)
+                        .strikethrough(isDrift, color: .gray)
+                    
+                    if isDrift {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 8))
+                            .foregroundColor(.gray)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(isDrift ? Color.gray.opacity(0.1) : Color.dfkAccent.opacity(0.1))
+                .cornerRadius(4)
 
                 Text(point.timestamp.formatted(.dateTime.hour().minute().second()))
                     .font(.subheadline.monospaced().bold())
+                    .foregroundColor(isDrift ? .gray : .primary)
+                    .strikethrough(isDrift, color: .gray)
 
                 Spacer()
 
                 if index > 0 {
-                    let prev = points[index - 1]
-                    let dist = point.distance(from: prev)
-                    Text(formatDistance(dist))
-                        .font(.caption.italic())
-                        .foregroundColor(dist > 1000 ? .red : .secondary)
+                    let prevEntry = entries.first(where: { $0.originalIndex == index - 1 })
+                    if let prevEntry {
+                        let dist = point.distance(from: prevEntry.location)
+                        Text(formatDistance(dist))
+                            .font(.caption.italic())
+                            .foregroundColor(isDrift ? .gray.opacity(0.6) : (dist > 1000 ? .red : .secondary))
+                            .strikethrough(isDrift, color: .gray)
+                    }
                 }
             }
 
             HStack {
                 Text("\(String(format: "%.6f", point.coordinate.latitude)), \(String(format: "%.6f", point.coordinate.longitude))")
                     .font(.caption2.monospaced())
-                    .foregroundColor(.secondary)
+                    .foregroundColor(isDrift ? .gray.opacity(0.5) : .secondary)
+                    .strikethrough(isDrift, color: .gray.opacity(0.5))
 
                 Spacer()
 
                 HStack(spacing: 4) {
+                    if isDrift {
+                        Text("漂移")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.gray.opacity(0.5))
+                            .cornerRadius(3)
+                    }
+                    
                     Image(systemName: "scope")
                     Text("\(Int(point.horizontalAccuracy))m")
                 }
                 .font(.system(size: 10))
-                .foregroundColor(point.horizontalAccuracy > 100 ? .orange : .secondary)
+                .foregroundColor(isDrift ? .gray.opacity(0.5) : (point.horizontalAccuracy > 100 ? .orange : .secondary))
             }
         }
         .padding(.vertical, 4)
+        .opacity(isDrift ? 0.65 : 1.0)
     }
 
     private func loadPoints() {
         isLoading = true
         Task.detached(priority: .userInitiated) {
-            // 这里改为 filtered: false，加载真正的原始数据
-            // 只有加载了原始数据，下方的“过滤问题点”功能才能识别并显示出那些有问题的点
-            let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date, filtered: false)
+            let rawEntries = RawLocationStore.shared.loadAllDevicesLocationsWithDriftFlags(for: date)
             await MainActor.run {
-                self.points = rawPoints
+                self.entries = rawEntries
                 self.isLoading = false
             }
         }
@@ -279,9 +347,9 @@ struct RawPointsListView: View {
 
     private func deletePoint(_ point: CLLocation) {
         RawLocationStore.shared.deleteLocation(at: point.timestamp.timeIntervalSince1970, for: date)
-        if let idx = points.firstIndex(where: { $0.timestamp == point.timestamp }) {
+        if let idx = entries.firstIndex(where: { $0.location.timestamp == point.timestamp }) {
             withAnimation(.spring()) {
-                _ = points.remove(at: idx)
+                _ = entries.remove(at: idx)
             }
         }
     }
@@ -306,8 +374,9 @@ struct RawPointsListView: View {
         isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let numberLocale = Locale(identifier: "en_US_POSIX")
 
-        var rows = ["timestamp_iso,timestamp_unix,latitude,longitude,accuracy,speed"]
-        rows += points.map { point in
+        var rows = ["timestamp_iso,timestamp_unix,latitude,longitude,accuracy,speed,is_drift"]
+        rows += entries.map { entry in
+            let point = entry.location
             let timestamp = point.timestamp.timeIntervalSince1970
             return [
                 isoFormatter.string(from: point.timestamp),
@@ -315,7 +384,8 @@ struct RawPointsListView: View {
                 String(format: "%.8f", locale: numberLocale, point.coordinate.latitude),
                 String(format: "%.8f", locale: numberLocale, point.coordinate.longitude),
                 String(format: "%.2f", locale: numberLocale, point.horizontalAccuracy),
-                String(format: "%.2f", locale: numberLocale, point.speed)
+                String(format: "%.2f", locale: numberLocale, point.speed),
+                entry.isDriftPoint ? "1" : "0"
             ].joined(separator: ",")
         }
 
@@ -330,31 +400,29 @@ struct RawPointsListView: View {
         return String(format: "+%.2fkm", d/1000)
     }
 
-    private func isSuspicious(index: Int, point: CLLocation) -> Bool {
-        // 1. 精度判定：只要精度超过 100米就视为潜在问题点（之前是300m，调低阈值以捕捉更多）
+    /// 判定可疑点（漂移点以外的其他异常）
+    private func isSuspicious(entry: RawPointEntry) -> Bool {
+        let point = entry.location
+        let index = entry.originalIndex
+        
+        // 1. 精度判定
         if point.horizontalAccuracy > 100 { return true }
 
         // 2. 检查周边范围 (±5 个点)，判定异常跳变
         let checkRange = 5
+        let allPoints = entries.map { $0.location }
         let start = max(0, index - checkRange)
-        let end = min(points.count - 1, index + checkRange)
+        let end = min(allPoints.count - 1, index + checkRange)
 
         for i in start...end {
             if i == index { continue }
-            let other = points[i]
+            let other = allPoints[i]
             let dist = point.distance(from: other)
             let time = max(0.1, abs(point.timestamp.timeIntervalSince(other.timestamp)))
             let speed = dist / time
 
-            // --- 调低阈值以捕捉更多可能有问题的点 ---
-
-            // A. 速度异常：超过 30m/s (108km/h) 且有一定距离
             if speed > 30 && dist > 200 { return true }
-
-            // B. 距离跳变：单次跳跃超过 500m
             if dist > 500 { return true }
-
-            // C. 精度与移动：精度稍差 (>50m) 且发生了较明显移动 (>300m)
             if dist > 300 && point.horizontalAccuracy > 50 { return true }
         }
 

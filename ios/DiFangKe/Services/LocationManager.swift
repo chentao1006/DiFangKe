@@ -34,6 +34,13 @@ struct RawRecordingDeviceOption: Identifiable, Hashable {
     }
 }
 
+// MARK: - 原始轨迹点包装（附带漂移标记）
+struct RawPointEntry {
+    let location: CLLocation
+    let isDriftPoint: Bool
+    let originalIndex: Int
+}
+
 // MARK: - 原始坐标持久化存储（按天存储至 CSV 文件）
 final class RawLocationStore {
     static let shared = RawLocationStore()
@@ -627,6 +634,182 @@ final class RawLocationStore {
     var lastSyncDate: Date? {
         let ts = UserDefaults.standard.double(forKey: "raw_locations_last_sync")
         return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
+    }
+
+    // MARK: - 漂移点标记系统
+    
+    /// 加载带漂移标记的原始轨迹点（用于 RawPointsListView 显示）
+    func loadAllDevicesLocationsWithDriftFlags(for date: Date) -> [RawPointEntry] {
+        // 加载未过滤的原始点
+        let rawPoints = loadAllDevicesLocations(for: date, filtered: false)
+        return RawLocationStore.markDriftPoints(rawPoints)
+    }
+    
+    /// 核心算法：标记轨迹中的漂移点（不删除，只打标记）
+    /// 检测模式：
+    /// 1. 三点回弹检测：A≈C 但 B 远离（用户描述的典型场景）
+    /// 2. 物理速度不可能检测
+    /// 3. 精度异常 + 大跳变检测
+    /// 4. 现有 filterRidiculousSpikes 中的多点跳变集群检测
+    static func markDriftPoints(_ points: [CLLocation]) -> [RawPointEntry] {
+        guard points.count >= 2 else {
+            return points.enumerated().map { RawPointEntry(location: $0.element, isDriftPoint: false, originalIndex: $0.offset) }
+        }
+        
+        var driftFlags = [Bool](repeating: false, count: points.count)
+        
+        // --- Pass 1: 三点回弹检测（核心新算法）---
+        // 对于每个点 B(index=i), 检查 A(i-1) 和 C(i+1)
+        // 如果 A≈C (距离较近) 但 B 远离 A 和 C，则 B 是漂移点
+        for i in 1..<(points.count - 1) {
+            let a = points[i - 1]
+            let b = points[i]
+            let c = points[i + 1]
+            
+            let timeAC = abs(c.timestamp.timeIntervalSince(a.timestamp))
+            
+            // 只在时间窗口较短时触发（30秒内，覆盖用户描述的5秒场景和更多情况）
+            guard timeAC < 30 else { continue }
+            
+            let distAC = a.distance(from: c)
+            let distAB = a.distance(from: b)
+            let distBC = b.distance(from: c)
+            
+            // A 和 C 距离很近（< 80m），但 B 跳到了很远（> 100m）
+            if distAC < 80 && distAB > 100 && distBC > 100 {
+                driftFlags[i] = true
+                continue
+            }
+            
+            // 更宽松的变体：A 和 C 距离适中（< 150m），但 B 跳得很远（> 300m）
+            if distAC < 150 && distAB > 300 && distBC > 300 {
+                driftFlags[i] = true
+                continue
+            }
+            
+            // 补充：B 的精度很差且跳变明显
+            if b.horizontalAccuracy > 100 && distAC < 100 && distAB > 150 {
+                driftFlags[i] = true
+                continue
+            }
+        }
+        
+        // --- Pass 2: 连续多点回弹检测（如 A,B1,B2,C 中 B1,B2 都是漂移）---
+        // 滑动窗口，检查非漂移的邻居
+        for i in 1..<(points.count - 1) {
+            if driftFlags[i] { continue } // 已经标记的跳过
+            
+            // 向前找最近的非漂移点
+            var prevIdx = i - 1
+            while prevIdx >= 0 && driftFlags[prevIdx] { prevIdx -= 1 }
+            guard prevIdx >= 0 else { continue }
+            
+            // 向后找最近的非漂移点
+            var nextIdx = i + 1
+            while nextIdx < points.count && driftFlags[nextIdx] { nextIdx += 1 }
+            guard nextIdx < points.count else { continue }
+            
+            let prev = points[prevIdx]
+            let current = points[i]
+            let next = points[nextIdx]
+            
+            let timePN = abs(next.timestamp.timeIntervalSince(prev.timestamp))
+            guard timePN < 60 else { continue }
+            
+            let distPN = prev.distance(from: next)
+            let distPC = prev.distance(from: current)
+            let distCN = current.distance(from: next)
+            
+            // 前后非漂移点很近，但当前点远离
+            if distPN < 100 && distPC > 150 && distCN > 150 {
+                driftFlags[i] = true
+            }
+        }
+        
+        // --- Pass 3: 物理速度不可能 + 精度极差的孤立跳变 ---
+        for i in 0..<points.count {
+            if driftFlags[i] { continue }
+            let current = points[i]
+            
+            // 3a: 物理不可能的瞬时速度（对比前后邻居）
+            if i > 0 && !driftFlags[i - 1] {
+                let prev = points[i - 1]
+                let dist = current.distance(from: prev)
+                let time = max(current.timestamp.timeIntervalSince(prev.timestamp), 0.1)
+                let speed = dist / time
+                
+                if speed > AppConfig.shared.physicalMaxSpeedThreshold {
+                    // 检查后面的点是否回弹到 prev 附近
+                    if i + 1 < points.count {
+                        let next = points[i + 1]
+                        let distPrevNext = prev.distance(from: next)
+                        if distPrevNext < dist * 0.5 {
+                            driftFlags[i] = true
+                            continue
+                        }
+                    }
+                }
+            }
+            
+            // 3b: 极差精度 + 大位移
+            if current.horizontalAccuracy > 1500 {
+                var nearbyGood = false
+                let checkRange = max(0, i - 3)...min(points.count - 1, i + 3)
+                for j in checkRange where j != i && !driftFlags[j] {
+                    if current.distance(from: points[j]) < 500 {
+                        nearbyGood = true
+                        break
+                    }
+                }
+                if !nearbyGood {
+                    driftFlags[i] = true
+                }
+            }
+        }
+        
+        // --- Pass 4: 使用现有的跳变集群逻辑标记（对应 filterRidiculousSpikes 的大跳变检测）---
+        var cleanedIndex = 0 // 跟踪已接受的最后一个点的索引
+        for i in 1..<points.count {
+            if driftFlags[i] { continue }
+            
+            let prev = points[cleanedIndex]
+            let current = points[i]
+            let dist = current.distance(from: prev)
+            let time = max(current.timestamp.timeIntervalSince(prev.timestamp), 0.1)
+            let speed = dist / time
+            
+            if speed > 60 || (dist > 800 && speed > 20) || dist > 2000 {
+                var foundReturn = false
+                let searchLimit = min(i + 15, points.count)
+                for j in (i + 1)..<searchLimit {
+                    let next = points[j]
+                    let tPrevToNext = max(next.timestamp.timeIntervalSince(prev.timestamp), 0.1)
+                    let dPrevToNext = next.distance(from: prev)
+                    let avgSpeed = dPrevToNext / tPrevToNext
+                    
+                    if avgSpeed < 42 && dist > 800 && current.distance(from: next) > 800 {
+                        // 标记 i 到 j-1 所有点为漂移
+                        for k in i..<j {
+                            driftFlags[k] = true
+                        }
+                        foundReturn = true
+                        break
+                    }
+                }
+                
+                if !foundReturn && current.horizontalAccuracy > 1500 && dist > 2000 {
+                    driftFlags[i] = true
+                }
+            }
+            
+            if !driftFlags[i] {
+                cleanedIndex = i
+            }
+        }
+        
+        return points.enumerated().map { index, location in
+            RawPointEntry(location: location, isDriftPoint: driftFlags[index], originalIndex: index)
+        }
     }
 }
 
