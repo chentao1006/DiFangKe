@@ -79,3 +79,4 @@ android/*.keystore
 android/.kotlin/
 android/.navigation/
 android/captures/
+*.aab
