@@ -376,11 +376,11 @@ class TimelineBuilder {
             var prevFp: Footprint?
             for j in (0..<i).reversed() {
                 if case .footprint(let fp) = result[j] {
-                    // 取紧邻的上一个足迹作为起点地点来源，break 已保证只取相邻项
-                    // 不再限制时间阈值：即使足迹到交通之间有较长的无轨迹空档（如手机后台未定位），
-                    // 起点地点仍应来自上一个足迹（如"家"）
-                    // 注意：仅更新地点名称，不修改交通的 startTime（时间以 GPS 第一个移动点为准）
-                    prevFp = fp
+                    // 核心修复：只有时间上足够接近，才认为是衔接关系
+                    // 避免中间的足迹被删除后，前后的交通直接对跳衔接
+                    if abs(t.startTime.timeIntervalSince(fp.endTime)) < AppConfig.shared.transportAlignmentThreshold {
+                        prevFp = fp
+                    }
                     break
                 }
             }
@@ -391,8 +391,7 @@ class TimelineBuilder {
                 let startName = matchedPlace?.name ?? fp.address ?? "未知地点"
                 updatedT = updatedT.updatingStart(startName)
                 
-                // 注意：不修改 startTime，时间以 GPS 轨迹第一个点为准（即探测到移动的时间）
-                // 只对齐显示用的起点坐标
+                // 强制对齐坐标
                 var newPoints = updatedT.points
                 let startCoord = CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
                 if newPoints.isEmpty {
@@ -407,9 +406,10 @@ class TimelineBuilder {
             var nextFp: Footprint?
             for j in (i+1)..<result.count {
                 if case .footprint(let fp) = result[j] {
-                    // 取紧邻的下一个足迹作为终点地点来源，break 已保证只取相邻项
-                    // 不再限制时间阈值（与起点对齐逻辑一致）
-                    nextFp = fp
+                    // 核心修复：只有时间上足够接近，才认为是衔接关系
+                    if abs(fp.startTime.timeIntervalSince(t.endTime)) < AppConfig.shared.transportAlignmentThreshold {
+                        nextFp = fp
+                    }
                     break
                 }
             }
@@ -420,8 +420,7 @@ class TimelineBuilder {
                 let endName = matchedPlace?.name ?? fp.address ?? "未知地点"
                 updatedT = updatedT.updatingEnd(endName)
                 
-                // 注意：不修改 endTime，时间以 GPS 轨迹最后一个点为准
-                // 只对齐显示用的终点坐标
+                // 强制对齐坐标
                 var newPoints = updatedT.points
                 let endCoord = CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
                 if newPoints.isEmpty {
@@ -684,7 +683,7 @@ class TimelineBuilder {
             endTime: end,
             startLocation: "接续起点",
             endLocation: "接续终点",
-            type: TransportType.from(speed: speed),
+            type: TransportType.from(speed: speed, duration: duration, distanceMeters: distance),
             distance: distance,
             averageSpeed: speed,
             points: [l1, l2]
@@ -928,13 +927,13 @@ class TimelineBuilder {
                 if currentSegmentType == nil {
                     let d = calculateDistance(currentPoints)
                     let t = currentPoints.last!.timestamp.timeIntervalSince(currentPoints.first!.timestamp)
-                    currentSegmentType = TransportType.from(speed: t > 0 ? d / t : 0)
+                    currentSegmentType = TransportType.from(speed: t > 0 ? d / t : 0, duration: t, distanceMeters: d)
                 }
                 let window = Array(filteredPoints[max(0, i-10)...i])
                 if window.count >= 6 {
                     let wd = calculateDistance(window)
                     let wt = window.last!.timestamp.timeIntervalSince(window.first!.timestamp)
-                    let wType = TransportType.from(speed: wt > 0 ? wd / wt : 0)
+                    let wType = TransportType.from(speed: wt > 0 ? wd / wt : 0, duration: wt, distanceMeters: wd)
                     if let segType = currentSegmentType, isSignificantTypeChange(from: segType, to: wType) && wt > AppConfig.shared.transportTypeChangeDurationThreshold {
                         if let transport = finalizeTransport(currentPoints) { transports.append(transport) }
                         // 类型切换时同样只借用坐标，不继承旧时间
@@ -1032,7 +1031,7 @@ class TimelineBuilder {
             endTime: end,
             startLocation: "起点", 
             endLocation: "终点",
-            type: TransportType.from(speed: averageSpeed),
+            type: TransportType.from(speed: averageSpeed, duration: duration, distanceMeters: distance),
             distance: distance,
             averageSpeed: averageSpeed,
             points: points.map { $0.coordinate }
@@ -1422,6 +1421,15 @@ class PersistentTimelineBuilder {
         if runConsolidation {
 #if !WIDGET_EXTENSION
             await LocationManager.shared.consolidateFootprints(in: context, targetDate: date)
+            try? context.save()
+            
+            // 核心修复：合并或删除了足迹后，会产生新的缺口。
+            // 之前尝试手动调用 fillGapsBetweenItems，但无法处理所有边界情况（如末尾缺口、需 processPoints 处理的复杂缺口）。
+            // 最完美的方案是：直接模拟一次“下拉刷新”（即再跑一次 runConsolidation: false 的 syncDay），
+            // 这保证了重新生成的结果与下拉刷新后完全一致！
+            syncingDates.remove(startOfDay) // 暂时解除防重入锁
+            await syncDay(date: date, in: context, runConsolidation: false)
+            // 内层 syncDay 结束后会从 syncingDates 中移除 startOfDay，外层的 defer 也会尝试移除，这是安全的。
 #endif
         }
         startControlledAddressResolution(in: context)
@@ -1565,6 +1573,7 @@ class PersistentTimelineBuilder {
                         walkingDistance: mergedMetrics.distance,
                         floorsClimbed: mergedMetrics.floors,
                         duration: current.endTime.timeIntervalSince(current.startTime),
+                        distanceMeters: current.distance,
                         preferredAutomotive: preferredAuto,
                         preferredCycling: preferredCycling
                     ).rawValue
@@ -1624,9 +1633,12 @@ class PersistentTimelineBuilder {
             
             if duration > 120 { // More than 2 minutes gap
                 let hasTransport = tps.contains { t in
+                    // 核心修复：只要与该区间有任何重叠（>1s），就认为已有交通，不再重复生成
                     let intersectStart = max(gapStart, t.startTime)
                     let intersectEnd = min(gapEnd, t.endTime)
-                    return intersectEnd.timeIntervalSince(intersectStart) > 60 
+                    if intersectEnd.timeIntervalSince(intersectStart) > 1 { return true }
+                    // 兜底：如果交通完整覆盖了这段间隙（交通起点 < 间隙起点 且 交通终点 > 间隙终点），也算有交通
+                    return t.startTime <= gapStart && t.endTime >= gapEnd
                 }
                 
                 let loc1 = CLLocation(latitude: currentFp.latitude, longitude: currentFp.longitude)
@@ -1638,6 +1650,9 @@ class PersistentTimelineBuilder {
                 let pathDist: Double
                 let pts: [CodableCoordinate]
                 
+                var actualStartTime = gapStart
+                var actualEndTime = gapEnd
+                
                 if !gapPoints.isEmpty {
                     // Include the footprint centers in the path to ensure correct mileage
                     var combinedPoints = [CLLocation(latitude: currentFp.latitude, longitude: currentFp.longitude)]
@@ -1645,6 +1660,10 @@ class PersistentTimelineBuilder {
                     combinedPoints.append(CLLocation(latitude: nextFp.latitude, longitude: nextFp.longitude))
                     pathDist = TimelineBuilder.calculateDistance(combinedPoints)
                     pts = combinedPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) }
+                    
+                    // 核心要求：交通的时间要从真正探测到移动后开始
+                    actualStartTime = gapPoints.first!.timestamp
+                    actualEndTime = gapPoints.last!.timestamp
                 } else {
                     pathDist = straightDist
                     pts = [CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude),
@@ -1678,14 +1697,15 @@ class PersistentTimelineBuilder {
                         walkingDistance: metrics.distance,
                         floorsClimbed: metrics.floors,
                         duration: duration,
+                        distanceMeters: pathDist,
                         preferredAutomotive: preferredAuto,
                         preferredCycling: preferredCycling
                     )
                     
                     let tp = TransportRecord(
                         day: startOfDay,
-                        startTime: gapStart,
-                        endTime: gapEnd,
+                        startTime: actualStartTime,
+                        endTime: actualEndTime,
                         startLocation: currentLocName,
                         endLocation: nextLocName,
                         typeRaw: determinedType.rawValue,
@@ -1729,7 +1749,8 @@ class PersistentTimelineBuilder {
             if let prevFp = fps.last(where: { $0.endTime <= tp.startTime + AppConfig.shared.snapTimeBuffer }) {
                 let gap = tp.startTime.timeIntervalSince(prevFp.endTime)
                 if gap >= 0 && gap < AppConfig.shared.transportAlignmentThreshold { 
-                    tp.startTime = prevFp.endTime
+                    // 核心修复：只更新起点的位置名称和坐标，不修改 startTime
+                    // 保持 startTime 为探测出移动后的第一个轨迹点的时间
                     let locName = getSimplifiedLocationName(for: prevFp, allPlaces: allPlaces)
                     if !locName.isEmpty && locName != "某地" {
                         tp.startLocation = locName
@@ -1745,7 +1766,8 @@ class PersistentTimelineBuilder {
             if let nextFp = fps.first(where: { $0.startTime >= tp.endTime - AppConfig.shared.snapTimeBuffer }) {
                 let gap = nextFp.startTime.timeIntervalSince(tp.endTime)
                 if gap >= 0 && gap < AppConfig.shared.transportAlignmentThreshold {
-                    tp.endTime = nextFp.startTime
+                    // 核心修复：只更新终点的位置名称和坐标，不修改 endTime
+                    // 保持 endTime 为轨迹最后一个移动点的时间
                     let locName = getSimplifiedLocationName(for: nextFp, allPlaces: allPlaces)
                     if !locName.isEmpty && locName != "某地" {
                         tp.endLocation = locName
@@ -2189,6 +2211,7 @@ class PersistentTimelineBuilder {
                         walkingDistance: metrics.distance,
                         floorsClimbed: metrics.floors,
                         duration: tEnd.timeIntervalSince(tStart),
+                        distanceMeters: pathDist,
                         preferredAutomotive: preferredAuto,
                         preferredCycling: preferredCycling
                     )

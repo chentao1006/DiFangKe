@@ -16,6 +16,7 @@ struct SettingsView: View {
     @AppStorage("isPastMemoriesNotificationEnabled") private var isPastMemoriesNotificationEnabled = true
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
     @AppStorage("aiServiceType") private var aiServiceType = "public"
+    @AppStorage(LocationAccuracyMode.userDefaultsKey) private var locationAccuracyModeRaw = LocationAccuracyMode.automatic.rawValue
     
     @State private var showingSettingsAlert = false
     
@@ -49,6 +50,23 @@ struct SettingsView: View {
             }
         )
     }
+
+    private var locationAccuracyModeBinding: Binding<LocationAccuracyMode> {
+        Binding(
+            get: { LocationAccuracyMode(rawValue: locationAccuracyModeRaw) ?? .automatic },
+            set: { mode in
+                locationAccuracyModeRaw = mode.rawValue
+                locationManager.applyLocationAccuracyMode()
+                if isTrackingEnabled {
+                    locationManager.startTracking()
+                }
+            }
+        )
+    }
+
+    private var selectedLocationAccuracyMode: LocationAccuracyMode {
+        LocationAccuracyMode(rawValue: locationAccuracyModeRaw) ?? .automatic
+    }
     
     var body: some View {
         Form {
@@ -61,6 +79,15 @@ struct SettingsView: View {
                             locationManager.stopTracking()
                         }
                     }
+
+                Picker("定位精度", selection: locationAccuracyModeBinding) {
+                    ForEach(LocationAccuracyMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                Text(selectedLocationAccuracyMode.description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 
                 Toggle("开启 iCloud 同步", isOn: $isICloudSyncEnabled)
                 if isICloudSyncEnabled {

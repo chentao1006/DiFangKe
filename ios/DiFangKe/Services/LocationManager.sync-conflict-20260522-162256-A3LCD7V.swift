@@ -34,6 +34,32 @@ struct RawRecordingDeviceOption: Identifiable, Hashable {
     }
 }
 
+enum LocationAccuracyMode: String, CaseIterable, Identifiable {
+    case automatic = "automatic"
+    case precise = "precise"
+    case batterySaving = "batterySaving"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .automatic: return "自动模式"
+        case .precise: return "精确模式"
+        case .batterySaving: return "省电模式"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .automatic: return "按移动状态自动调整，默认推荐"
+        case .precise: return "始终高精度记录，轨迹最完整"
+        case .batterySaving: return "始终低精度记录，减少耗电"
+        }
+    }
+
+    static let userDefaultsKey = "locationAccuracyMode"
+}
+
 // MARK: - 原始轨迹点包装（附带漂移标记）
 struct RawPointEntry {
     let location: CLLocation
@@ -1089,12 +1115,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     override init() {
         super.init()
         self.locationManager.delegate = self
-        self.locationManager.desiredAccuracy = kCLLocationAccuracyBest // 初次启动使用最高精度，确保冷启动位置快速锁定
-        self.locationManager.distanceFilter = 5.0 // 初始高频记录 (5米)
         self.locationManager.allowsBackgroundLocationUpdates = true
         self.locationManager.pausesLocationUpdatesAutomatically = false // 核心修复：禁止自动暂停，防止丢点
         self.locationManager.showsBackgroundLocationIndicator = false // 保持静默记录，不显示蓝色状态栏（响应用户反馈）
-        self.locationManager.activityType = .fitness // 默认为健身/步行模式
+        applyLocationAccuracyMode()
         
         // Initialize basic status
         updateAuthStatus()
@@ -1196,8 +1220,38 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 防抖：避免看门狗/系统回调频繁重启定位导致耗电抖动
     private var lastRecoveryBoostTime: Date = .distantPast
 
+    private var locationAccuracyMode: LocationAccuracyMode {
+        let raw = UserDefaults.standard.string(forKey: LocationAccuracyMode.userDefaultsKey)
+        return LocationAccuracyMode(rawValue: raw ?? "") ?? .automatic
+    }
+
+    func applyLocationAccuracyMode() {
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.pausesLocationUpdatesAutomatically = false
+
+        switch locationAccuracyMode {
+        case .automatic:
+            locationManager.desiredAccuracy = kCLLocationAccuracyBest
+            locationManager.distanceFilter = 5.0
+            locationManager.activityType = .fitness
+        case .precise:
+            locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+            locationManager.distanceFilter = kCLDistanceFilterNone
+            locationManager.activityType = .fitness
+        case .batterySaving:
+            locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+            locationManager.distanceFilter = 100.0
+            locationManager.activityType = .fitness
+        }
+    }
+
     /// 强制激活高精度模式（通常由计步器、运动传感器或网络变化触发，早于 GPS 位移）
     private func forceHighAccuracyBoost() {
+        if locationAccuracyMode == .batterySaving {
+            applyLocationAccuracyMode()
+            return
+        }
+
         print("🚀 Status change detected! Forcing high accuracy boost...")
         
         // 0. 设置 10 分钟出门保护期，覆盖大多数步行出门的起步阶段，防止过早降频造成直线轨迹
@@ -1208,8 +1262,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationManager.pausesLocationUpdatesAutomatically = false
         
         // 2. 提升精度，但避免长期停留在导航级满额采样导致发热
-        locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        locationManager.distanceFilter = 5.0
+        if locationAccuracyMode == .precise {
+            locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+            locationManager.distanceFilter = kCLDistanceFilterNone
+        } else {
+            locationManager.desiredAccuracy = kCLLocationAccuracyBest
+            locationManager.distanceFilter = 5.0
+        }
         locationManager.activityType = .fitness
         
         // 3. 核心补救：立即请求一次单次精确定位，强制拉高硬件功率
@@ -1280,6 +1339,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         let status = locationManager.authorizationStatus
         guard status == .authorizedAlways else { return }
+        guard locationAccuracyMode != .batterySaving else {
+            applyLocationAccuracyMode()
+            return
+        }
 
         // Intervene when we believe the user is actually moving OR when uiIsMoving is true.
         let motion = HealthManager.shared.currentMotionType
@@ -1477,6 +1540,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
 
         locationManager.requestAlwaysAuthorization()
+        applyLocationAccuracyMode()
         
         // Re-enable updates if they were stopped
         locationManager.startUpdatingLocation()
@@ -1811,6 +1875,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 0. 智能节能：根据速度和停留状态动态调整定位参数
         let place = matchedPlace
         let speed = location.speed
+        let accuracyMode = locationAccuracyMode
         
         // 判定是否正在长久停留
         // 我们将其放宽到 150m (从 300m 下调)，并增加已知地点粘性
@@ -1850,54 +1915,60 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             return false
         }()
         
-        let modeRaw = UserDefaults.standard.string(forKey: LocationAccuracyMode.userDefaultsKey) ?? LocationAccuracyMode.automatic.rawValue
-        let currentMode = LocationAccuracyMode(rawValue: modeRaw) ?? .automatic
-        
-        if currentMode == .automatic {
-            if let p = place, p.isIgnored {
-                // 已忽略地点也必须保留较密的原始轨迹，否则从家/公司出门会丢掉开头几百米，只是不生成该地点足迹。
-                if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters || manager.distanceFilter != 10.0 || manager.activityType != .fitness {
-                    manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-                    manager.distanceFilter = 10.0
-                    manager.activityType = .fitness // ⚠️ 不用 .other — iOS 会极度压缩更新频率
-                }
-                updateRegionMonitoring(isStationary: true)
-            } else if isStationary {
-                // 真正停留了：进入节能模式
-                if manager.desiredAccuracy != kCLLocationAccuracyBest || manager.distanceFilter != 5.0 || manager.activityType != .fitness {
-                    manager.desiredAccuracy = kCLLocationAccuracyBest
-                    // 停留时仍保持 5m 标准更新，确保步行离开时一开始就有点，而不是几百米后才开始。
-                    manager.distanceFilter = 5.0
-                    manager.activityType = .fitness // ⚠️ 不用 .other — iOS 会极度压缩更新频率
-                }
-                updateRegionMonitoring(isStationary: true)
-            } else {
-                // 自动采集增强：只要在移动（不论是步行、骑行还是开车）
-                // 开启增强采样，确保不漏点
-                let motion = HealthManager.shared.currentMotionType
-                let isMovingBySensor = motion == .walking || motion == .running || motion == .cycling || motion == .automotive
-                
-                // 高速驾驶优先走车载导航模式，但仍保留距离过滤，避免无限采样
-                if motion == .automotive || speed > 15.0 {
-                    if manager.desiredAccuracy != kCLLocationAccuracyBest || manager.distanceFilter != 10.0 || manager.activityType != .automotiveNavigation {
-                        manager.desiredAccuracy = kCLLocationAccuracyBest
-                        manager.distanceFilter = 10.0
-                        manager.activityType = .automotiveNavigation
-                    }
-                // 只要传感器认为在动，或者速度 > 0.5m/s
-                } else if isMovingBySensor || speed > 0.5 {
-                    let targetAccuracy = kCLLocationAccuracyBest
-                    if manager.desiredAccuracy != targetAccuracy || manager.distanceFilter != 5.0 || manager.activityType != .fitness {
-                        manager.desiredAccuracy = targetAccuracy
-                        manager.distanceFilter = 5.0
-                        manager.activityType = .fitness
-                    }
-                }
-                updateRegionMonitoring(isStationary: false)
+        if accuracyMode == .precise {
+            if manager.desiredAccuracy != kCLLocationAccuracyBestForNavigation || manager.distanceFilter != kCLDistanceFilterNone || manager.activityType != .fitness {
+                manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+                manager.distanceFilter = kCLDistanceFilterNone
+                manager.activityType = .fitness
             }
+            updateRegionMonitoring(isStationary: false)
+        } else if accuracyMode == .batterySaving {
+            if manager.desiredAccuracy != kCLLocationAccuracyHundredMeters || manager.distanceFilter != 100.0 || manager.activityType != .fitness {
+                manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+                manager.distanceFilter = 100.0
+                manager.activityType = .fitness
+            }
+            updateRegionMonitoring(isStationary: true)
+        } else if let p = place, p.isIgnored {
+            // 已忽略地点也必须保留较密的原始轨迹，否则从家/公司出门会丢掉开头几百米，只是不生成该地点足迹。
+            if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters || manager.distanceFilter != 10.0 || manager.activityType != .fitness {
+                manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+                manager.distanceFilter = 10.0
+                manager.activityType = .fitness // ⚠️ 不用 .other — iOS 会极度压缩更新频率
+            }
+            updateRegionMonitoring(isStationary: true)
+        } else if isStationary {
+            // 真正停留了：进入节能模式
+            if manager.desiredAccuracy != kCLLocationAccuracyBest || manager.distanceFilter != 5.0 || manager.activityType != .fitness {
+                manager.desiredAccuracy = kCLLocationAccuracyBest
+                // 停留时仍保持 5m 标准更新，确保步行离开时一开始就有点，而不是几百米后才开始。
+                manager.distanceFilter = 5.0
+                manager.activityType = .fitness // ⚠️ 不用 .other — iOS 会极度压缩更新频率
+            }
+            updateRegionMonitoring(isStationary: true)
         } else {
-            // 如果不是自动模式，就仅仅更新唤醒区域，不改变精度（精度在 applyLocationAccuracyMode 中已经设置好）
-            updateRegionMonitoring(isStationary: isStationary)
+            // 自动采集增强：只要在移动（不论是步行、骑行还是开车）
+            // 开启增强采样，确保不漏点
+            let motion = HealthManager.shared.currentMotionType
+            let isMovingBySensor = motion == .walking || motion == .running || motion == .cycling || motion == .automotive
+            
+            // 高速驾驶优先走车载导航模式，但仍保留距离过滤，避免无限采样
+            if motion == .automotive || speed > 15.0 {
+                if manager.desiredAccuracy != kCLLocationAccuracyBest || manager.distanceFilter != 10.0 || manager.activityType != .automotiveNavigation {
+                    manager.desiredAccuracy = kCLLocationAccuracyBest
+                    manager.distanceFilter = 10.0
+                    manager.activityType = .automotiveNavigation
+                }
+            // 只要传感器认为在动，或者速度 > 0.5m/s
+            } else if isMovingBySensor || speed > 0.5 {
+                let targetAccuracy = kCLLocationAccuracyBest
+                if manager.desiredAccuracy != targetAccuracy || manager.distanceFilter != 5.0 || manager.activityType != .fitness {
+                    manager.desiredAccuracy = targetAccuracy
+                    manager.distanceFilter = 5.0
+                    manager.activityType = .fitness
+                }
+            }
+            updateRegionMonitoring(isStationary: false)
         }
 
         // 反地理编码更新地址（高速节流至 1000 米，兼顾体验与能效）
@@ -2155,6 +2226,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         print("[LocationManager] ⏸️ Location updates paused by system. isTracking=\(isTracking) moving=\(isMovingBySensor)")
         guard isTracking, isMovingBySensor else { return }
+        guard locationAccuracyMode != .batterySaving else {
+            applyLocationAccuracyMode()
+            return
+        }
         
         if Date().timeIntervalSince(lastRecoveryBoostTime) < 60 {
             return
@@ -2187,32 +2262,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     // MARK: - Region Monitoring for Immediate Wakeup
     
-    func applyLocationAccuracyMode() {
-        let modeRaw = UserDefaults.standard.string(forKey: LocationAccuracyMode.userDefaultsKey) ?? LocationAccuracyMode.automatic.rawValue
-        let mode = LocationAccuracyMode(rawValue: modeRaw) ?? .automatic
-        
-        switch mode {
-        case .automatic:
-            // 自动模式下，根据当前状态重新评估
-            // 我们通过重置相关状态变量，迫使 runLocationWatchdog 或 updateRegionMonitoring 生效
-            // 简单起见，强制触发一次 location update 逻辑
-            locationManager.startUpdatingLocation()
-        case .high:
-            locationManager.desiredAccuracy = kCLLocationAccuracyBest
-            locationManager.distanceFilter = 5.0
-            locationManager.activityType = .fitness
-        case .balanced:
-            locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-            locationManager.distanceFilter = 10.0
-            locationManager.activityType = .fitness
-        case .powerSaving:
-            locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-            locationManager.distanceFilter = 50.0
-            locationManager.activityType = .other
-        }
-        print("[LocationManager] Applied LocationAccuracyMode: \(mode.rawValue)")
-    }
-
     private func updateRegionMonitoring(isStationary: Bool) {
         let identifier = "StationaryWakeupRegion"
         

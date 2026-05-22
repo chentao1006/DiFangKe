@@ -75,12 +75,14 @@ enum TransportType: String, CaseIterable, Codable {
         walkingDistance: Double = 0,
         floorsClimbed: Int = 0,
         duration: TimeInterval = 0,
+        distanceMeters: Double = 0,
         preferredAutomotive: TransportType = .car,
         preferredCycling: TransportType = .bicycle
     ) -> TransportType {
         let kmh = speed * 3.6
         let minutes = max(duration / 60, 0)
         let estimatedDistance = max(speed * duration, 0)
+        let effectiveDistance = distanceMeters > 0 ? distanceMeters : estimatedDistance
         let stepsPerMinute = minutes > 0 ? Double(stepCount) / minutes : 0
         let walkingDistanceRatio = estimatedDistance > 0 ? min(1.5, walkingDistance / estimatedDistance) : 0
         let hasStrongOnFootEvidence =
@@ -96,7 +98,7 @@ enum TransportType: String, CaseIterable, Codable {
         if kmh > 35 && motionType == .running {
             effectiveMotionType = .unknown // 跑步很难持续超过 35km/h
         }
-        if kmh > 45 && (motionType == .walking || motionType == .running) {
+        if kmh > 45 && (motionType == .walking || motionType == .running || motionType == .unknown) {
             effectiveMotionType = .automotive // 确定是车载
         }
         if kmh > 100 && motionType == .cycling {
@@ -106,6 +108,24 @@ enum TransportType: String, CaseIterable, Codable {
             effectiveMotionType = .walking
         }
 
+        // --- 综合常识铁律：距离与时间的合理性 ---
+        var maxAllowedTypeCategory = 4 // 1=Foot, 2=Cycle, 3=Auto, 4=Large
+        
+        if effectiveDistance < 3000 {
+            maxAllowedTypeCategory = 3
+        }
+        if effectiveDistance < 500 {
+            maxAllowedTypeCategory = 2
+        }
+
+        var safePreferredAuto = preferredAutomotive
+        if maxAllowedTypeCategory < 4 && safePreferredAuto.category >= 4 {
+            safePreferredAuto = .car
+        }
+        if maxAllowedTypeCategory < 3 && safePreferredAuto.category >= 3 {
+            safePreferredAuto = preferredCycling
+        }
+
         // 1. 优先使用传感器数据 (Core Motion)
         switch effectiveMotionType {
         case .walking:
@@ -113,12 +133,12 @@ enum TransportType: String, CaseIterable, Codable {
         case .running:
             return .running
         case .cycling:
-            if kmh > 55 { return preferredAutomotive } 
+            if kmh > 55 { return safePreferredAuto } 
             return preferredCycling
         case .automotive:
-            if kmh > 100 { return .train }
-            if kmh > 80 && preferredAutomotive == .bus { return .car } 
-            return preferredAutomotive
+            if kmh > 100 && maxAllowedTypeCategory >= 4 { return .train }
+            if kmh > 80 && safePreferredAuto == .bus { return .car } 
+            return safePreferredAuto
         default:
             break
         }
@@ -139,16 +159,21 @@ enum TransportType: String, CaseIterable, Codable {
         if kmh < 4.5 { 
             // 如果速度极低，但步数也很少（每分钟不到 5 步），说明大概率是在车里堵车，而不是真的在走
             if stepsPerMinute < 5 && stepCount < 20 && walkingDistance < 80 {
-                return preferredAutomotive 
+                return safePreferredAuto 
             }
             return .slow 
         }
-        if kmh < 9 && hasStrongOnFootEvidence { return .slow }
-        if kmh < 12 { return .bicycle }
-        if kmh < 22 && hasStrongOnFootEvidence && walkingDistanceRatio > 0.45 { return preferredCycling }
-        if kmh < 25 { return preferredCycling } 
-        if kmh < 120 { return preferredAutomotive }
-        if kmh < 350 { return .train }
+
+        var effectiveKmh = kmh
+        if maxAllowedTypeCategory < 4 && effectiveKmh >= 120.0 { effectiveKmh = 119.0 }
+        if maxAllowedTypeCategory < 3 && effectiveKmh >= 25.0 { effectiveKmh = 24.0 }
+
+        if effectiveKmh < 9 && hasStrongOnFootEvidence { return .slow }
+        if effectiveKmh < 12 { return .bicycle }
+        if effectiveKmh < 22 && hasStrongOnFootEvidence && walkingDistanceRatio > 0.45 { return preferredCycling }
+        if effectiveKmh < 25 { return preferredCycling } 
+        if effectiveKmh < 120 { return safePreferredAuto }
+        if effectiveKmh < 350 { return .train }
         return .airplane
     }
 
@@ -166,6 +191,15 @@ enum TransportType: String, CaseIterable, Codable {
         case .train: return "火车/高铁"
         case .airplane: return "飞机"
         case .ship: return "轮船"
+        }
+    }
+    
+    var category: Int {
+        switch self {
+        case .slow, .running: return 1
+        case .bicycle, .ebike: return 2
+        case .motorcycle, .bus, .car: return 3
+        case .subway, .train, .airplane, .ship: return 4
         }
     }
 }
