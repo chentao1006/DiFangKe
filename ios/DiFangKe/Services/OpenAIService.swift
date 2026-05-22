@@ -616,11 +616,11 @@ class OpenAIService {
         let base: String
         switch footprintCount {
         case 1:
-            base = "今天没去别的地方"
+            base = "没去别的地方"
         case 2...3:
-            base = "今天去过几个地方"
+            base = "去过几个地方"
         case 4...:
-            base = "今天去过的地方还不少"
+            base = "去过的地方还不少"
         default:
             base = "又是平凡的一天"
         }
@@ -740,7 +740,7 @@ class OpenAIService {
         let dateStr = date.formatted(.dateTime.year().month().day())
         let list = footprintDescriptions.joined(separator: "\n")
         let prompt = """
-        今天是 \(dateStr)。下面是当天足迹的事实片段，请你先自己归纳出一天的主线和状态，再用一句话总结今天。
+        这是 \(dateStr) 的数据。下面是当天足迹的事实片段，请你先自己归纳出该天的主线和状态，再用一句话总结这一天。
         要求：
         1. 只输出一句中文。
         2. 不要逐条复述，不要写时间线，不要把片段照搬成流水账。
@@ -754,6 +754,7 @@ class OpenAIService {
         10. 输出前先做一致性校验：结论必须和里程、地点线索一致，不能互相矛盾。
         11. 若片段体现明显的远距离或跨区域移动，结论应体现范围扩大与跨区域特征，避免收缩性描述。
         12. 活动范围判断要以明确事实优先：里程数和地点词 > 模糊描述；有冲突时按更强证据下结论。
+        13. 绝对不能在输出中包含“今天”二字，因为这是对往日的总结。
 
         事实片段：
         \(list)
@@ -761,7 +762,7 @@ class OpenAIService {
         
         let body: [String: Any] = [
             "messages": [
-                ["role": "system", "content": "你是一位只做事实概括的中文助手。输出前先做事实一致性校验：结论必须与里程和地点线索一致，禁止出现与证据相反的收缩性结论。输出要自然、口语化，不要虚构，不要抒情，不要修辞，不要使用报表口吻、监控口吻或生硬表达，也不要补写感受、氛围、节奏、心情或状态判断。"],
+                ["role": "system", "content": "你是一位只做事实概括的中文助手。输出前先做事实一致性校验：结论必须与里程和地点线索一致，禁止出现与证据相反的收缩性结论。输出要自然、口语化，不要虚构，不要抒情，不要修辞，不要使用报表口吻、监控口吻或生硬表达，也不要补写感受、氛围、节奏、心情或状态判断。禁止在输出中包含“今天”二字。"],
                 ["role": "user", "content": prompt]
             ],
             "temperature": 0.2

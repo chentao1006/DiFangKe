@@ -3337,12 +3337,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             if dayLimit > currentTime.addingTimeInterval(AppConfig.shared.ongoingStayGracePeriod) {
                 if let gap = identifyGapStay(from: currentTime, to: dayLimit, rawPoints: rawPoints) {
                     // 核心改进：如果最后一段也是停留，尝试将其与上一段 GAP_STAY 合并（如果是同一个地方），避免产生碎片
-                    var descriptor = FetchDescriptor<Footprint>(
-                        predicate: #Predicate { $0.locationHash == "GAP_STAY" },
-                        sortBy: [SortDescriptor(\.endTime, order: .reverse)]
-                    )
-                    descriptor.fetchLimit = 1
-                    let existingLast = (try? self.modelContext?.fetch(descriptor))?.first
+                    var existingLast: Footprint? = nil
+                    await MainActor.run {
+                        var descriptor = FetchDescriptor<Footprint>(
+                            predicate: #Predicate { $0.locationHash == "GAP_STAY" },
+                            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+                        )
+                        descriptor.fetchLimit = 1
+                        existingLast = (try? self.modelContext?.fetch(descriptor))?.first
+                    }
                     
                     if let lastFp = existingLast, 
                        abs(lastFp.endTime.timeIntervalSince(gap.start)) < AppConfig.shared.stayMergeGapThreshold {

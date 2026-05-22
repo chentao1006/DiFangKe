@@ -713,7 +713,9 @@ struct DFKMapView: View {
         }.joined(separator: "|")
         let heatmapKey = heatmapPoints.prefix(8).map(\.id).joined(separator: "|")
         let annotationKey = mainAnnotationCoordinate.map { String(format: "%.4f,%.4f", $0.latitude, $0.longitude) } ?? "none"
-        let sizeKey = "\(Int(size.width.rounded()))x\(Int(size.height.rounded()))"
+        let w = Int(size.width / 10) * 10
+        let h = Int(size.height / 10) * 10
+        let sizeKey = "\(w)x\(h)"
         let styleKey = UITraitCollection.current.userInterfaceStyle == .dark ? "dark" : "light"
         return [sizeKey, styleKey, annotationKey, pointKey, footprintKey, transportKey, photoKey, footprintPhotoKey, heatmapKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
     }
