@@ -16,6 +16,7 @@ import com.ct106.difangke.service.OpenAIService
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.Dispatchers
@@ -103,7 +104,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             (boundedFps.map { TimelineItem.FootprintItem(it) } + boundedTps.map { TimelineItem.TransportItem(it) })
                 .sortedByDescending { it.startTime }
-        }
+        }.flowOn(Dispatchers.Default)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -203,7 +204,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .sortedByDescending { it.startTime }
                 
                 alignTransportItems(rawItems, boundedFps)
-            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+            }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
         }
     }
 
@@ -229,17 +230,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 db.footprintDao().observeBetween(start, end),
                 db.transportRecordDao().observeForDay(start, end)
             ) { footprints, transports ->
-                val allPointsList = mutableListOf<List<Double>>()
-                footprints.forEach { fp ->
-                    try {
-                        val lats = org.json.JSONArray(fp.latitudeJson)
-                        val lons = org.json.JSONArray(fp.longitudeJson)
-                        for (i in 0 until minOf(lats.length(), lons.length())) {
-                            allPointsList.add(listOf(lats.getDouble(i), lons.getDouble(i)))
-                        }
-                    } catch (e: Exception) {}
-                }
+                val sb = java.lang.StringBuilder()
+                sb.append("[")
+                var first = true
+
+                // 不再将足迹的漂移点加入到轨迹线中，只保留交通线
+
                 transports.forEach { tp ->
+                    kotlinx.coroutines.yield()
                     try {
                         val array = org.json.JSONArray(tp.pointsJson)
                         for (i in 0 until array.length()) {
@@ -247,31 +245,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             if (element is org.json.JSONArray) {
                                 val v1 = element.getDouble(0)
                                 val v2 = element.getDouble(1)
-                                if (Math.abs(v1) > 90.0) allPointsList.add(listOf(v2, v1)) else allPointsList.add(listOf(v1, v2))
+                                if (!first) sb.append(",")
+                                if (Math.abs(v1) > 90.0) sb.append("[$v2,$v1]") else sb.append("[$v1,$v2]")
+                                first = false
                             } else if (element is org.json.JSONObject) {
                                 val lat = element.optDouble("lat", element.optDouble("latitude", Double.NaN))
                                 val lon = element.optDouble("lon", element.optDouble("longitude", Double.NaN))
-                                if (!lat.isNaN() && !lon.isNaN()) allPointsList.add(listOf(lat, lon))
+                                if (!lat.isNaN() && !lon.isNaN()) {
+                                    if (!first) sb.append(",")
+                                    sb.append("[$lat,$lon]")
+                                    first = false
+                                }
                             }
                         }
+                        // 插入分隔符，防止两段不相关的交通线连成一条直线
+                        if (!first) sb.append(",[0.0,0.0]")
                     } catch (e: Exception) {}
                 }
-                if (allPointsList.isNotEmpty()) {
-                    val array = org.json.JSONArray()
-                    allPointsList.forEach { p ->
-                        val pArr = org.json.JSONArray().put(p[0]).put(p[1])
-                        array.put(pArr)
-                    }
-                    array.toString()
-                } else null
+                sb.append("]")
+                if (first) null else sb.toString()
             }
 
             // 如果是今天，额外与实时定位合并
             if (isToday(date)) {
                 combine(trajectoryFlow, LocationTrackingService.stateFlow) { traj, _ -> traj }
+                    .flowOn(Dispatchers.Default)
                     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
             } else {
-                trajectoryFlow.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+                trajectoryFlow.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
             }
         }
     }
@@ -288,7 +289,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 db.activityTypeDao().observeAll()
             ) { footprints, activityTypes ->
                 buildFootprintMarkersJson(footprints, activityTypes)
-            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+            }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
         }
     }
 
@@ -425,8 +426,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private var loadDataJob: kotlinx.coroutines.Job? = null
+
     fun loadDataForDate(date: Date) {
-        viewModelScope.launch {
+        loadDataJob?.cancel()
+        loadDataJob = viewModelScope.launch {
             // 清理旧数据
             _dailyTrajectory.value = null
             _dailyMarkers.value = null
@@ -438,69 +442,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             val endOfDay = cal.time
 
-            // 1. 获取足迹
-            val footprints = db.footprintDao().getBetween(startOfDay, endOfDay)
-            
-            // 2. 获取交通记录
-            val transports = db.transportRecordDao().getForDay(startOfDay, endOfDay)
+            withContext(Dispatchers.Default) {
+                // 1. 获取足迹和交通记录 (用于传给 AI)
+                val footprints = db.footprintDao().getBetween(startOfDay, endOfDay)
+                val transports = db.transportRecordDao().getForDay(startOfDay, endOfDay)
 
-            // 不需要手动计算统计数据，Flow 自动处理
-
-            // 不需要手动更新 DailyInsight，Flow 自动处理
-
-            // 5. 聚合轨迹点
-            val allPointsList = mutableListOf<List<Double>>()
-            footprints.forEach { fp ->
-                try {
-                    val lats = org.json.JSONArray(fp.latitudeJson)
-                    val lons = org.json.JSONArray(fp.longitudeJson)
-                    for (i in 0 until minOf(lats.length(), lons.length())) {
-                        allPointsList.add(listOf(lats.getDouble(i), lons.getDouble(i)))
-                    }
-                } catch (e: Exception) {}
-            }
-            transports.forEach { tp ->
-                try {
-                    val array = org.json.JSONArray(tp.pointsJson)
-                    for (i in 0 until array.length()) {
-                        val element = array.get(i)
-                        if (element is org.json.JSONArray) {
-                            val v1 = element.getDouble(0)
-                            val v2 = element.getDouble(1)
-                            if (Math.abs(v1) > 90.0) allPointsList.add(listOf(v2, v1)) else allPointsList.add(listOf(v1, v2))
-                        } else if (element is org.json.JSONObject) {
-                            val lat = element.optDouble("lat", element.optDouble("latitude", Double.NaN))
-                            val lon = element.optDouble("lon", element.optDouble("longitude", Double.NaN))
-                            if (!lat.isNaN() && !lon.isNaN()) allPointsList.add(listOf(lat, lon))
-                        }
-                    }
-                } catch (e: Exception) {}
-            }
-            if (allPointsList.isNotEmpty()) {
-                val array = org.json.JSONArray()
-                allPointsList.forEach { p ->
-                    val pArr = org.json.JSONArray().put(p[0]).put(p[1])
-                    array.put(pArr)
+                withContext(Dispatchers.Main) {
+                    // 发起 AI 分析任务
+                    aiAnalysisJob?.cancel()
+                    aiAnalysisJob = triggerAiAnalysis(footprints, transports, startOfDay)
                 }
-                _dailyTrajectory.value = array.toString()
-            } else {
-                _dailyTrajectory.value = null
             }
-
-            // 6. 聚合足迹中心点以便在大/小地图显示活动图标标记
-            _dailyMarkers.value = buildFootprintMarkersJson(footprints, db.activityTypeDao().getAll())
-
-            // 发起 AI 分析任务
-            triggerAiAnalysis(footprints, transports, startOfDay)
         }
     }
+
+    private var aiAnalysisJob: kotlinx.coroutines.Job? = null
 
     private fun triggerAiAnalysis(
         footprints: List<FootprintEntity>,
         transports: List<TransportRecordEntity>,
         date: Date
-    ) {
-        viewModelScope.launch {
+    ): kotlinx.coroutines.Job {
+        return viewModelScope.launch {
+            delay(500) // Debounce fast swiping
+            if (date.time != zeroTime(_currentDate.value).time) return@launch
+
             // 对未分析的足迹进行单独分析
             // footprints.filter { !it.aiAnalyzed }.forEach { fp ->
             //     openAI.analyzeFootprint(fp)
@@ -621,14 +587,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val array = org.json.JSONArray()
         footprints.forEach { fp ->
             try {
-                val lats = org.json.JSONArray(fp.latitudeJson)
-                val lons = org.json.JSONArray(fp.longitudeJson)
-                if (lats.length() > 0 && lons.length() > 0) {
+                val lat = fp.representativeLatitude
+                val lon = fp.representativeLongitude
+                if (lat != 0.0 && lon != 0.0) {
                     val activity = activityById[fp.activityTypeValue]
                     array.put(
                         org.json.JSONObject()
-                            .put("lat", lats.getDouble(0))
-                            .put("lon", lons.getDouble(0))
+                            .put("lat", lat)
+                            .put("lon", lon)
                             .put("icon", activity?.icon ?: "place")
                             .put("color", activity?.colorHex ?: "#00A0AC")
                             .put("duration", fp.duration)

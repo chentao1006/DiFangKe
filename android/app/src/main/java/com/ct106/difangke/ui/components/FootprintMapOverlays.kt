@@ -100,7 +100,8 @@ private fun FootprintEntity.firstCoordinateOrNull(): Pair<Double, Double>? {
 }
 
 private fun createFootprintMarkerBitmap(marker: FootprintMapMarker): Bitmap {
-    val scale = 1f + 0.45f * ((marker.durationSeconds / 3600.0).coerceIn(0.0, 8.0) / 8.0).toFloat()
+    val baseScale = 1f + 0.45f * ((marker.durationSeconds / 3600.0).coerceIn(0.0, 8.0) / 8.0).toFloat()
+    val scale = baseScale * 2f // 放大一倍
     val size = (34f * scale).toInt()
     val stroke = max(2f, 2.5f * scale)
     val bitmap = Bitmap.createBitmap(size + 8, size + 8, Bitmap.Config.ARGB_8888)

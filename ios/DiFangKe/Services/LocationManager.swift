@@ -1047,6 +1047,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     // 正在记录的临时停留状态
     var potentialStopStartLocation: CLLocation?
+    private var ongoingPlaceOverrideID: UUID?
+    private var ongoingPlaceOverrideAddress: String?
     
     /// 快速检测云端是否有数据 (通过 KVS)
     func hasExistingCloudData() -> Bool {
@@ -1160,6 +1162,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         if uiIsMoving, now.timeIntervalSince(lastMovingEvidenceTime) > holdSeconds {
             uiIsMoving = false
             print("[LocationManager] UI moving=false (\(source))")
+            Task {
+                await triggerTimelineSift()
+            }
         }
     }
     
@@ -1324,16 +1329,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     func triggerTimelineSift() async {
-        // This is called on triggers: position change, app start, hourly
-        // Since TimelineBuilder works on the footprints in DB, we mainly need to ensure 
-        // the footprints are consolidated and analyzed.
-        /*
-        let container = modelContext?.container
-        guard let container = container else { return }
-        let context = ModelContext(container)
-        */
-        // 用户强烈要求：下拉刷新和常规追踪不要再去动时间线（不要执行合并）。合并改到重置的最后统一执行。
-        // await self.consolidateFootprints(in: context)
+        guard let context = modelContext else { return }
+        await PersistentTimelineBuilder.syncDay(date: Date(), in: context, runConsolidation: false)
+        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
     }
     
     private func siftYesterday() {
@@ -1383,6 +1381,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     var matchedPlace: Place? {
+        if let overrideID = ongoingPlaceOverrideID,
+           let overridePlace = allPlaces.first(where: { $0.placeID == overrideID }) {
+            return overridePlace
+        }
+
         guard let currentGcj = lastLocation ?? potentialStopStartLocation else { return nil }
         
         // 1. 找出所有在范围内的地点
@@ -1517,6 +1520,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         UserDefaults.standard.removeObject(forKey: "pending_lat")
         UserDefaults.standard.removeObject(forKey: "pending_lng")
         UserDefaults.standard.removeObject(forKey: "pending_time")
+        clearOngoingPlaceOverride()
     }
 
     /// 合并数据库中已有的碎片足迹（必须在主线程执行）
@@ -1953,12 +1957,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             if !isSamePlace && distance > 150.0 && location.horizontalAccuracy < 100.0 {
                 potentialStopStartLocation = location
+                clearOngoingPlaceOverride()
                 savePotentialStop()
                 ongoingTitle = nil
                 saveOngoingTitle()
             }
         } else {
             potentialStopStartLocation = location
+            clearOngoingPlaceOverride()
             savePotentialStop()
             ongoingTitle = nil
             saveOngoingTitle()
@@ -2493,6 +2499,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             rawLocations: effectiveRawLocations
         )
         
+        let matchedPlace = self.matchedPlaceFor(coordinate: boundedCandidate.centerCoordinate)
+        let effectivePlace = ongoingPlaceOverrideID.flatMap { overrideID in
+            allPlaces.first(where: { $0.placeID == overrideID })
+        } ?? matchedPlace
+
         // 检查是否需要合并之前的记录
         let targetStart = Calendar.current.startOfDay(for: boundedCandidate.startTime)
         let targetEnd = targetStart.addingTimeInterval(86400)
@@ -2504,7 +2515,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         fetchDescriptor.fetchLimit = 1
         
         let existingFootprints = try? context.fetch(fetchDescriptor)
-        if let last = existingFootprints?.first, FootprintProcessor.shared.shouldMerge(lastFootprint: last, newCandidate: boundedCandidate) {
+        if let last = existingFootprints?.first,
+           shouldMergeExistingFootprint(last, with: boundedCandidate, matchedPlace: effectivePlace) {
             // 合并逻辑：确保时间范围正确延伸，不重复生成重叠记录
             let oldEndTime = last.endTime
             let oldStartTime = last.startTime
@@ -2521,9 +2533,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
             
             // 重新匹配地点（以防合并过程中位置偏移导致匹配变化）
-            if let mPlace = self.matchedPlaceFor(coordinate: boundedCandidate.centerCoordinate) {
+            if let mPlace = effectivePlace {
                 if last.placeID != mPlace.placeID {
                     last.placeID = mPlace.placeID
+                }
+                if last.isAddressEditedByHand || ongoingPlaceOverrideID == mPlace.placeID || (last.address ?? "").isEmpty {
+                    last.address = ongoingPlaceOverrideAddress ?? mPlace.name
+                    last.isAddressEditedByHand = last.isAddressEditedByHand || ongoingPlaceOverrideID == mPlace.placeID
                 }
             }
             
@@ -2543,16 +2559,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 address: (isHistorical || currentAddress == "正在解析位置..." || currentAddress == "未知位置") ? nil : currentAddress
             )
             
-            if let mPlace = self.matchedPlaceFor(coordinate: boundedCandidate.centerCoordinate) {
+            if let mPlace = effectivePlace {
                 let pid = mPlace.placeID
                 newFootprint.placeID = pid
+                newFootprint.isAddressEditedByHand = ongoingPlaceOverrideID == pid
                 
                 // --- 自动关联习惯活动类型 ---
                 // 只有同一地点、同一时间段出现过3次以上才关联
                 newFootprint.activityTypeValue = self.findFrequentActivityType(for: pid, at: boundedCandidate.startTime, context: context)
                 
                 // Address 优先使用地点名称，解决“标题对地点(地址)不对”的问题
-                newFootprint.address = mPlace.name
+                newFootprint.address = ongoingPlaceOverrideAddress ?? mPlace.name
                 
                 // Title uses the custom name (User preference: "Title uses name")
                 
@@ -2596,6 +2613,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             if let lastLoc = candidate.rawLocations.last {
                 self.potentialStopStartLocation = lastLoc
                 savePotentialStop()
+                clearOngoingPlaceOverride()
             }
         }
         
@@ -2610,6 +2628,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
 
         triggerNotificationSummaryRefresh()
+    }
+
+    private func shouldMergeExistingFootprint(_ last: Footprint, with candidate: CandidateFootprint, matchedPlace: Place?) -> Bool {
+        if let placeID = matchedPlace?.placeID, last.placeID == placeID {
+            let timeGap = candidate.startTime.timeIntervalSince(last.endTime)
+            return timeGap < max(AppConfig.shared.liveStayMergeTimeThreshold, AppConfig.shared.samePlaceMergeGapThreshold)
+        }
+        return FootprintProcessor.shared.shouldMerge(lastFootprint: last, newCandidate: candidate)
     }
 
     func analyzeFootprintByID(_ id: PersistentIdentifier) {
@@ -3666,6 +3692,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let displayValue = (targetPlace.isUserDefined && !(targetPlace.address ?? "").isEmpty) ? (targetPlace.address ?? suggestion.name) : suggestion.name
         
         if forOngoing {
+            self.ongoingPlaceOverrideID = targetPlace.placeID
+            self.ongoingPlaceOverrideAddress = displayValue
             self.currentAddress = displayValue
             // 强制重新进行分析以更新 UI
             ongoingTitle = nil
@@ -3689,6 +3717,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
         
         try? modelContext?.save()
+    }
+
+    private func clearOngoingPlaceOverride() {
+        ongoingPlaceOverrideID = nil
+        ongoingPlaceOverrideAddress = nil
     }
     
     @discardableResult
@@ -3719,6 +3752,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             )
             newPlace.isPriority = true
             modelContext?.insert(newPlace)
+            allPlaces.append(newPlace)
             return newPlace
         }
     }

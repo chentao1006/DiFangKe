@@ -97,13 +97,13 @@ struct TimelinePageView: View {
             deactivatePage()
         }
         .onChange(of: footprints) { _, _ in
-            guard isActivePage else { return }
+            guard isActivePage, !isModalPresented else { return }
             // 安全刷新：仅重新获取数据库内容刷新 UI，不触发 syncDay 算法，彻底杜绝死循环
             let items = PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
             applyTimelineItems(items, triggerAiIfChanged: true)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
-            guard isActivePage else { return }
+            guard isActivePage, !isModalPresented else { return }
             // 当后台完成活动匹配时，仅刷新 UI，不触发 AI 重新总结
             refreshTimeline(force: false)
         }
@@ -122,10 +122,13 @@ struct TimelinePageView: View {
             refreshTask?.cancel()
         }
         .onChange(of: locationManager.lastRawDataUpdateTrigger) { _, _ in
-            guard isActivePage else { return }
+            guard isActivePage, !isModalPresented else { return }
             refreshTimeline(force: false)
         }
-        .sheet(item: $selectedFootprint) { footprint in
+        .sheet(item: $selectedFootprint, onDismiss: {
+            autoFocusOnOpen = false
+            refreshTimeline(force: false)
+        }) { footprint in
             FootprintModalView(
                 footprint: footprint, 
                 autoFocus: autoFocusOnOpen,
@@ -154,7 +157,9 @@ struct TimelinePageView: View {
                 CloudSettingsManager.shared.triggerDataSyncPulse()
             }
         }
-        .sheet(item: $selectedTransport) { transport in
+        .sheet(item: $selectedTransport, onDismiss: {
+            refreshTimeline(force: false)
+        }) { transport in
             TransportModalView(transport: transport) { newType in
                 // --- 核心修复：直接将修改持久化到数据库，而不是仅修改内存 ---
                 let targetId = transport.id
@@ -201,6 +206,10 @@ struct TimelinePageView: View {
         appearanceTask?.cancel()
         refreshTask?.cancel()
     }
+
+    private var isModalPresented: Bool {
+        selectedFootprint != nil || selectedTransport != nil || showingAddPlaceSheet
+    }
     
     // 过滤掉与当前正在进行的实时停留重合的足迹，避免双重视图
     private var filteredTimelineItems: [TimelineItem] {
@@ -225,8 +234,9 @@ struct TimelinePageView: View {
         let alreadyCovered = filteredTimelineItems.contains { item in
             guard case .footprint(let footprint) = item else { return false }
 
-            if let placeID = matchedPlace?.placeID, footprint.placeID == placeID, footprint.endTime >= startTime {
-                return true
+            if let placeID = matchedPlace?.placeID, footprint.placeID == placeID {
+                let samePlaceGrace = max(AppConfig.shared.liveStayMergeTimeThreshold, AppConfig.shared.samePlaceMergeGapThreshold)
+                return endTime.timeIntervalSince(footprint.endTime) <= samePlaceGrace
             }
 
             let footprintLocation = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)

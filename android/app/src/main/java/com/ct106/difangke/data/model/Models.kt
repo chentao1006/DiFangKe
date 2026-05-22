@@ -60,13 +60,15 @@ enum class TransportType(val raw: String) {
     companion object {
         fun from(
             speedMs: Double,
-            motionType: Int = 0, // 对应 Android DetectedActivity 类型
+            motionType: Int = 4, // 对应 Android DetectedActivity 类型 (4 = UNKNOWN)
             stepCount: Int = 0,
             durationSec: Long = 0,
+            distanceMeters: Double = 0.0,
             preferredAuto: TransportType = CAR,
             preferredCycling: TransportType = BICYCLE
         ): TransportType {
             val kmh = speedMs * 3.6
+            val effectiveDistance = if (distanceMeters > 0) distanceMeters else (speedMs * durationSec)
             
             // --- 物理常识铁律：最高速度约束 ---
             var effectiveMotion = motionType
@@ -74,18 +76,38 @@ enum class TransportType(val raw: String) {
             if (kmh > 15.0 && motionType == 7 /* WALKING */) effectiveMotion = 4 /* UNKNOWN */
             // 跑步不可能超过 35km/h
             if (kmh > 35.0 && motionType == 8 /* RUNNING */) effectiveMotion = 4 /* UNKNOWN */
-            // 确定车载速度 (45km/h 以上)
-            if (kmh > 45.0 && (motionType == 7 || motionType == 8)) effectiveMotion = 0 /* IN_VEHICLE */
+            // 确定车载速度 (45km/h 以上，甚至未知状态也判定为车载)
+            if (kmh > 45.0 && (motionType == 7 || motionType == 8 || motionType == 4)) effectiveMotion = 0 /* IN_VEHICLE */
+
+            // --- 综合常识铁律：距离与时间的合理性 ---
+            var maxAllowedTypeCategory = 4 // 默认允许所有 (4=Train/Airplane/Ship)
+            
+            // 不到 3 公里，不可能是轨交、火车、飞机（强制降级为汽车）
+            if (effectiveDistance < 3000) {
+                maxAllowedTypeCategory = 3
+            }
+            // 不到 500 米，不可能是汽车（强制降级为自行车或以下，排除短途高漂移）
+            if (effectiveDistance < 500) {
+                maxAllowedTypeCategory = 2 
+            }
+
+            var safePreferredAuto = preferredAuto
+            if (maxAllowedTypeCategory < 4 && getCategory(safePreferredAuto) >= 4) {
+                safePreferredAuto = CAR
+            }
+            if (maxAllowedTypeCategory < 3 && getCategory(safePreferredAuto) >= 3) {
+                safePreferredAuto = preferredCycling
+            }
 
             // 1. 优先使用传感器数据 (Google Play Services Activity Recognition)
             when (effectiveMotion) {
                 7 /* WALKING */ -> return if (kmh > 7.0) RUNNING else SLOW
                 8 /* RUNNING */ -> return RUNNING
-                1 /* ON_BICYCLE */ -> return if (kmh > 55.0) preferredAuto else preferredCycling
+                1 /* ON_BICYCLE */ -> return if (kmh > 55.0) safePreferredAuto else preferredCycling
                 0 /* IN_VEHICLE */ -> {
-                    if (kmh > 100.0) return TRAIN
-                    if (kmh > 80.0 && preferredAuto == BUS) return CAR
-                    return preferredAuto
+                    if (kmh > 100.0 && maxAllowedTypeCategory >= 4) return TRAIN
+                    if (kmh > 80.0 && safePreferredAuto == BUS) return CAR
+                    return safePreferredAuto
                 }
             }
 
@@ -100,15 +122,19 @@ enum class TransportType(val raw: String) {
             if (kmh < 4.5) {
                 val stepsPerMin = if (durationSec > 0L) stepCount / (durationSec / 60.0) else 0.0
                 // 如果速度极低但步数很少，判定为车载堵车
-                if (stepsPerMin < 5.0 && stepCount < 20) return preferredAuto
+                if (stepsPerMin < 5.0 && stepCount < 20) return safePreferredAuto
                 return SLOW
             }
+            
+            var effectiveKmh = kmh
+            if (maxAllowedTypeCategory < 4 && effectiveKmh >= 120.0) effectiveKmh = 119.0 // 强行拉回汽车区间
+            if (maxAllowedTypeCategory < 3 && effectiveKmh >= 25.0) effectiveKmh = 24.0 // 强行拉回自行车区间
 
             return when {
-                kmh < 12.0 -> BICYCLE
-                kmh < 25.0 -> preferredCycling
-                kmh < 120.0 -> preferredAuto
-                kmh < 350.0 -> TRAIN
+                effectiveKmh < 12.0 -> BICYCLE
+                effectiveKmh < 25.0 -> preferredCycling
+                effectiveKmh < 120.0 -> safePreferredAuto
+                effectiveKmh < 350.0 -> TRAIN
                 else -> AIRPLANE
             }
         }
@@ -275,29 +301,53 @@ object FootprintTitles {
 
 // ── 扩展属性：用于简化数据库实体的坐标访问 ───────────────────────
 val com.ct106.difangke.data.db.entity.FootprintEntity.representativeLatitude: Double get() {
-    return try {
-        val arr = org.json.JSONArray(latitudeJson)
-        if (arr.length() > 0) arr.getDouble(0) else 0.0
-    } catch (e: Exception) { 0.0 }
+    return extractFirstDoubleOrZero(latitudeJson)
 }
 
 val com.ct106.difangke.data.db.entity.FootprintEntity.representativeLongitude: Double get() {
-    return try {
-        val arr = org.json.JSONArray(longitudeJson)
-        if (arr.length() > 0) arr.getDouble(0) else 0.0
-    } catch (e: Exception) { 0.0 }
+    return extractFirstDoubleOrZero(longitudeJson)
+}
+
+private fun extractFirstDoubleOrZero(jsonArrayStr: String): Double {
+    try {
+        if (jsonArrayStr.length < 3) return 0.0
+        val firstComma = jsonArrayStr.indexOf(',')
+        val endIndex = if (firstComma != -1) firstComma else jsonArrayStr.indexOf(']')
+        if (endIndex <= 1) return 0.0
+        return jsonArrayStr.substring(1, endIndex).trim().toDouble()
+    } catch (e: Exception) { return 0.0 }
 }
 
 val com.ct106.difangke.data.db.entity.TransportRecordEntity.startLatitude: Double get() {
-    return try {
-        val arr = org.json.JSONArray(pointsJson)
-        if (arr.length() > 0) arr.getJSONArray(0).getDouble(0) else 0.0
-    } catch (e: Exception) { 0.0 }
+    return extractFirstDoubleFromNested(pointsJson, 0)
 }
 
 val com.ct106.difangke.data.db.entity.TransportRecordEntity.startLongitude: Double get() {
-    return try {
-        val arr = org.json.JSONArray(pointsJson)
-        if (arr.length() > 0) arr.getJSONArray(0).getDouble(1) else 0.0
-    } catch (e: Exception) { 0.0 }
+    return extractFirstDoubleFromNested(pointsJson, 1)
+}
+
+private fun extractFirstDoubleFromNested(pointsJson: String, index: Int): Double {
+    try {
+        if (pointsJson.length < 5) return 0.0
+        val startNested = pointsJson.indexOf('[', 1)
+        if (startNested == -1) {
+            val startObj = pointsJson.indexOf('{', 1)
+            if (startObj != -1) {
+                // simple fallback if it's object array
+                val arr = org.json.JSONArray(pointsJson)
+                if (arr.length() > 0) {
+                    val obj = arr.getJSONObject(0)
+                    if (index == 0) return obj.optDouble("lat", obj.optDouble("latitude", 0.0))
+                    else return obj.optDouble("lon", obj.optDouble("longitude", 0.0))
+                }
+            }
+            return 0.0
+        }
+        val endNested = pointsJson.indexOf(']', startNested)
+        if (endNested == -1) return 0.0
+        val pairStr = pointsJson.substring(startNested + 1, endNested)
+        val parts = pairStr.split(',')
+        if (parts.size > index) return parts[index].trim().toDouble()
+    } catch (e: Exception) {}
+    return 0.0
 }

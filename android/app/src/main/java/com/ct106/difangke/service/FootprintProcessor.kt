@@ -79,7 +79,32 @@ class FootprintProcessor private constructor() {
 
         if (queue.size < 2) return null
 
-        // 5. 计算停留中心（不含最新点）
+        // 5. 强制时间截断 (防大跨度残留导致 85% 漂移过滤失效)
+        val firstPoint = queue.first()
+        val durationInQueue = (location.timestamp.time - firstPoint.timestamp.time) / 1000L
+        if (durationInQueue > 4 * 3600) {
+            val analysisQueue = queue.dropLast(1)
+            var result = detectStayPoint(analysisQueue)
+            if (result == null && analysisQueue.size >= 2) {
+                // 如果因为漂移过大导致常规检测失败，强行结算这4小时，防止丢数据
+                val (cLat, cLon) = calculateCenter(analysisQueue)
+                result = CandidateFootprint(
+                    startTime = analysisQueue.first().timestamp,
+                    endTime = analysisQueue.last().timestamp,
+                    latitude = cLat,
+                    longitude = cLon,
+                    duration = durationInQueue,
+                    rawLatitudes = analysisQueue.map { it.latitude },
+                    rawLongitudes = analysisQueue.map { it.longitude }
+                )
+            }
+            // 无论是否成功检测到停留，都清空队列，防止无限积压
+            queue.clear()
+            queue.add(location)
+            if (result != null) return result
+        }
+
+        // 6. 计算停留中心（不含最新点）
         val analysisQueue = queue.dropLast(1)
         val (centerLat, centerLon) = calculateCenter(analysisQueue)
         val distToCenter = haversineMeters(centerLat, centerLon, location.latitude, location.longitude)
@@ -133,8 +158,28 @@ class FootprintProcessor private constructor() {
     }
 
     /** 强制结算当前队列（对应 iOS finalizeCurrentStay） */
-    fun finalizeCurrentStay(queue: List<RawLocationStore.RawPoint>): CandidateFootprint? =
-        detectStayPoint(queue)
+    fun finalizeCurrentStay(queue: List<RawLocationStore.RawPoint>): CandidateFootprint? {
+        var result = detectStayPoint(queue)
+        if (result == null && queue.size >= 2) {
+            val startTime = queue.first().timestamp
+            val endTime = queue.last().timestamp
+            val durationSec = (endTime.time - startTime.time) / 1000
+            // 如果最后残留的队列时长达到了一个有效停留标准，强行结算，防止因漂移被丢弃
+            if (durationSec >= stayDuration) {
+                val (cLat, cLon) = calculateCenter(queue)
+                result = CandidateFootprint(
+                    startTime = startTime,
+                    endTime = endTime,
+                    latitude = cLat,
+                    longitude = cLon,
+                    duration = durationSec,
+                    rawLatitudes = queue.map { it.latitude },
+                    rawLongitudes = queue.map { it.longitude }
+                )
+            }
+        }
+        return result
+    }
 
     /**
      * 判断是否应与最近足迹合并（对应 iOS shouldMerge）

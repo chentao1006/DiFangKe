@@ -376,11 +376,11 @@ class TimelineBuilder {
             var prevFp: Footprint?
             for j in (0..<i).reversed() {
                 if case .footprint(let fp) = result[j] {
-                    // 核心修复：只有时间上足够接近，才认为是衔接关系
-                    // 避免中间的足迹被删除后，前后的交通直接对跳衔接
-                    if abs(t.startTime.timeIntervalSince(fp.endTime)) < AppConfig.shared.transportAlignmentThreshold {
-                        prevFp = fp
-                    }
+                    // 取紧邻的上一个足迹作为起点地点来源，break 已保证只取相邻项
+                    // 不再限制时间阈值：即使足迹到交通之间有较长的无轨迹空档（如手机后台未定位），
+                    // 起点地点仍应来自上一个足迹（如"家"）
+                    // 注意：仅更新地点名称，不修改交通的 startTime（时间以 GPS 第一个移动点为准）
+                    prevFp = fp
                     break
                 }
             }
@@ -391,7 +391,8 @@ class TimelineBuilder {
                 let startName = matchedPlace?.name ?? fp.address ?? "未知地点"
                 updatedT = updatedT.updatingStart(startName)
                 
-                // 强制对齐坐标
+                // 注意：不修改 startTime，时间以 GPS 轨迹第一个点为准（即探测到移动的时间）
+                // 只对齐显示用的起点坐标
                 var newPoints = updatedT.points
                 let startCoord = CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
                 if newPoints.isEmpty {
@@ -406,10 +407,9 @@ class TimelineBuilder {
             var nextFp: Footprint?
             for j in (i+1)..<result.count {
                 if case .footprint(let fp) = result[j] {
-                    // 核心修复：只有时间上足够接近，才认为是衔接关系
-                    if abs(fp.startTime.timeIntervalSince(t.endTime)) < AppConfig.shared.transportAlignmentThreshold {
-                        nextFp = fp
-                    }
+                    // 取紧邻的下一个足迹作为终点地点来源，break 已保证只取相邻项
+                    // 不再限制时间阈值（与起点对齐逻辑一致）
+                    nextFp = fp
                     break
                 }
             }
@@ -420,7 +420,8 @@ class TimelineBuilder {
                 let endName = matchedPlace?.name ?? fp.address ?? "未知地点"
                 updatedT = updatedT.updatingEnd(endName)
                 
-                // 强制对齐坐标
+                // 注意：不修改 endTime，时间以 GPS 轨迹最后一个点为准
+                // 只对齐显示用的终点坐标
                 var newPoints = updatedT.points
                 let endCoord = CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
                 if newPoints.isEmpty {
@@ -607,6 +608,7 @@ class TimelineBuilder {
             if !isOngoing && end.timeIntervalSince(lastProcessedTime) > 0 {
                 addStationaryStay(from: lastProcessedTime, to: end, gapPoints: gapPoints, items: &items, allPlaces: allPlaces, forceAdd: true)
             }
+        } else {
             // No transports: fill the whole gap as a stay
             // --- 增强修复：如果虽然没识别出交通，但位移跨度很大，不应将其作为 Stay 填补，
             // 否则会造成前后的足迹被错误合并。此时应合成一段虚线交通。
@@ -1307,7 +1309,7 @@ class PersistentTimelineBuilder {
     }
 
     @MainActor
-    static func syncDay(date: Date, in context: ModelContext) async {
+    static func syncDay(date: Date, in context: ModelContext, runConsolidation: Bool = true) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         
@@ -1417,9 +1419,11 @@ class PersistentTimelineBuilder {
         
         
         // 按用户要求：在此处（重置最后）调用合并逻辑
+        if runConsolidation {
 #if !WIDGET_EXTENSION
-        await LocationManager.shared.consolidateFootprints(in: context, targetDate: date)
+            await LocationManager.shared.consolidateFootprints(in: context, targetDate: date)
 #endif
+        }
         startControlledAddressResolution(in: context)
     }
 

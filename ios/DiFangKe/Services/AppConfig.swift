@@ -203,6 +203,10 @@ class AppConfig {
         double(forKey: "SAME_PLACE_MERGE_BONUS_THRESHOLD")
     }
     
+    var samePlaceMergeGapThreshold: Double {
+        double(forKey: "SAME_PLACE_MERGE_GAP_THRESHOLD")
+    }
+
     var physicalMaxSpeedThreshold: Double {
         double(forKey: "PHYSICAL_MAX_SPEED_THRESHOLD")
     }

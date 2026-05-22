@@ -114,30 +114,73 @@ fun DFKMapScreen(
             
             // 绘制轨迹
             if (pathPoints.isNotEmpty()) {
-                val latLngs = pathPoints.map { LatLng(it.first, it.second) }
-                amap.addPolyline(
-                    PolylineOptions()
-                        .addAll(latLngs)
-                        .width(15f)
-                        .color(polylineColor)
-                        .useGradient(true)
-                )
+                val validLatLngs = mutableListOf<LatLng>()
+                val segments = mutableListOf<List<LatLng>>()
+                var currentSegment = mutableListOf<LatLng>()
+                pathPoints.forEach {
+                    if (it.first.isNaN() || it.second.isNaN()) {
+                        if (currentSegment.isNotEmpty()) {
+                            segments.add(currentSegment)
+                            currentSegment = mutableListOf()
+                        }
+                    } else {
+                        val ll = LatLng(it.first, it.second)
+                        currentSegment.add(ll)
+                        validLatLngs.add(ll)
+                    }
+                }
+                if (currentSegment.isNotEmpty()) {
+                    segments.add(currentSegment)
+                }
+
+                segments.forEach { segment ->
+                    amap.addPolyline(
+                        PolylineOptions().addAll(segment).width(15f).color(polylineColor).useGradient(true)
+                    )
+                }
 
                 amap.addFootprintMarkers(footprintMarkers)
                 
                 // 核心优化：自动调整缩放和范围，使轨迹完整显示
                 if (!hasCentredToNow) {
-                    if (latLngs.size > 1) {
+                    if (validLatLngs.size > 1) {
                         val boundsBuilder = LatLngBounds.Builder()
-                        latLngs.forEach { boundsBuilder.include(it) }
+                        validLatLngs.forEach { boundsBuilder.include(it) }
                         val bounds = boundsBuilder.build()
-                        // 延迟一两帧执行，确保地图 View 尺寸已测量
-                        amap.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 150))
+                        val centerLat = (bounds.northeast.latitude + bounds.southwest.latitude) / 2
+                        val centerLon = (bounds.northeast.longitude + bounds.southwest.longitude) / 2
+                        val center = LatLng(centerLat, centerLon)
+
+                        val distance = com.amap.api.maps.AMapUtils.calculateLineDistance(bounds.southwest, bounds.northeast)
+
+                        val doBounds = {
+                            val paddingPx = (30 * view.context.resources.displayMetrics.density).toInt()
+                            try {
+                                if (distance < 500f) {
+                                    // 只有一个足迹或小范围活动，避免放太大，给一个13.5的区级视野
+                                    amap.moveCamera(CameraUpdateFactory.newLatLngZoom(center, 13.5f))
+                                } else {
+                                    amap.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, paddingPx))
+                                    if (amap.cameraPosition.zoom > 16f) {
+                                        amap.moveCamera(CameraUpdateFactory.zoomTo(16f))
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                amap.moveCamera(CameraUpdateFactory.newLatLngZoom(center, 13.5f))
+                            }
+                        }
+
+                        if (view.width > 0 && view.height > 0) {
+                            doBounds()
+                        } else {
+                            amap.moveCamera(CameraUpdateFactory.newLatLngZoom(center, 12f))
+                            amap.setOnMapLoadedListener { doBounds() }
+                        }
                         hasCentredToNow = true
-                    } else if (latLngs.isNotEmpty()) {
-                        val latest = latLngs.last()
+                    } else if (validLatLngs.isNotEmpty()) {
+                        val latest = validLatLngs.last()
                         if (latest.latitude != 0.0 && latest.longitude != 0.0) {
-                            amap.moveCamera(CameraUpdateFactory.newLatLngZoom(latest, 16f))
+                            amap.moveCamera(CameraUpdateFactory.newLatLngZoom(latest, 14.5f))
                             hasCentredToNow = true
                         }
                     }

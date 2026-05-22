@@ -68,7 +68,6 @@ class OpenAIService private constructor() {
      * 发送网络请求的通用方法
      */
     private suspend fun postRequest(body: Map<String, Any>): JSONObject? = requestMutex.withLock {
-        isNetworkRequesting = true
         val interval = getInterval()
         val now = System.currentTimeMillis()
         val elapsed = now - lastRequestTime
@@ -79,76 +78,80 @@ class OpenAIService private constructor() {
             delay(waitTime)
         }
 
-        val result = withContext(Dispatchers.IO) {
-            val serviceType = prefs.aiServiceType.first()
-            val isCustom = serviceType == "custom"
+        try {
+            isNetworkRequesting = true
+            val result = withContext(Dispatchers.IO) {
+                val serviceType = prefs.aiServiceType.first()
+                val isCustom = serviceType == "custom"
 
-            val baseUrl = if (isCustom) prefs.getCustomAiUrl().trim() else AppConfig.PUBLIC_SERVICE_URL
-            var apiKey = if (isCustom) prefs.getCustomAiKey().trim() else AppConfig.SERVICE_SECRET
-            val model = if (isCustom) prefs.getCustomAiModel().trim() else "gpt-3.5-turbo"
+                val baseUrl = if (isCustom) prefs.getCustomAiUrl().trim() else AppConfig.PUBLIC_SERVICE_URL
+                var apiKey = if (isCustom) prefs.getCustomAiKey().trim() else AppConfig.SERVICE_SECRET
+                val model = if (isCustom) prefs.getCustomAiModel().trim() else "gpt-3.5-turbo"
 
-            val deviceId = if (!isCustom) {
-                android.provider.Settings.Secure.getString(
-                    DiFangKeApp.instance.contentResolver,
-                    android.provider.Settings.Secure.ANDROID_ID
-                ) ?: "android-unknown"
-            } else ""
+                val deviceId = if (!isCustom) {
+                    android.provider.Settings.Secure.getString(
+                        DiFangKeApp.instance.contentResolver,
+                        android.provider.Settings.Secure.ANDROID_ID
+                    ) ?: "android-unknown"
+                } else ""
 
-            if (!isCustom) {
-                apiKey = generateToken(deviceId)
-            }
+                if (!isCustom) {
+                    apiKey = generateToken(deviceId)
+                }
 
-            if (baseUrl.isEmpty() || apiKey.isEmpty()) {
-                Log.e(TAG, "AI 接口配置不完整")
-                return@withContext null
-            }
+                if (baseUrl.isEmpty() || apiKey.isEmpty()) {
+                    Log.e(TAG, "AI 接口配置不完整")
+                    return@withContext null
+                }
 
-            val urlStr = if (baseUrl.endsWith("/")) "${baseUrl}chat/completions" else "$baseUrl/chat/completions"
-            
-            val requestBody = body.toMutableMap()
-            if (!requestBody.containsKey("model")) {
-                requestBody["model"] = model
-            }
+                val urlStr = if (baseUrl.endsWith("/")) "${baseUrl}chat/completions" else "$baseUrl/chat/completions"
+                
+                val requestBody = body.toMutableMap()
+                if (!requestBody.containsKey("model")) {
+                    requestBody["model"] = model
+                }
 
-            runCatching {
-                val url = URL(urlStr)
-                val conn = url.openConnection() as HttpURLConnection
-                conn.apply {
-                    requestMethod = "POST"
-                    connectTimeout = 15000
-                    readTimeout = 15000
-                    setRequestProperty("Content-Type", "application/json")
-                    if (isCustom) {
-                        setRequestProperty("Authorization", "Bearer $apiKey")
-                    } else {
-                        setRequestProperty("X-Device-Id", deviceId)
-                        setRequestProperty("X-Token", apiKey)
+                runCatching {
+                    val url = URL(urlStr)
+                    val conn = url.openConnection() as HttpURLConnection
+                    conn.apply {
+                        requestMethod = "POST"
+                        connectTimeout = 15000
+                        readTimeout = 15000
+                        setRequestProperty("Content-Type", "application/json")
+                        if (isCustom) {
+                            setRequestProperty("Authorization", "Bearer $apiKey")
+                        } else {
+                            setRequestProperty("X-Device-Id", deviceId)
+                            setRequestProperty("X-Token", apiKey)
+                        }
+                        doOutput = true
                     }
-                    doOutput = true
-                }
 
-                val jsonOutput = gson.toJson(requestBody)
-                conn.outputStream.use { os ->
-                    os.write(jsonOutput.toByteArray(Charsets.UTF_8))
-                }
+                    val jsonOutput = gson.toJson(requestBody)
+                    conn.outputStream.use { os ->
+                        os.write(jsonOutput.toByteArray(Charsets.UTF_8))
+                    }
 
-                if (conn.responseCode !in 200..299) {
-                    Log.e(TAG, "HTTP Error: ${conn.responseCode}")
-                    return@runCatching null
-                }
+                    if (conn.responseCode !in 200..299) {
+                        Log.e(TAG, "HTTP Error: ${conn.responseCode}")
+                        return@runCatching null
+                    }
 
-                val responseText = BufferedReader(InputStreamReader(conn.inputStream)).readText()
-                conn.disconnect()
+                    val responseText = BufferedReader(InputStreamReader(conn.inputStream)).readText()
+                    conn.disconnect()
 
-                JSONObject(responseText)
-            }.onFailure {
-                Log.e(TAG, "Request failed", it)
-            }.getOrNull()
+                    JSONObject(responseText)
+                }.onFailure {
+                    Log.e(TAG, "Request failed", it)
+                }.getOrNull()
+            }
+
+            lastRequestTime = System.currentTimeMillis()
+            return result
+        } finally {
+            isNetworkRequesting = false
         }
-
-        lastRequestTime = System.currentTimeMillis()
-        isNetworkRequesting = false
-        result
     }
 
     /**

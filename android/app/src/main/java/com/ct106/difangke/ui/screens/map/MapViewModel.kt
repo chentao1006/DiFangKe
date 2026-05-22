@@ -50,15 +50,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
             val footprints = db.footprintDao().getBetween(startOfTarget, Date(startOfTarget.time + 86400000L))
             _footprintMarkers.value = buildFootprintMapMarkers(footprints, db.activityTypeDao().getAll())
             val dbPoints = mutableListOf<Pair<Double, Double>>()
-            footprints.forEach { fp ->
-                try {
-                    val lats = gson.fromJson(fp.latitudeJson, Array<Double>::class.java)
-                    val lons = gson.fromJson(fp.longitudeJson, Array<Double>::class.java)
-                    lats.zip(lons).forEach { (lat, lon) ->
-                        dbPoints.add(lat to lon)
-                    }
-                } catch (e: Exception) {}
-            }
+            // 不再将足迹漂移点加入轨迹，只保留交通线
 
             // 加载交通轨迹
             val transports = db.transportRecordDao().getForDay(startOfTarget, Date(startOfTarget.time + 86400000L))
@@ -68,19 +60,14 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                     pts.forEach { p ->
                         dbPoints.add(p[0] to p[1])
                     }
+                    // 插入分隔符，防止不同的交通记录被连成一条直线
+                    dbPoints.add(Double.NaN to Double.NaN)
                 } catch (e: Exception) {}
             }
 
-            // 2. 加载 RawLocationStore 中的原始流水点
-            val rawPoints = rawStore.loadLocations(startOfTarget)
-            val trajectoryPoints = rawPoints.map { it.latitude to it.longitude }
-
-            // 3. 合并 (如果是今天且有流水点，优先用流水点；否则用数据库聚合点)
-            val finalPoints = if (trajectoryPoints.isNotEmpty() && (timestamp == null || isToday(timestamp))) {
-                trajectoryPoints
-            } else {
-                dbPoints
-            }
+            // 不再使用 rawPoints 的全部流水，避免今天产生大量原地的“毛线团”漂移线
+            // 统一使用 dbPoints（仅含提取出的有效交通段）
+            val finalPoints = dbPoints
             _pathPoints.value = finalPoints.map { it to 0L }
         }
     }

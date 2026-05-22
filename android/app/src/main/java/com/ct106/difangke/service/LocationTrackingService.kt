@@ -15,6 +15,8 @@ import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.location.RawLocationStore
 import com.ct106.difangke.data.model.FootprintTitles
 import com.ct106.difangke.data.model.TransportType
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import com.google.gson.Gson
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
@@ -84,7 +86,49 @@ class LocationTrackingService : Service() {
     private var currentIntervalTier = -1 // -1: initial, 0: stationary, 1: moving, 2: fast
     private val ongoingStayMaxPointGapMs = (AppConfig.TRANSPORT_MAX_GAP_THRESHOLD * 1000).toLong()
 
+    private var wasVpnActive: Boolean? = null
+
+    private fun isVpnActive(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val activeNetwork = cm?.activeNetwork ?: return false
+        val capabilities = cm.getNetworkCapabilities(activeNetwork) ?: return false
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+    }
+
+    private fun getBestLocationMode(): AMapLocationClientOption.AMapLocationMode {
+        return if (isVpnActive()) {
+            Log.i(TAG, "检测到 VPN 处于激活状态，使用 Device_Sensors 模式（仅 GPS）定位以防止定位漂移")
+            AMapLocationClientOption.AMapLocationMode.Device_Sensors
+        } else {
+            AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+        }
+    }
+
+    private fun updateLocationClientOption(tier: Int) {
+        val newInterval = when (tier) {
+            2 -> 8000L    // 高速：8秒
+            1 -> 15000L   // 正常移动：15秒
+            else -> 30000L // 停留：30秒
+        }
+        locationClient?.setLocationOption(AMapLocationClientOption().apply {
+            locationMode = getBestLocationMode()
+            interval = newInterval
+            isNeedAddress = true
+            isMockEnable = false
+            isOffset = true
+            isSensorEnable = true // 开启传感器辅助定位
+        })
+        Log.d(TAG, "Location option updated: interval=$newInterval ms, mode=${if (wasVpnActive == true) "Device_Sensors" else "Hight_Accuracy"}")
+    }
+
     private val locationListener = AMapLocationListener { location ->
+        val currentVpn = isVpnActive()
+        val vpnStateChanged = wasVpnActive != currentVpn
+        if (vpnStateChanged) {
+            wasVpnActive = currentVpn
+            Log.i(TAG, "VPN 状态变更检测到: $currentVpn，重新应用定位选项")
+        }
+
         if (location != null && location.errorCode == 0) {
             val speed = location.speed
             // 根据速度调整采样频率以节省耗电
@@ -95,23 +139,10 @@ class LocationTrackingService : Service() {
                 else -> 0
             }
             
-            if (newTier != currentIntervalTier) {
+            if (newTier != currentIntervalTier || vpnStateChanged) {
                 currentIntervalTier = newTier
-                val newInterval = when (newTier) {
-                    2 -> 8000L    // 高速：8秒
-                    1 -> 15000L   // 正常移动：15秒
-                    else -> 30000L // 停留：30秒
-                }
-                
-                locationClient?.setLocationOption(AMapLocationClientOption().apply {
-                    locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
-                    interval = newInterval
-                    isNeedAddress = true
-                    isMockEnable = false
-                    isOffset = true
-                    isSensorEnable = true // 开启传感器辅助定位
-                })
-                Log.d(TAG, "Interval adjusted to $newInterval ms due to speed $speed m/s")
+                updateLocationClientOption(newTier)
+                Log.d(TAG, "Interval adjusted to tier $newTier, vpnStateChanged=$vpnStateChanged, speed=$speed m/s")
             }
 
             serviceScope.launch { 
@@ -125,7 +156,12 @@ class LocationTrackingService : Service() {
                 )
             }
         } else {
-            Log.e(TAG, "定位失败: ${location?.errorCode} - ${location?.errorInfo}")
+            Log.e(TAG, "定位失败: ${location?.errorCode} - ${location?.errorInfo} (VPN: $currentVpn)")
+            // 如果是因为开启 VPN/代理 导致高精度定位失败，可在下一次尝试强制重置一次选项
+            if (vpnStateChanged) {
+                val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
+                updateLocationClientOption(tier)
+            }
         }
     }
 
@@ -143,8 +179,9 @@ class LocationTrackingService : Service() {
         super.onCreate()
         try {
             locationClient = AMapLocationClient(applicationContext)
+            wasVpnActive = isVpnActive()
             val option = AMapLocationClientOption().apply {
-                locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+                locationMode = getBestLocationMode()
                 interval = 30000L // 默认初次 30 秒定位一次
                 isNeedAddress = true
                 isMockEnable = false
@@ -166,13 +203,15 @@ class LocationTrackingService : Service() {
                 startForeground(NotificationHelper.TRACKING_NOTIFICATION_ID, notification)
                 
                 // 开启高德后台定位
-                val intervalMs = when (currentIntervalTier) {
+                wasVpnActive = isVpnActive()
+                val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
+                val intervalMs = when (tier) {
                     2 -> 8000L
                     1 -> 15000L
                     else -> 30000L
                 }
                 locationClient?.setLocationOption(AMapLocationClientOption().apply {
-                    locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+                    locationMode = getBestLocationMode()
                     interval = intervalMs
                     isNeedAddress = true
                     isMockEnable = false
@@ -568,6 +607,32 @@ class LocationTrackingService : Service() {
             val avgLon = if (existingLons.isNotEmpty()) existingLons.average() else 0.0
 
             if (processor.shouldMerge(lastFp.endTime, avgLat, avgLon, candidate)) {
+                // Filter candidate points to only include those newer than lastFp's endTime to avoid duplication
+                // Because lastFp might be the ongoing footprint which already contains points up to its own endTime
+                val newPointsCutoff = lastFp.endTime.time
+                val newLats = mutableListOf<Double>()
+                val newLons = mutableListOf<Double>()
+                
+                // We don't have timestamps for individual candidate points easily here, 
+                // but we know candidate covers [startTime, endTime]. 
+                // If lastFp is the ongoing footprint, lastFp.endTime is very close to candidate.endTime.
+                // A safer way is to just fetch the raw points from DB for the merged range, 
+                // or just overwrite if it's the identical ongoing footprint.
+                // Since this is tricky without timestamps, let's just use the fact that if lastFp.endTime >= candidate.endTime, we don't need to append.
+                if (lastFp.footprintID == ongoingFootprintID) {
+                    // It's the ongoing footprint! The candidate represents the EXACT same stay.
+                    // We can just use candidate's points directly (or keep lastFp's points if they are richer).
+                    // Actually, candidate points are from memory queue, existing points are from DB. Let's just use the longer one.
+                    val merged = lastFp.copy(
+                        endTime = candidate.endTime,
+                        latitudeJson = if (candidate.rawLatitudes.size > existingLats.size) gson.toJson(candidate.rawLatitudes) else lastFp.latitudeJson,
+                        longitudeJson = if (candidate.rawLongitudes.size > existingLons.size) gson.toJson(candidate.rawLongitudes) else lastFp.longitudeJson
+                    )
+                    db.footprintDao().update(merged)
+                    ongoingFootprintID = null // clear it
+                    return
+                }
+
                 val merged = lastFp.copy(
                     endTime = candidate.endTime,
                     latitudeJson = gson.toJson(existingLats + candidate.rawLatitudes),
@@ -583,8 +648,9 @@ class LocationTrackingService : Service() {
         val places = db.placeDao().getAll()
         val matchedPlace = PlaceMatcher.bestPlaceForCoordinate(candidate.latitude, candidate.longitude, places, processor)
 
+        val finalId = ongoingFootprintID ?: UUID.randomUUID().toString()
         val entity = FootprintEntity(
-            footprintID = UUID.randomUUID().toString(),
+            footprintID = finalId,
             date = candidate.startTime,
             startTime = candidate.startTime,
             endTime = candidate.endTime,
@@ -607,6 +673,8 @@ class LocationTrackingService : Service() {
         } else entity
 
         db.footprintDao().insert(finalEntity)
+        ongoingFootprintID = null // clear ongoing state after finalizing
+
         lastFp?.let { prev ->
             saveTransportSegment(prev, finalEntity)
         }
@@ -662,7 +730,7 @@ class LocationTrackingService : Service() {
             pointsJson = gson.toJson(pts)
         }
 
-        val transportType = TransportType.from(speedMs = avgSpeed)
+        val transportType = TransportType.from(speedMs = avgSpeed, durationSec = gapSec.toLong(), distanceMeters = totalDist)
 
         val record = TransportRecordEntity(
             recordID = UUID.randomUUID().toString(),

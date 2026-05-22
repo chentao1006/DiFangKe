@@ -43,6 +43,7 @@ import com.ct106.difangke.service.LocationTrackingService
 import com.ct106.difangke.ui.components.*
 import com.ct106.difangke.viewmodel.MainViewModel
 import com.ct106.difangke.service.OpenAIService
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -98,9 +99,9 @@ fun MainScreen(
     }
     
     // 同步 Pager 到时间 (Pager -> Date)
-    LaunchedEffect(pagerState.settledPage) {
-        if (availableDates.isNotEmpty() && !pagerState.isScrollInProgress) {
-            val dateAtPage = availableDates[pagerState.settledPage.coerceIn(availableDates.indices)]
+    LaunchedEffect(pagerState.currentPage) {
+        if (availableDates.isNotEmpty()) {
+            val dateAtPage = availableDates[pagerState.currentPage.coerceIn(availableDates.indices)]
             if (dateAtPage.time != currentDate.time) {
                 viewModel.setDate(dateAtPage)
             }
@@ -438,8 +439,9 @@ fun TimelinePage(
     val isToday = date.time == today.time
     val isFuture = date.time > today.time
 
-    LaunchedEffect(allowAutoRebuild, date.time, isFuture, isToday, items.isEmpty(), points) {
-        if (allowAutoRebuild && !isFuture && !isToday && items.isEmpty() && points > 0) {
+    LaunchedEffect(allowAutoRebuild, date.time, isFuture, items.isEmpty(), points) {
+        if (allowAutoRebuild && !isFuture && items.isEmpty() && points > 0) {
+            delay(1000) // 延迟一小会，避免刚切过去就闪烁，并且符合“过一会”的需求
             viewModel.ensureTimelineForDate(date)
         }
     }
@@ -946,6 +948,9 @@ fun TodayFloatingButton(isVisible: Boolean, onClick: () -> Unit) {
 
 @Composable
 fun FuturePlaceholderView() {
+    val isDark = isSystemInDarkTheme()
+    val titleColor = if (isDark) Color.White else Color.Black.copy(alpha = 0.8f)
+    
     Column(
         modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -953,13 +958,16 @@ fun FuturePlaceholderView() {
     ) {
         Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(60.dp), tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
         Spacer(Modifier.height(16.dp))
-        Text("明天是个未拆的礼物", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text("明天是个未拆的礼物", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = titleColor)
         Text("愿明天的你，能在平凡中发现惊喜。", style = MaterialTheme.typography.bodyMedium, color = Color.Gray, textAlign = TextAlign.Center)
     }
 }
 
 @Composable
 fun PastPlaceholderView() {
+    val isDark = isSystemInDarkTheme()
+    val titleColor = if (isDark) Color.White else Color.Black.copy(alpha = 0.8f)
+    
     Column(
         modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -967,7 +975,7 @@ fun PastPlaceholderView() {
     ) {
         Icon(Icons.Default.Timer, null, modifier = Modifier.size(60.dp), tint = Color.Gray.copy(alpha = 0.6f))
         Spacer(Modifier.height(16.dp))
-        Text("真希望能早点遇到你", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text("真希望能早点遇到你", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = titleColor)
         Text("要是早点遇见，就能记录更多精彩了。", style = MaterialTheme.typography.bodyMedium, color = Color.Gray, textAlign = TextAlign.Center)
     }
 }

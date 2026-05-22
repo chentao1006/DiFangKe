@@ -73,11 +73,12 @@ class PersistentTimelineBuilder(private val context: Context) {
         
         if (points.isEmpty()) return@withContext
 
-        // 3. 清理自动生成的旧数据（保留 Confirmed 和 Manual 记录）
-        // iOS 逻辑：仅重整非人工干预的部分
         db.footprintDao().deleteCandidatesBetween(startOfDay, endOfDay)
         db.footprintDao().deleteStartBoundaryCandidates(startOfDay)
         db.transportRecordDao().deleteAutoForDay(startOfDay, endOfDay)
+
+        // Fetch retained footprints (confirmed, manual, or title-edited) to prevent overlapping candidate generation
+        val retainedFps = db.footprintDao().getBetween(startOfDay, endOfDay)
 
         // 3. 构建时间线
         val queue = mutableListOf<RawLocationStore.RawPoint>()
@@ -89,15 +90,27 @@ class PersistentTimelineBuilder(private val context: Context) {
             candidate?.let {
                 // 增加小量延迟防止高频触发高德 REST 接口频率限制
                 kotlinx.coroutines.delay(300)
+                
+                // 检查是否与保留的足迹重叠
+                val overlap = retainedFps.firstOrNull { retained ->
+                    it.startTime.before(retained.endTime) && it.endTime.after(retained.startTime)
+                }
+                if (overlap != null) {
+                    lastFp = overlap
+                    queue.clear()
+                    queue.add(point)
+                    return@let
+                }
+
                 val entity = createFootprintEntity(it)
                 
                 // 检查是否合并
                 var currentFp = entity
-                if (lastFp != null) {
+                if (lastFp != null && lastFp!!.statusValue == "candidate" && !lastFp!!.isTitleEditedByHand) {
                     val prevLats = gson.fromJson(lastFp!!.latitudeJson, Array<Double>::class.java).toList()
                     val prevLons = gson.fromJson(lastFp!!.longitudeJson, Array<Double>::class.java).toList()
-                    val avgLat = prevLats.average()
-                    val avgLon = prevLons.average()
+                    val avgLat = if (prevLats.isNotEmpty()) prevLats.average() else 0.0
+                    val avgLon = if (prevLons.isNotEmpty()) prevLons.average() else 0.0
 
                     if (processor.shouldMerge(lastFp!!.endTime, avgLat, avgLon, it)) {
                         currentFp = lastFp!!.copy(
@@ -118,6 +131,10 @@ class PersistentTimelineBuilder(private val context: Context) {
                     }
                 } else {
                     db.footprintDao().insert(currentFp)
+                    // 如果 lastFp 非空且不合并（比如 lastFp 是 retained），也要生成交通段
+                    if (lastFp != null) {
+                        generateTransportSegment(lastFp!!, currentFp, points, preferredAuto, preferredCycling)
+                    }
                     lastFp = currentFp
                     footprints.add(currentFp)
                 }
@@ -129,10 +146,19 @@ class PersistentTimelineBuilder(private val context: Context) {
 
         // 4. 处理最后的残留队列（如果停留超过阈值）
         processor.finalizeCurrentStay(queue)?.let { lastCandidate ->
-            val finalEntity = createFootprintEntity(lastCandidate)
-            db.footprintDao().insert(finalEntity)
-            lastFp?.let { generateTransportSegment(it, finalEntity, points, preferredAuto, preferredCycling) }
-            lastFp = finalEntity
+            // 同样需要检查是否与保留的足迹重叠
+            val overlap = retainedFps.firstOrNull { retained ->
+                lastCandidate.startTime.before(retained.endTime) && lastCandidate.endTime.after(retained.startTime)
+            }
+            if (overlap == null) {
+                val finalEntity = createFootprintEntity(lastCandidate)
+                db.footprintDao().insert(finalEntity)
+                lastFp?.let { generateTransportSegment(it, finalEntity, points, preferredAuto, preferredCycling) }
+                lastFp = finalEntity
+            } else {
+                // 如果最后一段也重叠了，直接将 lastFp 指向重叠的足迹，放弃这段候选
+                lastFp = overlap
+            }
         }
 
         // --- 足迹的时间范围要限制在0点到次日0点：边界填补 (最后记录到 24:00) ---
@@ -141,20 +167,9 @@ class PersistentTimelineBuilder(private val context: Context) {
             if (!isToday) {
                 val gapToEnd = (endOfDay.time - last.endTime.time) / 1000L
                 if (gapToEnd >= AppConfig.STAY_DURATION_THRESHOLD) {
-                    val entity = FootprintEntity(
-                        footprintID = UUID.randomUUID().toString(),
-                        date = startOfDay,
-                        startTime = last.endTime,
-                        endTime = endOfDay,
-                        latitudeJson = last.latitudeJson,
-                        longitudeJson = last.longitudeJson,
-                        locationHash = last.locationHash,
-                        title = "",
-                        statusValue = "candidate",
-                        address = last.address,
-                        placeID = last.placeID
-                    )
-                    db.footprintDao().insert(entity)
+                    // 直接延长 lastFp 的 endTime，而不是新建一个重复的 footprint
+                    val extendedFp = last.copy(endTime = endOfDay)
+                    db.footprintDao().update(extendedFp)
                 }
             }
         }
@@ -226,6 +241,7 @@ class PersistentTimelineBuilder(private val context: Context) {
                         TransportType.from(
                             speedMs = newAvgSpeed,
                             durationSec = duration,
+                            distanceMeters = merged.distance,
                             preferredAuto = preferredAuto,
                             preferredCycling = preferredCycling
                         )
@@ -329,6 +345,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         val determinedType = TransportType.from(
             speedMs = avgSpeed,
             durationSec = gapSec,
+            distanceMeters = totalDist,
             preferredAuto = preferredAuto,
             preferredCycling = preferredCycling
         )

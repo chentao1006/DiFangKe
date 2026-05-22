@@ -682,7 +682,7 @@ fun DaySummaryCard(
 
             // 右侧内容
             Column(modifier = Modifier.padding(vertical = 20.dp, horizontal = 0.dp).padding(end = 20.dp)) {
-                val isGenerating = summary == "正在生成概览..." || summary == null
+                val isGenerating = summary == "正在生成概览..."
                 Text(
                     text = summary ?: "当日概览", 
                     style = MaterialTheme.typography.titleMedium, 
@@ -741,6 +741,7 @@ fun MiniMapView(
     val context = LocalContext.current
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    var hasCentred by remember { mutableStateOf(false) }
     
     Box(
         modifier = Modifier
@@ -783,49 +784,92 @@ fun MiniMapView(
                 amap.myLocationStyle = myLocationStyle
                 amap.isMyLocationEnabled = true
                 val target = com.amap.api.maps.model.LatLng(lat, lon)
-                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(target, 16f))
+                if (!hasCentred) {
+                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(target, 13.5f))
+                    hasCentred = true
+                }
             } else if (pointsJson != null) {
                 try {
                     val array = org.json.JSONArray(pointsJson)
-                    val points = mutableListOf<com.amap.api.maps.model.LatLng>()
+                    val validPoints = mutableListOf<com.amap.api.maps.model.LatLng>()
+                    val segments = mutableListOf<List<com.amap.api.maps.model.LatLng>>()
+                    var currentSegment = mutableListOf<com.amap.api.maps.model.LatLng>()
                     for (i in 0 until array.length()) {
                         val p = array.getJSONArray(i)
-                        points.add(com.amap.api.maps.model.LatLng(p.getDouble(0), p.getDouble(1)))
-                    }
-                    if (points.isNotEmpty()) {
-                        amap.addPolyline(
-                            com.amap.api.maps.model.PolylineOptions().addAll(points).width(12f).color(primaryColor).useGradient(true)
-                        )
-                        
-                        if (points.size == 1) {
-                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points[0], 15f))
-                        } else {
-                            // 监听地图加载完成回调，确保 AMap 获得宽高后再执行 newLatLngBounds
-                            amap.setOnMapLoadedListener {
-                                try {
-                                    val bounds = com.amap.api.maps.model.LatLngBounds.builder().apply {
-                                        points.forEach { include(it) }
-                                    }.build()
-                                    // 增加 padding 比例，适配不同屏幕
-                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, 120))
-                                    
-                                    // 再次确认缩放防止因点太近导致的视野过大
-                                    if (amap.cameraPosition.zoom > 15.5f) {
-                                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.zoomTo(15.5f))
-                                    }
-                                } catch (e: Exception) {
-                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points.first(), 15f))
-                                }
+                        val lat = p.getDouble(0)
+                        val lon = p.getDouble(1)
+                        if (lat == 0.0 && lon == 0.0) {
+                            if (currentSegment.isNotEmpty()) {
+                                segments.add(currentSegment)
+                                currentSegment = mutableListOf()
                             }
-                            // 立即执行一次定位兜底
-                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points.first(), 15f))
+                        } else {
+                            val ll = com.amap.api.maps.model.LatLng(lat, lon)
+                            currentSegment.add(ll)
+                            validPoints.add(ll)
+                        }
+                    }
+                    if (currentSegment.isNotEmpty()) {
+                        segments.add(currentSegment)
+                    }
+
+                    if (validPoints.isNotEmpty()) {
+                        segments.forEach { segment ->
+                            amap.addPolyline(
+                                com.amap.api.maps.model.PolylineOptions().addAll(segment).width(12f).color(primaryColor).useGradient(true)
+                            )
+                        }
+                        
+                        if (validPoints.size == 1) {
+                            if (!hasCentred) {
+                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(validPoints[0], 13.5f))
+                                hasCentred = true
+                            }
+                        } else {
+                            val bounds = com.amap.api.maps.model.LatLngBounds.builder().apply {
+                                validPoints.forEach { include(it) }
+                            }.build()
+                            val centerLat = (bounds.northeast.latitude + bounds.southwest.latitude) / 2
+                            val centerLon = (bounds.northeast.longitude + bounds.southwest.longitude) / 2
+                            val center = com.amap.api.maps.model.LatLng(centerLat, centerLon)
+                            
+                            val distance = com.amap.api.maps.AMapUtils.calculateLineDistance(bounds.southwest, bounds.northeast)
+                            
+                            if (!hasCentred) {
+                                val doBounds = {
+                                    val paddingPx = (30 * view.context.resources.displayMetrics.density).toInt()
+                                    try {
+                                        if (distance < 500f) {
+                                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(center, 13.5f))
+                                        } else {
+                                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, paddingPx))
+                                            if (amap.cameraPosition.zoom > 16f) {
+                                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.zoomTo(16f))
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(center, 13.5f))
+                                    }
+                                }
+
+                                if (view.width > 0 && view.height > 0) {
+                                    doBounds()
+                                } else {
+                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(center, 12f))
+                                    amap.setOnMapLoadedListener { doBounds() }
+                                }
+                                hasCentred = true
+                            }
                         }
                     }
                 } catch (e: Exception) {}
             } else if (lat != null && lon != null) {
                 val target = com.amap.api.maps.model.LatLng(lat, lon)
                 amap.addMarker(com.amap.api.maps.model.MarkerOptions().position(target))
-                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(target, 16f))
+                if (!hasCentred) {
+                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(target, 13.5f))
+                    hasCentred = true
+                }
             }
             
             // 绘制足迹点标记 (实心圆点)
