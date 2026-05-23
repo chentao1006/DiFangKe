@@ -80,14 +80,40 @@ struct SettingsView: View {
                         }
                     }
 
-                Picker("定位精度", selection: locationAccuracyModeBinding) {
-                    ForEach(LocationAccuracyMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                NavigationLink {
+                    Form {
+                        ForEach(LocationAccuracyMode.allCases) { mode in
+                            Button {
+                                locationAccuracyModeBinding.wrappedValue = mode
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(mode.title)
+                                            .foregroundColor(.primary)
+                                        Text(mode.description)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .multilineTextAlignment(.leading)
+                                    }
+                                    Spacer()
+                                    if selectedLocationAccuracyMode == mode {
+                                        Image(systemName: "checkmark")
+                                            .foregroundColor(.dfkAccent)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .navigationTitle("定位精度")
+                    .navigationBarTitleDisplayMode(.inline)
+                } label: {
+                    HStack {
+                        Text("定位精度")
+                        Spacer()
+                        Text(selectedLocationAccuracyMode.title)
+                            .foregroundColor(.secondary)
                     }
                 }
-                Text(selectedLocationAccuracyMode.description)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
                 
                 Toggle("开启 iCloud 同步", isOn: $isICloudSyncEnabled)
                 if isICloudSyncEnabled {

@@ -31,6 +31,7 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val isTrackingEnabled by viewModel.isTrackingEnabled.collectAsState()
+    val locationAccuracyMode by viewModel.locationAccuracyMode.collectAsState()
     val isAiEnabled by viewModel.isAiEnabled.collectAsState()
     val isAutoPhotoLinkEnabled by viewModel.isAutoPhotoLinkEnabled.collectAsState()
     val isDailyNotificationEnabled by viewModel.isDailyNotificationEnabled.collectAsState()
@@ -64,6 +65,7 @@ fun SettingsScreen(
     }
 
     var showNotificationSettingsAlert by remember { mutableStateOf(false) }
+    var showAccuracyModeDialog by remember { mutableStateOf(false) }
 
     val checkNotificationPermission = { onGranted: () -> Unit ->
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
@@ -105,6 +107,26 @@ fun SettingsScreen(
                     subtitle = "应用将自动记录您的行踪并在时间轴展示",
                     checked = isTrackingEnabled,
                     onCheckedChange = { viewModel.setTrackingEnabled(it) }
+                )
+            }
+            item {
+                val currentMode = com.ct106.difangke.data.model.LocationAccuracyMode.fromId(locationAccuracyMode)
+                ListItem(
+                    modifier = Modifier.clickable { showAccuracyModeDialog = true },
+                    headlineContent = { Text("定位精度", fontWeight = FontWeight.Medium) },
+                    supportingContent = { Text(currentMode.description, fontSize = 12.sp) },
+                    trailingContent = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(currentMode.title, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=0.3f),
+                                modifier = Modifier.padding(start = 4.dp).size(20.dp)
+                            )
+                        }
+                    },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
                 )
             }
             item {
@@ -352,6 +374,47 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showNotificationSettingsAlert = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    if (showAccuracyModeDialog) {
+        AlertDialog(
+            onDismissRequest = { showAccuracyModeDialog = false },
+            title = { Text("定位精度") },
+            text = {
+                Column {
+                    com.ct106.difangke.data.model.LocationAccuracyMode.values().forEach { mode ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    viewModel.setLocationAccuracyMode(mode.id)
+                                    showAccuracyModeDialog = false
+                                }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = mode.id == locationAccuracyMode,
+                                onClick = {
+                                    viewModel.setLocationAccuracyMode(mode.id)
+                                    showAccuracyModeDialog = false
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(mode.title, style = MaterialTheme.typography.bodyLarge)
+                                Text(mode.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAccuracyModeDialog = false }) {
                     Text("取消")
                 }
             }

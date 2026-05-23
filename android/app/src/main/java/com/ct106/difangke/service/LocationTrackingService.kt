@@ -84,6 +84,7 @@ class LocationTrackingService : Service() {
     private var lastNotificationText: String? = null
     private var lastNotifiedStayStart: Long? = null
     private var currentIntervalTier = -1 // -1: initial, 0: stationary, 1: moving, 2: fast
+    private var currentAccuracyMode = "automatic"
     private val ongoingStayMaxPointGapMs = (AppConfig.TRANSPORT_MAX_GAP_THRESHOLD * 1000).toLong()
 
     private var wasVpnActive: Boolean? = null
@@ -100,15 +101,26 @@ class LocationTrackingService : Service() {
             Log.i(TAG, "检测到 VPN 处于激活状态，使用 Device_Sensors 模式（仅 GPS）定位以防止定位漂移")
             AMapLocationClientOption.AMapLocationMode.Device_Sensors
         } else {
-            AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+            if (currentAccuracyMode == "powerSaving") {
+                AMapLocationClientOption.AMapLocationMode.Battery_Saving
+            } else {
+                AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+            }
         }
     }
 
     private fun updateLocationClientOption(tier: Int) {
-        val newInterval = when (tier) {
-            2 -> 8000L    // 高速：8秒
-            1 -> 15000L   // 正常移动：15秒
-            else -> 30000L // 停留：30秒
+        val newInterval = when (currentAccuracyMode) {
+            "high" -> 5000L
+            "balanced" -> 15000L
+            "powerSaving" -> 60000L
+            else -> {
+                when (tier) {
+                    2 -> 8000L    // 高速：8秒
+                    1 -> 15000L   // 正常移动：15秒
+                    else -> 30000L // 停留：30秒
+                }
+            }
         }
         locationClient?.setLocationOption(AMapLocationClientOption().apply {
             locationMode = getBestLocationMode()
@@ -118,7 +130,7 @@ class LocationTrackingService : Service() {
             isOffset = true
             isSensorEnable = true // 开启传感器辅助定位
         })
-        Log.d(TAG, "Location option updated: interval=$newInterval ms, mode=${if (wasVpnActive == true) "Device_Sensors" else "Hight_Accuracy"}")
+        Log.d(TAG, "Location option updated: interval=$newInterval ms, mode=${getBestLocationMode()}")
     }
 
     private val locationListener = AMapLocationListener { location ->
@@ -177,6 +189,17 @@ class LocationTrackingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        
+        serviceScope.launch {
+            prefs.locationAccuracyMode.collect { mode ->
+                currentAccuracyMode = mode
+                if (stateFlow.value !is TrackingState.Idle) {
+                    val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
+                    updateLocationClientOption(tier)
+                }
+            }
+        }
+        
         try {
             locationClient = AMapLocationClient(applicationContext)
             wasVpnActive = isVpnActive()
@@ -205,19 +228,7 @@ class LocationTrackingService : Service() {
                 // 开启高德后台定位
                 wasVpnActive = isVpnActive()
                 val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
-                val intervalMs = when (tier) {
-                    2 -> 8000L
-                    1 -> 15000L
-                    else -> 30000L
-                }
-                locationClient?.setLocationOption(AMapLocationClientOption().apply {
-                    locationMode = getBestLocationMode()
-                    interval = intervalMs
-                    isNeedAddress = true
-                    isMockEnable = false
-                    isOffset = true
-                    isSensorEnable = true
-                })
+                updateLocationClientOption(tier)
                 locationClient?.enableBackgroundLocation(NotificationHelper.TRACKING_NOTIFICATION_ID, notification)
                 locationClient?.startLocation()
                 

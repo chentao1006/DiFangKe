@@ -42,11 +42,16 @@ class AppPreferences(private val context: Context) {
         val KEY_PENDING_STAY_LON = doublePreferencesKey("pending_stay_lon")
         val KEY_PENDING_STAY_START_TIME = longPreferencesKey("pending_stay_start_time")
         val KEY_PENDING_STAY_ADDRESS = stringPreferencesKey("pending_stay_address")
+        
+        val KEY_LOCATION_ACCURACY_MODE = stringPreferencesKey("locationAccuracyMode")
     }
 
     // ── Flows（响应式读取）──────────────────────────────────────────
     val isTrackingEnabled: Flow<Boolean> = context.dataStore.data.map {
         it[KEY_IS_TRACKING_ENABLED] ?: true
+    }
+    val locationAccuracyMode: Flow<String> = context.dataStore.data.map {
+        it[KEY_LOCATION_ACCURACY_MODE] ?: "automatic"
     }
     val isAiEnabled: Flow<Boolean> = context.dataStore.data.map {
         it[KEY_IS_AI_ENABLED] ?: false
@@ -89,6 +94,9 @@ class AppPreferences(private val context: Context) {
     // ── Suspend 写入 ──────────────────────────────────────────────
     suspend fun setTrackingEnabled(enabled: Boolean) =
         context.dataStore.edit { it[KEY_IS_TRACKING_ENABLED] = enabled }
+
+    suspend fun setLocationAccuracyMode(mode: String) =
+        context.dataStore.edit { it[KEY_LOCATION_ACCURACY_MODE] = mode }
 
     suspend fun setAiEnabled(enabled: Boolean) =
         context.dataStore.edit { it[KEY_IS_AI_ENABLED] = enabled }

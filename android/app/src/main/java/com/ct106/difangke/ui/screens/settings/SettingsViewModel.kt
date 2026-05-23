@@ -25,6 +25,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val isTrackingEnabled: StateFlow<Boolean> = prefs.isTrackingEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
         
+    val locationAccuracyMode: StateFlow<String> = prefs.locationAccuracyMode
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "automatic")
+        
     val isAiEnabled: StateFlow<Boolean> = prefs.isAiEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
@@ -72,6 +75,15 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 LocationTrackingService.start(getApplication())
             } else {
                 LocationTrackingService.stop(getApplication())
+            }
+        }
+    }
+
+    fun setLocationAccuracyMode(mode: String) {
+        viewModelScope.launch {
+            prefs.setLocationAccuracyMode(mode)
+            if (prefs.isTrackingEnabled.first()) {
+                LocationTrackingService.start(getApplication()) // Restart/Update service
             }
         }
     }

@@ -1209,8 +1209,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         // 2. 提升精度，但避免长期停留在导航级满额采样导致发热
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        locationManager.distanceFilter = 5.0
-        locationManager.activityType = .fitness
+        locationManager.distanceFilter = kCLDistanceFilterNone
+        locationManager.activityType = .other
         
         // 3. 核心补救：立即请求一次单次精确定位，强制拉高硬件功率
         locationManager.requestLocation()
@@ -1887,10 +1887,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // 只要传感器认为在动，或者速度 > 0.5m/s
                 } else if isMovingBySensor || speed > 0.5 {
                     let targetAccuracy = kCLLocationAccuracyBest
-                    if manager.desiredAccuracy != targetAccuracy || manager.distanceFilter != 5.0 || manager.activityType != .fitness {
+                    if manager.desiredAccuracy != targetAccuracy || manager.distanceFilter != kCLDistanceFilterNone || manager.activityType != .other {
                         manager.desiredAccuracy = targetAccuracy
-                        manager.distanceFilter = 5.0
-                        manager.activityType = .fitness
+                        manager.distanceFilter = kCLDistanceFilterNone
+                        manager.activityType = .other
                     }
                 }
                 updateRegionMonitoring(isStationary: false)
@@ -2199,8 +2199,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             locationManager.startUpdatingLocation()
         case .high:
             locationManager.desiredAccuracy = kCLLocationAccuracyBest
-            locationManager.distanceFilter = 5.0
-            locationManager.activityType = .fitness
+            locationManager.distanceFilter = kCLDistanceFilterNone
+            locationManager.activityType = .other
         case .balanced:
             locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
             locationManager.distanceFilter = 10.0
