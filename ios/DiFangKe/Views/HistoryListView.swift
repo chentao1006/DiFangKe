@@ -166,9 +166,8 @@ struct HistoryListView: View {
     
     let initialDate: Date
     let showImportOnAppear: Bool
-    @State private var viewMode: ViewMode = .week
+    @State private var viewMode: ViewMode = .month
     @State private var selectedDate: Date
-    @State private var cachedSummaries: [Date: DaySummary] = [:]
     @State private var showingDate: IdentifiableDate? = nil
     @State private var showingPhotoImportRange = false
     @State private var showingRawPointsDate: IdentifiableDate? = nil
@@ -188,13 +187,11 @@ struct HistoryListView: View {
     @Query(sort: \Place.name) private var allPlacesForScan: [Place]
     
     enum ViewMode: String, CaseIterable {
-        case week = "周"
-        case month = "月"
+        case month = "历史"
         case favorites = "收藏"
         case statistics = "统计"
     }
 
-    @State private var hasScrolledWeek = false
     @State private var hasScrolledMonth = false
     
     init(initialDate: Date = Date(), showImportOnAppear: Bool = false) {
@@ -216,24 +213,23 @@ struct HistoryListView: View {
         .navigationBarTitleDisplayMode(.inline)
         .background(Color.dfkBackground)
         .onAppear { 
-            updateSummaries() 
+            rebuildIndex()
             if showImportOnAppear {
                 checkPhotoPermission()
             }
         }
-        .onChange(of: allFootprints) { updateSummaries() }
-        .onChange(of: allManualSelections) { updateSummaries() }
-        .onChange(of: allTransportRecords) { updateSummaries() }
-        .onChange(of: allInsights) { updateSummaries() }
+        .onChange(of: allFootprints) { rebuildIndex() }
+        .onChange(of: allTransportRecords) { rebuildIndex() }
+        .onChange(of: allActivityTypes) { rebuildIndex() }
         .sheet(item: $showingDate) { item in
             SimpleDayTimelineView(date: item.date)
                 .environment(locationManager)
-                .onDisappear { updateSummaries() }
+                .onDisappear { rebuildIndex() }
         }
         .sheet(item: $showingRawPointsDate) { item in
             RawPointsListView(date: item.date)
                 .environment(locationManager)
-                .onDisappear { updateSummaries() }
+                .onDisappear { rebuildIndex() }
         }
         .modifier(ImportSheetsModifier(
             showingPhotoImportRange: $showingPhotoImportRange,
@@ -256,7 +252,7 @@ struct HistoryListView: View {
                     
                     await MainActor.run {
                         scannedResults = []
-                        updateSummaries()
+                        rebuildIndex()
                         self.successCount = selectedFootprints.count
                         self.isImporting = false
                         self.showingImportSuccessAlert = true
@@ -278,36 +274,13 @@ struct HistoryListView: View {
         .modifier(ImportToolbarModifier(onTapAction: checkPhotoPermission))
     }
     
-    @Namespace private var modeNamespace
-    
     private var pickerSection: some View {
-        HStack(spacing: 0) {
+        Picker("视图", selection: $viewMode) {
             ForEach(ViewMode.allCases, id: \.self) { mode in
-                Text(mode.rawValue)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(viewMode == mode ? .white : .secondary)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity)
-                    .background(
-                        ZStack {
-                            if viewMode == mode {
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(Color.dfkAccent)
-                                    .matchedGeometryEffect(id: "mode_bg", in: modeNamespace)
-                            }
-                        }
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            viewMode = mode
-                        }
-                    }
+                Text(mode.rawValue).tag(mode)
             }
         }
-        .padding(4)
-        .background(Color.gray.opacity(0.1))
-        .cornerRadius(12)
+        .pickerStyle(.segmented)
         .padding(.horizontal, 20)
         .padding(.top, 10)
         .padding(.bottom, 15)
@@ -342,17 +315,12 @@ struct HistoryListView: View {
     
     private var contentArea: some View {
         TabView(selection: $viewMode) {
-            HistoryWeekView(summaries: cachedSummaries, targetDate: selectedDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledWeek, showingRawPointsDate: $showingRawPointsDate, requestSummary: ensureSummary) { date in
-                showingDate = IdentifiableDate(date: date)
-            }
-            .tag(ViewMode.week)
-            
-            HistoryMonthView(summaries: cachedSummaries, targetDate: selectedDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledMonth, showingRawPointsDate: $showingRawPointsDate, requestSummary: ensureSummary) { date in
+            HistoryMonthView(footprintsByDay: footprintsByDay, transportsByDay: transportsByDay, allActivityTypes: allActivityTypes, targetDate: selectedDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledMonth, showingRawPointsDate: $showingRawPointsDate) { date in
                 showingDate = IdentifiableDate(date: date)
             }
             .tag(ViewMode.month)
             
-            HistoryFavoritesView(onUpdate: updateSummaries)
+            HistoryFavoritesView(onUpdate: rebuildIndex)
                 .environment(locationManager)
                 .tag(ViewMode.favorites)
             
@@ -368,7 +336,7 @@ struct HistoryListView: View {
     }
     
     private var shouldShowYearJump: Bool {
-        viewMode == .week || viewMode == .month
+        viewMode == .month
     }
     
     private var footprintYears: [(year: Int, date: Date)] {
@@ -388,91 +356,41 @@ struct HistoryListView: View {
     
     private func jumpToYear(_ date: Date) {
         selectedDate = Calendar.current.startOfDay(for: date)
-        hasScrolledWeek = false
         hasScrolledMonth = false
     }
     
-    private func updateSummaries() {
-        // Pre-warm just Today
-        ensureSummary(for: Calendar.current.startOfDay(for: Date()))
-    }
-    
-    private func ensureSummary(for date: Date) {
-        if cachedSummaries[date] != nil && !Calendar.current.isDateInToday(date) {
-            return
+    @State private var footprintsByDay: [Date: [Footprint]] = [:]
+    @State private var transportsByDay: [Date: [TransportRecord]] = [:]
+
+    private func rebuildIndex() {
+        let calendar = Calendar.current
+        var fpMap: [Date: [Footprint]] = [:]
+        var tpMap: [Date: [TransportRecord]] = [:]
+        
+        for fp in allFootprints where fp.statusValue != "ignored" {
+            let start = calendar.startOfDay(for: fp.startTime)
+            let end = calendar.startOfDay(for: fp.endTime)
+            var current = start
+            while current <= end {
+                fpMap[current, default: []].append(fp)
+                guard let next = calendar.date(byAdding: .day, value: 1, to: current) else { break }
+                current = next
+            }
         }
         
-        let activityTypes = allActivityTypes
-        
-        Task {
-            // 第一阶段：直接从数据库获取已处理的持久化时间线数据
-            // 这保证了周/月视图与日视图看到的内容完全一致（包含用户的手动修改和合并）
-            let timelineItems = await MainActor.run {
-                let items = PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
-                TimelineBuilder.timelineCache[date] = items // 共享缓存，加速随后点开详情页的加载速度
-                return items
-            }
-            
-            let coreSummary = await Task.detached(priority: .userInitiated) {
-                let validFootprints = timelineItems.compactMap { if case .footprint(let f) = $0 { return f }; return nil }
-                
-                let highlightCount = validFootprints.filter { $0.isHighlight == true }.count
-                let highlights = validFootprints.filter { $0.isHighlight == true }
-                let highlightTitle = highlights.first?.address
-                let hasConfirmed = validFootprints.contains { $0.status == .confirmed }
-                let hasCandidate = validFootprints.contains { $0.status == .candidate }
-                let totalDuration = validFootprints.reduce(0) { $0 + $1.duration }
-                
-                let totalTrajectoryCount = RawLocationStore.shared.getTotalPointsCount(for: date)
-                
-                let timelineIcons = deduplicatedTimelineIcons(timelineItems.reversed().map { item in
-                    DaySummary.TimelineIcon(
-                        icon: item.getIcon(allActivityTypes: activityTypes),
-                        colorHex: item.getColor(allActivityTypes: activityTypes),
-                        isTransport: item.isTransport,
-                        isHighlight: item.isHighlight
-                    )
-                })
-                
-                let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
-                let totalMileage = LocationManager.calculatePathDistance(rawPoints)
-                
-                return DaySummary(
-                    date: date,
-                    totalDuration: totalDuration,
-                    footprintCount: validFootprints.count,
-                    highlightCount: highlightCount,
-                    highlightTitle: highlightTitle,
-                    hasConfirmed: hasConfirmed,
-                    hasCandidate: hasCandidate,
-                    activeHours: [],
-                    favoriteHours: [],
-                    timelineIcons: timelineIcons,
-                    trajectoryCount: totalTrajectoryCount,
-                    mileage: totalMileage,
-                    photoCount: 0
-                )
-            }.value
-            
-            await MainActor.run {
-                self.cachedSummaries[date] = coreSummary
-            }
-            
-            // 第二阶段：异步“数照片”，数完后局部更新
-            let finalPhotoCount = await Task.detached(priority: .background) {
-                return PhotoService.shared.fetchCount(
-                    startTime: Calendar.current.startOfDay(for: date),
-                    endTime: Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: date)!
-                )
-            }.value
-            
-            await MainActor.run {
-                if var existing = self.cachedSummaries[date] {
-                    existing.photoCount = finalPhotoCount
-                    self.cachedSummaries[date] = existing
-                }
+        for tp in allTransportRecords where tp.statusRaw != "ignored" {
+            let start = calendar.startOfDay(for: tp.startTime)
+            let end = calendar.startOfDay(for: tp.endTime)
+            var current = start
+            while current <= end {
+                tpMap[current, default: []].append(tp)
+                guard let next = calendar.date(byAdding: .day, value: 1, to: current) else { break }
+                current = next
             }
         }
+        
+        self.footprintsByDay = fpMap
+        self.transportsByDay = tpMap
     }
     
     private func checkPhotoPermission() {
@@ -522,135 +440,6 @@ struct HistoryListView: View {
     }
 }
 
-// MARK: - Week View
-struct HistoryWeekView: View {
-    let summaries: [Date: DaySummary]
-    let targetDate: Date
-    let earliestDate: Date
-    @Binding var hasScrolled: Bool
-    @Binding var showingRawPointsDate: IdentifiableDate?
-    let requestSummary: (Date) -> Void
-    let onDayTap: (Date) -> Void
-    
-    @State private var weeksLimit: Int = 15 // 每页预加载多一些周
-    
-    var weeksCount: Int {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        let startOfTodayWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today))!
-        let startOfEarliestWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: earliestDate))!
-        return calendar.dateComponents([.weekOfYear], from: startOfEarliestWeek, to: startOfTodayWeek).weekOfYear ?? 0
-    }
-    
-    var weeks: [[Date]] {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        let startOfTodayWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today))!
-        
-        let count = min(weeksLimit, weeksCount)
-        
-        return (0...count).map { weekOffset in
-            let startOfWeek = calendar.date(byAdding: .weekOfYear, value: -weekOffset, to: startOfTodayWeek)!
-            return (0..<7).compactMap { dayOffset in
-                calendar.date(byAdding: .day, value: dayOffset, to: startOfWeek)
-            }
-        }
-    }
-    
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 16, pinnedViews: [.sectionHeaders]) {
-                    ForEach(weeks, id: \.self) { weekDates in
-                        if let firstDate = weekDates.first {
-                            let monday = Calendar.current.date(from: Calendar.current.dateComponents([.yearForWeekOfYear, .weekOfYear], from: firstDate))!
-                            Section(header: weekHeader(for: firstDate)) {
-                                VStack(spacing: 8) {
-                                    ForEach(weekDates, id: \.self) { date in
-                                        DayCell(
-                                            date: date,
-                                            targetDate: targetDate,
-                                            summary: summaries[date],
-                                            onTap: { onDayTap(date) }
-                                        )
-                                        .contextMenu {
-                                            Button {
-                                                showingRawPointsDate = IdentifiableDate(date: date)
-                                            } label: {
-                                                Label("查看所有轨迹点", systemImage: "dot.radiowaves.left.and.right")
-                                            }
-                                        }
-                                        .onAppear { requestSummary(date) }
-                                    }
-                                }
-                                .padding(.horizontal)
-                            }
-                            .id("week-" + monday.dayID)
-                        }
-                    }
-                    
-                    if weeksLimit < weeksCount {
-                        ProgressView()
-                            .padding()
-                            .onAppear {
-                                // 滚动到底部时自动加载更多
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                    weeksLimit += 15
-                                }
-                            }
-                    }
-                }
-                .padding(.top)
-            }
-            .onAppear {
-                adjustLimitForTarget()
-            }
-            .task(id: targetDate) {
-                if !hasScrolled {
-                    adjustLimitForTarget()
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                    scrollToTarget(proxy: proxy)
-                }
-            }
-        }
-    }
-    
-    private func adjustLimitForTarget() {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        let weeksToTarget = calendar.dateComponents([.weekOfYear], from: targetDate, to: today).weekOfYear ?? 0
-        if weeksToTarget >= weeksLimit {
-            weeksLimit = weeksToTarget + 5
-        }
-    }
-    
-    private func scrollToTarget(proxy: ScrollViewProxy) {
-        hasScrolled = true
-        let calendar = Calendar.current
-        let components = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: targetDate)
-        if let startOfWeek = calendar.date(from: components) {
-            withAnimation {
-                proxy.scrollTo("week-" + startOfWeek.dayID, anchor: .top)
-            }
-        }
-    }
-    
-    private func weekHeader(for date: Date) -> some View {
-        let calendar = Calendar.current
-        let startOfSectionWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date))!
-        let year = calendar.component(.year, from: startOfSectionWeek)
-        let week = calendar.component(.weekOfYear, from: startOfSectionWeek)
-        
-        return HStack {
-            Text("\(String(format: "%d", year))年 第\(week)周")
-                .font(.system(size: 18, weight: .bold))
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.dfkBackground.opacity(0.95))
-    }
-}
 
 struct DayCell: View {
     let date: Date
@@ -763,14 +552,14 @@ struct DayStatsView: View {
     }
 }
 
-// MARK: - Month View
 struct HistoryMonthView: View {
-    let summaries: [Date: DaySummary]
+    let footprintsByDay: [Date: [Footprint]]
+    let transportsByDay: [Date: [TransportRecord]]
+    let allActivityTypes: [ActivityType]
     let targetDate: Date
     let earliestDate: Date
     @Binding var hasScrolled: Bool
     @Binding var showingRawPointsDate: IdentifiableDate?
-    let requestSummary: (Date) -> Void
     let onDayTap: (Date) -> Void
     
     @State private var monthsLimit: Int = 12 // 每页预加载多一些月
@@ -873,7 +662,14 @@ struct HistoryMonthView: View {
                 let leadingSpaces = calculateLeadingSpaces(for: month)
                 ForEach(0..<leadingSpaces, id: \.self) { _ in Color.clear.frame(height: 40) }
                 ForEach(days, id: \.self) { date in
-                    MonthDayCell(date: date, targetDate: targetDate, summary: summaries[date], onTap: { onDayTap(date) }, onAppearAction: { requestSummary(date) })
+                    MonthDayCell(
+                        date: date,
+                        targetDate: targetDate,
+                        footprints: footprintsByDay[date] ?? [],
+                        transports: transportsByDay[date] ?? [],
+                        activityTypes: allActivityTypes,
+                        onTap: { onDayTap(date) }
+                    )
                         .contextMenu {
                             Button {
                                 showingRawPointsDate = IdentifiableDate(date: date)
@@ -905,13 +701,38 @@ struct HistoryMonthView: View {
 struct MonthDayCell: View {
     let date: Date
     let targetDate: Date
-    let summary: DaySummary?
+    let footprints: [Footprint]
+    let transports: [TransportRecord]
+    let activityTypes: [ActivityType]
     let onTap: () -> Void
     @Environment(\.colorScheme) private var colorScheme
     
+    var allIcons: [DaySummary.TimelineIcon] {
+        if footprints.isEmpty && transports.isEmpty { return [] }
+        
+        var items: [TimelineItem] = []
+        for fp in footprints { items.append(.footprint(fp)) }
+        for tp in transports {
+            let tType = TransportType(rawValue: tp.typeRaw) ?? .slow
+            let mType = tp.manualTypeRaw != nil ? TransportType(rawValue: tp.manualTypeRaw!) : nil
+            let t = Transport(id: tp.recordID, startTime: tp.startTime, endTime: tp.endTime, startLocation: tp.startLocation, endLocation: tp.endLocation, type: tType, distance: tp.distance, averageSpeed: tp.averageSpeed, points: [], manualType: mType)
+            items.append(.transport(t))
+        }
+        items.sort { $0.startTime < $1.startTime }
+        
+        return deduplicatedTimelineIcons(items.map { item in
+            DaySummary.TimelineIcon(
+                icon: item.getIcon(allActivityTypes: activityTypes),
+                colorHex: item.getColor(allActivityTypes: activityTypes),
+                isTransport: item.isTransport,
+                isHighlight: item.isHighlight
+            )
+        })
+    }
+    
     var body: some View {
-        let allIcons = summary?.timelineIcons ?? []
-        let hasData = summary != nil && !allIcons.isEmpty
+        let icons = allIcons
+        let hasData = !icons.isEmpty
         let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
         let isTarget = Calendar.current.isDate(date, inSameDayAs: targetDate)
         
@@ -921,9 +742,9 @@ struct MonthDayCell: View {
                 .foregroundColor(hasData ? .primary : .secondary.opacity(0.4))
                 .padding(.top, 3)
             
-            if !allIcons.isEmpty {
+            if !icons.isEmpty {
                 FlowLayout(spacing: 1) {
-                    ForEach(allIcons) { item in
+                    ForEach(icons) { item in
                         let style = timelineIconStyle(for: item, colorScheme: colorScheme)
                         ZStack {
                             if item.isHighlight {
@@ -956,11 +777,8 @@ struct MonthDayCell: View {
                 else if isTarget { RoundedRectangle(cornerRadius: 12).fill(Color.gray.opacity(0.12)) }
             }
         )
-        .onAppear { onAppearAction?() }
         .onTapGesture { if hasData { onTap() } }
     }
-    
-    var onAppearAction: (() -> Void)? = nil
 }
 
 // MARK: - Extensions

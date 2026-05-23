@@ -9,6 +9,7 @@ struct SuggestionsMenuContent: View {
     let coordinate: CLLocationCoordinate2D?
     let forOngoing: Bool
     var footprint: Footprint? = nil
+    var isDraft: Bool = false
     var onSearchRequested: () -> Void
     var onCustomSelection: ((String) -> Void)? = nil
     
@@ -35,7 +36,7 @@ struct SuggestionsMenuContent: View {
                         if let customSelected = onCustomSelection {
                             customSelected(suggestion.name)
                         } else {
-                            locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint)
+                            locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint, isDraft: isDraft)
                         }
                     } label: {
                         HStack {
@@ -66,6 +67,7 @@ struct LocationSearchSheet: View {
     let coordinate: CLLocationCoordinate2D?
     let forOngoing: Bool
     var footprint: Footprint? = nil
+    var isDraft: Bool = false
     var onCustomSelection: ((String) -> Void)? = nil
 
     @State private var searchText = ""
@@ -114,7 +116,7 @@ struct LocationSearchSheet: View {
                                     customSelected(suggestion.name)
                                     dismiss()
                                 } else {
-                                    locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint)
+                                    locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint, isDraft: isDraft)
                                     dismiss()
                                 }
                             } label: {

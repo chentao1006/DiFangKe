@@ -20,27 +20,16 @@ struct AiSettingsView: View {
     }
     @State private var isTesting = false
     @State private var testResult: (success: Bool, message: String)?
-    @Namespace private var aiModeNamespace
     
     var body: some View {
         Form {
             Section {
-                HStack(spacing: 0) {
+                Picker("服务类型", selection: $aiServiceType) {
                     ForEach(AiServiceType.allCases) { type in
-                        AiServiceTypeTab(
-                            type: type,
-                            isSelected: aiServiceType == type,
-                            namespace: aiModeNamespace
-                        ) {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                aiServiceType = type
-                            }
-                        }
+                        Text(type.displayName).tag(type)
                     }
                 }
-                .padding(4)
-                .background(Color.gray.opacity(0.1))
-                .cornerRadius(10)
+                .pickerStyle(.segmented)
                 .listRowBackground(Color.clear)
                 .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
             } header: {
@@ -114,32 +103,6 @@ struct AiSettingsView: View {
             isTesting = false
             testResult = (success, message)
         }
-    }
-}
-
-struct AiServiceTypeTab: View {
-    let type: AiSettingsView.AiServiceType
-    let isSelected: Bool
-    let namespace: Namespace.ID
-    let action: () -> Void
-    
-    var body: some View {
-        Text(type.displayName)
-            .font(.system(size: 13, weight: .medium))
-            .foregroundColor(isSelected ? .white : .secondary)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity)
-            .background(
-                ZStack {
-                    if isSelected {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.dfkAccent)
-                            .matchedGeometryEffect(id: "ai_mode_bg", in: namespace)
-                    }
-                }
-            )
-            .contentShape(Rectangle())
-            .onTapGesture(perform: action)
     }
 }
 
