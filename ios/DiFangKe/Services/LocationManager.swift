@@ -2468,7 +2468,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             guard let footprints = try? context.fetch(fetchDescriptor), !footprints.isEmpty else { return }
             
             var activityUpdateCount = 0
-            var footprintsToAnalyze: [PersistentIdentifier] = []
+            var footprintsToAnalyze: [UUID] = []
             
             for fp in footprints {
                 // 1. 自动关联活动类型 (仅补齐缺失的，且跳过人工修改过的)
@@ -2490,7 +2490,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // 2. 检查是否需要 AI 辅助生成标题及备注 (跳过已分析过和用户手动编辑过的)
                 // 同时也跳过已经确定不需要 AI 的 (aiAnalyzed == true)
                 if !fp.aiAnalyzed && !fp.isAddressEditedByHand {
-                    footprintsToAnalyze.append(fp.persistentModelID)
+                    footprintsToAnalyze.append(fp.footprintID)
                 }
             }
             
@@ -2678,9 +2678,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         return FootprintProcessor.shared.shouldMerge(lastFootprint: last, newCandidate: candidate)
     }
 
-    func analyzeFootprintByID(_ id: PersistentIdentifier) {
-        guard let context = modelContext,
-              let footprint = context.model(for: id) as? Footprint else { return }
+    func analyzeFootprintByID(_ id: UUID) {
+        guard let context = modelContext else { return }
+        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
+        guard let footprint = try? context.fetch(descriptor).first else { return }
         analyzeFootprint(footprint, context: context)
     }
 
@@ -2701,7 +2702,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 核心修复：必须有 context 才能访问 persistentModelID 并在主线程恢复，否则说明是 UI Lite 对象
         guard footprint.modelContext != nil else { return }
         
-        let id = footprint.persistentModelID
+        let id = footprint.footprintID
         let startTime = footprint.startTime
         let endTime = footprint.endTime
         let coordinate = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
@@ -2720,7 +2721,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 // 先在主线程获取当前状态
                 let (currentIDs, currentMetadata): ([String], [PhotoMetadata]) = await MainActor.run {
-                    guard let fp = context.model(for: id) as? Footprint else { return ([], []) }
+                    let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
+                    guard let fp = try? context.fetch(descriptor).first else { return ([], []) }
                     return (fp.photoAssetIDs, fp.photoMetadata)
                 }
                 
@@ -2822,7 +2824,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // 4. 回写主线程
                 if hasChanged {
                     await MainActor.run {
-                        if let fp = context.model(for: id) as? Footprint {
+                        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
+                        if let fp = try? context.fetch(descriptor).first {
                             fp.photoAssetIDs = workingIDs
                             fp.photoMetadata = workingMetadata
                             try? context.save()
@@ -2860,7 +2863,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             } else if (footprint.address ?? "").isEmpty || footprint.address == "地点记录" || footprint.address == "正在解析位置..." || footprint.address == "此处" {
                 // 2. 如果没有匹配地点，且地址是通用的，则尝试反地理编码
                 let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
-                let footprintID = footprint.persistentModelID
+                let footprintID = footprint.footprintID
                 
                 geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
                     guard let self = self, let placemark = placemarks?.first else { return }
@@ -2871,10 +2874,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     
                     Task { @MainActor in
                         // 在主线程重新获取该对象，确保线程安全
-                        if let mainContext = self.modelContext?.container.mainContext,
-                           let mainFp = mainContext.model(for: footprintID) as? Footprint {
-                            mainFp.address = name
-                            try? mainContext.save()
+                        if let mainContext = self.modelContext?.container.mainContext {
+                            let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+                            if let mainFp = try? mainContext.fetch(descriptor).first {
+                                mainFp.address = name
+                                try? mainContext.save()
+                            }
                         }
                     }
                 }
@@ -3727,7 +3732,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     /// 用户选择建议地点后的处理
-    func selectSuggestion(_ suggestion: LocationSuggestion, forOngoing: Bool, footprint: Footprint? = nil) {
+    func selectSuggestion(_ suggestion: LocationSuggestion, forOngoing: Bool, footprint: Footprint? = nil, isDraft: Bool = false) {
         let targetPlace = updateOrCreatePlaceAsPriority(suggestion)
         
         // 如果是“重要地点”（用户定义），展示地址而非名称（因为名称会在标签/标题里展示）
@@ -3743,23 +3748,34 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             if let loc = lastLocation ?? potentialStopStartLocation {
                 analyzeOngoingStay(at: loc)
             }
-        } else if let fp = footprint, let context = modelContext {
-            // 确保足迹已受管理 (针对 GAP_STAY 产生的幻影足迹)
-            if fp.modelContext == nil {
-                context.insert(fp)
-                if fp.locationHash == "GAP_STAY" {
-                    fp.locationHash = "MANUAL_STAY"
+        } else if let fp = footprint {
+            if !isDraft {
+                if let context = modelContext {
+                    // 确保足迹已受管理 (针对 GAP_STAY 产生的幻影足迹)
+                    if fp.modelContext == nil {
+                        context.insert(fp)
+                        if fp.locationHash == "GAP_STAY" {
+                            fp.locationHash = "MANUAL_STAY"
+                        }
+                    }
                 }
             }
             
             fp.address = suggestion.name
             fp.placeID = targetPlace.placeID
             fp.isAddressEditedByHand = true
-            // 重新分析足迹内容
-            analyzeFootprint(fp, context: context)
+            
+            if !isDraft {
+                if let context = modelContext {
+                    // 重新分析足迹内容
+                    analyzeFootprint(fp, context: context)
+                }
+            }
         }
         
-        try? modelContext?.save()
+        if !isDraft {
+            try? modelContext?.save()
+        }
     }
 
     private func clearOngoingPlaceOverride() {

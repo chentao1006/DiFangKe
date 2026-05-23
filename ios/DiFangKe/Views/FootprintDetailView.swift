@@ -229,7 +229,8 @@ struct FootprintModalView: View {
                 LocationSearchSheet(locationManager: locationManager, 
                                     coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), 
                                     forOngoing: false, 
-                                    footprint: footprint)
+                                    footprint: footprint,
+                                    isDraft: isDraft)
             }
             .sheet(item: Binding(get: { selectedPhotoID.map { IdentifiableString(value: $0) } }, set: { selectedPhotoID = $0?.value })) { item in
                 let index = footprint.photoAssetIDs.firstIndex(of: item.value) ?? 0
@@ -371,7 +372,7 @@ extension FootprintModalView {
             HStack(alignment: .center, spacing: 8) {
                 HStack(alignment: .top, spacing: 6) {
                     Menu {
-                        SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint) {
+                        SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint, isDraft: isDraft) {
                             showingSearchSheet = true
                         }
                     } label: {
