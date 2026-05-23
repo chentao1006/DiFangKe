@@ -56,7 +56,7 @@ struct RawPointsListView: View {
                                     Map(position: $position) {
                                         // 有效轨迹线（正常颜色）
                                         MapPolyline(coordinates: validCoordinates)
-                                            .stroke(Color.dfkAccent.opacity(0.5), lineWidth: 3)
+                                            .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
 
                                         // 漂移点用灰色圆点标注
                                         ForEach(Array(driftCoordinates.enumerated()), id: \.offset) { _, coord in
@@ -64,6 +64,7 @@ struct RawPointsListView: View {
                                                 Circle()
                                                     .fill(Color.gray.opacity(0.5))
                                                     .frame(width: 6, height: 6)
+                                                    .accessibilityHidden(true)
                                             }
                                         }
 

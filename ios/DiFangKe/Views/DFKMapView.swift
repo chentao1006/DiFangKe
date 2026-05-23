@@ -548,6 +548,7 @@ struct DFKMapView: View {
         .contentShape(RoundedRectangle(cornerRadius: 8 * scale, style: .continuous))
     }
 
+    @ViewBuilder
     private func transportAnnotationContent(for transport: Transport) -> some View {
         let transportIcon = ZStack {
             RoundedRectangle(cornerRadius: isInteractive ? 8 : 6)
@@ -562,14 +563,12 @@ struct DFKMapView: View {
         .contentShape(RoundedRectangle(cornerRadius: 6))
 
         if let onTimelineItemTap {
-            return AnyView(
-                transportIcon
-                    .onTapGesture {
-                        onTimelineItemTap(.transport(transport))
-                    }
-            )
+            transportIcon
+                .onTapGesture {
+                    onTimelineItemTap(.transport(transport))
+                }
         } else {
-            return AnyView(transportIcon)
+            transportIcon
         }
     }
 
@@ -654,6 +653,7 @@ struct DFKMapView: View {
             .frame(width: size, height: size)
     }
 
+    @ViewBuilder
     private func photoAnnotationContent(for asset: PHAsset) -> some View {
         let content = AssetThumbnailView(assetID: asset.localIdentifier, showsTime: false)
             .frame(width: isInteractive ? 60 : 46, height: isInteractive ? 60 : 46)
@@ -662,15 +662,13 @@ struct DFKMapView: View {
             .contentShape(Rectangle())
 
         if let onPhotoTap {
-            return AnyView(
-                content
-                    .onTapGesture {
-                        onPhotoTap(asset)
-                    }
-            )
+            content
+                .onTapGesture {
+                    onPhotoTap(asset)
+                }
+        } else {
+            content
         }
-
-        return AnyView(content)
     }
 
     private func snapshotCacheKey(for size: CGSize) -> String {

@@ -137,10 +137,6 @@ struct DayTimelineView: View {
             .onChange(of: scrollID) { oldValue, newValue in
                 handleScrollChange(oldValue: oldValue, newValue: newValue)
             }
-            .modifier(ArrowTapScrollPhaseModifier {
-                finalizeArrowTapSwipeIfNeeded()
-            })
-            
             // Date Switcher Bottom Gradient Fade
             LinearGradient(
                 stops: [
@@ -238,10 +234,6 @@ struct DayTimelineView: View {
     
     private func handleScrollChange(oldValue: Date?, newValue: Date?) {
         guard let newValue = newValue else { return }
-        let isArrowTapSwipe = {
-            guard let target = arrowTapTargetDate else { return false }
-            return isArrowTapAnimating && Calendar.current.isDate(target, inSameDayAs: newValue)
-        }()
 
         if newValue != oldValue {
             // 限制振动频率，避免连续切换时马达过载
@@ -249,11 +241,13 @@ struct DayTimelineView: View {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
         }
-        if isArrowTapSwipe {
+        
+        if isArrowTapAnimating {
+            // 正在箭头动画中，仅更新预览日期供 Header 显示，坚决不提前激活和进行重绘
             arrowTapPreviewDate = newValue
-            // 不提前写 selectedDate/activatedDate，等动画收尾 finalize
             return
         }
+        
         if !isPressingArrow {
             selectedDate = newValue
             scheduleDateActivation(for: newValue)
@@ -275,7 +269,13 @@ struct DayTimelineView: View {
         let delay: UInt64 = delayOverride ?? (isPressingArrow ? 300_000_000 : 200_000_000)
         
         activationTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: delay)
+            if delay == 0 {
+                // 即使 delay 为 0，也让当前渲染帧完成后再激活，避免卡住动画
+                await Task.yield()
+                await Task.yield()
+            } else {
+                try? await Task.sleep(nanoseconds: delay)
+            }
             if Task.isCancelled { return }
             withAnimation(.easeInOut(duration: 0.2)) {
                 activatedDate = date
@@ -292,16 +292,20 @@ struct DayTimelineView: View {
         // proxy.scrollTo 不保证总会及时回写 scrollID，收尾必须以目标日期为准。
         scrollID = targetDate
         selectedDate = targetDate
-        scheduleDateActivation(for: targetDate, delayOverride: 0)
-
-        preLoadTask?.cancel()
-        preLoadTask = Task { @MainActor in
-            preLoadNeighborDates(around: targetDate)
-        }
-
         isArrowTapAnimating = false
         arrowTapTargetDate = nil
         arrowTapPreviewDate = nil
+
+        // 给一小段时间让滚动动画帧先完成渲染，再触发耗时的 TimelinePageView 重建
+        activationTask?.cancel()
+        activationTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms，让 scroll settle
+            if Task.isCancelled { return }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                activatedDate = targetDate
+            }
+            preLoadNeighborDates(around: targetDate)
+        }
     }
 
     private func scheduleArrowTapFinalizeFallbackIfNeeded(duration: TimeInterval) {
@@ -352,6 +356,7 @@ struct DayTimelineView: View {
         let offset = latestOffsetIn(date: date)
         let dayFootprints = groupedFootprints[date] ?? []
         let dayManualSelections = groupedManualSelections[date] ?? []
+        let dayInsight = groupedInsights[date]
         TimelinePageView(
             date: date, 
             footprints: dayFootprints, 
@@ -360,7 +365,8 @@ struct DayTimelineView: View {
             offset: offset, 
             locationManager: locationManager, 
             pastLimitOffset: pastLimitOffset,
-            isActivePage: activatedDate == date
+            isActivePage: activatedDate == date,
+            dailyInsight: dayInsight
         )
         .frame(width: UIScreen.main.bounds.width)
         .id(date)
@@ -813,10 +819,12 @@ struct DayTimelineView: View {
 
         let targetDate = cachedDates[nextIndex]
         arrowTapTargetDate = targetDate
+        arrowTapPreviewDate = targetDate // 立刻更新 header 显示，无需等动画结束
         isArrowTapAnimating = true
-        withAnimation(.linear(duration: 0.4)) {
+        withAnimation(.easeInOut(duration: 0.45)) {
             proxy.scrollTo(targetDate, anchor: .center)
         }
+        scheduleArrowTapFinalizeFallbackIfNeeded(duration: 0.45)
     }
 
     private func simulateArrowTapSwipeToToday(proxy: ScrollViewProxy) {
@@ -1042,22 +1050,6 @@ struct DayTimelineView: View {
             }
         } message: {
             Text("这将会永久删除 iCloud 中的所有记录，且无法恢复。如果您想开启全新的记录体验，请选择确定。")
-        }
-    }
-}
-
-private struct ArrowTapScrollPhaseModifier: ViewModifier {
-    let onIdle: () -> Void
-
-    func body(content: Content) -> some View {
-        if #available(iOS 18.0, *) {
-            content.onScrollPhaseChange { _, newPhase in
-                if newPhase == .idle {
-                    onIdle()
-                }
-            }
-        } else {
-            content
         }
     }
 }

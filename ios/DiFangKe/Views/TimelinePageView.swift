@@ -15,7 +15,7 @@ struct TimelinePageView: View {
     let pastLimitOffset: Int
     let isActivePage: Bool
     let isFromHistory: Bool
-    @Query private var pageInsights: [DailyInsight]
+    let dailyInsight: DailyInsight?
     
     @State private var selectedFootprint: Footprint?
     @State private var selectedTransport: Transport?
@@ -46,12 +46,9 @@ struct TimelinePageView: View {
     @State private var dayPhotoAssets: [PHAsset] = []
     @State private var lastSummaryTimelineSignature: String?
     
-    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isActivePage: Bool = true, isFromHistory: Bool = false) {
+    init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isActivePage: Bool = true, isFromHistory: Bool = false, dailyInsight: DailyInsight? = nil) {
         self.date = date
-        let start = Calendar.current.startOfDay(for: date)
-        _pageInsights = Query(filter: #Predicate<DailyInsight> { insight in
-            insight.date == start
-        })
+        self.dailyInsight = dailyInsight
         
         self.footprints = footprints
         self.manualSelections = manualSelections
@@ -364,7 +361,7 @@ struct TimelinePageView: View {
                     timelineItems: displayedTimelineItems,
                     onTimelineItemTap: handleTimelineItemTap,
                     photoAssets: dayPhotoAssets,
-                    summary: pageInsights.first?.content,
+                    summary: dailyInsight?.content,
                     isLoading: isLoadingTimeline,
                     rendersLiveMap: isActivePage
                 )
@@ -495,7 +492,7 @@ struct TimelinePageView: View {
         guard triggerAiIfChanged,
               isAiAssistantEnabled else { return }
 
-        let isMissingSummary = pageInsights.first?.content?.isEmpty ?? true
+        let isMissingSummary = dailyInsight?.content?.isEmpty ?? true
         let signatureChanged = previousSignature != nil && previousSignature != signature
         
         guard signatureChanged || (previousSignature == nil && isMissingSummary) else { return }
