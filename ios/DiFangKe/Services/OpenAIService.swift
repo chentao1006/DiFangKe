@@ -400,6 +400,67 @@ class OpenAIService {
             }
         }
     }
+
+    func currentDailyOverviewSummary(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], completion: @escaping (String?) -> Void) {
+        guard let container = modelContainer else {
+            completion(nil)
+            return
+        }
+
+        let startOfDate = Calendar.current.startOfDay(for: date)
+        let fpIds = footprints.map(\.footprintID)
+        let tpIds = transports.map(\.recordID)
+
+        Task {
+            let context = ModelContext(container)
+            let profile = buildDailySummaryProfile(
+                fpIds: fpIds,
+                tpIds: tpIds,
+                context: context,
+                includeTodayData: true
+            )
+
+            let descriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate {
+                $0.date == startOfDate
+            })
+            let existing = (try? context.fetch(descriptor))?.first
+            let existingContent = existing?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if let profile,
+               existing?.aiGenerated == true,
+               existing?.dataFingerprint == profile.fingerprint,
+               let existingContent,
+               !existingContent.isEmpty {
+                await MainActor.run { completion(existingContent) }
+                return
+            }
+
+            let resolved = await self.resolveDailySummary(
+                date: startOfDate,
+                fpIds: fpIds,
+                tpIds: tpIds,
+                context: context,
+                includeTodayData: true
+            )
+
+            if let resolved {
+                if let existing {
+                    existing.content = resolved.content
+                    existing.aiGenerated = true
+                    existing.dataFingerprint = resolved.fingerprint
+                } else {
+                    let newSummary = DailyInsight(date: startOfDate, content: resolved.content, aiGenerated: true)
+                    newSummary.dataFingerprint = resolved.fingerprint
+                    context.insert(newSummary)
+                }
+                try? context.save()
+            }
+
+            await MainActor.run {
+                completion(resolved?.content)
+            }
+        }
+    }
     
     private func processDailySummaryTask(date: Date, fpIds: [UUID], tpIds: [UUID], context: ModelContext, force: Bool = false) async {
         let startOfDate = Calendar.current.startOfDay(for: date)
@@ -484,6 +545,8 @@ class OpenAIService {
         var events: [(Date, String)] = []
         var uniquePlaceKeys: Set<String> = []
         var totalTransportDistance: Double = 0
+        var transportEventCount = 0
+        var transportTypeNames: [String] = []
         var footprintCoordsByTime: [(Date, CLLocationCoordinate2D)] = []
         
         let startOfDate = Calendar.current.startOfDay(for: Date())
@@ -509,9 +572,15 @@ class OpenAIService {
         for id in tpIds {
             let tpDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == id })
             if let tp = (try? context.fetch(tpDescriptor))?.first {
+                transportEventCount += 1
                 let factLine = dailySummaryTransportLine(for: tp)
                 if !factLine.isEmpty {
                     events.append((tp.startTime, factLine))
+                }
+                let type = tp.manualTypeRaw ?? tp.typeRaw
+                let typeName = TransportType(rawValue: type)?.localizedName ?? "交通"
+                if !transportTypeNames.contains(typeName) {
+                    transportTypeNames.append(typeName)
                 }
                 if tp.distance > 0 {
                     totalTransportDistance += tp.distance
@@ -531,6 +600,9 @@ class OpenAIService {
 
         if totalDistanceEvidence > 0 {
             lines.append("\(lines.count + 1). 当日里程：\(dailySummaryDistanceText(totalDistanceEvidence))")
+        }
+        if !transportTypeNames.isEmpty {
+            lines.append("\(lines.count + 1). 交通概况：\(transportEventCount) 次移动，包含 \(transportTypeNames.joined(separator: "、"))")
         }
         lines.append("\(lines.count + 1). 地点变化：\(dailySummaryPlaceJudgement(uniquePlaceCount: uniquePlaceKeys.count, distanceMeters: totalDistanceEvidence))")
         
@@ -755,6 +827,7 @@ class OpenAIService {
         11. 若片段体现明显的远距离或跨区域移动，结论应体现范围扩大与跨区域特征，避免收缩性描述。
         12. 活动范围判断要以明确事实优先：里程数和地点词 > 模糊描述；有冲突时按更强证据下结论。
         13. 绝对不能在输出中包含“今天”二字，因为这是对往日的总结。
+        14. 只在足迹、交通、里程都显示活动很少时，才可以写“基本在家”“没怎么出门”这类收缩性结论；只要有多次移动、骑行、电动车或明显里程，就必须体现出门或移动。
 
         事实片段：
         \(list)
