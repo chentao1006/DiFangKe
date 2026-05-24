@@ -111,7 +111,7 @@ cat <<EOF > "$JSON_DEST"
 {
   "versionCode": $VERSION_CODE,
   "versionName": "$VERSION_NAME",
-  "downloadUrl": "https://difangke.cn/download/difangke.apk",
+  "downloadUrl": "https://difang.app/download/difangke.apk",
   "releaseNotes": "1. 自动打包发布版本 $VERSION_NAME\n2. 修复已知问题并提升稳定性"
 }
 EOF
