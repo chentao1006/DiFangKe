@@ -88,15 +88,15 @@ final class RawLocationStore {
         UIDevice.current.name
     }
 
-    private var isICloudSyncEnabled: Bool {
-        if UserDefaults.standard.object(forKey: "isICloudSyncEnabled") == nil {
+    private var isRawTrajectoryICloudSyncEnabled: Bool {
+        if UserDefaults.standard.object(forKey: "isRawTrajectoryICloudSyncEnabled") == nil {
             return true
         }
-        return UserDefaults.standard.bool(forKey: "isICloudSyncEnabled")
+        return UserDefaults.standard.bool(forKey: "isRawTrajectoryICloudSyncEnabled")
     }
 
     func preferredRecordingDeviceID() -> String {
-        guard isICloudSyncEnabled else { return deviceID }
+        guard isRawTrajectoryICloudSyncEnabled else { return deviceID }
         if let selected = UserDefaults.standard.string(forKey: preferredRecordingDeviceKey), !selected.isEmpty {
             return selected
         }
@@ -3818,7 +3818,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     /// 执行原始轨迹数据的 iCloud 同步
     func performRawDataSync(showOverlay: Bool = false, onlyRecent: Bool = true, skipUpload: Bool = false) async {
-        guard UserDefaults.standard.bool(forKey: "isICloudSyncEnabled") || showOverlay else { return }
+        let isRawTrajectorySyncEnabled = UserDefaults.standard.object(forKey: "isRawTrajectoryICloudSyncEnabled") as? Bool ?? true
+        guard isRawTrajectorySyncEnabled else { return }
         
         if showOverlay {
             await MainActor.run {

@@ -344,6 +344,15 @@ struct RecordingStatusCard: View {
             return "正在此处停留"
         }
     }
+
+    private var currentSpeedText: String {
+        let speedKmh = max(locationManager.lastLocation?.speed ?? 0, 0) * 3.6
+        return String(format: "当前速度 %.1f km/h", speedKmh)
+    }
+
+    private var shouldShowCurrentSpeed: Bool {
+        locationManager.uiIsMoving && (locationManager.lastLocation?.speed ?? 0) > 0.5
+    }
     
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -416,7 +425,11 @@ struct RecordingStatusCard: View {
                             .buttonStyle(.plain)
                         } else {
                             TimelineView(.periodic(from: .now, by: 60)) { _ in
-                                if let durationStr = locationManager.stayDuration {
+                                if shouldShowCurrentSpeed {
+                                    Text(currentSpeedText)
+                                        .font(.system(size: 14))
+                                        .foregroundColor(.secondary)
+                                } else if let durationStr = locationManager.stayDuration {
                                     Text("已停留 \(durationStr)")
                                         .font(.system(size: 14))
                                         .foregroundColor(.secondary)

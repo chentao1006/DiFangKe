@@ -2,21 +2,33 @@ import SwiftUI
 import CoreLocation
 
 struct RawLogsManagerView: View {
+    @AppStorage("isRawTrajectoryICloudSyncEnabled") private var isRawTrajectoryICloudSyncEnabled = true
+
     @State private var files: [RawFileItem] = []
     
     @State private var isSyncing = false
     @State private var syncStatus: String?
+    @State private var isExportingAll = false
+    @State private var exportAllURL: URL?
+    @State private var showingExportAllShareSheet = false
+    @State private var exportAllError: String?
     
     @Environment(LocationManager.self) private var locationManager
     
     var body: some View {
         List {
-            Section(header: Text("iCloud 同步")) {
+            Section(header: Text("iCloud 同步"), footer: Text("关闭后，此设备不会自动同步轨迹文件，也不能手动上传或下载轨迹文件。")) {
+                Toggle("同步轨迹文件", isOn: $isRawTrajectoryICloudSyncEnabled)
+
                 HStack {
                     VStack(alignment: .leading) {
                         Text("手动备份到云端")
                             .font(.headline)
-                        if let lastSync = RawLocationStore.shared.lastSyncDate {
+                        if !isRawTrajectoryICloudSyncEnabled {
+                            Text("轨迹文件同步已关闭")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else if let lastSync = RawLocationStore.shared.lastSyncDate {
                             Text("上次同步: \(lastSync.formatted(.dateTime.month().day().hour().minute()))")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -36,6 +48,7 @@ struct RawLogsManagerView: View {
                                 await startSync()
                             }
                         }
+                        .disabled(!isRawTrajectoryICloudSyncEnabled)
                     }
                 }
                 
@@ -51,6 +64,19 @@ struct RawLogsManagerView: View {
                     Text("暂无数据文件")
                         .foregroundColor(.secondary)
                 } else {
+                    Button {
+                        exportAllFiles()
+                    } label: {
+                        HStack {
+                            Label("导出全部", systemImage: "archivebox")
+                            Spacer()
+                            if isExportingAll {
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(isExportingAll)
+
                     ForEach(files) { file in
                         HStack {
                             VStack(alignment: .leading) {
@@ -73,6 +99,90 @@ struct RawLogsManagerView: View {
         .navigationTitle("轨迹文件")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: loadFiles)
+        .sheet(isPresented: $showingExportAllShareSheet) {
+            if let exportAllURL {
+                ActivityView(activityItems: [exportAllURL])
+            }
+        }
+        .alert("导出失败", isPresented: Binding(
+            get: { exportAllError != nil },
+            set: { if !$0 { exportAllError = nil } }
+        )) {
+            Button("确定", role: .cancel) { }
+        } message: {
+            Text(exportAllError ?? "")
+        }
+        .onChange(of: isRawTrajectoryICloudSyncEnabled) { _, newValue in
+            if !newValue {
+                syncStatus = nil
+            }
+            Task { @MainActor in
+                await locationManager.refreshForRecordingDeviceChange()
+            }
+        }
+    }
+
+    private func exportAllFiles() {
+        guard !files.isEmpty else { return }
+
+        isExportingAll = true
+        let fileURLs = files.map(\.url)
+
+        Task {
+            do {
+                let archiveURL = try makeZipArchive(from: fileURLs)
+                await MainActor.run {
+                    exportAllURL = archiveURL
+                    showingExportAllShareSheet = true
+                    isExportingAll = false
+                }
+            } catch {
+                await MainActor.run {
+                    exportAllError = error.localizedDescription
+                    isExportingAll = false
+                }
+            }
+        }
+    }
+
+    private func makeZipArchive(from fileURLs: [URL]) throws -> URL {
+        let fileManager = FileManager.default
+        let exportRoot = fileManager.temporaryDirectory.appendingPathComponent("RawLocationsExport-\(UUID().uuidString)", isDirectory: true)
+        let payloadDirectory = exportRoot.appendingPathComponent("RawLocations", isDirectory: true)
+
+        try fileManager.createDirectory(at: payloadDirectory, withIntermediateDirectories: true)
+
+        for fileURL in fileURLs {
+            let destinationURL = payloadDirectory.appendingPathComponent(fileURL.lastPathComponent)
+            try fileManager.copyItem(at: fileURL, to: destinationURL)
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let archiveURL = fileManager.temporaryDirectory.appendingPathComponent("DiFangKe_RawLocations_\(formatter.string(from: Date())).zip")
+        if fileManager.fileExists(atPath: archiveURL.path) {
+            try fileManager.removeItem(at: archiveURL)
+        }
+
+        var coordinatorError: NSError?
+        var copyError: Error?
+        let coordinator = NSFileCoordinator()
+        coordinator.coordinate(readingItemAt: payloadDirectory, options: .forUploading, error: &coordinatorError) { temporaryZipURL in
+            do {
+                try fileManager.copyItem(at: temporaryZipURL, to: archiveURL)
+            } catch {
+                copyError = error
+            }
+        }
+
+        if let copyError {
+            throw copyError
+        }
+        if let coordinatorError {
+            throw coordinatorError
+        }
+
+        return archiveURL
     }
     
     @MainActor
@@ -105,6 +215,11 @@ struct RawLogsManagerView: View {
     }
     
     private func startSync() async {
+        guard isRawTrajectoryICloudSyncEnabled else {
+            syncStatus = "轨迹文件同步已关闭"
+            return
+        }
+
         isSyncing = true
         syncStatus = "正在同步文件..."
         

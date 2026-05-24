@@ -1247,6 +1247,14 @@ class TimelineBuilder {
         }
         return distance
     }
+    
+    static func shouldAttachTransportEndpoint(pathEndpoint: CodableCoordinate?, footprint: CodableCoordinate) -> Bool {
+        guard let pathEndpoint else { return true }
+        let pathLocation = CLLocation(latitude: pathEndpoint.lat, longitude: pathEndpoint.lon)
+        let footprintLocation = CLLocation(latitude: footprint.lat, longitude: footprint.lon)
+        let threshold = min(AppConfig.shared.stayDistanceThreshold, 120.0)
+        return pathLocation.distance(from: footprintLocation) <= threshold
+    }
 }
 
 struct CodableCoordinate: Codable {
@@ -1410,7 +1418,7 @@ class PersistentTimelineBuilder {
         await mergeConsecutiveFootprints(for: date, in: context, allRawPoints: allRawPoints, threshold: AppConfig.shared.mergeDistanceThreshold)
         await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
         await fillGapsBetweenItems(for: date, in: context, allRawPoints: allRawPoints, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
-        await snapTransportsToFootprints(for: date, in: context)
+        await snapTransportsToFootprints(for: date, in: context, allRawPoints: allRawPoints)
         try? context.save()
         // ----------------------------------------------------
         
@@ -1654,12 +1662,17 @@ class PersistentTimelineBuilder {
                 var actualEndTime = gapEnd
                 
                 if !gapPoints.isEmpty {
-                    // Include the footprint centers in the path to ensure correct mileage
-                    var combinedPoints = [CLLocation(latitude: currentFp.latitude, longitude: currentFp.longitude)]
-                    combinedPoints.append(contentsOf: gapPoints)
-                    combinedPoints.append(CLLocation(latitude: nextFp.latitude, longitude: nextFp.longitude))
-                    pathDist = TimelineBuilder.calculateDistance(combinedPoints)
-                    pts = combinedPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) }
+                    var routePoints = gapPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) }
+                    let startCoord = CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude)
+                    if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.first, footprint: startCoord) {
+                        routePoints.insert(startCoord, at: 0)
+                    }
+                    let endCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)
+                    if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.last, footprint: endCoord) {
+                        routePoints.append(endCoord)
+                    }
+                    pathDist = TimelineBuilder.calculatePathDistance(routePoints)
+                    pts = routePoints
                     
                     // 核心要求：交通的时间要从真正探测到移动后开始
                     actualStartTime = gapPoints.first!.timestamp
@@ -1722,7 +1735,15 @@ class PersistentTimelineBuilder {
     }
     
     @MainActor
-    private static func snapTransportsToFootprints(for date: Date, in context: ModelContext) async {
+    static func refreshTransportRoutesForDay(date: Date, in context: ModelContext) async {
+        let allRawPoints = await Task.detached {
+            RawLocationStore.shared.loadAllDevicesLocations(for: date)
+        }.value
+        await snapTransportsToFootprints(for: date, in: context, allRawPoints: allRawPoints)
+    }
+    
+    @MainActor
+    private static func snapTransportsToFootprints(for date: Date, in context: ModelContext, allRawPoints: [CLLocation] = []) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
@@ -1746,6 +1767,11 @@ class PersistentTimelineBuilder {
                 decodedPoints = decoded
             }
             
+            var alignedPreviousFootprint: Footprint?
+            var alignedNextFootprint: Footprint?
+            var routeSearchStart = tp.startTime
+            var routeSearchEnd = tp.endTime
+            
             if let prevFp = fps.last(where: { $0.endTime <= tp.startTime + AppConfig.shared.snapTimeBuffer }) {
                 let gap = tp.startTime.timeIntervalSince(prevFp.endTime)
                 if gap >= 0 && gap < AppConfig.shared.transportAlignmentThreshold { 
@@ -1755,10 +1781,8 @@ class PersistentTimelineBuilder {
                     if !locName.isEmpty && locName != "某地" {
                         tp.startLocation = locName
                     }
-                    let fpCoord = CodableCoordinate(lat: prevFp.latitude, lon: prevFp.longitude)
-                    if decodedPoints.first?.lat != fpCoord.lat || decodedPoints.first?.lon != fpCoord.lon {
-                        decodedPoints.insert(fpCoord, at: 0)
-                    }
+                    alignedPreviousFootprint = prevFp
+                    routeSearchStart = min(routeSearchStart, prevFp.endTime.addingTimeInterval(-5 * 60))
                     changed = true
                 }
             }
@@ -1772,11 +1796,38 @@ class PersistentTimelineBuilder {
                     if !locName.isEmpty && locName != "某地" {
                         tp.endLocation = locName
                     }
-                    let fpCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)
-                    if decodedPoints.last?.lat != fpCoord.lat || decodedPoints.last?.lon != fpCoord.lon {
-                        decodedPoints.append(fpCoord)
-                    }
+                    alignedNextFootprint = nextFp
+                    routeSearchEnd = max(routeSearchEnd, nextFp.startTime)
                     changed = true
+                }
+            }
+            
+            let rawRoute = repairedTransportRoute(
+                from: allRawPoints,
+                start: routeSearchStart,
+                end: routeSearchEnd,
+                previousFootprint: alignedPreviousFootprint
+            )
+            if rawRoute.count >= 2 {
+                decodedPoints = rawRoute.map {
+                    CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude)
+                }
+                changed = true
+            }
+            
+            if let prevFp = alignedPreviousFootprint {
+                let fpCoord = CodableCoordinate(lat: prevFp.latitude, lon: prevFp.longitude)
+                if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: decodedPoints.first, footprint: fpCoord) &&
+                    (decodedPoints.first?.lat != fpCoord.lat || decodedPoints.first?.lon != fpCoord.lon) {
+                    decodedPoints.insert(fpCoord, at: 0)
+                }
+            }
+            
+            if let nextFp = alignedNextFootprint {
+                let fpCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)
+                if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: decodedPoints.last, footprint: fpCoord) &&
+                    (decodedPoints.last?.lat != fpCoord.lat || decodedPoints.last?.lon != fpCoord.lon) {
+                    decodedPoints.append(fpCoord)
                 }
             }
             
@@ -1792,6 +1843,28 @@ class PersistentTimelineBuilder {
             }
         }
         try? context.save()
+    }
+    
+    private static func repairedTransportRoute(from rawPoints: [CLLocation], start: Date, end: Date, previousFootprint: Footprint?) -> [CLLocation] {
+        guard end > start else { return [] }
+        var route = rawPoints.filter { point in
+            if point.timestamp < start || point.timestamp > end { return false }
+            if point.horizontalAccuracy <= 0 || point.horizontalAccuracy > AppConfig.shared.habitAnalysisAccuracyThreshold { return false }
+            return true
+        }
+        
+        guard route.count >= 2 else { return route }
+        
+        if let previousFootprint {
+            let center = CLLocation(latitude: previousFootprint.latitude, longitude: previousFootprint.longitude)
+            let exitRadius = min(AppConfig.shared.stayDistanceThreshold * 0.4, 80.0)
+            if let exitIndex = route.firstIndex(where: { $0.distance(from: center) >= exitRadius }) {
+                let startIndex = max(route.startIndex, route.index(before: exitIndex))
+                route = Array(route[startIndex...])
+            }
+        }
+        
+        return route
     }
 
     private static func getSimplifiedLocationName(for footprint: Footprint, allPlaces: [Place]) -> String {
@@ -2088,15 +2161,29 @@ class PersistentTimelineBuilder {
             let duration = clusterPoints.last!.timestamp.timeIntervalSince(clusterPoints.first!.timestamp)
             
             if duration >= AppConfig.shared.stayDurationThreshold {
+                let split = departureTailSplitIndex(
+                    points: points,
+                    clusterStartIndex: i,
+                    clusterEndIndex: j,
+                    clusterPoints: clusterPoints
+                )
+                let footprintClusterPoints = split.map { Array(points[i..<$0]) } ?? clusterPoints
+                guard let fpStart = footprintClusterPoints.first,
+                      let fpEnd = footprintClusterPoints.last,
+                      fpEnd.timestamp.timeIntervalSince(fpStart.timestamp) >= AppConfig.shared.stayDurationThreshold else {
+                    i = split ?? j
+                    continue
+                }
+                
                 // 判定为足迹！
-                let coords = clusterPoints.map { $0.coordinate }
+                let coords = footprintClusterPoints.map { $0.coordinate }
                 let fp = Footprint(
                     date: startOfDay,
-                    startTime: clusterPoints.first!.timestamp,
-                    endTime: clusterPoints.last!.timestamp,
+                    startTime: fpStart.timestamp,
+                    endTime: fpEnd.timestamp,
                     footprintLocations: coords,
                     locationHash: "\(coords.first?.latitude ?? 0),\(coords.first?.longitude ?? 0)",
-                    duration: duration,
+                    duration: fpEnd.timestamp.timeIntervalSince(fpStart.timestamp),
                     status: .confirmed
                 )
                 
@@ -2118,7 +2205,7 @@ class PersistentTimelineBuilder {
                 }
                 context.insert(fp)
                 lastFp = fp
-                i = j // 跳过该簇
+                i = split ?? j // 保留停留簇末尾的离开轨迹给交通，避免交通开头变直线
             } else {
                 // i 及其后续一小段不足以构成停留，那么从 i 到下一个停留起始点之间就是交通
                 // 寻找下一个能构成停留的起始点 k
@@ -2178,7 +2265,14 @@ class PersistentTimelineBuilder {
                     // Calculate distance including footprint connections if available
                     var augmentedPoints = transportPoints
                     if let last = lastFp {
-                        augmentedPoints.insert(CLLocation(latitude: last.latitude, longitude: last.longitude), at: 0)
+                        let endpoint = CodableCoordinate(
+                            lat: augmentedPoints.first!.coordinate.latitude,
+                            lon: augmentedPoints.first!.coordinate.longitude
+                        )
+                        let footprintCoord = CodableCoordinate(lat: last.latitude, lon: last.longitude)
+                        if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: endpoint, footprint: footprintCoord) {
+                            augmentedPoints.insert(CLLocation(latitude: last.latitude, longitude: last.longitude), at: 0)
+                        }
                         if startName == "起点" {
                             startName = last.address ?? "起点"
                         }
@@ -2234,6 +2328,24 @@ class PersistentTimelineBuilder {
                 i = k // 移动到下一个可能的停留点或末尾
             }
         }
+    }
+    
+    private static func departureTailSplitIndex(points: [CLLocation], clusterStartIndex: Int, clusterEndIndex: Int, clusterPoints: [CLLocation]) -> Int? {
+        guard clusterEndIndex < points.count, clusterEndIndex - clusterStartIndex >= 3 else { return nil }
+        guard let clusterEnd = clusterPoints.last else { return nil }
+        
+        let maxTailDuration: TimeInterval = 5 * 60
+        let earliestTailTime = clusterEnd.timestamp.addingTimeInterval(-maxTailDuration)
+        var splitIndex = clusterStartIndex
+        
+        while splitIndex < clusterEndIndex && points[splitIndex].timestamp < earliestTailTime {
+            splitIndex += 1
+        }
+        
+        let stableDuration = points[splitIndex].timestamp.timeIntervalSince(points[clusterStartIndex].timestamp)
+        guard stableDuration >= AppConfig.shared.stayDurationThreshold else { return nil }
+        
+        return splitIndex
     }
     
     // --- 地理编码限频解析器 ---

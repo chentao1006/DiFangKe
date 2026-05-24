@@ -563,6 +563,7 @@ struct HistoryMonthView: View {
     let onDayTap: (Date) -> Void
     
     @State private var monthsLimit: Int = 12 // 每页预加载多一些月
+    @State private var rawPointsDialogDate: IdentifiableDate?
     
     var monthsCount: Int {
         let calendar = Calendar.current
@@ -580,26 +581,32 @@ struct HistoryMonthView: View {
     
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 32, pinnedViews: [.sectionHeaders]) {
-                    ForEach(months, id: \.self) { month in
-                        Section(header: monthHeader(for: month)) {
-                            monthGrid(for: month)
-                        }
-                        .id("month-" + month.dayID)
-                    }
-                    
-                    if monthsLimit < monthsCount {
-                        ProgressView()
-                            .padding()
-                            .onAppear {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                    monthsLimit += 12
-                                }
+            ZStack {
+                ScrollView {
+                    LazyVStack(spacing: 32, pinnedViews: [.sectionHeaders]) {
+                        ForEach(months, id: \.self) { month in
+                            Section(header: monthHeader(for: month)) {
+                                monthGrid(for: month)
                             }
+                            .id("month-" + month.dayID)
+                        }
+
+                        if monthsLimit < monthsCount {
+                            ProgressView()
+                                .padding()
+                                .onAppear {
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                        monthsLimit += 12
+                                    }
+                                }
+                        }
                     }
+                    .padding(.bottom, 30)
                 }
-                .padding(.bottom, 30)
+
+                if let rawPointsDialogDate {
+                    rawPointsActionOverlay(for: rawPointsDialogDate)
+                }
             }
             .background(Color.dfkBackground)
             .onAppear {
@@ -631,6 +638,67 @@ struct HistoryMonthView: View {
                 proxy.scrollTo("month-" + startOfMonth.dayID, anchor: .top)
             }
         }
+    }
+
+    private func rawPointsActionOverlay(for item: IdentifiableDate) -> some View {
+        ZStack {
+            Color.black.opacity(0.25)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        rawPointsDialogDate = nil
+                    }
+                }
+
+            VStack(spacing: 0) {
+                VStack(spacing: 4) {
+                    Text("日期操作")
+                        .font(.headline)
+                    Text(item.date.formatted(.dateTime.year().month().day()))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.top, 16)
+                .padding(.bottom, 12)
+
+                Divider()
+
+                HStack(spacing: 10) {
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                        .foregroundColor(.dfkAccent)
+                    Text("查看所有轨迹点")
+                        .foregroundColor(.primary)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 52)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    showingRawPointsDate = item
+                    rawPointsDialogDate = nil
+                }
+
+                Divider()
+
+                Text("取消")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 48)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            rawPointsDialogDate = nil
+                        }
+                    }
+            }
+            .frame(width: 280)
+            .background(Color(uiColor: .systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(color: .black.opacity(0.18), radius: 20, x: 0, y: 8)
+            .transition(.scale(scale: 0.96).combined(with: .opacity))
+        }
+        .zIndex(10)
     }
     
     private func monthHeader(for date: Date) -> some View {
@@ -670,12 +738,9 @@ struct HistoryMonthView: View {
                         activityTypes: allActivityTypes,
                         onTap: { onDayTap(date) }
                     )
-                        .contextMenu {
-                            Button {
-                                showingRawPointsDate = IdentifiableDate(date: date)
-                            } label: {
-                                Label("查看所有轨迹点", systemImage: "dot.radiowaves.left.and.right")
-                            }
+                        .onLongPressGesture(minimumDuration: 0.45) {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            rawPointsDialogDate = IdentifiableDate(date: date)
                         }
                 }
             }
