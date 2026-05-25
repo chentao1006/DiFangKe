@@ -720,7 +720,7 @@ class LocationTrackingService : Service() {
         val pts = mutableListOf<List<Double>>()
         if (lat1 != 0.0) pts.add(listOf(lat1, lon1, prevFp.endTime.time.toDouble()))
         if (rawPoints.isNotEmpty()) {
-            pts.addAll(rawPoints.map { listOf(it.latitude, it.longitude, it.timestamp.toDouble()) })
+            pts.addAll(rawPoints.map { listOf(it.latitude, it.longitude, it.timestamp.time.toDouble()) })
         }
         if (lat2 != 0.0) pts.add(listOf(lat2, lon2, newFp.startTime.time.toDouble()))
 

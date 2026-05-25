@@ -321,7 +321,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         val pts = mutableListOf<List<Double>>()
         pts.add(listOf(lat1, lon1, prevFp.endTime.time.toDouble()))
         if (segmentPoints.isNotEmpty()) {
-            pts.addAll(segmentPoints.map { listOf(it.latitude, it.longitude, it.timestamp.toDouble()) })
+            pts.addAll(segmentPoints.map { listOf(it.latitude, it.longitude, it.timestamp.time.toDouble()) })
         }
         pts.add(listOf(lat2, lon2, newFp.startTime.time.toDouble()))
 

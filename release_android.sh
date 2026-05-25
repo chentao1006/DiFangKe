@@ -88,7 +88,7 @@ mkdir -p "$DEPLOY_DIR"
 # 4.1 手动强制重新签署 (确保同时拥有 V1 和 V2 证书)
 SDK_DIR=$(grep "^sdk.dir=" "$ROOT_DIR/android/local.properties" | cut -d'=' -f2)
 APKSIGNER=$(find "$SDK_DIR/build-tools" -name "apksigner" | sort -r | head -n 1)
-KS_PATH="$ROOT_DIR/android/difangke.jks"
+KS_PATH="$ROOT_DIR/android/key.jks"
 KS_PASS=$(get_local_prop "STORE_PASSWORD")
 KEY_ALIAS=$(get_local_prop "KEY_ALIAS")
 

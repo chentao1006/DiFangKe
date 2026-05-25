@@ -52,7 +52,7 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file("../" + (localProperties.getProperty("KEY_FILE") ?: "difangke.jks"))
+            storeFile = file("../" + (localProperties.getProperty("KEY_FILE") ?: "key.jks"))
             storePassword = localProperties.getProperty("STORE_PASSWORD") ?: ""
             keyAlias = localProperties.getProperty("KEY_ALIAS") ?: ""
             keyPassword = localProperties.getProperty("KEY_PASSWORD") ?: ""
