@@ -214,10 +214,11 @@ struct Transport: Identifiable {
     let distance: Double // in meters
     let averageSpeed: Double // in m/s
     let points: [CLLocationCoordinate2D]
+    let pathPoints: [TransportPathPoint]
     var manualType: TransportType? = nil
     var stepCount: Int? = nil
     
-    init(id: UUID = UUID(), startTime: Date, endTime: Date, startLocation: String, endLocation: String, type: TransportType, distance: Double, averageSpeed: Double, points: [CLLocationCoordinate2D], manualType: TransportType? = nil, stepCount: Int? = nil) {
+    init(id: UUID = UUID(), startTime: Date, endTime: Date, startLocation: String, endLocation: String, type: TransportType, distance: Double, averageSpeed: Double, points: [CLLocationCoordinate2D], pathPoints: [TransportPathPoint]? = nil, manualType: TransportType? = nil, stepCount: Int? = nil) {
         self.id = id
         self.startTime = startTime
         self.endTime = endTime
@@ -227,6 +228,7 @@ struct Transport: Identifiable {
         self.distance = distance
         self.averageSpeed = averageSpeed
         self.points = points
+        self.pathPoints = pathPoints ?? points.map { TransportPathPoint(coordinate: $0, timestamp: nil) }
         self.manualType = manualType
         self.stepCount = stepCount
     }
@@ -240,22 +242,22 @@ struct Transport: Identifiable {
     }
     
     func updatingStart(_ location: String) -> Transport {
-        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: location, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: manualType, stepCount: stepCount)
+        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: location, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, pathPoints: pathPoints, manualType: manualType, stepCount: stepCount)
     }
     
     func updatingEnd(_ location: String) -> Transport {
-        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: location, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: manualType, stepCount: stepCount)
+        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: location, type: type, distance: distance, averageSpeed: averageSpeed, points: points, pathPoints: pathPoints, manualType: manualType, stepCount: stepCount)
     }
     
     func updatingType(_ newType: TransportType) -> Transport {
-        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: newType, stepCount: stepCount)
+        Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, pathPoints: pathPoints, manualType: newType, stepCount: stepCount)
     }
 
     func updatingTimes(start: Date, end: Date) -> Transport {
-        Transport(id: id, startTime: start, endTime: end, startLocation: startLocation, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, manualType: manualType, stepCount: stepCount)
+        Transport(id: id, startTime: start, endTime: end, startLocation: startLocation, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, pathPoints: pathPoints, manualType: manualType, stepCount: stepCount)
     }
 
-    func updatingPoints(_ newPoints: [CLLocationCoordinate2D]) -> Transport {
+    func updatingPoints(_ newPoints: [CLLocationCoordinate2D], newPathPoints: [TransportPathPoint]? = nil) -> Transport {
         var newDistance: Double = 0
         if newPoints.count >= 2 {
             for i in 0..<newPoints.count - 1 {
@@ -267,10 +269,121 @@ struct Transport: Identifiable {
         let duration = endTime.timeIntervalSince(startTime)
         let newSpeed = duration > 0 ? newDistance / duration : 0
         
-        return Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: endLocation, type: type, distance: newDistance, averageSpeed: newSpeed, points: newPoints, manualType: manualType, stepCount: stepCount)
+        return Transport(id: id, startTime: startTime, endTime: endTime, startLocation: startLocation, endLocation: endLocation, type: type, distance: newDistance, averageSpeed: newSpeed, points: newPoints, pathPoints: newPathPoints ?? pathPoints, manualType: manualType, stepCount: stepCount)
     }
 }
 
+struct TransportPathPoint {
+    let coordinate: CLLocationCoordinate2D
+    let timestamp: Date?
+}
+
+struct TransportLineSegment: Identifiable {
+    let id: String
+    let coordinates: [CLLocationCoordinate2D]
+    let isDashed: Bool
+}
+
+extension Transport {
+    var lineSegments: [TransportLineSegment] {
+        let validPoints = pathPoints.filter {
+            $0.coordinate.latitude.isFinite &&
+            $0.coordinate.longitude.isFinite &&
+            CLLocationCoordinate2DIsValid($0.coordinate)
+        }
+        guard validPoints.count >= 2 else { return [] }
+
+        var segments: [TransportLineSegment] = []
+        var currentChunk: [CLLocationCoordinate2D] = [validPoints[0].coordinate]
+        var isCurrentlyDashed: Bool? = nil
+
+        for i in 0..<(validPoints.count - 1) {
+            let current = validPoints[i]
+            let next = validPoints[i + 1]
+            let isDashed: Bool
+            if let currentTime = current.timestamp, let nextTime = next.timestamp {
+                isDashed = abs(nextTime.timeIntervalSince(currentTime)) > 3 * 60
+            } else {
+                isDashed = false
+            }
+
+            if isCurrentlyDashed == nil {
+                isCurrentlyDashed = isDashed
+            }
+
+            if isCurrentlyDashed == isDashed {
+                currentChunk.append(next.coordinate)
+            } else {
+                segments.append(TransportLineSegment(
+                    id: "\(id.uuidString)-\(segments.count)",
+                    coordinates: currentChunk.smoothed(),
+                    isDashed: isCurrentlyDashed!
+                ))
+                currentChunk = [current.coordinate, next.coordinate]
+                isCurrentlyDashed = isDashed
+            }
+        }
+
+        if let dashed = isCurrentlyDashed, currentChunk.count >= 2 {
+            segments.append(TransportLineSegment(
+                id: "\(id.uuidString)-\(segments.count)",
+                coordinates: currentChunk.smoothed(),
+                isDashed: dashed
+            ))
+        }
+
+        return segments
+    }
+}
+
+extension Array where Element == CLLocationCoordinate2D {
+    /// 使用 Catmull-Rom 插值算法对坐标点进行平滑处理，使其呈现出优雅的曲线感
+    func smoothed(granularity: Int = 10) -> [CLLocationCoordinate2D] {
+        guard count >= 3 else { return self }
+        
+        var result: [CLLocationCoordinate2D] = []
+        
+        // 预处理：过滤掉极近的点，避免插值抖动
+        var filtered: [CLLocationCoordinate2D] = [self[0]]
+        for i in 1..<count {
+            let p1 = filtered.last!
+            let p2 = self[i]
+            let dist = sqrt(pow(p2.latitude - p1.latitude, 2) + pow(p2.longitude - p1.longitude, 2))
+            if dist > 0.00001 { // 约 1 米
+                filtered.append(p2)
+            }
+        }
+        
+        guard filtered.count >= 3 else { return self }
+        
+        for i in 0..<filtered.count - 1 {
+            let p0 = filtered[Swift.max(i - 1, 0)]
+            let p1 = filtered[i]
+            let p2 = filtered[i + 1]
+            let p3 = filtered[Swift.min(i + 2, filtered.count - 1)]
+            
+            for t in 0..<granularity {
+                let s = Double(t) / Double(granularity)
+                let lat = catmullRom(p0.latitude, p1.latitude, p2.latitude, p3.latitude, t: s)
+                let lon = catmullRom(p0.longitude, p1.longitude, p2.longitude, p3.longitude, t: s)
+                result.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
+            }
+        }
+        result.append(filtered.last!)
+        return result
+    }
+    
+    private func catmullRom(_ p0: Double, _ p1: Double, _ p2: Double, _ p3: Double, t: Double) -> Double {
+        let t2 = t * t
+        let t3 = t2 * t
+        return 0.5 * (
+            (2 * p1) +
+            (-p0 + p2) * t +
+            (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+            (-p0 + 3 * p1 - 3 * p2 + p3) * t3
+        )
+    }
+}
 
 @Model
 final class TransportRecord {

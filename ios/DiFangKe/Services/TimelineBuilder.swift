@@ -393,13 +393,19 @@ class TimelineBuilder {
                 
                 // 强制对齐坐标
                 var newPoints = updatedT.points
+                var newPathPoints = updatedT.pathPoints
                 let startCoord = CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
+                let startTimestamp = fp.endTime
                 if newPoints.isEmpty {
                     newPoints = [startCoord]
+                    newPathPoints = [TransportPathPoint(coordinate: startCoord, timestamp: startTimestamp)]
                 } else {
                     newPoints[0] = startCoord
+                    if !newPathPoints.isEmpty {
+                        newPathPoints[0] = TransportPathPoint(coordinate: startCoord, timestamp: newPathPoints[0].timestamp ?? startTimestamp)
+                    }
                 }
-                updatedT = updatedT.updatingPoints(newPoints)
+                updatedT = updatedT.updatingPoints(newPoints, newPathPoints: newPathPoints)
             }
             
             // 向后寻找最近的足迹点作为终点
@@ -422,15 +428,22 @@ class TimelineBuilder {
                 
                 // 强制对齐坐标
                 var newPoints = updatedT.points
+                var newPathPoints = updatedT.pathPoints
                 let endCoord = CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
+                let endTimestamp = fp.startTime
                 if newPoints.isEmpty {
                     newPoints.append(endCoord)
+                    newPathPoints.append(TransportPathPoint(coordinate: endCoord, timestamp: endTimestamp))
                 } else if newPoints.count == 1 {
                     newPoints.append(endCoord)
+                    newPathPoints.append(TransportPathPoint(coordinate: endCoord, timestamp: endTimestamp))
                 } else {
                     newPoints[newPoints.count - 1] = endCoord
+                    if !newPathPoints.isEmpty {
+                        newPathPoints[newPathPoints.count - 1] = TransportPathPoint(coordinate: endCoord, timestamp: newPathPoints[newPathPoints.count - 1].timestamp ?? endTimestamp)
+                    }
                 }
-                updatedT = updatedT.updatingPoints(newPoints)
+                updatedT = updatedT.updatingPoints(newPoints, newPathPoints: newPathPoints)
             }
             
             result[i] = .transport(updatedT)
@@ -1260,6 +1273,13 @@ class TimelineBuilder {
 struct CodableCoordinate: Codable {
     let lat: Double
     let lon: Double
+    let timestamp: Date?
+
+    init(lat: Double, lon: Double, timestamp: Date? = nil) {
+        self.lat = lat
+        self.lon = lon
+        self.timestamp = timestamp
+    }
 }
 
 class PersistentTimelineBuilder {
@@ -1662,12 +1682,12 @@ class PersistentTimelineBuilder {
                 var actualEndTime = gapEnd
                 
                 if !gapPoints.isEmpty {
-                    var routePoints = gapPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) }
-                    let startCoord = CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude)
+                    var routePoints = gapPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) }
+                    let startCoord = CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude, timestamp: currentFp.endTime)
                     if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.first, footprint: startCoord) {
                         routePoints.insert(startCoord, at: 0)
                     }
-                    let endCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)
+                    let endCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude, timestamp: nextFp.startTime)
                     if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.last, footprint: endCoord) {
                         routePoints.append(endCoord)
                     }
@@ -1679,8 +1699,8 @@ class PersistentTimelineBuilder {
                     actualEndTime = gapPoints.last!.timestamp
                 } else {
                     pathDist = straightDist
-                    pts = [CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude),
-                           CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)]
+                    pts = [CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude, timestamp: currentFp.endTime),
+                           CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude, timestamp: nextFp.startTime)]
                 }
 
 
@@ -1810,13 +1830,13 @@ class PersistentTimelineBuilder {
             )
             if rawRoute.count >= 2 {
                 decodedPoints = rawRoute.map {
-                    CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude)
+                    CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp)
                 }
                 changed = true
             }
             
             if let prevFp = alignedPreviousFootprint {
-                let fpCoord = CodableCoordinate(lat: prevFp.latitude, lon: prevFp.longitude)
+                let fpCoord = CodableCoordinate(lat: prevFp.latitude, lon: prevFp.longitude, timestamp: prevFp.endTime)
                 if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: decodedPoints.first, footprint: fpCoord) &&
                     (decodedPoints.first?.lat != fpCoord.lat || decodedPoints.first?.lon != fpCoord.lon) {
                     decodedPoints.insert(fpCoord, at: 0)
@@ -1824,7 +1844,7 @@ class PersistentTimelineBuilder {
             }
             
             if let nextFp = alignedNextFootprint {
-                let fpCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude)
+                let fpCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude, timestamp: nextFp.startTime)
                 if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: decodedPoints.last, footprint: fpCoord) &&
                     (decodedPoints.last?.lat != fpCoord.lat || decodedPoints.last?.lon != fpCoord.lon) {
                     decodedPoints.append(fpCoord)
@@ -2237,7 +2257,7 @@ class PersistentTimelineBuilder {
                     let tStart = transportPoints.first!.timestamp
                     let tEnd = transportPoints.last!.timestamp
                     let coords = transportPoints.map { $0.coordinate }
-                    let codableCoords = coords.map { CodableCoordinate(lat: $0.latitude, lon: $0.longitude) }
+                    let codableCoords = transportPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) }
                     let diameter = TimelineBuilder.calculateMaxDiameter(coords)
                     
                     // 如果一段交通的位移和时间均不足以被计入，则跳过
@@ -2267,11 +2287,19 @@ class PersistentTimelineBuilder {
                     if let last = lastFp {
                         let endpoint = CodableCoordinate(
                             lat: augmentedPoints.first!.coordinate.latitude,
-                            lon: augmentedPoints.first!.coordinate.longitude
+                            lon: augmentedPoints.first!.coordinate.longitude,
+                            timestamp: augmentedPoints.first!.timestamp
                         )
-                        let footprintCoord = CodableCoordinate(lat: last.latitude, lon: last.longitude)
+                        let footprintCoord = CodableCoordinate(lat: last.latitude, lon: last.longitude, timestamp: last.endTime)
                         if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: endpoint, footprint: footprintCoord) {
-                            augmentedPoints.insert(CLLocation(latitude: last.latitude, longitude: last.longitude), at: 0)
+                            let footprintLocation = CLLocation(
+                                coordinate: CLLocationCoordinate2D(latitude: last.latitude, longitude: last.longitude),
+                                altitude: 0,
+                                horizontalAccuracy: 0,
+                                verticalAccuracy: 0,
+                                timestamp: last.endTime
+                            )
+                            augmentedPoints.insert(footprintLocation, at: 0)
                         }
                         if startName == "起点" {
                             startName = last.address ?? "起点"
@@ -2285,7 +2313,7 @@ class PersistentTimelineBuilder {
                     let pathDist = TimelineBuilder.calculateDistance(augmentedPoints)
                     let avgSpeed = tEnd.timeIntervalSince(tStart) > 0 ? pathDist / tEnd.timeIntervalSince(tStart) : 0
                     
-                    let augmentedPtsData = (try? JSONEncoder().encode(augmentedPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude) })) ?? ptsData
+                    let augmentedPtsData = (try? JSONEncoder().encode(augmentedPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) })) ?? ptsData
 
                     // --- 异步获取健康和传感器数据 ---
                     #if !WIDGET_EXTENSION
@@ -2482,8 +2510,15 @@ extension PersistentTimelineBuilder {
                 tp.endTime = boundedEnd
             }
             var pts: [CLLocationCoordinate2D] = []
+            var pathPoints: [TransportPathPoint] = []
             if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: tp.pointsData) {
                 pts = decoded.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                pathPoints = decoded.map {
+                    TransportPathPoint(
+                        coordinate: CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon),
+                        timestamp: $0.timestamp
+                    )
+                }
             }
             let tType = TransportType(rawValue: tp.typeRaw) ?? .slow
             let mType = tp.manualTypeRaw != nil ? TransportType(rawValue: tp.manualTypeRaw!) : nil
@@ -2498,6 +2533,7 @@ extension PersistentTimelineBuilder {
                 distance: tp.distance,
                 averageSpeed: tp.averageSpeed,
                 points: pts,
+                pathPoints: pathPoints.isEmpty ? nil : pathPoints,
                 manualType: mType
             )
             items.append(.transport(t))

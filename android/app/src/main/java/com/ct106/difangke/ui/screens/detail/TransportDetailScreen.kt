@@ -71,12 +71,14 @@ fun TransportDetailScreen(
     }
 
     val t = transport!!
-    val points = remember(t.pointsJson) { parsePoints(t.pointsJson) }
+    val pathPoints = remember(t.pointsJson) { parseTransportDetailPathPoints(t.pointsJson) }
+    val points = remember(pathPoints) { pathPoints.map { it.coordinate } }
 
     Box(modifier = Modifier.fillMaxSize()) {
         // 1. Full Screen Map Layer
         TransportDetailMapView(
             points = points, 
+            pathPoints = pathPoints,
             isDark = isDark,
             primaryColor = MaterialTheme.colorScheme.primary.toArgb(),
             startLocation = t.startLocation,
@@ -347,6 +349,7 @@ fun TransportDetailMapView(
     points: List<com.amap.api.maps.model.LatLng>,
     isDark: Boolean,
     primaryColor: Int,
+    pathPoints: List<TransportDetailPathPoint> = emptyList(),
     startLocation: String? = null,
     endLocation: String? = null,
     allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity> = emptyList()
@@ -378,14 +381,29 @@ fun TransportDetailMapView(
         amap.clear()
         amap.addImportantPlaceCircles(allPlaces)
         if (points.isNotEmpty()) {
-            // Polyline
-            amap.addPolyline(
-                com.amap.api.maps.model.PolylineOptions()
-                    .addAll(points)
+            val segments = if (pathPoints.size >= 2) {
+                pathPoints.zipWithNext { previous, current ->
+                    val isDashed = previous.timestamp != null &&
+                        current.timestamp != null &&
+                        kotlin.math.abs(current.timestamp - previous.timestamp) > 5 * 60 * 1000L
+                    listOf(previous.coordinate, current.coordinate) to isDashed
+                }
+            } else {
+                listOf(points to false)
+            }
+
+            segments.forEach { (segment, isDashed) ->
+                val options = com.amap.api.maps.model.PolylineOptions()
+                    .addAll(segment)
                     .width(18f)
                     .color(primaryColor)
                     .lineJoinType(com.amap.api.maps.model.PolylineOptions.LineJoinType.LineJoinRound)
-            )
+                    .useGradient(!isDashed)
+                if (isDashed) {
+                    options.setDottedLine(true)
+                }
+                amap.addPolyline(options)
+            }
 
             // Start Marker
             amap.addMarker(
@@ -449,8 +467,13 @@ fun TransportDetailMapView(
     }
 }
 
-private fun parsePoints(pointsJson: String): List<com.amap.api.maps.model.LatLng> {
-    val list = mutableListOf<com.amap.api.maps.model.LatLng>()
+data class TransportDetailPathPoint(
+    val coordinate: com.amap.api.maps.model.LatLng,
+    val timestamp: Long? = null
+)
+
+private fun parseTransportDetailPathPoints(pointsJson: String): List<TransportDetailPathPoint> {
+    val list = mutableListOf<TransportDetailPathPoint>()
     try {
         if (pointsJson.isEmpty() || pointsJson == "[]") return emptyList()
         
@@ -462,18 +485,20 @@ private fun parsePoints(pointsJson: String): List<com.amap.api.maps.model.LatLng
                 // Format: [[lat, lon], ...]
                 val lat = element.getDouble(0)
                 val lon = element.getDouble(1)
+                val timestamp = if (element.length() >= 3) normalizeTransportTimestampMillis(element.optDouble(2, 0.0)) else null
                 // Heuristic: swap if lat is likely lon (China specific or range check)
                 if (Math.abs(lat) > 90.0) {
-                    list.add(com.amap.api.maps.model.LatLng(lon, lat))
+                    list.add(TransportDetailPathPoint(com.amap.api.maps.model.LatLng(lon, lat), timestamp))
                 } else {
-                    list.add(com.amap.api.maps.model.LatLng(lat, lon))
+                    list.add(TransportDetailPathPoint(com.amap.api.maps.model.LatLng(lat, lon), timestamp))
                 }
             } else if (element is JSONObject) {
                 // Format: [{"lat": 1.0, "lon": 2.0}, ...] or [{"latitude": 1.0, "longitude": 2.0}, ...]
                 val lat = element.optDouble("lat", element.optDouble("latitude", Double.NaN))
                 val lon = element.optDouble("lon", element.optDouble("longitude", Double.NaN))
+                val timestamp = normalizeTransportTimestampMillis(element.optDouble("timestamp", 0.0))
                 if (!lat.isNaN() && !lon.isNaN()) {
-                    list.add(com.amap.api.maps.model.LatLng(lat, lon))
+                    list.add(TransportDetailPathPoint(com.amap.api.maps.model.LatLng(lat, lon), timestamp))
                 }
             }
         }
@@ -481,6 +506,11 @@ private fun parsePoints(pointsJson: String): List<com.amap.api.maps.model.LatLng
         Log.e("TransportDetail", "Critical: Failed to parse pointsJson. Input: $pointsJson", e)
     }
     return list
+}
+
+private fun normalizeTransportTimestampMillis(raw: Double): Long? {
+    if (raw <= 0.0) return null
+    return if (raw < 10_000_000_000.0) (raw * 1000).toLong() else raw.toLong()
 }
 
 @Composable

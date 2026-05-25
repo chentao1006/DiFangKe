@@ -718,11 +718,11 @@ class LocationTrackingService : Service() {
         val lon2 = if (newLons.isNotEmpty()) newLons.average() else 0.0
 
         val pts = mutableListOf<List<Double>>()
-        if (lat1 != 0.0) pts.add(listOf(lat1, lon1))
+        if (lat1 != 0.0) pts.add(listOf(lat1, lon1, prevFp.endTime.time.toDouble()))
         if (rawPoints.isNotEmpty()) {
-            pts.addAll(rawPoints.map { listOf(it.latitude, it.longitude) })
+            pts.addAll(rawPoints.map { listOf(it.latitude, it.longitude, it.timestamp.toDouble()) })
         }
-        if (lat2 != 0.0) pts.add(listOf(lat2, lon2))
+        if (lat2 != 0.0) pts.add(listOf(lat2, lon2, newFp.startTime.time.toDouble()))
 
         totalDist = pts.zipWithNext { a, b ->
             processor.haversineMeters(a[0], a[1], b[0], b[1])

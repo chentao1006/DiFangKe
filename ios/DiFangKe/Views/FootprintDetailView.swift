@@ -871,7 +871,7 @@ extension FootprintModalView {
                                     photoToDelete = assetID
                                     showingPhotoDeleteAlert = true
                                 } label: {
-                                    Label("删除照片", systemImage: "trash")
+                                    Label("移除照片", systemImage: "trash")
                                 }
                             }
                     }

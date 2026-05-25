@@ -115,28 +115,32 @@ fun DFKMapScreen(
             // 绘制轨迹
             if (pathPoints.isNotEmpty()) {
                 val validLatLngs = mutableListOf<LatLng>()
-                val segments = mutableListOf<List<LatLng>>()
-                var currentSegment = mutableListOf<LatLng>()
-                pathPoints.forEach {
-                    if (it.first.isNaN() || it.second.isNaN()) {
-                        if (currentSegment.isNotEmpty()) {
-                            segments.add(currentSegment)
-                            currentSegment = mutableListOf()
-                        }
+                val lineSegments = mutableListOf<Pair<List<LatLng>, Boolean>>()
+                var previousPoint: MapPathPoint? = null
+                pathPoints.forEach { point ->
+                    if (point.isSeparator) {
+                        previousPoint = null
                     } else {
-                        val ll = LatLng(it.first, it.second)
-                        currentSegment.add(ll)
+                        val ll = LatLng(point.latitude, point.longitude)
                         validLatLngs.add(ll)
+                        val previous = previousPoint
+                        if (previous != null && !previous.isSeparator) {
+                            val previousLl = LatLng(previous.latitude, previous.longitude)
+                            val isDashed = previous.timestamp != null &&
+                                point.timestamp != null &&
+                                kotlin.math.abs(point.timestamp - previous.timestamp) > 5 * 60 * 1000L
+                            lineSegments.add(listOf(previousLl, ll) to isDashed)
+                        }
+                        previousPoint = point
                     }
                 }
-                if (currentSegment.isNotEmpty()) {
-                    segments.add(currentSegment)
-                }
 
-                segments.forEach { segment ->
-                    amap.addPolyline(
-                        PolylineOptions().addAll(segment).width(15f).color(polylineColor).useGradient(true)
-                    )
+                lineSegments.forEach { (segment, isDashed) ->
+                    val options = PolylineOptions().addAll(segment).width(15f).color(polylineColor).useGradient(!isDashed)
+                    if (isDashed) {
+                        options.setDottedLine(true)
+                    }
+                    amap.addPolyline(options)
                 }
 
                 amap.addFootprintMarkers(footprintMarkers)

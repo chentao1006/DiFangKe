@@ -286,15 +286,30 @@ struct TransportModalView: View {
                                 }
                             }
                             
-                            // Route
-                            let smoothedPoints = validTransportPoints.smoothed()
-                            
-                            MapPolyline(coordinates: smoothedPoints)
-                                .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: 7.5, lineCap: .round, lineJoin: .round))
-                            
-                            // Route Polyline Main
-                            MapPolyline(coordinates: smoothedPoints)
-                                .stroke(Color.dfkAccent.opacity(0.7), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                            ForEach(transport.lineSegments) { segment in
+                                if !segment.isDashed {
+                                    MapPolyline(coordinates: segment.coordinates)
+                                        .stroke(
+                                            Color(uiColor: .systemBackground),
+                                            style: StrokeStyle(
+                                                lineWidth: 7.5,
+                                                lineCap: .round,
+                                                lineJoin: .round
+                                            )
+                                        )
+                                }
+
+                                MapPolyline(coordinates: segment.coordinates)
+                                    .stroke(
+                                        Color.dfkAccent.opacity(0.7),
+                                        style: StrokeStyle(
+                                            lineWidth: segment.isDashed ? 2 : 5,
+                                            lineCap: .round,
+                                            lineJoin: .round,
+                                            dash: segment.isDashed ? [5, 5] : []
+                                        )
+                                    )
+                            }
                             
                             // Photos along the route
                             ForEach(validMapPhotos, id: \.asset.localIdentifier) { entry in

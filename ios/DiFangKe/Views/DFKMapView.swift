@@ -111,6 +111,8 @@ struct DFKMapView: View {
         let footprints: [Footprint]
     }
 
+
+
     var heatmapPoints: [HeatmapPoint] = []
 
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
@@ -578,19 +580,30 @@ struct DFKMapView: View {
         let foregroundLineWidth: CGFloat = isInteractive ? 5 : 3
 
         ForEach(transportItems) { transport in
-            let smoothedPoints = transport.points.smoothed()
-            
-            MapPolyline(coordinates: smoothedPoints)
-                .stroke(
-                    Color(uiColor: .systemBackground),
-                    style: StrokeStyle(lineWidth: backgroundLineWidth, lineCap: .round, lineJoin: .round)
-                )
+            ForEach(transport.lineSegments) { segment in
+                if !segment.isDashed {
+                    MapPolyline(coordinates: segment.coordinates)
+                        .stroke(
+                            Color(uiColor: .systemBackground),
+                            style: StrokeStyle(
+                                lineWidth: backgroundLineWidth,
+                                lineCap: .round,
+                                lineJoin: .round
+                            )
+                        )
+                }
 
-            MapPolyline(coordinates: smoothedPoints)
-                .stroke(
-                    Color.dfkAccent.opacity(0.7),
-                    style: StrokeStyle(lineWidth: foregroundLineWidth, lineCap: .round, lineJoin: .round)
-                )
+                MapPolyline(coordinates: segment.coordinates)
+                    .stroke(
+                        Color.dfkAccent.opacity(0.7),
+                        style: StrokeStyle(
+                            lineWidth: segment.isDashed ? (isInteractive ? 2 : 1.2) : foregroundLineWidth,
+                            lineCap: .round,
+                            lineJoin: .round,
+                            dash: segment.isDashed ? [5, 5] : []
+                        )
+                    )
+            }
 
             if let coord = transport.points.distanceMidpoint {
                 Annotation("", coordinate: coord) {
@@ -599,6 +612,8 @@ struct DFKMapView: View {
             }
         }
     }
+
+
 
     @MapContentBuilder
     private func aggregatedFootprintAnnotations() -> some MapContent {
@@ -835,33 +850,22 @@ struct DFKMapView: View {
 
             for item in timelineItems {
                 guard case .transport(let transport) = item, transport.points.count >= 2 else { continue }
-                let projected = transport.points.map { snapshot.point(for: $0) }
 
-                ctx.cgContext.beginPath()
-                if projected.count == 2 {
+                for segment in transport.lineSegments {
+                    let projected = segment.coordinates.map { snapshot.point(for: $0) }
+                    guard projected.count >= 2 else { continue }
+
+                    ctx.cgContext.beginPath()
                     ctx.cgContext.move(to: projected[0])
-                    ctx.cgContext.addLine(to: projected[1])
-                } else if projected.count > 2 {
-                    // 使用二次贝塞尔曲线平滑处理：以线段中点为目标点，原有点为控制点
-                    ctx.cgContext.move(to: projected[0])
-                    
-                    // 第一个点到第二个点中点
-                    let firstMid = CGPoint(x: (projected[0].x + projected[1].x) / 2, y: (projected[0].y + projected[1].y) / 2)
-                    ctx.cgContext.addLine(to: firstMid)
-                    
-                    for i in 1..<projected.count - 1 {
-                        let p0 = projected[i]
-                        let p1 = projected[i+1]
-                        let mid = CGPoint(x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2)
-                        ctx.cgContext.addQuadCurve(to: mid, control: p0)
+                    for i in 1..<projected.count {
+                        ctx.cgContext.addLine(to: projected[i])
                     }
-                    
-                    ctx.cgContext.addLine(to: projected.last!)
+                    ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(0.65).cgColor)
+                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.5 : 4)
+                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
+                    ctx.cgContext.strokePath()
                 }
-                
-                ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(0.65).cgColor)
-                ctx.cgContext.setLineWidth(4)
-                ctx.cgContext.strokePath()
+                ctx.cgContext.setLineDash(phase: 0, lengths: [])
 
                 if let midCoord = transport.points.distanceMidpoint {
                     let midPoint = snapshot.point(for: midCoord)
@@ -1297,25 +1301,30 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         }
 
         for transport in transportItems {
+            let segments = Self.transportLineSegments(for: transport)
+            guard !segments.isEmpty else { continue }
+
+            for segment in segments {
+                let border = MKPolyline(coordinates: segment.coordinates, count: segment.coordinates.count)
+                context.coordinator.overlayStyles[ObjectIdentifier(border)] = OverlayStyle(
+                    strokeColor: UIColor.systemBackground,
+                    fillColor: nil,
+                    lineWidth: 7.5,
+                    dashPattern: segment.isDashed ? [8 as NSNumber, 8 as NSNumber] : nil
+                )
+                mapView.addOverlay(border)
+
+                let line = MKPolyline(coordinates: segment.coordinates, count: segment.coordinates.count)
+                context.coordinator.overlayStyles[ObjectIdentifier(line)] = OverlayStyle(
+                    strokeColor: UIColor(Color.dfkAccent),
+                    fillColor: nil,
+                    lineWidth: 5,
+                    dashPattern: segment.isDashed ? [8 as NSNumber, 8 as NSNumber] : nil
+                )
+                mapView.addOverlay(line)
+            }
+
             let validPoints = transport.points.filter(\.isRenderableMapCoordinate)
-            guard validPoints.count >= 2 else { continue }
-
-            let border = MKPolyline(coordinates: validPoints, count: validPoints.count)
-            context.coordinator.overlayStyles[ObjectIdentifier(border)] = OverlayStyle(
-                strokeColor: UIColor.systemBackground,
-                fillColor: nil,
-                lineWidth: 7.5
-            )
-            mapView.addOverlay(border)
-
-            let line = MKPolyline(coordinates: validPoints, count: validPoints.count)
-            context.coordinator.overlayStyles[ObjectIdentifier(line)] = OverlayStyle(
-                strokeColor: UIColor(Color.dfkAccent),
-                fillColor: nil,
-                lineWidth: 5
-            )
-            mapView.addOverlay(line)
-
             if let midpoint = validPoints.distanceMidpoint {
                 mapView.addAnnotation(MapImageAnnotation(
                     coordinate: midpoint,
@@ -1363,6 +1372,28 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         }
     }
 
+    private struct LineSegment {
+        let coordinates: [CLLocationCoordinate2D]
+        let isDashed: Bool
+    }
+
+    private static func transportLineSegments(for transport: Transport) -> [LineSegment] {
+        let validPoints = transport.pathPoints.filter { $0.coordinate.isRenderableMapCoordinate }
+        guard validPoints.count >= 2 else { return [] }
+
+        return (0..<(validPoints.count - 1)).map { index in
+            let current = validPoints[index]
+            let next = validPoints[index + 1]
+            let isDashed: Bool
+            if let currentTime = current.timestamp, let nextTime = next.timestamp {
+                isDashed = abs(nextTime.timeIntervalSince(currentTime)) > 5 * 60
+            } else {
+                isDashed = false
+            }
+            return LineSegment(coordinates: [current.coordinate, next.coordinate], isDashed: isDashed)
+        }
+    }
+
     final class Coordinator: NSObject, MKMapViewDelegate {
         static let annotationReuseIdentifier = "StableInteractiveMapAnnotation"
 
@@ -1401,6 +1432,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 renderer.lineWidth = style?.lineWidth ?? 5
                 renderer.lineCap = .round
                 renderer.lineJoin = .round
+                renderer.lineDashPattern = style?.dashPattern
                 return renderer
             }
 
@@ -1562,6 +1594,7 @@ private struct OverlayStyle {
     let strokeColor: UIColor
     let fillColor: UIColor?
     let lineWidth: CGFloat
+    var dashPattern: [NSNumber]? = nil
 }
 
 private final class MapImageAnnotation: NSObject, MKAnnotation {
@@ -1686,54 +1719,6 @@ extension Array where Element == CLLocationCoordinate2D {
     }
 }
 
-extension Array where Element == CLLocationCoordinate2D {
-    /// 使用 Catmull-Rom 插值算法对坐标点进行平滑处理，使其呈现出优雅的曲线感
-    func smoothed(granularity: Int = 10) -> [CLLocationCoordinate2D] {
-        guard count >= 3 else { return self }
-        
-        var result: [CLLocationCoordinate2D] = []
-        
-        // 预处理：过滤掉极近的点，避免插值抖动
-        var filtered: [CLLocationCoordinate2D] = [self[0]]
-        for i in 1..<count {
-            let p1 = filtered.last!
-            let p2 = self[i]
-            let dist = sqrt(pow(p2.latitude - p1.latitude, 2) + pow(p2.longitude - p1.longitude, 2))
-            if dist > 0.00001 { // 约 1 米
-                filtered.append(p2)
-            }
-        }
-        
-        guard filtered.count >= 3 else { return self }
-        
-        for i in 0..<filtered.count - 1 {
-            let p0 = filtered[Swift.max(i - 1, 0)]
-            let p1 = filtered[i]
-            let p2 = filtered[i + 1]
-            let p3 = filtered[Swift.min(i + 2, filtered.count - 1)]
-            
-            for t in 0..<granularity {
-                let s = Double(t) / Double(granularity)
-                let lat = catmullRom(p0.latitude, p1.latitude, p2.latitude, p3.latitude, t: s)
-                let lon = catmullRom(p0.longitude, p1.longitude, p2.longitude, p3.longitude, t: s)
-                result.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
-            }
-        }
-        result.append(filtered.last!)
-        return result
-    }
-    
-    private func catmullRom(_ p0: Double, _ p1: Double, _ p2: Double, _ p3: Double, t: Double) -> Double {
-        let t2 = t * t
-        let t3 = t2 * t
-        return 0.5 * (
-            (2 * p1) +
-            (-p0 + p2) * t +
-            (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
-            (-p0 + 3 * p1 - 3 * p2 + p3) * t3
-        )
-    }
-}
 
 extension CLLocationCoordinate2D {
     var isRenderableMapCoordinate: Bool {

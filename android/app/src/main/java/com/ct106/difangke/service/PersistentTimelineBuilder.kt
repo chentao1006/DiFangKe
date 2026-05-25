@@ -319,11 +319,11 @@ class PersistentTimelineBuilder(private val context: Context) {
         val lon2 = gson.fromJson(newFp.longitudeJson, Array<Double>::class.java).average()
 
         val pts = mutableListOf<List<Double>>()
-        pts.add(listOf(lat1, lon1))
+        pts.add(listOf(lat1, lon1, prevFp.endTime.time.toDouble()))
         if (segmentPoints.isNotEmpty()) {
-            pts.addAll(segmentPoints.map { listOf(it.latitude, it.longitude) })
+            pts.addAll(segmentPoints.map { listOf(it.latitude, it.longitude, it.timestamp.toDouble()) })
         }
-        pts.add(listOf(lat2, lon2))
+        pts.add(listOf(lat2, lon2, newFp.startTime.time.toDouble()))
 
         totalDist = pts.zipWithNext { a, b ->
             processor.haversineMeters(a[0], a[1], b[0], b[1])
