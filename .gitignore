@@ -64,7 +64,7 @@ fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
 .DS_Store
-android/app/src/main/java/com/ct106/difangke/AppConfig.kt
+AppConfig.kt
 
 # --- Android / Gradle ---
 android/.gradle/
