@@ -222,6 +222,7 @@ struct TimelinePageView: View {
         let startTime = startLocation.timestamp
         let endTime = max(Date(), startTime)
         let matchedPlace = locationManager.matchedPlace
+
         let matchedActivityType = inferredActivityTypeValue(for: matchedPlace?.placeID, at: startTime)
         let address = locationManager.ongoingTitle ?? {
             let currentAddress = locationManager.currentAddress
@@ -589,6 +590,11 @@ struct TimelinePageView: View {
             )
         }
 
+        let transportSnapshots = items.compactMap { item -> Double? in
+            guard case .transport(let tp) = item else { return nil }
+            return tp.distance > 0 ? tp.distance : nil
+        }
+
         let linkedPhotoAssetIDs = Set(items.compactMap { item -> [String]? in
             guard case .footprint(let footprint) = item else { return nil }
             return footprint.photoAssetIDs
@@ -596,21 +602,23 @@ struct TimelinePageView: View {
 
         let result = await Task.detached(priority: .userInitiated) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
-            var totalMileage = LocationManager.calculatePathDistance(rawPoints)
             
-            // 核心改进：如果没有原始轨迹点（如仅导入了照片），则尝试通过所有足迹点（包含照片生成的足迹）计算直线距离之和
-            if totalMileage < 50 && footprintSnapshots.count >= 2 {
-                var estimatedDist: Double = 0
-                let fpCoords = footprintSnapshots
-                    .sorted { $0.startTime < $1.startTime }
-                    .map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
-                if fpCoords.count >= 2 {
-                    for i in 0..<fpCoords.count - 1 {
-                        estimatedDist += fpCoords[i].distance(from: fpCoords[i+1])
-                    }
-                    totalMileage = estimatedDist
+            // Calculate transport distance
+            let transportDistance = transportSnapshots.reduce(0, +)
+            
+            // Calculate inferred footprint distance
+            var inferredFootprintDistance: Double = 0
+            let fpCoords = footprintSnapshots
+                .sorted { $0.startTime < $1.startTime }
+                .map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
+            if fpCoords.count >= 2 {
+                for i in 0..<fpCoords.count - 1 {
+                    inferredFootprintDistance += fpCoords[i].distance(from: fpCoords[i+1])
                 }
             }
+            
+            // Use the maximum of transport distance and inferred footprint distance
+            let totalMileage = max(transportDistance, inferredFootprintDistance)
             
             let rawCoords = rawPoints.map { $0.coordinate }
             let simplified = LocationManager.simplifyCoordinates(rawCoords, tolerance: 0.00005)
@@ -861,18 +869,18 @@ struct TimelinePageView: View {
 
                 // 手动下拉应先上传本地轨迹，再拉取其他设备更新，保证多设备刷新可见最新足迹。
                 async let syncTask: () = locationManager.performRawDataSync(onlyRecent: true, skipUpload: false)
-                async let siftTask: () = locationManager.triggerTimelineSift()
                 async let cloudSettingsSyncTask: () = {
                     CloudSettingsManager.shared.manualSyncNow()
                     CloudSettingsManager.shared.triggerDataSyncPulseManual()
                 }()
                 
                 // 等待两者完成
-                _ = await (syncTask, siftTask, cloudSettingsSyncTask)
+                _ = await (syncTask, cloudSettingsSyncTask)
             }
             
-            // 3. 异步刷新，【强制】触发重新同步构建（保证下拉能拉取最新轨迹并转为足迹）
-            await refreshTimelineAsync(force: true)
+            // 3. 下拉只重新读取已保存结果；重新生成会覆盖时间线编辑页的手动调整，
+            // 必须走明确的“重新生成”入口，不能藏在刷新手势里。
+            await refreshTimelineAsync(force: false)
             
             // 3.5 手动下拉强制触发照片关联检查（针对当前所有足迹）
             for item in timelineItems {

@@ -1810,7 +1810,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         // 0. 智能节能：根据速度和停留状态动态调整定位参数
         let place = matchedPlace
-        let speed = location.speed
+        let speed = max(0, location.speed)
         
         // 判定是否正在长久停留
         // 我们将其放宽到 150m (从 300m 下调)，并增加已知地点粘性
@@ -2038,6 +2038,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             let fpYear = calendar.component(.year, from: fp.startTime)
             let fpMonth = calendar.component(.month, from: fp.startTime)
             let fpDay = calendar.component(.day, from: fp.startTime)
+            
+            if fp.placeID == nil || (fp.activityTypeValue ?? "").isEmpty {
+                return false
+            }
             
             return fpYear < currentYear && fpMonth == month && fpDay == day
         }
@@ -2915,7 +2919,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // Calculate points and mileage using TimelineBuilder logic
         Task.detached(priority: .background) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
-            let mileage = LocationManager.calculatePathDistance(rawPoints)
+            
+            let transportDistance = todayTransports.reduce(0.0) { $0 + ($1.distance > 0 ? $1.distance : 0) }
+            var inferredFootprintDistance: Double = 0
+            let fpCoords = validFootprints.sorted { $0.startTime < $1.startTime }
+            if fpCoords.count >= 2 {
+                for i in 0..<fpCoords.count - 1 {
+                    let loc1 = CLLocation(latitude: fpCoords[i].latitude, longitude: fpCoords[i].longitude)
+                    let loc2 = CLLocation(latitude: fpCoords[i+1].latitude, longitude: fpCoords[i+1].longitude)
+                    inferredFootprintDistance += loc1.distance(from: loc2)
+                }
+            }
+            let mileage = max(transportDistance, inferredFootprintDistance)
 
             let resolvedOverview: String?
             if !validFootprints.isEmpty || !todayTransports.isEmpty {
@@ -3222,12 +3237,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // 清理当天缓存
                 TimelineBuilder.timelineCache.removeValue(forKey: startOfDay)
                 
-                // 物理清空当天所有相关记录（保留照片足迹）
+                // 物理清空当天所有相关记录（保留照片足迹）。必须按时间交集清理，
+                // 否则昨天开始、今天结束的跨天足迹会漏删，重建后继续出现在今天。
                 let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-                    $0.startTime >= startOfDay && $0.startTime < endOfDay
+                    $0.startTime < endOfDay && $0.endTime > startOfDay
                 })
                 let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                    $0.startTime >= startOfDay && $0.startTime < endOfDay
+                    $0.startTime < endOfDay && $0.endTime > startOfDay
                 })
                 let insightDesc = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDay })
                 
@@ -3529,19 +3545,19 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
         
         Task {
-            // 1. 物理清空当天所有相关记录
+            // 1. 物理清空当天所有相关记录。按时间交集删除，防止跨天旧记录漏删。
             let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-                $0.startTime >= startOfDay && $0.startTime < endOfDay
+                $0.startTime < endOfDay && $0.endTime > startOfDay
             })
             let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                $0.startTime >= startOfDay && $0.startTime < endOfDay
+                $0.startTime < endOfDay && $0.endTime > startOfDay
             })
             let insightDesc = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDay })
             
             if let fps = try? context.fetch(fpDesc) {
                 for fp in fps {
-                    // 仅保护带照片的足迹（视为原始数据）
-                    let isProtected = !fp.photoAssetIDs.isEmpty
+                    // 仅保护带照片的足迹（视为原始数据）或已被用户忽略/删除的足迹
+                    let isProtected = !fp.photoAssetIDs.isEmpty || fp.status == .ignored
                     if !isProtected {
                         context.delete(fp)
                     }

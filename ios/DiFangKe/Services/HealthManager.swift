@@ -76,7 +76,7 @@ class HealthManager: ObservableObject {
                 self.currentMotionType = .unknown
             }
             
-            self.isMoving = !activity.stationary && !activity.unknown
+            self.isMoving = self.currentMotionType == .walking || self.currentMotionType == .running || self.currentMotionType == .cycling || self.currentMotionType == .automotive
         }
         
         // 2. 计步器监控 (提供极速运动反馈)

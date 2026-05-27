@@ -208,6 +208,63 @@ final class WidgetDataSyncManager {
         }
         return images
     }
+
+    private struct WidgetTransportLineSegment {
+        let coordinates: [CLLocationCoordinate2D]
+        let isDashed: Bool
+    }
+
+    private func widgetTransportLineSegments(from decoded: [CodableCoordinate]) -> [WidgetTransportLineSegment] {
+        let validPoints = decoded.filter {
+            $0.lat.isFinite &&
+            $0.lon.isFinite &&
+            CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon))
+        }
+        guard validPoints.count >= 2 else { return [] }
+
+        var segments: [WidgetTransportLineSegment] = []
+        var currentChunk = [CLLocationCoordinate2D(latitude: validPoints[0].lat, longitude: validPoints[0].lon)]
+        var currentDashed: Bool?
+
+        for index in 0..<(validPoints.count - 1) {
+            let current = validPoints[index]
+            let next = validPoints[index + 1]
+            let isDashed: Bool
+            if let currentTime = current.timestamp, let nextTime = next.timestamp {
+                isDashed = abs(nextTime.timeIntervalSince(currentTime)) > 3 * 60
+            } else {
+                isDashed = false
+            }
+
+            if currentDashed == nil {
+                currentDashed = isDashed
+            }
+
+            let nextCoordinate = CLLocationCoordinate2D(latitude: next.lat, longitude: next.lon)
+            if currentDashed == isDashed {
+                currentChunk.append(nextCoordinate)
+            } else {
+                segments.append(WidgetTransportLineSegment(
+                    coordinates: currentChunk.smoothed(),
+                    isDashed: currentDashed == true
+                ))
+                currentChunk = [
+                    CLLocationCoordinate2D(latitude: current.lat, longitude: current.lon),
+                    nextCoordinate
+                ]
+                currentDashed = isDashed
+            }
+        }
+
+        if currentChunk.count >= 2 {
+            segments.append(WidgetTransportLineSegment(
+                coordinates: currentChunk.smoothed(),
+                isDashed: currentDashed == true
+            ))
+        }
+
+        return segments
+    }
     
     private func syncData(forOffset offset: Int) async {
         let calendar = Calendar.current
@@ -302,23 +359,28 @@ final class WidgetDataSyncManager {
                             for tr in transports {
                                 if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: tr.pointsData), !decoded.isEmpty {
                                     let clCoords = decoded.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-                                    let points = clCoords.map { snapshot.point(for: $0) }
-                                    
-                                    if points.count >= 2 {
+
+                                    for segment in widgetTransportLineSegments(from: decoded) {
+                                        let points = segment.coordinates.map { snapshot.point(for: $0) }
+                                        guard points.count >= 2 else { continue }
+
                                         ctx.cgContext.beginPath()
                                         ctx.cgContext.move(to: points[0])
                                         for i in 1..<points.count { ctx.cgContext.addLine(to: points[i]) }
                                         ctx.cgContext.setStrokeColor(transportLineColor.cgColor)
-                                        ctx.cgContext.setLineWidth(4.0) // 尺寸调整，线稍微细一点
+                                        ctx.cgContext.setLineWidth(segment.isDashed ? 1.5 : 4.0)
+                                        ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
                                         ctx.cgContext.strokePath()
-                                        
-                                        if let midCoord = clCoords.widgetMidpoint {
-                                            let midPoint = snapshot.point(for: midCoord)
-                                            let iconSize: CGFloat = 20
-                                            let rect = CGRect(x: midPoint.x - iconSize/2, y: midPoint.y - iconSize/2, width: iconSize, height: iconSize)
-                                            
+                                    }
+                                    ctx.cgContext.setLineDash(phase: 0, lengths: [])
+
+                                    if clCoords.count >= 2, let midCoord = clCoords.widgetMidpoint {
+                                        let midPoint = snapshot.point(for: midCoord)
+                                        let iconSize: CGFloat = 20
+                                        let rect = CGRect(x: midPoint.x - iconSize/2, y: midPoint.y - iconSize/2, width: iconSize, height: iconSize)
+
                                         let strokeColor = theme == .dark ? UIColor.black : UIColor.white
-                                        
+
                                         // 背景框
                                         let path = UIBezierPath(roundedRect: rect, cornerRadius: 5)
                                         themeColor.setFill()
@@ -326,14 +388,13 @@ final class WidgetDataSyncManager {
                                         strokeColor.setStroke()
                                         path.lineWidth = 1.2
                                         path.stroke()
-                                        
+
                                         // 图标
                                         let transportType = TransportType(rawValue: tr.manualTypeRaw ?? tr.typeRaw) ?? .slow
                                         if let iconImage = UIImage(systemName: transportType.sfSymbol) {
                                             let symbolSize: CGFloat = 12
                                             let symbolRect = CGRect(x: midPoint.x - symbolSize/2, y: midPoint.y - symbolSize/2, width: symbolSize, height: symbolSize)
                                             iconImage.withTintColor(strokeColor).draw(in: symbolRect)
-                                        }
                                         }
                                     }
                                 }
@@ -354,7 +415,7 @@ final class WidgetDataSyncManager {
                                     let path = UIBezierPath(roundedRect: rect, cornerRadius: 8 * dotScale)
                                     ctx.cgContext.saveGState()
                                     path.addClip()
-                                    photoImage.draw(in: rect)
+                                    photoImage.drawAspectFill(in: rect)
                                     ctx.cgContext.restoreGState()
 
                                     ctx.cgContext.setStrokeColor(UIColor.white.cgColor)
@@ -467,3 +528,21 @@ extension UIColor {
     }
 }
 
+private extension UIImage {
+    func drawAspectFill(in rect: CGRect) {
+        guard size.width > 0, size.height > 0, rect.width > 0, rect.height > 0 else {
+            draw(in: rect)
+            return
+        }
+
+        let scale = max(rect.width / size.width, rect.height / size.height)
+        let drawSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let drawRect = CGRect(
+            x: rect.midX - drawSize.width / 2,
+            y: rect.midY - drawSize.height / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+        draw(in: drawRect)
+    }
+}

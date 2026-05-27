@@ -257,6 +257,7 @@ struct DayTimelineView: View {
         }
         preLoadTask?.cancel()
         preLoadTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000) // Delay preloading to avoid stuttering during scroll animation
             if Task.isCancelled { return }
             preLoadNeighborDates(around: newValue)
         }
@@ -497,7 +498,6 @@ struct DayTimelineView: View {
         
         for neighbor in neighbors {
             let startOfDay = calendar.startOfDay(for: neighbor)
-            guard TimelineBuilder.timelineCache[startOfDay] == nil else { continue }
             
             // Optimized: Skip pre-loading for empty historical dates
             let dayFootprints = groupedFootprints[startOfDay] ?? []
@@ -507,31 +507,9 @@ struct DayTimelineView: View {
                 continue
             }
             
-            let dayManualSelections = groupedManualSelections[startOfDay] ?? []
-            let places = allPlaces
-            
-            // Capture snapshots and convert to Lite for background processing
-            let fpsLite = dayFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
-            let placesLite = places.map { TimelineBuilder.convertToPlaceLite($0) }
-            let overridesLite = dayManualSelections.map { TimelineBuilder.convertToOverrideLite($0) }
-
-            // Detach entire heavy process to background
-            Task {
-                let items = await Task.detached(priority: .background) {
-                    let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: startOfDay)
-                    return TimelineBuilder.buildTimeline(
-                        for: startOfDay,
-                        footprints: fpsLite,
-                        allRawPoints: rawPoints,
-                        allPlaces: placesLite,
-                        overrides: overridesLite
-                    )
-                }.value
-                
-                await MainActor.run {
-                    TimelineBuilder.timelineCache[startOfDay] = items
-                }
-            }
+            // 只预读数据库里已经保存的时间线，不能在切日期时重新按 raw points 生成。
+            // 否则会把时间线编辑器里的手动拆分/合并/拖拽结果用旧算法缓存盖掉。
+            TimelineBuilder.timelineCache[startOfDay] = PersistentTimelineBuilder.fetchTimeline(for: startOfDay, in: modelContext)
         }
     }
     

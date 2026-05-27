@@ -885,6 +885,9 @@ extension FootprintModalView {
             footprint.status = .ignored 
             hasChanged = true
         }
+        if footprint.modelContext == nil {
+            modelContext.insert(footprint)
+        }
         try? modelContext.save()
         onDismiss?(hasChanged)
         dismiss() 

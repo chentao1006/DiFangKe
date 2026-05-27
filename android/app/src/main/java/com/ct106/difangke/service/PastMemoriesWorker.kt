@@ -89,6 +89,10 @@ class PastMemoriesWorker(
                 val fpMonth = cal.get(Calendar.MONTH)
                 val fpDay = cal.get(Calendar.DAY_OF_MONTH)
                 
+                if (fp.placeID.isNullOrEmpty() || fp.activityTypeValue.isNullOrEmpty()) {
+                    return@filter false
+                }
+                
                 fpYear < currentYear && fpMonth == currentMonth && fpDay == currentDay
             }
 

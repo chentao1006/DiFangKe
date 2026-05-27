@@ -58,8 +58,7 @@ struct DaySummaryCard: View {
                             DayStatItem(value: formatDistance(totalMileage), label: "里程数")
                         }
                         .padding(.top, 2)
-                    }
-                    
+                    }                    
                 }
                 .padding(.vertical, 16)
                 .padding(.leading, 0)
@@ -318,8 +317,11 @@ struct RecordingStatusCard: View {
             return "定位记录已关闭"
         }
         
+        let isCurrentlyStaying = locationManager.potentialStopStartLocation != nil
+        
         // 优先使用 LocationManager 的稳定移动判断（带滞回），避免走路时标题频繁切换“停留”
-        if locationManager.uiIsMoving {
+        // 但如果未打破停留半径（isCurrentlyStaying == true），则绝不切换到移动状态
+        if locationManager.uiIsMoving && !isCurrentlyStaying {
             if let location = locationManager.lastLocation, location.speed > 0 {
                 let speedKmh = location.speed * 3.6
                 if speedKmh > 90 {
@@ -351,7 +353,7 @@ struct RecordingStatusCard: View {
     }
 
     private var shouldShowCurrentSpeed: Bool {
-        locationManager.uiIsMoving && (locationManager.lastLocation?.speed ?? 0) > 0.5
+        locationManager.uiIsMoving && locationManager.potentialStopStartLocation == nil && (locationManager.lastLocation?.speed ?? 0) > 0.5
     }
     
     var body: some View {
@@ -391,7 +393,7 @@ struct RecordingStatusCard: View {
                         if !locationManager.isTracking {
                             Text(displayTitle)
                                 .foregroundColor(.secondary)
-                        } else if let place = locationManager.matchedPlace, place.isUserDefined {
+                        } else if let place = locationManager.matchedPlace, place.isUserDefined, locationManager.potentialStopStartLocation != nil {
                             Text("正在")
                                 .foregroundColor(Color.dfkMainText) +
                             Text(place.name)

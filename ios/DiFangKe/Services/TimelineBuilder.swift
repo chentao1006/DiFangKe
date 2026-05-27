@@ -2,6 +2,7 @@ import Foundation
 import CoreLocation
 import SwiftData
 import MapKit
+import Photos
 
 // Add TimelineItem enum
 enum TimelineItem: Identifiable {
@@ -1351,14 +1352,21 @@ class PersistentTimelineBuilder {
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
         let isToday = calendar.isDateInToday(date)
         
+        let intersectingFpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        if normalizeCrossDayFootprints((try? context.fetch(intersectingFpDesc)) ?? [], calendar: calendar, context: context) {
+            try? context.save()
+        }
+
         // 1. 获取当天所有的真实记录并排序（包括自动填充的记录，以防止无限循环）
         let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         let allFps = (try? context.fetch(fpDesc)) ?? []
         
         let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         let allTps = (try? context.fetch(tpDesc)) ?? []
         
@@ -1413,7 +1421,27 @@ class PersistentTimelineBuilder {
         }
         
         // 4. 对每个缺口进行处理
-        for gap in gaps {
+        // 获取当天所有已忽略/已删除的足迹，避免重构时被 gap filling 重新生成
+        let ignoredFpDesc = FetchDescriptor<Footprint>(predicate: #Predicate<Footprint> {
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue == "ignored"
+        })
+        let ignoredFps = (try? context.fetch(ignoredFpDesc)) ?? []
+        
+        let filteredGaps = gaps.filter { gap in
+            let overlapsIgnored = ignoredFps.contains { ignored in
+                let overlapStart = max(gap.start, ignored.startTime)
+                let overlapEnd = min(gap.end, ignored.endTime)
+                if overlapEnd > overlapStart {
+                    let overlapDuration = overlapEnd.timeIntervalSince(overlapStart)
+                    let gapDuration = gap.end.timeIntervalSince(gap.start)
+                    return overlapDuration > 300 || (overlapDuration / gapDuration) > 0.5
+                }
+                return false
+            }
+            return !overlapsIgnored
+        }
+
+        for gap in filteredGaps {
             if Task.isCancelled { break }
             
             // 过滤该缺口内的点位
@@ -1526,7 +1554,7 @@ class PersistentTimelineBuilder {
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
         
         let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         
         let tps = (try? context.fetch(descriptor)) ?? []
@@ -1642,13 +1670,13 @@ class PersistentTimelineBuilder {
         let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
         
         let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         let fps = (try? context.fetch(fpDesc)) ?? []
         guard fps.count >= 2 else { return }
         
         let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         let tps = (try? context.fetch(tpDesc)) ?? []
         
@@ -1771,12 +1799,12 @@ class PersistentTimelineBuilder {
         let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
         
         let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         let fps = (try? context.fetch(fpDesc)) ?? []
         
         let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         let tps = (try? context.fetch(tpDesc)) ?? []
         
@@ -1915,13 +1943,13 @@ class PersistentTimelineBuilder {
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
 
         let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         let fps = (try? context.fetch(fpDesc)) ?? []
         guard !fps.isEmpty else { return }
 
         let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusRaw != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         let transports = (try? context.fetch(tpDesc)) ?? []
         guard !transports.isEmpty else { return }
@@ -2047,7 +2075,7 @@ class PersistentTimelineBuilder {
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
         
         let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
-            $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored"
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         
         let fps = (try? context.fetch(descriptor)) ?? []
@@ -2455,41 +2483,97 @@ class PersistentTimelineBuilder {
         }
         return ""
     }
+    
+    static func coordinate(at time: Date, in items: [TimelineItem]) -> CLLocationCoordinate2D? {
+        guard !items.isEmpty else { return nil }
+        
+        for item in items {
+            switch item {
+            case .footprint(let fp):
+                if time >= fp.startTime && time <= fp.endTime {
+                    return CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
+                }
+            case .transport(let tp):
+                if time >= tp.startTime && time <= tp.endTime {
+                    if !tp.pathPoints.isEmpty {
+                        // Find the closest point in time
+                        var closestPoint: CLLocationCoordinate2D?
+                        var minTimeDiff = TimeInterval.infinity
+                        for p in tp.pathPoints {
+                            let pTime = p.timestamp ?? tp.startTime
+                            let diff = abs(time.timeIntervalSince(pTime))
+                            if diff < minTimeDiff {
+                                minTimeDiff = diff
+                                closestPoint = p.coordinate
+                            }
+                        }
+                        return closestPoint ?? tp.points.first
+                    } else if !tp.points.isEmpty {
+                        // Interpolate by time proportion if no timestamps on points
+                        let totalDuration = tp.endTime.timeIntervalSince(tp.startTime)
+                        guard totalDuration > 0 else { return tp.points.first }
+                        
+                        let progress = max(0, min(1, time.timeIntervalSince(tp.startTime) / totalDuration))
+                        let totalPoints = tp.points.count
+                        
+                        let exactIndex = CGFloat(progress) * CGFloat(totalPoints - 1)
+                        let lowerIndex = Int(floor(exactIndex))
+                        let upperIndex = Int(ceil(exactIndex))
+                        
+                        guard lowerIndex >= 0 && upperIndex < totalPoints else { return tp.points.first }
+                        
+                        if lowerIndex == upperIndex {
+                            return tp.points[lowerIndex]
+                        }
+                        
+                        let ratio = Double(exactIndex - CGFloat(lowerIndex))
+                        let p1 = tp.points[lowerIndex]
+                        let p2 = tp.points[upperIndex]
+                        
+                        let lat = p1.latitude + (p2.latitude - p1.latitude) * ratio
+                        let lon = p1.longitude + (p2.longitude - p1.longitude) * ratio
+                        
+                        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+                    }
+                }
+            }
+        }
+        
+        // If time is before the first item or after the last item
+        let sortedItems = items.sorted { $0.startTime < $1.startTime }
+        if let first = sortedItems.first, time < first.startTime {
+            switch first {
+            case .footprint(let fp): return CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
+            case .transport(let tp): return tp.points.first
+            }
+        }
+        
+        if let last = sortedItems.last, time > last.endTime {
+            switch last {
+            case .footprint(let fp): return CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
+            case .transport(let tp): return tp.points.last
+            }
+        }
+        
+        return nil
+    }
 }
 
 extension PersistentTimelineBuilder {
     @MainActor
     static func fetchTimeline(for date: Date, in context: ModelContext) -> [TimelineItem] {
-        let startOfDay = Calendar.current.startOfDay(for: date)
-        let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
         
         // 足迹的时间范围要限制在0点到次日0点：包含所有与当天有交集的记录
         let fpDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
             $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue != "ignored"
         })
-        let fps = (try? context.fetch(fpDescriptor)) ?? []
+        var fps = (try? context.fetch(fpDescriptor)) ?? []
 
-        // 兜底自愈：裁回当天窗口。
-        var hasFootprintCorrections = false
-        for fp in fps {
-            let boundedStart = max(fp.startTime, startOfDay)
-            let boundedEnd = min(max(fp.endTime, boundedStart), endOfDay)
-            if fp.startTime != boundedStart {
-                fp.startTime = boundedStart
-                hasFootprintCorrections = true
-            }
-            if fp.endTime != boundedEnd {
-                fp.endTime = boundedEnd
-                hasFootprintCorrections = true
-            }
-            let normalizedDate = Calendar.current.startOfDay(for: fp.startTime)
-            if fp.date != normalizedDate {
-                fp.date = normalizedDate
-                hasFootprintCorrections = true
-            }
-        }
-        if hasFootprintCorrections {
-            try? context.save()
+        if normalizeCrossDayFootprints(fps, calendar: calendar, context: context) {
+            fps = (try? context.fetch(fpDescriptor)) ?? []
         }
         
         let tpDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
@@ -2549,5 +2633,140 @@ extension PersistentTimelineBuilder {
         let alignedItems = TimelineBuilder.alignTransportLocations(items, allPlaces: litePlaces)
         
         return alignedItems.sorted { $0.startTime > $1.startTime }
+    }
+
+    @MainActor
+    private static func normalizeCrossDayFootprints(_ footprints: [Footprint], calendar: Calendar, context: ModelContext) -> Bool {
+        var didChange = false
+
+        for footprint in footprints {
+            guard footprint.endTime > footprint.startTime else { continue }
+            let startDay = calendar.startOfDay(for: footprint.startTime)
+            let effectiveEndTime = footprint.endTime.addingTimeInterval(-0.001)
+            let endDay = calendar.startOfDay(for: max(footprint.startTime, effectiveEndTime))
+            guard startDay != endDay else {
+                if footprint.date != startDay {
+                    footprint.date = startDay
+                    didChange = true
+                }
+                continue
+            }
+
+            splitCrossDayFootprint(footprint, calendar: calendar, context: context)
+            didChange = true
+        }
+
+        if didChange {
+            try? context.save()
+        }
+
+        return didChange
+    }
+
+    @MainActor
+    private static func splitCrossDayFootprint(_ footprint: Footprint, calendar: Calendar, context: ModelContext) {
+        let originalStart = footprint.startTime
+        let originalEnd = footprint.endTime
+        let originalLocations = footprint.footprintLocations
+        let originalPhotoAssetIDs = footprint.photoAssetIDs
+        
+        // Fetch all assets once to know their creation dates
+        var assetCreationDates: [String: Date] = [:]
+        if !originalPhotoAssetIDs.isEmpty {
+            let result = PHAsset.fetchAssets(withLocalIdentifiers: originalPhotoAssetIDs, options: nil)
+            result.enumerateObjects { asset, _, _ in
+                if let date = asset.creationDate {
+                    assetCreationDates[asset.localIdentifier] = date
+                }
+            }
+        }
+        
+        var segmentStart = originalStart
+        var segmentIndex = 0
+
+        while segmentStart < originalEnd {
+            let segmentDay = calendar.startOfDay(for: segmentStart)
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: segmentDay) else { break }
+            let segmentEnd = min(originalEnd, nextDay)
+            guard segmentEnd > segmentStart else { break }
+
+            let segmentLocations = proportionalLocations(
+                from: originalLocations,
+                segmentStart: segmentStart,
+                segmentEnd: segmentEnd,
+                originalStart: originalStart,
+                originalEnd: originalEnd
+            )
+
+            var segmentPhotoIDs: [String] = []
+            for id in originalPhotoAssetIDs {
+                if let date = assetCreationDates[id] {
+                    if date >= segmentStart && date < segmentEnd {
+                        segmentPhotoIDs.append(id)
+                    }
+                } else {
+                    if segmentIndex == 0 {
+                        segmentPhotoIDs.append(id)
+                    }
+                }
+            }
+
+            if segmentIndex == 0 {
+                footprint.date = segmentDay
+                footprint.startTime = segmentStart
+                footprint.endTime = segmentEnd
+                footprint.footprintLocations = segmentLocations
+                footprint.photoAssetIDs = segmentPhotoIDs
+            } else {
+                let segmentFootprint = Footprint(
+                    date: segmentDay,
+                    startTime: segmentStart,
+                    endTime: segmentEnd,
+                    footprintLocations: segmentLocations,
+                    locationHash: "\(footprint.locationHash)_DAY_\(segmentIndex)",
+                    duration: segmentEnd.timeIntervalSince(segmentStart),
+                    reason: footprint.reason,
+                    status: footprint.status,
+                    aiScore: footprint.aiScore,
+                    isHighlight: footprint.isHighlight,
+                    placeID: footprint.placeID,
+                    photoAssetIDs: segmentPhotoIDs,
+                    address: footprint.address,
+                    isPlaceSuggestionIgnored: footprint.isPlaceSuggestionIgnored,
+                    aiAnalyzed: footprint.aiAnalyzed,
+                    isAddressEditedByHand: footprint.isAddressEditedByHand,
+                    activityTypeValue: footprint.activityTypeValue,
+                    stepCount: footprint.stepCount,
+                    walkingDistance: footprint.walkingDistance,
+                    floorsAscended: footprint.floorsAscended
+                )
+                context.insert(segmentFootprint)
+            }
+
+            segmentIndex += 1
+            segmentStart = segmentEnd
+        }
+    }
+
+    private static func proportionalLocations(
+        from locations: [CLLocationCoordinate2D],
+        segmentStart: Date,
+        segmentEnd: Date,
+        originalStart: Date,
+        originalEnd: Date
+    ) -> [CLLocationCoordinate2D] {
+        guard !locations.isEmpty else { return [] }
+        guard locations.count > 1 else { return locations }
+
+        let totalDuration = originalEnd.timeIntervalSince(originalStart)
+        guard totalDuration > 0 else { return locations }
+
+        let maxIndex = locations.count - 1
+        let startRatio = max(0, min(1, segmentStart.timeIntervalSince(originalStart) / totalDuration))
+        let endRatio = max(startRatio, min(1, segmentEnd.timeIntervalSince(originalStart) / totalDuration))
+        let lowerIndex = max(0, min(maxIndex, Int(floor(startRatio * Double(maxIndex)))))
+        let upperIndex = max(lowerIndex, min(maxIndex, Int(ceil(endRatio * Double(maxIndex)))))
+
+        return Array(locations[lowerIndex...upperIndex])
     }
 }

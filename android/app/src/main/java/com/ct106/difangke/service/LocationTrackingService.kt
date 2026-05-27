@@ -87,18 +87,38 @@ class LocationTrackingService : Service() {
     private var currentAccuracyMode = "automatic"
     private val ongoingStayMaxPointGapMs = (AppConfig.TRANSPORT_MAX_GAP_THRESHOLD * 1000).toLong()
 
-    private var wasVpnActive: Boolean? = null
+    private var wasVpnOrProxyActive: Boolean? = null
 
-    private fun isVpnActive(): Boolean {
+    private fun isVpnOrProxyActive(): Boolean {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val activeNetwork = cm?.activeNetwork ?: return false
         val capabilities = cm.getNetworkCapabilities(activeNetwork) ?: return false
-        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+            return true
+        }
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val proxyInfo = cm.defaultProxy
+            if (proxyInfo != null) {
+                if (!proxyInfo.host.isNullOrEmpty() || proxyInfo.pacFileUrl != null) {
+                    return true
+                }
+            }
+        }
+        
+        val host = System.getProperty("http.proxyHost")
+        val port = System.getProperty("http.proxyPort")
+        if (!host.isNullOrEmpty() && !port.isNullOrEmpty()) {
+            return true
+        }
+        
+        return false
     }
 
     private fun getBestLocationMode(): AMapLocationClientOption.AMapLocationMode {
-        return if (isVpnActive()) {
-            Log.i(TAG, "检测到 VPN 处于激活状态，使用 Device_Sensors 模式（仅 GPS）定位以防止定位漂移")
+        return if (isVpnOrProxyActive()) {
+            Log.i(TAG, "检测到 VPN 或代理处于激活状态，使用 Device_Sensors 模式（仅 GPS）定位以防止定位漂移")
             AMapLocationClientOption.AMapLocationMode.Device_Sensors
         } else {
             if (currentAccuracyMode == "powerSaving") {
@@ -134,11 +154,11 @@ class LocationTrackingService : Service() {
     }
 
     private val locationListener = AMapLocationListener { location ->
-        val currentVpn = isVpnActive()
-        val vpnStateChanged = wasVpnActive != currentVpn
-        if (vpnStateChanged) {
-            wasVpnActive = currentVpn
-            Log.i(TAG, "VPN 状态变更检测到: $currentVpn，重新应用定位选项")
+        val currentVpnOrProxy = isVpnOrProxyActive()
+        val networkStateChanged = wasVpnOrProxyActive != currentVpnOrProxy
+        if (networkStateChanged) {
+            wasVpnOrProxyActive = currentVpnOrProxy
+            Log.i(TAG, "VPN 或代理状态变更检测到: $currentVpnOrProxy，重新应用定位选项")
         }
 
         if (location != null && location.errorCode == 0) {
@@ -151,10 +171,10 @@ class LocationTrackingService : Service() {
                 else -> 0
             }
             
-            if (newTier != currentIntervalTier || vpnStateChanged) {
+            if (newTier != currentIntervalTier || networkStateChanged) {
                 currentIntervalTier = newTier
                 updateLocationClientOption(newTier)
-                Log.d(TAG, "Interval adjusted to tier $newTier, vpnStateChanged=$vpnStateChanged, speed=$speed m/s")
+                Log.d(TAG, "Interval adjusted to tier $newTier, networkStateChanged=$networkStateChanged, speed=$speed m/s")
             }
 
             serviceScope.launch { 
@@ -168,9 +188,9 @@ class LocationTrackingService : Service() {
                 )
             }
         } else {
-            Log.e(TAG, "定位失败: ${location?.errorCode} - ${location?.errorInfo} (VPN: $currentVpn)")
+            Log.e(TAG, "定位失败: ${location?.errorCode} - ${location?.errorInfo} (VPN/代理: $currentVpnOrProxy)")
             // 如果是因为开启 VPN/代理 导致高精度定位失败，可在下一次尝试强制重置一次选项
-            if (vpnStateChanged) {
+            if (networkStateChanged) {
                 val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
                 updateLocationClientOption(tier)
             }
@@ -202,7 +222,7 @@ class LocationTrackingService : Service() {
         
         try {
             locationClient = AMapLocationClient(applicationContext)
-            wasVpnActive = isVpnActive()
+            wasVpnOrProxyActive = isVpnOrProxyActive()
             val option = AMapLocationClientOption().apply {
                 locationMode = getBestLocationMode()
                 interval = 30000L // 默认初次 30 秒定位一次
@@ -226,7 +246,7 @@ class LocationTrackingService : Service() {
                 startForeground(NotificationHelper.TRACKING_NOTIFICATION_ID, notification)
                 
                 // 开启高德后台定位
-                wasVpnActive = isVpnActive()
+                wasVpnOrProxyActive = isVpnOrProxyActive()
                 val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
                 updateLocationClientOption(tier)
                 locationClient?.enableBackgroundLocation(NotificationHelper.TRACKING_NOTIFICATION_ID, notification)

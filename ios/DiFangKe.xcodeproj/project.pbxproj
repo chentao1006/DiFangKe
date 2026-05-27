@@ -11,6 +11,7 @@
 		08EBCFC9A52F3BC0EFC26A8F /* DayTimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DE8CB8855A50A7F5B5828C7 /* DayTimelineView.swift */; };
 		134DBA94706ABB8ACD8C6EF5 /* ExportManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FAF51D5207C3CFEFBEB0667 /* ExportManager.swift */; };
 		19D19D677339112CC0F14ED5 /* Place.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7338D01A9D36898197763A48 /* Place.swift */; };
+		32BD3192C18CDD34C8B5EB24 /* TimelineEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */; };
 		51C5B1CA5308C8B8E9EEDFBC /* FootprintDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DA88C94F7EAC66D28F00A84 /* FootprintDetailView.swift */; };
 		6C8D388180D8BFA81BBF320B /* RecycleBinView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7537D23096CA61CCC79B0405 /* RecycleBinView.swift */; };
 		71F2E5B397A918D6AD287D07 /* OpenAIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */; };
@@ -117,6 +118,7 @@
 		97D09C072C5681826463BD99 /* PlacesManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesManagerView.swift; sourceTree = "<group>"; };
 		A49FF8D1053B68159E4D2EEC /* Footprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Footprint.swift; sourceTree = "<group>"; };
 		A54AB938AAFF2E0EF442F6AA /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TimelineEditView.swift; sourceTree = "<group>"; };
 		BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoService.swift; sourceTree = "<group>"; };
 		C64D3D9D2F80058600BB3C3F /* IgnoredPlacesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IgnoredPlacesView.swift; sourceTree = "<group>"; };
 		C64D3D9F2F8111A800BB3C3F /* RawLogsManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawLogsManagerView.swift; sourceTree = "<group>"; };
@@ -243,6 +245,7 @@
 				97D09C072C5681826463BD99 /* PlacesManagerView.swift */,
 				2A099643BEA06307F4508FC0 /* SettingsView.swift */,
 				7537D23096CA61CCC79B0405 /* RecycleBinView.swift */,
+				B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -458,6 +461,7 @@
 				6C8D388180D8BFA81BBF320B /* RecycleBinView.swift in Sources */,
 				C6D2DE3A2F90E39800466878 /* HealthManager.swift in Sources */,
 				D452A546B9150F52A9DA068F /* LocationAccuracyMode.swift in Sources */,
+				32BD3192C18CDD34C8B5EB24 /* TimelineEditView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

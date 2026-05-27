@@ -88,6 +88,9 @@ struct DFKMapView: View {
     var allowsGeneratedSnapshot: Bool = true
     var showsStandalonePhotos: Bool = false
     var prefersActivityIcons: Bool = false
+    var isMiniTimelineMode: Bool = false
+    var selectedTimeCoordinate: CLLocationCoordinate2D? = nil
+    var timelineUpdateIdentifier: Int? = nil
 
     struct HeatmapPoint: Identifiable {
         let id: String
@@ -135,6 +138,9 @@ struct DFKMapView: View {
         heatmapPoints: [HeatmapPoint] = [],
         showsStandalonePhotos: Bool = false,
         prefersActivityIcons: Bool = false,
+        isMiniTimelineMode: Bool = false,
+        selectedTimeCoordinate: CLLocationCoordinate2D? = nil,
+        timelineUpdateIdentifier: Int? = nil,
         onTimelineItemTap: ((TimelineItem) -> Void)? = nil,
         onPhotoTap: ((PHAsset) -> Void)? = nil
     ) {
@@ -151,6 +157,9 @@ struct DFKMapView: View {
         self.heatmapPoints = heatmapPoints
         self.showsStandalonePhotos = showsStandalonePhotos
         self.prefersActivityIcons = prefersActivityIcons
+        self.isMiniTimelineMode = isMiniTimelineMode
+        self.selectedTimeCoordinate = selectedTimeCoordinate
+        self.timelineUpdateIdentifier = timelineUpdateIdentifier
         self.onTimelineItemTap = onTimelineItemTap
         self.onPhotoTap = onPhotoTap
     }
@@ -256,6 +265,7 @@ struct DFKMapView: View {
     }
 
     private func markerSize(for duration: TimeInterval) -> CGFloat {
+        if isMiniTimelineMode { return 12 }
         let baseSize: CGFloat = isInteractive ? 34 : 28
         return baseSize * calculateScale(for: duration)
     }
@@ -371,6 +381,16 @@ struct DFKMapView: View {
                                         .fill(Color.dfkAccent)
                                         .frame(width: isInteractive ? 18 : 14, height: isInteractive ? 18 : 14)
                                         .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
+                                }
+                            }
+                            
+                            if let coordinate = selectedTimeCoordinate, coordinate.isRenderableMapCoordinate {
+                                Annotation("", coordinate: coordinate) {
+                                    Circle()
+                                        .fill(Color.red)
+                                        .frame(width: 14, height: 14)
+                                        .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
+                                        .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
                                 }
                             }
 
@@ -522,7 +542,7 @@ struct DFKMapView: View {
         let activity = fp.getActivityType(from: allActivities)
         let activityColor = activity?.color ?? Color.secondary.opacity(0.5)
         let iconName = activity?.icon ?? "questionmark.circle.dashed"
-        let iconSize: CGFloat = (activity?.icon == nil ? 22 : 16) * scale
+        let iconSize: CGFloat = isMiniTimelineMode ? 6 : (activity?.icon == nil ? 22 : 16) * scale
 
         return ZStack {
             // 根据 prefersActivityIcons 决定显示活动图标还是照片封面
@@ -552,14 +572,17 @@ struct DFKMapView: View {
 
     @ViewBuilder
     private func transportAnnotationContent(for transport: Transport) -> some View {
+        let size: CGFloat = isMiniTimelineMode ? 10 : (isInteractive ? 28 : 20)
+        let iconSize: CGFloat = isMiniTimelineMode ? 6 : (isInteractive ? 14 : 10)
+        
         let transportIcon = ZStack {
             RoundedRectangle(cornerRadius: isInteractive ? 8 : 6)
                 .fill(Color.dfkAccent)
-                .frame(width: isInteractive ? 28 : 20, height: isInteractive ? 28 : 20)
+                .frame(width: size, height: size)
                 .overlay(RoundedRectangle(cornerRadius: isInteractive ? 8 : 6).stroke(Color(uiColor: .systemBackground), lineWidth: 1.2))
 
             Image(systemName: transport.currentType.sfSymbol)
-                .font(.system(size: isInteractive ? 14 : 10, weight: .bold))
+                .font(.system(size: iconSize, weight: .bold))
                 .foregroundColor(Color(uiColor: .systemBackground))
         }
         .contentShape(RoundedRectangle(cornerRadius: 6))
@@ -1402,6 +1425,9 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         var footprintsByID: [String: DFKMapView.AggregatedFootprint] = [:]
         var transportsByID: [String: Transport] = [:]
         var photosByID: [String: PHAsset] = [:]
+        
+        var lastUpdateIdentifier: Int? = -1
+        var lastSelectedCoordinateStr: String = ""
 
         init(_ parent: StableInteractiveMapView) {
             self.parent = parent
