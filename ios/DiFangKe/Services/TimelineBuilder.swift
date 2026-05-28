@@ -399,11 +399,11 @@ class TimelineBuilder {
                 let startTimestamp = fp.endTime
                 if newPoints.isEmpty {
                     newPoints = [startCoord]
-                    newPathPoints = [TransportPathPoint(coordinate: startCoord, timestamp: startTimestamp)]
+                    newPathPoints = [TransportPathPoint(coordinate: startCoord, timestamp: startTimestamp, isSyntheticPadding: true)]
                 } else {
                     newPoints[0] = startCoord
                     if !newPathPoints.isEmpty {
-                        newPathPoints[0] = TransportPathPoint(coordinate: startCoord, timestamp: newPathPoints[0].timestamp ?? startTimestamp)
+                        newPathPoints[0] = TransportPathPoint(coordinate: startCoord, timestamp: newPathPoints[0].timestamp ?? startTimestamp, isSyntheticPadding: true)
                     }
                 }
                 updatedT = updatedT.updatingPoints(newPoints, newPathPoints: newPathPoints)
@@ -434,14 +434,14 @@ class TimelineBuilder {
                 let endTimestamp = fp.startTime
                 if newPoints.isEmpty {
                     newPoints.append(endCoord)
-                    newPathPoints.append(TransportPathPoint(coordinate: endCoord, timestamp: endTimestamp))
+                    newPathPoints.append(TransportPathPoint(coordinate: endCoord, timestamp: endTimestamp, isSyntheticPadding: true))
                 } else if newPoints.count == 1 {
                     newPoints.append(endCoord)
-                    newPathPoints.append(TransportPathPoint(coordinate: endCoord, timestamp: endTimestamp))
+                    newPathPoints.append(TransportPathPoint(coordinate: endCoord, timestamp: endTimestamp, isSyntheticPadding: true))
                 } else {
                     newPoints[newPoints.count - 1] = endCoord
                     if !newPathPoints.isEmpty {
-                        newPathPoints[newPathPoints.count - 1] = TransportPathPoint(coordinate: endCoord, timestamp: newPathPoints[newPathPoints.count - 1].timestamp ?? endTimestamp)
+                        newPathPoints[newPathPoints.count - 1] = TransportPathPoint(coordinate: endCoord, timestamp: newPathPoints[newPathPoints.count - 1].timestamp ?? endTimestamp, isSyntheticPadding: true)
                     }
                 }
                 updatedT = updatedT.updatingPoints(newPoints, newPathPoints: newPathPoints)
@@ -1275,11 +1275,13 @@ struct CodableCoordinate: Codable {
     let lat: Double
     let lon: Double
     let timestamp: Date?
+    var isSyntheticPadding: Bool?
 
-    init(lat: Double, lon: Double, timestamp: Date? = nil) {
+    init(lat: Double, lon: Double, timestamp: Date? = nil, isSyntheticPadding: Bool? = nil) {
         self.lat = lat
         self.lon = lon
         self.timestamp = timestamp
+        self.isSyntheticPadding = isSyntheticPadding
     }
 }
 
@@ -1447,8 +1449,6 @@ class PersistentTimelineBuilder {
             // 过滤该缺口内的点位
             let gapPoints = allRawPoints.filter { point in
                 if point.timestamp < gap.start || point.timestamp > gap.end { return false }
-                // 核心防护：如果点位处于实时进行的停留时间之后，先跳过，让其留在实时状态中
-                if let os = ongoingStart, point.timestamp >= os { return false }
                 // 核心修复：过滤精度极差或无效的点，防止 GPS 漂移产生虚假交通
                 if point.horizontalAccuracy <= 0 || point.horizontalAccuracy > AppConfig.shared.habitAnalysisAccuracyThreshold { return false }
                 return true
@@ -1711,11 +1711,11 @@ class PersistentTimelineBuilder {
                 
                 if !gapPoints.isEmpty {
                     var routePoints = gapPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) }
-                    let startCoord = CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude, timestamp: currentFp.endTime)
+                    let startCoord = CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude, timestamp: currentFp.endTime, isSyntheticPadding: true)
                     if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.first, footprint: startCoord) {
                         routePoints.insert(startCoord, at: 0)
                     }
-                    let endCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude, timestamp: nextFp.startTime)
+                    let endCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude, timestamp: nextFp.startTime, isSyntheticPadding: true)
                     if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.last, footprint: endCoord) {
                         routePoints.append(endCoord)
                     }
@@ -1727,8 +1727,8 @@ class PersistentTimelineBuilder {
                     actualEndTime = gapPoints.last!.timestamp
                 } else {
                     pathDist = straightDist
-                    pts = [CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude, timestamp: currentFp.endTime),
-                           CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude, timestamp: nextFp.startTime)]
+                    pts = [CodableCoordinate(lat: currentFp.latitude, lon: currentFp.longitude, timestamp: currentFp.endTime, isSyntheticPadding: true),
+                           CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude, timestamp: nextFp.startTime, isSyntheticPadding: true)]
                 }
 
 
@@ -1864,7 +1864,7 @@ class PersistentTimelineBuilder {
             }
             
             if let prevFp = alignedPreviousFootprint {
-                let fpCoord = CodableCoordinate(lat: prevFp.latitude, lon: prevFp.longitude, timestamp: prevFp.endTime)
+                let fpCoord = CodableCoordinate(lat: prevFp.latitude, lon: prevFp.longitude, timestamp: prevFp.endTime, isSyntheticPadding: true)
                 if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: decodedPoints.first, footprint: fpCoord) &&
                     (decodedPoints.first?.lat != fpCoord.lat || decodedPoints.first?.lon != fpCoord.lon) {
                     decodedPoints.insert(fpCoord, at: 0)
@@ -1872,7 +1872,7 @@ class PersistentTimelineBuilder {
             }
             
             if let nextFp = alignedNextFootprint {
-                let fpCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude, timestamp: nextFp.startTime)
+                let fpCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude, timestamp: nextFp.startTime, isSyntheticPadding: true)
                 if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: decodedPoints.last, footprint: fpCoord) &&
                     (decodedPoints.last?.lat != fpCoord.lat || decodedPoints.last?.lon != fpCoord.lon) {
                     decodedPoints.append(fpCoord)
@@ -2600,7 +2600,8 @@ extension PersistentTimelineBuilder {
                 pathPoints = decoded.map {
                     TransportPathPoint(
                         coordinate: CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon),
-                        timestamp: $0.timestamp
+                        timestamp: $0.timestamp,
+                        isSyntheticPadding: $0.isSyntheticPadding ?? false
                     )
                 }
             }
@@ -2711,7 +2712,9 @@ extension PersistentTimelineBuilder {
                 }
             }
 
-            if segmentIndex == 0 {
+            let isLastSegment = (segmentEnd == originalEnd)
+
+            if isLastSegment {
                 footprint.date = segmentDay
                 footprint.startTime = segmentStart
                 footprint.endTime = segmentEnd

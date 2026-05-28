@@ -3556,8 +3556,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             if let fps = try? context.fetch(fpDesc) {
                 for fp in fps {
-                    // 仅保护带照片的足迹（视为原始数据）或已被用户忽略/删除的足迹
-                    let isProtected = !fp.photoAssetIDs.isEmpty || fp.status == .ignored
+                    // 仅保护非删除状态且带照片的足迹（视为有价值的用户数据）
+                    let isProtected = !fp.photoAssetIDs.isEmpty && fp.status != .ignored
                     if !isProtected {
                         context.delete(fp)
                     }

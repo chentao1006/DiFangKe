@@ -744,7 +744,7 @@ struct TimelinePageView: View {
             Image(systemName: "mappin.and.ellipse")
                 .font(.system(size: 60))
                 .foregroundColor(Color.dfkCandidate)
-            Text("比较平常，没有发现特别足迹")
+            Text("没有发现足迹")
                 .font(.subheadline.bold())
                 .foregroundColor(Color.dfkSecondaryText)
             Spacer()

@@ -1408,7 +1408,9 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             let current = validPoints[index]
             let next = validPoints[index + 1]
             let isDashed: Bool
-            if let currentTime = current.timestamp, let nextTime = next.timestamp {
+            if current.isSyntheticPadding || next.isSyntheticPadding {
+                isDashed = true
+            } else if let currentTime = current.timestamp, let nextTime = next.timestamp {
                 isDashed = abs(nextTime.timeIntervalSince(currentTime)) > 5 * 60
             } else {
                 isDashed = false

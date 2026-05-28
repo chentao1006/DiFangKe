@@ -276,6 +276,7 @@ struct Transport: Identifiable {
 struct TransportPathPoint {
     let coordinate: CLLocationCoordinate2D
     let timestamp: Date?
+    var isSyntheticPadding: Bool = false
 }
 
 struct TransportLineSegment: Identifiable {
@@ -301,7 +302,10 @@ extension Transport {
             let current = validPoints[i]
             let next = validPoints[i + 1]
             let isDashed: Bool
-            if let currentTime = current.timestamp, let nextTime = next.timestamp {
+            
+            if current.isSyntheticPadding || next.isSyntheticPadding {
+                isDashed = true
+            } else if let currentTime = current.timestamp, let nextTime = next.timestamp {
                 isDashed = abs(nextTime.timeIntervalSince(currentTime)) > 3 * 60
             } else {
                 isDashed = false
