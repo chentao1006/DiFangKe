@@ -17,6 +17,7 @@
 		71F2E5B397A918D6AD287D07 /* OpenAIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */; };
 		7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FECD1239FE04DF703FFB1E6 /* DataManagerView.swift */; };
 		8EDC80C32DCF8D059D548DB7 /* DiFangKeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C84EEA3EDC02DA770FA555B /* DiFangKeApp.swift */; };
+		923B7C1655C4BB80D929DDCF /* Aptabase in Frameworks */ = {isa = PBXBuildFile; productRef = 68EA130148C5349D5CF940EE /* Aptabase */; };
 		93AB9A1A347A786C40F60D26 /* MapPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D750760587987B7CCDAB5FF /* MapPickerView.swift */; };
 		988AA12CFD19A21CA1592A1D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A099643BEA06307F4508FC0 /* SettingsView.swift */; };
 		9F3F925B82CF4EEDED4E3AFF /* AddPlaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35E218304D15330402004958 /* AddPlaceSheet.swift */; };
@@ -175,6 +176,14 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		8F91DE4F3B6FDFF2EB8ECE0A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				923B7C1655C4BB80D929DDCF /* Aptabase in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C67848102FA24C0C002DF823 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -343,6 +352,7 @@
 				A23D6FADAE18AE6B2791A4EE /* Sources */,
 				402F6E6DF86D9DE22D1B34EF /* Resources */,
 				C67848282FA24C10002DF823 /* Embed Foundation Extensions */,
+				8F91DE4F3B6FDFF2EB8ECE0A /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -350,6 +360,9 @@
 				C67848262FA24C10002DF823 /* PBXTargetDependency */,
 			);
 			name = DiFangKe;
+			packageProductDependencies = (
+				68EA130148C5349D5CF940EE /* Aptabase */,
+			);
 			productName = DiFangKe;
 			productReference = 0109B5C3A46C595F984A0148 /* 地方客.app */;
 			productType = "com.apple.product-type.application";
@@ -380,6 +393,9 @@
 			);
 			mainGroup = CE21BCBC42E9B032C1E986C7;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				3FB6B41A72C5CC53D33BDFF0 /* XCRemoteSwiftPackageReference "aptabase-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 060C5744364D60F6DF54D207 /* Products */;
 			projectDirPath = "";
@@ -569,7 +585,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = DiFangKe/DiFangKe.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = DiFangKe/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
@@ -663,7 +679,7 @@
 				CODE_SIGN_ENTITLEMENTS = DiFangKeWidgetExtension.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"DEBUG=1",
@@ -705,7 +721,7 @@
 				CODE_SIGN_ENTITLEMENTS = DiFangKeWidgetExtension.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = DiFangKeWidget/Info.plist;
@@ -741,7 +757,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = DiFangKe/DiFangKe.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = DiFangKe/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
@@ -795,6 +811,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		3FB6B41A72C5CC53D33BDFF0 /* XCRemoteSwiftPackageReference "aptabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/aptabase/aptabase-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.3.5;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		68EA130148C5349D5CF940EE /* Aptabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3FB6B41A72C5CC53D33BDFF0 /* XCRemoteSwiftPackageReference "aptabase-swift" */;
+			productName = Aptabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 22478D1FFB0A8791BF88398D /* Project object */;
 }

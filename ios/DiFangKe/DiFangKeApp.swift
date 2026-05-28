@@ -5,6 +5,8 @@ import Photos
 import BackgroundTasks
 import PhotosUI
 import WidgetKit
+import Aptabase
+
 
 // Brand Theme Extensions
 extension Color {
@@ -23,6 +25,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     static let bgRefreshTaskID = "com.ct106.difangke.locationKeepAlive"
     
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
+        // Initialize Aptabase Analytics
+        Aptabase.shared.initialize(appKey: AppConfig.shared.aptabaseAppKey)
+        Aptabase.shared.trackEvent("app_started")
+        
         // 注册远程通知是激活 iCloud 实时同步的关键，它能让设备及时收到云端的变更推送
         application.registerForRemoteNotifications()
         

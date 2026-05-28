@@ -258,4 +258,8 @@ class AppConfig {
     var appGroupID: String {
         string(forKey: "APP_GROUP_ID")
     }
+
+    var aptabaseAppKey: String {
+        string(forKey: "APTABASE_APP_KEY")
+    }
 }

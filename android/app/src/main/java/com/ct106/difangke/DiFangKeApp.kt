@@ -9,6 +9,7 @@ import com.ct106.difangke.data.prefs.AppPreferences
 import com.ct106.difangke.service.NotificationHelper
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import com.aptabase.Aptabase
 
 class DiFangKeApp : Application() {
 
@@ -24,6 +25,10 @@ class DiFangKeApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        
+        // Initialize Aptabase Analytics
+        Aptabase.instance.initialize(this, AppConfig.APTABASE_APP_KEY)
+        Aptabase.instance.trackEvent("app_started")
         
         // 高德隐私合规初始化（完整 3D 版 SDK 必须在所有高德接口调用前执行）
         com.amap.api.maps.MapsInitializer.updatePrivacyShow(this, true, true)
