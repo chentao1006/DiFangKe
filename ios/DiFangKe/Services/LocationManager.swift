@@ -401,65 +401,8 @@ final class RawLocationStore {
     /// 几分钟内跨越数公里又回到附近，属于典型的坐标跳变 (支持连续多点跳转检测)
     static func filterRidiculousSpikes(_ points: [CLLocation]) -> [CLLocation] {
         guard points.count >= 3 else { return points }
-        var cleaned: [CLLocation] = []
-        cleaned.append(points[0])
-        
-        var i = 1
-        while i < points.count {
-            let prev = cleaned.last!
-            let current = points[i]
-            
-            // --- 强化判定逻辑：基于速度与回弹的多点联合过滤 ---
-            let tPrevToCurrent = max(current.timestamp.timeIntervalSince(prev.timestamp), 0.1)
-            let dPrevToCurrent = current.distance(from: prev)
-            let speedPrevToCurrent = dPrevToCurrent / tPrevToCurrent // m/s
-            
-            // --- NEW: Physical Impossibility Check (User Request: 5s/3km = 600m/s) ---
-            if speedPrevToCurrent > AppConfig.shared.physicalMaxSpeedThreshold {
-                i += 1
-                continue
-            }
-            
-            // 如果瞬时速度较快，或者位移较大（超过 800m）且速度也不低（超过 20m/s）
-            // 或者：只要位移巨大（超过 2000m），即使速度没那么快，也要触发跳变探测（对抗长间隔的大跳变）
-            if speedPrevToCurrent > 60 || (dPrevToCurrent > 800 && speedPrevToCurrent > 20) || dPrevToCurrent > 2000 {
-                var jumpReturnIndex = -1
-                let searchLimit = min(i + 15, points.count) 
-                
-                for j in (i + 1)..<searchLimit {
-                    let next = points[j]
-                    let tPrevToNext = max(next.timestamp.timeIntervalSince(prev.timestamp), 0.1)
-                    let dPrevToNext = next.distance(from: prev)
-                    let avgSpeedToNext = dPrevToNext / tPrevToNext
-                    
-                    // 如果点 j 相对于 prev 的平均速度是合理的（< 150km/h，约 42m/s）
-                    // 但 current 这一点是突发性的跳转，则说明 [i...j-1] 段是漂移
-                    if avgSpeedToNext < 42 && dPrevToCurrent > 800 {
-                        // 且回归点 next 距离 current 也必须足够远，证明 current 是偏离轨迹的点
-                        if current.distance(from: next) > 800 {
-                            jumpReturnIndex = j
-                            break
-                        }
-                    }
-                }
-                
-                if jumpReturnIndex != -1 {
-                    print("🚩 Aggressively filtered ghost jump cluster from \(i) to \(jumpReturnIndex)")
-                    i = jumpReturnIndex
-                    continue
-                }
-            }
-            
-            // --- 补救：对极差精度的孤立点直接剔除 ---
-            if current.horizontalAccuracy > 1500 && dPrevToCurrent > 2000 {
-                i += 1
-                continue
-            }
-            
-            cleaned.append(current)
-            i += 1
-        }
-        return cleaned
+        let marked = markDriftPoints(points)
+        return marked.filter { !$0.isDriftPoint }.map { $0.location }
     }
     
     /// 高效获取指定日期的总点数（统计行数，不解析对象）
@@ -675,20 +618,20 @@ final class RawLocationStore {
             let distAB = a.distance(from: b)
             let distBC = b.distance(from: c)
             
-            // A 和 C 距离很近（< 80m），但 B 跳到了很远（> 100m）
-            if distAC < 80 && distAB > 100 && distBC > 100 {
+            // A 和 C 距离很近（< 100m），但 B 跳到了很远（> 80m）
+            if distAC < 100 && distAB > 80 && distBC > 80 {
                 driftFlags[i] = true
                 continue
             }
             
-            // 更宽松的变体：A 和 C 距离适中（< 150m），但 B 跳得很远（> 300m）
-            if distAC < 150 && distAB > 300 && distBC > 300 {
+            // 更宽松的变体：A 和 C 距离适中（< 200m），但 B 跳得很远（> 200m）
+            if distAC < 200 && distAB > 200 && distBC > 200 {
                 driftFlags[i] = true
                 continue
             }
             
             // 补充：B 的精度很差且跳变明显
-            if b.horizontalAccuracy > 100 && distAC < 100 && distAB > 150 {
+            if b.horizontalAccuracy > 65 && distAC < 150 && distAB > 100 {
                 driftFlags[i] = true
                 continue
             }
@@ -1655,7 +1598,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let coords = fp.footprintLocations
         // 核心：基于位置聚类寻找多个“停留点”
         // 安全保护：不自动处理用户手动编辑过、有照片、或者是已确认的足迹，避免干扰用户已有工作
-        let hasUserEdits = fp.isAddressEditedByHand || !(fp.reason ?? "").isEmpty || !fp.photoAssetIDs.isEmpty || fp.status == .confirmed
+        let hasUserEdits = fp.isAddressEditedByHand || !(fp.reason ?? "").isEmpty || !fp.photoAssetIDs.isEmpty || fp.status == .manual
         if hasUserEdits { return }
         
         guard coords.count > 15 else { return } // 略微增加密度要求
@@ -1667,7 +1610,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             while j < coords.count {
                 let startLoc = CLLocation(latitude: coords[i].latitude, longitude: coords[i].longitude)
                 let currLoc = CLLocation(latitude: coords[j].latitude, longitude: coords[j].longitude)
-                if startLoc.distance(from: currLoc) < 100.0 { // 100m 聚类半径
+                if startLoc.distance(from: currLoc) < min(100.0, AppConfig.shared.mergeDistanceThreshold * 0.8) { // 动态聚类半径
                     j += 1
                 } else {
                     break
@@ -1695,7 +1638,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     let lastLoc = CLLocation(latitude: lastCenter.latitude, longitude: lastCenter.longitude)
                     let currLoc = CLLocation(latitude: curr.center.latitude, longitude: curr.center.longitude)
                     
-                    if currLoc.distance(from: lastLoc) > 120.0 {
+                    if currLoc.distance(from: lastLoc) > AppConfig.shared.mergeDistanceThreshold {
                         distinctClusters.append((curr.start, curr.end))
                         lastCenter = curr.center
                     } else {
@@ -1964,18 +1907,23 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             let distance = location.distance(from: startLoc)
             
             if !isSamePlace && distance > 150.0 && location.horizontalAccuracy < 100.0 {
-                potentialStopStartLocation = location
+                // 已经离开当前地点，设为空以表示正在移动中
+                potentialStopStartLocation = nil
                 clearOngoingPlaceOverride()
                 savePotentialStop()
                 ongoingTitle = nil
                 saveOngoingTitle()
             }
         } else {
-            potentialStopStartLocation = location
-            clearOngoingPlaceOverride()
-            savePotentialStop()
-            ongoingTitle = nil
-            saveOngoingTitle()
+            // 目前没有记录停留起点（正在移动中）
+            // 只有当确定没有明显移动证据时（uiIsMoving = false），才将其设为新的停留起点
+            if !uiIsMoving {
+                potentialStopStartLocation = location
+                clearOngoingPlaceOverride()
+                savePotentialStop()
+                ongoingTitle = nil
+                saveOngoingTitle()
+            }
         }
         
         // 4. 触发正在持续停留的 AI 分析 (停留 10 分钟后触发第一次，之后每 60 分钟刷新)
@@ -2097,11 +2045,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             )
             if let existing = try? context.fetch(fetchDescriptor) {
                 for fp in existing {
-                    // 仅保护带照片的足迹不被重置清空（视为原始数据）
-                    let isProtected = !fp.photoAssetIDs.isEmpty
-                    if !isProtected {
-                        context.delete(fp)
-                    }
+                    context.delete(fp)
                 }
             }
             
@@ -3018,6 +2962,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 "device": deviceID
             ]
             UserDefaults.standard.set(status, forKey: "liveStayStatus")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "pending_lat")
+            UserDefaults.standard.removeObject(forKey: "pending_lng")
+            UserDefaults.standard.removeObject(forKey: "pending_time")
+            UserDefaults.standard.removeObject(forKey: "liveStayStatus")
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "pending_time_local_updated")
         }
     }
 
@@ -3556,11 +3506,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             if let fps = try? context.fetch(fpDesc) {
                 for fp in fps {
-                    // 仅保护非删除状态且带照片的足迹（视为有价值的用户数据）
-                    let isProtected = !fp.photoAssetIDs.isEmpty && fp.status != .ignored
-                    if !isProtected {
-                        context.delete(fp)
-                    }
+                    context.delete(fp)
                 }
             }
             if let tps = try? context.fetch(tpDesc) { for tp in tps { context.delete(tp) } }

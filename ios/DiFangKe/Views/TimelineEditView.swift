@@ -1130,12 +1130,12 @@ struct TimelineEditView: View {
         for item in timelineItems where !finalIDs.contains(item.id) {
             switch item {
             case .footprint(let footprint):
-                footprint.status = .ignored
+                modelContext.delete(footprint)
             case .transport(let transport):
                 let recordID = transport.id
                 let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == recordID })
                 if let record = try? modelContext.fetch(descriptor).first {
-                    record.statusRaw = "ignored"
+                    modelContext.delete(record)
                 }
             }
         }

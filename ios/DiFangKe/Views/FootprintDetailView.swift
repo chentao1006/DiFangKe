@@ -882,11 +882,10 @@ extension FootprintModalView {
     
     private func ignoreFootprint() { 
         withAnimation { 
-            footprint.status = .ignored 
             hasChanged = true
         }
-        if footprint.modelContext == nil {
-            modelContext.insert(footprint)
+        if let context = footprint.modelContext {
+            context.delete(footprint)
         }
         try? modelContext.save()
         onDismiss?(hasChanged)

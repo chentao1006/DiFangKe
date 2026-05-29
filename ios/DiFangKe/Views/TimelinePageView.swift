@@ -448,7 +448,7 @@ struct TimelinePageView: View {
 
         let recordDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == targetId })
         if let records = try? modelContext.fetch(recordDescriptor), let record = records.first {
-            record.statusRaw = "ignored"
+            modelContext.delete(record)
         }
 
         let overrideDescriptor = FetchDescriptor<TransportManualSelection>(predicate: #Predicate { $0.recordID == targetId })

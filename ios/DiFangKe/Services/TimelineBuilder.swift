@@ -231,48 +231,9 @@ class TimelineBuilder {
             // 核心逻辑：使用配置调整的时间限制。但如果有照片，则视为原始事实保留且不作为垃圾过滤
             .filter { $0.duration >= AppConfig.shared.stayDurationThreshold || !$0.photoAssetIDs.isEmpty }
         
-        // UI-level merging of consecutive footprints for the same location
-        var finalizedSortedFootprints: [FootprintLite] = []
-        for fp in sortedFootprints {
-            if let last = finalizedSortedFootprints.last, shouldPerformUiMerge(last, fp) {
-                // 核心修复：即使符合合并条件（距离近、时间近），如果中间有明显的原始轨迹位移，也不应合并
-                let gapPoints = TimelineBuilder.extractPoints(from: allRawPoints, start: last.endTime, end: fp.startTime)
-                let hasMovement = !gapPoints.isEmpty && hasSignificantMovement(between: last, and: fp, points: gapPoints)
-                
-                if !hasMovement {
-                    // Create a temporary footprint that covers the combined range
-                    let combinedLocations = last.footprintLocations + fp.footprintLocations
-                    let avgLat = combinedLocations.isEmpty ? last.latitude : (combinedLocations.map { $0.latitude }.reduce(0, +) / Double(combinedLocations.count))
-                    let avgLon = combinedLocations.isEmpty ? last.longitude : (combinedLocations.map { $0.longitude }.reduce(0, +) / Double(combinedLocations.count))
-
-                    let combined = FootprintLite(
-                        startTime: last.startTime,
-                        endTime: max(last.endTime, fp.endTime),
-                        latitude: avgLat,
-                        longitude: avgLon,
-                        footprintID: last.footprintID,
-                        placeID: last.placeID,
-                        address: (last.placeID != nil || last.isAddressEditedByHand) ? last.address : ((fp.placeID != nil || fp.isAddressEditedByHand) ? fp.address : last.address),
-                        status: last.status,
-                        footprintLocations: combinedLocations,
-                        isAddressEditedByHand: last.isAddressEditedByHand || fp.isAddressEditedByHand,
-                        date: last.date,
-                        duration: max(last.endTime, fp.endTime).timeIntervalSince(last.startTime),
-                        photoAssetIDs: Array(Set(last.photoAssetIDs + fp.photoAssetIDs)),
-                        reason: last.reason ?? fp.reason,
-                        isHighlight: (last.isHighlight == true || fp.isHighlight == true),
-                        maxDiameter: 0, // Not strictly needed for UI Lite objects
-                        aiAnalyzed: last.aiAnalyzed || fp.aiAnalyzed,
-                        activityTypeValue: (last.status == .manual && last.activityTypeValue == nil) || (fp.status == .manual && fp.activityTypeValue == nil) ? nil : (last.activityTypeValue ?? fp.activityTypeValue)
-                    )
-                    finalizedSortedFootprints[finalizedSortedFootprints.count - 1] = combined
-                } else {
-                    finalizedSortedFootprints.append(fp)
-                }
-            } else {
-                finalizedSortedFootprints.append(fp)
-            }
-        }
+        // 用户要求：彻底去掉 UI 层的强行合并逻辑，后台生成什么就显示什么。
+        // 将原先的 UI-level merging 注释掉/直接使用原始足迹集合。
+        let finalizedSortedFootprints: [FootprintLite] = sortedFootprints
         
         var currentTime = startOfDay
         
@@ -328,7 +289,8 @@ class TimelineBuilder {
         let resolvedItems = resolveTimelineOverlaps(items)
         
         // Final merge of adjacent stationary items if any were created during resolution
-        let mergedItems = mergeAdjacentItems(resolvedItems)
+        // 用户要求：彻底去掉 UI 层的强行合并逻辑
+        let mergedItems = resolvedItems // mergeAdjacentItems(resolvedItems)
         
         // --- 衔接优化：将交通的起止点名称与坐标对齐到前后足迹 ---
         let alignedItems = alignTransportLocations(mergedItems, allPlaces: allPlaces)
@@ -486,8 +448,8 @@ class TimelineBuilder {
             return true
         }
         
-        // 4. 降级逻辑：如果距离略远但地址完全一致，也可以合并
-        if distance < AppConfig.shared.stayDistanceThreshold * 1.5 && addr1 == addr2 && activity1 == activity2 {
+        // 4. 降级逻辑：如果距离略远但地址完全一致，也可以合并，但距离不能超过 stayDistanceThreshold * 0.6 (约120米)
+        if distance < AppConfig.shared.stayDistanceThreshold * 0.6 && addr1 == addr2 && activity1 == activity2 {
             return true
         }
         
@@ -1649,7 +1611,7 @@ class PersistentTimelineBuilder {
                     current.endLocation = next.endLocation
                 }
                 
-                next.statusRaw = "ignored"
+                context.delete(next)
                 // 移除此处 save，统一在 syncDay 末尾 save，大幅减少 UI 抖动
                 // try? context.save()
                 
@@ -2116,7 +2078,11 @@ class PersistentTimelineBuilder {
                 let currentLite = TimelineBuilder.convertToFootprintLite(current)
                 let nextLite = TimelineBuilder.convertToFootprintLite(next)
                 
-                if !gapPoints.isEmpty && TimelineBuilder.hasSignificantMovement(between: currentLite, and: nextLite, points: gapPoints) {
+                // 如果两个足迹极其接近（小于 mergeThreshold，当前为 150m），我们认为它们是同一个地点的连续停留。
+                // 此时忽略 hasSignificantMovement 检查，防止因短暂的 GPS 漂移导致同一个地点被切分成两半。
+                let isEffectivelySameLocation = dist < mergeThreshold
+                
+                if !isEffectivelySameLocation && !gapPoints.isEmpty && TimelineBuilder.hasSignificantMovement(between: currentLite, and: nextLite, points: gapPoints) {
                     i += 1
                     continue
                 }
@@ -2131,6 +2097,11 @@ class PersistentTimelineBuilder {
                 // 合并时间
                 current.endTime = max(current.endTime, next.endTime)
                 current.duration = current.endTime.timeIntervalSince(current.startTime)
+                
+                // 合并位置点
+                var path = current.footprintLocations
+                path.append(contentsOf: next.footprintLocations)
+                current.footprintLocations = path
                 
                 // 合并照片
                 if !next.photoAssetIDs.isEmpty {
@@ -2155,7 +2126,7 @@ class PersistentTimelineBuilder {
                 }
 
                 // 标记下一个为忽略 (逻辑上合并了)
-                next.statusValue = "ignored"
+                context.delete(next)
                 
                 try? context.save()
                 // 递归处理，直到没有可合并的

@@ -125,6 +125,7 @@ struct DataManagerView: View {
                 Button(role: .destructive) {
                     DFKMapSnapshotCache.shared.clearCache()
                     updateCacheSize()
+                    clearAllIgnoredData()
                 } label: {
                     Label("清空地图缓存", systemImage: "trash")
                 }
@@ -280,6 +281,28 @@ struct DataManagerView: View {
             self.alertTitle = "操作失败"
             self.alertMessage = error.localizedDescription
             self.showAlert = true
+        }
+    }
+    
+    private func clearAllIgnoredData() {
+        do {
+            let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate { $0.statusValue == "ignored" })
+            if let fps = try? modelContext.fetch(fpDesc) {
+                for f in fps {
+                    modelContext.delete(f)
+                }
+            }
+            
+            let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.statusRaw == "ignored" })
+            if let tps = try? modelContext.fetch(tpDesc) {
+                for t in tps {
+                    modelContext.delete(t)
+                }
+            }
+            
+            try modelContext.save()
+        } catch {
+            print("清理遗留 ignored 记录失败: \(error)")
         }
     }
     

@@ -58,7 +58,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         
         // ── 注册 BGAppRefreshTask：定期唤醒以确保定位服务不被系统回收 ──
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.bgRefreshTaskID, using: nil) { task in
-            self.handleBackgroundRefresh(task: task as! BGAppRefreshTask)
+            guard let refreshTask = task as? BGAppRefreshTask else { return }
+            self.handleBackgroundRefresh(task: refreshTask)
         }
         scheduleBackgroundRefresh()
         
@@ -278,9 +279,16 @@ struct DiFangKeApp: App {
             }
         } catch {
             print("SwiftData CRITICAL ERROR: \(error)")
-            let fallbackContainer = try! ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
-            await MainActor.run {
-                self.modelContainer = fallbackContainer
+            do {
+                let fallbackConfig = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+                let fallbackContainer = try ModelContainer(for: schema, configurations: [fallbackConfig])
+                await MainActor.run {
+                    self.modelContainer = fallbackContainer
+                }
+            } catch {
+                print("SwiftData FALLBACK CRITICAL ERROR: \(error)")
+                // Prevent crash, but app will likely stay on splash screen
+                // or we could initialize an empty container if possible
             }
         }
     }

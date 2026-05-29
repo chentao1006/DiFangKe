@@ -41,7 +41,7 @@ class TransportDetailViewModel(application: Application) : AndroidViewModel(appl
     fun deleteTransport() {
         val current = _transport.value ?: return
         viewModelScope.launch {
-            db.transportRecordDao().ignoreById(current.recordID)
+            db.transportRecordDao().delete(current)
             _transport.value = null
         }
     }
