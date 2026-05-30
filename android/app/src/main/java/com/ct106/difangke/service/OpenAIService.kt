@@ -284,13 +284,8 @@ class OpenAIService private constructor() {
             val start = TIME_FMT.format(tp.startTime)
             val end = TIME_FMT.format(tp.endTime)
             val typeName = com.ct106.difangke.data.model.TransportType.from(tp.typeRaw).localizedName
-            val distStr = if (tp.distance > 0) {
-                if (tp.distance > 1000) String.format("%.1fkm", tp.distance / 1000) else "${tp.distance.toInt()}m"
-            } else ""
-            
             val desc = "$start-$end｜移动（$typeName）" + 
-                (if (tp.startLocation != "起点" || tp.endLocation != "终点") "｜${tp.startLocation} ➔ ${tp.endLocation}" else "") +
-                (if (distStr.isNotEmpty()) "｜距离：$distStr" else "")
+                (if (tp.startLocation != "起点" || tp.endLocation != "终点") "｜${tp.startLocation} ➔ ${tp.endLocation}" else "")
             
             items.add(SimpleItem(tp.startTime, desc))
         }

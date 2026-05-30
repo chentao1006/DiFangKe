@@ -4,6 +4,7 @@ import MapKit
 import UIKit
 import Combine
 import Photos
+import Aptabase
 
 struct DayTimelineView: View {
     @Environment(\.modelContext) private var modelContext
@@ -106,6 +107,7 @@ struct DayTimelineView: View {
             }
             .alert("重新生成本日数据", isPresented: $showingResetAlert) {
                 Button("确定重新生成", role: .destructive) {
+                    Aptabase.shared.trackEvent("timeline_rebuilt")
                     locationManager.resetData(for: activatedDate)
                 }
                 Button("取消", role: .cancel) { }

@@ -8,6 +8,7 @@ import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import com.aptabase.Aptabase
 
 class FootprintDetailViewModel(application: Application) : AndroidViewModel(application) {
     private val db = DiFangKeApp.instance.database
@@ -129,6 +130,7 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
         onSaved: () -> Unit = {}
     ) {
         val current = _footprint.value ?: return
+        Aptabase.instance.trackEvent("footprint_edited")
         viewModelScope.launch {
             val updated = current.copy(
                 title = title, 
@@ -151,6 +153,7 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun deleteFootprint() {
+        Aptabase.instance.trackEvent("footprint_deleted")
         val current = _footprint.value ?: return
         viewModelScope.launch {
             db.footprintDao().delete(current)

@@ -543,11 +543,8 @@ class OpenAIService {
         var lines: [String] = []
         
         var events: [(Date, String)] = []
-        var uniquePlaceKeys: Set<String> = []
-        var totalTransportDistance: Double = 0
         var transportEventCount = 0
         var transportTypeNames: [String] = []
-        var footprintCoordsByTime: [(Date, CLLocationCoordinate2D)] = []
         
         let startOfDate = Calendar.current.startOfDay(for: Date())
         
@@ -564,8 +561,6 @@ class OpenAIService {
                     events.append((fp.startTime, factLine))
                 }
 
-                uniquePlaceKeys.insert(dailySummaryPlaceKey(for: fp, places: allPlaces))
-                footprintCoordsByTime.append((fp.startTime, CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)))
             }
         }
         
@@ -582,9 +577,6 @@ class OpenAIService {
                 if !transportTypeNames.contains(typeName) {
                     transportTypeNames.append(typeName)
                 }
-                if tp.distance > 0 {
-                    totalTransportDistance += tp.distance
-                }
             }
         }
         
@@ -595,23 +587,14 @@ class OpenAIService {
             lines.append("\(index + 1). \(event.1)")
         }
 
-        let inferredFootprintDistance = dailySummaryInferredDistance(from: footprintCoordsByTime)
-        let totalDistanceEvidence = max(totalTransportDistance, inferredFootprintDistance)
-
-        if totalDistanceEvidence > 0 {
-            lines.append("\(lines.count + 1). 当日里程：\(dailySummaryDistanceText(totalDistanceEvidence))")
-        }
         if !transportTypeNames.isEmpty {
             lines.append("\(lines.count + 1). 交通概况：\(transportEventCount) 次移动，包含 \(transportTypeNames.joined(separator: "、"))")
         }
-        lines.append("\(lines.count + 1). 地点变化：\(dailySummaryPlaceJudgement(uniquePlaceCount: uniquePlaceKeys.count, distanceMeters: totalDistanceEvidence))")
         
         guard !lines.isEmpty else { return nil }
         
         let fallbackSummary = dailySummaryFallbackSummary(
-            footprintCount: events.count,
-            totalDistance: totalDistanceEvidence,
-            placeJudgement: dailySummaryPlaceJudgement(uniquePlaceCount: uniquePlaceKeys.count, distanceMeters: totalDistanceEvidence)
+            footprintCount: events.count
         )
         return DailySummaryProfile(
             lines: lines,
@@ -676,83 +659,20 @@ class OpenAIService {
             parts.append("\(transport.startLocation) ➔ \(transport.endLocation)")
         }
         
-        if transport.distance > 0 {
-            let distStr = transport.distance > 1000 ? String(format: "%.1fkm", transport.distance / 1000) : "\(Int(transport.distance))m"
-            parts.append("距离：\(distStr)")
-        }
-        
         return parts.joined(separator: "｜")
     }
 
-    private func dailySummaryFallbackSummary(footprintCount: Int, totalDistance: Double, placeJudgement: String) -> String {
-        let base: String
+    private func dailySummaryFallbackSummary(footprintCount: Int) -> String {
         switch footprintCount {
         case 1:
-            base = "没去别的地方"
+            return "没去别的地方"
         case 2...3:
-            base = "去过几个地方"
+            return "去过几个地方"
         case 4...:
-            base = "去过的地方还不少"
+            return "去过的地方还不少"
         default:
-            base = "又是平凡的一天"
+            return "又是平凡的一天"
         }
-
-        if totalDistance > 0 {
-            return "\(base)，里程约\(dailySummaryDistanceText(totalDistance))，\(placeJudgement)"
-        }
-        return "\(base)，\(placeJudgement)"
-    }
-
-    private func dailySummaryDistanceText(_ meters: Double) -> String {
-        if meters < 1000 {
-            return "\(Int(meters.rounded()))m"
-        }
-        return String(format: "%.1fkm", meters / 1000)
-    }
-
-    private func dailySummaryPlaceJudgement(uniquePlaceCount: Int, distanceMeters: Double) -> String {
-        if distanceMeters >= 50_000 {
-            return "地点变化比较明显"
-        }
-        switch uniquePlaceCount {
-        case 0...1:
-            return "地点变化不大"
-        case 2...3:
-            return "地点有一定变化"
-        default:
-            return "地点变化比较明显"
-        }
-    }
-
-    private func dailySummaryPlaceKey(for footprint: Footprint, places: [Place]) -> String {
-        let address = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if footprint.isAddressEditedByHand && !address.isEmpty {
-            return "addr:\(address)"
-        }
-
-        if let placeID = footprint.placeID {
-            return "pid:\(placeID.uuidString)"
-        }
-
-        if !address.isEmpty {
-            return "addr:\(address)"
-        }
-
-        // 无 placeID/地址时回退到坐标网格，确保照片导入的跨城点能体现“地点变化”。
-        return String(format: "grid:%.2f,%.2f", footprint.latitude, footprint.longitude)
-    }
-
-    private func dailySummaryInferredDistance(from timedCoords: [(Date, CLLocationCoordinate2D)]) -> Double {
-        let sorted = timedCoords.sorted { $0.0 < $1.0 }
-        guard sorted.count >= 2 else { return 0 }
-
-        var total: Double = 0
-        for index in 1..<sorted.count {
-            let prev = CLLocation(latitude: sorted[index - 1].1.latitude, longitude: sorted[index - 1].1.longitude)
-            let cur = CLLocation(latitude: sorted[index].1.latitude, longitude: sorted[index].1.longitude)
-            total += prev.distance(from: cur)
-        }
-        return total
     }
 
     private func dailySummaryCleanedSummary(_ summary: String?) -> String? {
@@ -822,12 +742,10 @@ class OpenAIService {
         6. 如果当天有多次交通出行但地点变化不大，可以概括为“出门走走”或“多次往返”。
         7. 如果信息零散，就总结整体状态，不要编造细节。
         8. 尽量控制在 15 字以内。
-        9. 可以优先吸收“当日里程”和“地点变化”这两条信息，不要机械复述。
-        10. 输出前先做一致性校验：结论必须和里程、地点线索一致，不能互相矛盾。
-        11. 若片段体现明显的远距离或跨区域移动，结论应体现范围扩大与跨区域特征，避免收缩性描述。
-        12. 活动范围判断要以明确事实优先：里程数和地点词 > 模糊描述；有冲突时按更强证据下结论。
-        13. 绝对不能在输出中包含“今天”二字，因为这是对往日的总结。
-        14. 只在足迹、交通、里程都显示活动很少时，才可以写“基本在家”“没怎么出门”这类收缩性结论；只要有多次移动、骑行、电动车或明显里程，就必须体现出门或移动。
+        9. 若片段体现明显的远距离或跨区域移动，结论应体现范围扩大与跨区域特征，避免收缩性描述。
+        10. 活动范围判断要以明确事实优先：地点词和交通方式 > 模糊描述；有冲突时按更强证据下结论。
+        11. 绝对不能在输出中包含“今天”二字，因为这是对往日的总结。
+        12. 只在足迹、交通等信息都显示活动很少时，才可以写“基本在家”“没怎么出门”这类收缩性结论；只要有多次移动、骑行、电动车等交通方式，就必须体现出门或移动。
 
         事实片段：
         \(list)
@@ -835,7 +753,7 @@ class OpenAIService {
         
         let body: [String: Any] = [
             "messages": [
-                ["role": "system", "content": "你是一位只做事实概括的中文助手。输出前先做事实一致性校验：结论必须与里程和地点线索一致，禁止出现与证据相反的收缩性结论。输出要自然、口语化，不要虚构，不要抒情，不要修辞，不要使用报表口吻、监控口吻或生硬表达，也不要补写感受、氛围、节奏、心情或状态判断。禁止在输出中包含“今天”二字。"],
+                ["role": "system", "content": "你是一位只做事实概括的中文助手。输出前先做事实一致性校验：禁止出现与证据相反的收缩性结论。输出要自然、口语化，不要虚构，不要抒情，不要修辞，不要使用报表口吻、监控口吻或生硬表达，也不要补写感受、氛围、节奏、心情或状态判断。禁止在输出中包含“今天”二字。"],
                 ["role": "user", "content": prompt]
             ],
             "temperature": 0.2

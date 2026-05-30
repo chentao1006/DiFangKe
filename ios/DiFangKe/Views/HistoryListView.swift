@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import MapKit
 import Photos
+import Aptabase
 
 struct DaySummary: Identifiable, Equatable {
     struct TimelineIcon: Identifiable, Equatable {
@@ -1086,6 +1087,7 @@ struct PhotoImportResultsView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("导入") { 
+                        Aptabase.shared.trackEvent("photos_imported")
                         onConfirm(results.filter { selectedIDs.contains($0.footprintID) }) 
                     }
                     .fontWeight(.bold)

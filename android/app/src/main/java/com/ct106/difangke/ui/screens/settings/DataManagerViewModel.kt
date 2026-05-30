@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.location.RawLocationStore
+import com.aptabase.Aptabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +42,7 @@ class DataManagerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun importData(uri: android.net.Uri) {
+        Aptabase.instance.trackEvent("data_import_started")
         viewModelScope.launch {
             _isProcessing.value = true
             try {
@@ -71,6 +73,7 @@ class DataManagerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun clearAllData() {
+        Aptabase.instance.trackEvent("data_cleared")
         viewModelScope.launch {
             _isProcessing.value = true
             withContext(Dispatchers.IO) {

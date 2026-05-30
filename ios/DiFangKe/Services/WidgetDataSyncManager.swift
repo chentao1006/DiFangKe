@@ -396,7 +396,7 @@ final class WidgetDataSyncManager {
                                         if let iconImage = UIImage(systemName: transportType.sfSymbol) {
                                             let symbolSize: CGFloat = 12
                                             let symbolRect = CGRect(x: midPoint.x - symbolSize/2, y: midPoint.y - symbolSize/2, width: symbolSize, height: symbolSize)
-                                            iconImage.withTintColor(strokeColor).draw(in: symbolRect)
+                                            iconImage.withTintColor(strokeColor).drawAspectFit(in: symbolRect)
                                         }
                                     }
                                 }
@@ -440,7 +440,7 @@ final class WidgetDataSyncManager {
                                     if let iconImage = UIImage(systemName: iconName) {
                                         let iconSize = (size * 0.55)
                                         let iconRect = CGRect(x: point.x - iconSize/2, y: point.y - iconSize/2, width: iconSize, height: iconSize)
-                                        iconImage.withTintColor(strokeColor).draw(in: iconRect)
+                                        iconImage.withTintColor(strokeColor).drawAspectFit(in: iconRect)
                                     }
                                 }
                             }
@@ -456,7 +456,13 @@ final class WidgetDataSyncManager {
             }
             
             // 更新元数据
-            defaults?.set(footprints.count, forKey: "widgetCount_\(offset)")
+            let uniqueFootprintCount = Set(footprints.map { fp -> String in
+                if let addr = fp.address, !addr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return addr
+                }
+                return fp.locationHash
+            }).count
+            defaults?.set(uniqueFootprintCount, forKey: "widgetCount_\(offset)")
             defaults?.set(Date().timeIntervalSince1970, forKey: "widgetUpdate_\(offset)")
             
         } catch {
@@ -538,6 +544,23 @@ private extension UIImage {
         }
 
         let scale = max(rect.width / size.width, rect.height / size.height)
+        let drawSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let drawRect = CGRect(
+            x: rect.midX - drawSize.width / 2,
+            y: rect.midY - drawSize.height / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+        draw(in: drawRect)
+    }
+
+    func drawAspectFit(in rect: CGRect) {
+        guard size.width > 0, size.height > 0, rect.width > 0, rect.height > 0 else {
+            draw(in: rect)
+            return
+        }
+
+        let scale = min(rect.width / size.width, rect.height / size.height)
         let drawSize = CGSize(width: size.width * scale, height: size.height * scale)
         let drawRect = CGRect(
             x: rect.midX - drawSize.width / 2,

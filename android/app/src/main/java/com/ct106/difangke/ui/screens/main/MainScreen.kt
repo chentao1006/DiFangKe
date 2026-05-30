@@ -529,7 +529,7 @@ fun TimelineContent(
                         trackingState = trackingState,
                         isTracking = isTrackingEnabled && trackingState !is LocationTrackingService.TrackingState.Idle,
                         isTrackingEnabled = isTrackingEnabled,
-                        footprintCount = items.filterIsInstance<TimelineItem.FootprintItem>().size,
+                        footprintCount = items.filterIsInstance<TimelineItem.FootprintItem>().map { it.footprint.title.ifEmpty { it.footprint.locationHash } }.distinct().size,
                         mileage = totalMileage,
                         pointCount = totalPoints,
                         pointsJson = dailyPoints,
@@ -542,7 +542,7 @@ fun TimelineContent(
                     )
                 } else {
                     DaySummaryCard(
-                        footprintCount = filteredItems.filterIsInstance<TimelineItem.FootprintItem>().size,
+                        footprintCount = filteredItems.filterIsInstance<TimelineItem.FootprintItem>().map { it.footprint.title.ifEmpty { it.footprint.locationHash } }.distinct().size,
                         mileage = totalMileage,
                         pointCount = totalPoints,
                         summary = dailyInsight,

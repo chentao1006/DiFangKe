@@ -2,6 +2,7 @@ import SwiftUI
 import CoreLocation
 import MapKit
 import SwiftData
+import Aptabase
 import Photos
 
 // MARK: - Day Summary Card
@@ -348,12 +349,41 @@ struct RecordingStatusCard: View {
     }
 
     private var currentSpeedText: String {
-        let speedKmh = max(locationManager.lastLocation?.speed ?? 0, 0) * 3.6
+        let speedKmh = max(smoothedSpeed, 0) * 3.6
         return String(format: "当前速度 %.1f km/h", speedKmh)
     }
 
+    private var smoothedSpeed: Double {
+        let points = locationManager.allTodayPoints
+        guard points.count >= 2 else {
+            return max(locationManager.lastLocation?.speed ?? 0, 0)
+        }
+        
+        let now = Date()
+        // 取最近 15 秒内的数据点来平滑速度，避免单点跳跃
+        let recentPoints = points.reversed().prefix(while: { now.timeIntervalSince($0.timestamp) < 15 })
+        
+        if recentPoints.count >= 2 {
+            let last = recentPoints.first!
+            let first = recentPoints.last!
+            let time = last.timestamp.timeIntervalSince(first.timestamp)
+            if time > 0 {
+                return last.distance(from: first) / time
+            }
+        } else {
+            // 如果最近 15 秒点不足，取最后两个点
+            let last = points[points.count - 1]
+            let prev = points[points.count - 2]
+            let time = last.timestamp.timeIntervalSince(prev.timestamp)
+            if time > 0 && time < 60 {
+                return last.distance(from: prev) / time
+            }
+        }
+        return 0
+    }
+
     private var shouldShowCurrentSpeed: Bool {
-        locationManager.uiIsMoving && locationManager.potentialStopStartLocation == nil && (locationManager.lastLocation?.speed ?? 0) > 0.5
+        locationManager.uiIsMoving && locationManager.potentialStopStartLocation == nil
     }
     
     var body: some View {
@@ -815,6 +845,7 @@ struct FootprintCardView: View {
         Button {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 footprint.isHighlight = !(footprint.isHighlight ?? false)
+                Aptabase.shared.trackEvent("footprint_highlighted")
                 try? modelContext.save()
                 highlightVisible = (footprint.isHighlight == true)
             }

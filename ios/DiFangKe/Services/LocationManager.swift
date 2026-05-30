@@ -2853,7 +2853,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         // Filter out ignored footprints and include ongoing stay
         let validFootprints = todayFootprints.filter { $0.status != .ignored }
-        let footprintCount = validFootprints.count
+        let footprintCount = Set(validFootprints.map { fp -> String in
+            if let addr = fp.address, !addr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return addr
+            }
+            return fp.locationHash
+        }).count
         let transportDescriptor = FetchDescriptor<TransportRecord>(
             predicate: #Predicate { $0.startTime >= targetDate && $0.startTime < tomorrowStart && $0.statusRaw == "active" },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]

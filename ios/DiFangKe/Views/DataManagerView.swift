@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import CoreLocation
 import UniformTypeIdentifiers
+import Aptabase
 
 struct DataManagerView: View {
     @Environment(\.modelContext) private var modelContext
@@ -186,6 +187,7 @@ struct DataManagerView: View {
     }
     
     private func prepareExport() {
+        Aptabase.shared.trackEvent("data_export_started")
         isExporting = true
         
         Task {
@@ -219,6 +221,7 @@ struct DataManagerView: View {
     }
     
     private func importData(from result: Result<[URL], Error>) {
+        Aptabase.shared.trackEvent("data_import_started")
         do {
             let urls = try result.get()
             guard let url = urls.first else {
@@ -256,6 +259,7 @@ struct DataManagerView: View {
     }
     
     private func deleteAllData() {
+        Aptabase.shared.trackEvent("data_cleared")
         // 按照用户要求：自动关闭同步开关以确保“仅清空本地”
         UserDefaults.standard.set(false, forKey: "isICloudSyncEnabled")
         // 同步刷新设置状态
@@ -307,6 +311,7 @@ struct DataManagerView: View {
     }
     
     private func rebuildAllTimelines() {
+        Aptabase.shared.trackEvent("timeline_rebuilt")
         locationManager.rebuildAllData()
     }
 

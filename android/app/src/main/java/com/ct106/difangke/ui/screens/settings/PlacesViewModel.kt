@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.service.LocationTrackingService
+import com.aptabase.Aptabase
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -67,6 +68,7 @@ class PlacesViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun savePlace(id: String?, name: String, address: String, lat: Double, lon: Double, radius: Float = 50f) {
+        Aptabase.instance.trackEvent("place_added")
         viewModelScope.launch {
             if (id == null) {
                 db.placeDao().insert(PlaceEntity(

@@ -101,7 +101,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                     summaryMap[date] = DaySummary(
                         date = date,
                         totalDuration = fps.sumOf { it.duration },
-                        footprintCount = fps.size,
+                        footprintCount = fps.map { it.title.ifEmpty { it.locationHash } }.distinct().size,
                         highlightCount = fps.count { it.isHighlight == true },
                         highlightTitle = fps.firstOrNull { it.isHighlight == true }?.title,
                         hasConfirmed = fps.any { it.aiAnalyzed },

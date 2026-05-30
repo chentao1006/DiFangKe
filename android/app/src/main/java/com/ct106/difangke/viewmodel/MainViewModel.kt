@@ -21,7 +21,9 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withContext
 import com.ct106.difangke.data.location.RawLocationStore
+import com.aptabase.Aptabase
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -493,6 +495,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 重新生成全天数据（对应 iOS syncDay） */
     fun rebuildTimeline(date: Date) {
+        Aptabase.instance.trackEvent("timeline_rebuilt")
         viewModelScope.launch {
             _isRefreshing.value = true
             builder.rebuildDay(date)

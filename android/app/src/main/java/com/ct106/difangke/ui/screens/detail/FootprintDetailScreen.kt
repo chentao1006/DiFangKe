@@ -38,6 +38,7 @@ import com.ct106.difangke.ui.components.getIconForName
 import java.text.SimpleDateFormat
 import java.util.*
 import org.json.JSONArray
+import com.aptabase.Aptabase
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -131,7 +132,10 @@ fun FootprintDetailScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { isHighlight = !isHighlight }) {
+                    IconButton(onClick = { 
+                        isHighlight = !isHighlight 
+                        Aptabase.instance.trackEvent("footprint_highlighted")
+                    }) {
                         Icon(
                             imageVector = if (isHighlight) Icons.Default.Star else Icons.Default.StarOutline,
                             contentDescription = if (isHighlight) "取消收藏" else "收藏",

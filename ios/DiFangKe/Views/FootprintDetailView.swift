@@ -3,6 +3,7 @@ import MapKit
 import SwiftData
 import Photos
 import PhotosUI
+import Aptabase
 
 // MARK: - FootprintModalView
 // Replaces old FootprintDetailView content to ensure scope visibility
@@ -117,6 +118,7 @@ struct FootprintModalView: View {
                         withAnimation(.spring(response: 0.3)) {
                             ensureFootprintManaged()
                             footprint.isHighlight = !(footprint.isHighlight ?? false)
+                            Aptabase.shared.trackEvent("footprint_highlighted")
                             hasChanged = true
                             if !isDraft { try? modelContext.save() }
                         }
@@ -265,6 +267,7 @@ struct FootprintModalView: View {
             }
         .onDisappear {
             if hasChanged {
+                Aptabase.shared.trackEvent("footprint_edited")
                 footprint.status = .manual
             }
             if !isDraft {
@@ -881,6 +884,7 @@ extension FootprintModalView {
     }
     
     private func ignoreFootprint() { 
+        Aptabase.shared.trackEvent("footprint_deleted")
         withAnimation { 
             hasChanged = true
         }
@@ -1113,6 +1117,7 @@ struct AddToFavoriteModal: View {
     }
 
     private func savePlace() {
+        Aptabase.shared.trackEvent("place_added")
         let finalName = placeName.trimmingCharacters(in: .whitespaces).isEmpty ? (footprint.address ?? "未知地点") : placeName.trimmingCharacters(in: .whitespaces)
         
         // (Exclusive category logic removed: user can have multiple Home/Work/School places)

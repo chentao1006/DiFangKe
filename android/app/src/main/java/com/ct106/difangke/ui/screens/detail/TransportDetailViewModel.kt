@@ -8,6 +8,7 @@ import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.model.TransportType
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import com.aptabase.Aptabase
 
 class TransportDetailViewModel(application: Application) : AndroidViewModel(application) {
     private val db = DiFangKeApp.instance.database
@@ -26,6 +27,7 @@ class TransportDetailViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun updateTransport(manualType: TransportType?, startLocation: String?, endLocation: String?) {
+        Aptabase.instance.trackEvent("transport_edited")
         val current = _transport.value ?: return
         viewModelScope.launch {
             val updated = current.copy(

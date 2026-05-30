@@ -344,7 +344,12 @@ struct TimelinePageView: View {
             if isToday {
                 RecordingStatusCard(
                     locationManager: locationManager, 
-                    footprintCount: footprints.count,
+                    footprintCount: Set(footprints.map { fp -> String in
+                        if let addr = fp.address, !addr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            return addr
+                        }
+                        return fp.locationHash
+                    }).count,
                     timelineItems: displayedTimelineItems,
                     rendersLiveMap: isActivePage,
                     onTimelineItemTap: handleTimelineItemTap,
@@ -356,7 +361,12 @@ struct TimelinePageView: View {
                         date: date,
                         dateOffset: offset,
                         totalPoints: totalPointsCount,
-                        footprintCount: displayedTimelineItems.filter { if case .footprint = $0 { return true }; return false }.count,
+                        footprintCount: Set(footprints.map { fp -> String in
+                            if let addr = fp.address, !addr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                return addr
+                            }
+                            return fp.locationHash
+                        }).count,
                         totalMileage: totalDailyMileage,
                         points: trajectoryPoints,
                     timelineItems: displayedTimelineItems,

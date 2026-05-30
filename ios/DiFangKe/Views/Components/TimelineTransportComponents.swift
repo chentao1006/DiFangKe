@@ -3,6 +3,7 @@ import CoreLocation
 import MapKit
 import SwiftData
 import Photos
+import Aptabase
 
 struct TransportCardView: View {
     let transport: Transport
@@ -490,6 +491,7 @@ struct TransportModalView: View {
     }
     
     private func saveLocationOverride(type: LocationType, name: String) {
+        Aptabase.shared.trackEvent("transport_edited")
         withAnimation(.spring(response: 0.3)) {
             if type == .start {
                 localStartOverride = name
@@ -524,6 +526,7 @@ struct TransportModalView: View {
     }
     
     private func saveChoice(_ type: TransportType) {
+        Aptabase.shared.trackEvent("transport_edited")
         // 1. Update local UI immediately
         withAnimation(.spring(response: 0.3)) {
             localManualType = type
