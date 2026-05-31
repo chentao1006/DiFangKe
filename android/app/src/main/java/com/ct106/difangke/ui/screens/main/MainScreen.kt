@@ -81,12 +81,9 @@ fun MainScreen(
     )
     
     // 初始化 Pager 到特定日期 (如果是从历史跳转过来的)
-    LaunchedEffect(availableDates, initialDate) {
-        if (availableDates.isNotEmpty() && initialDate != null) {
-            val index = availableDates.indexOfFirst { it.time == initialDate.time }
-            if (index >= 0) {
-                pagerState.scrollToPage(index)
-            }
+    LaunchedEffect(initialDate) {
+        if (initialDate != null) {
+            viewModel.setDate(initialDate)
         }
     }
     

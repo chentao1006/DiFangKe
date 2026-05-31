@@ -132,7 +132,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             let idString = userInfo["footprintID"] as? String
             let footprintID = idString != nil ? UUID(uuidString: idString!) : nil
             
-            // 使用 NotificationCenter 发送内部跳转通知
+            // 核心修复：直接将 deepLinkDate 存入单例，防止冷启动时 NotificationCenter 丢失消息
+            let dayStart = Calendar.current.startOfDay(for: date)
+            LocationManager.shared.deepLinkDate = dayStart
+            if let fid = footprintID {
+                LocationManager.shared.deepLinkFootprintID = fid
+            }
+            
+            // 使用 NotificationCenter 发送内部跳转通知 (供已在前台的 UI 捕获)
             var notificationInfo: [String: Any] = ["date": date]
             if let fid = footprintID {
                 notificationInfo["footprintID"] = fid

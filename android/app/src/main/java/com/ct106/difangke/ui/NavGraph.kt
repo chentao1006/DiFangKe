@@ -60,6 +60,23 @@ fun NavGraph(initialDate: Long? = null) {
         return
     }
 
+    val activity = LocalContext.current as? androidx.activity.ComponentActivity
+    DisposableEffect(activity, navController) {
+        val listener = androidx.core.util.Consumer<android.content.Intent> { intent ->
+            val date = intent.getLongExtra("date", -1L)
+            if (date != -1L) {
+                intent.removeExtra("date")
+                navController.navigate("main?date=$date") {
+                    popUpTo(NavRoutes.MAIN) { inclusive = true }
+                }
+            }
+        }
+        activity?.addOnNewIntentListener(listener)
+        onDispose {
+            activity?.removeOnNewIntentListener(listener)
+        }
+    }
+
     NavHost(
         navController = navController,
         startDestination = startDestination!!,

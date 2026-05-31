@@ -232,6 +232,17 @@ struct DayTimelineView: View {
                 UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
             }
         }
+        
+        // 核心修复：处理冷启动时的 deep link
+        if let deepLinkDate = locationManager.deepLinkDate {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                withAnimation(.spring()) {
+                    self.selectedDate = deepLinkDate
+                    self.scrollID = deepLinkDate
+                }
+            }
+            locationManager.deepLinkDate = nil
+        }
     }
     
     private func handleScrollChange(oldValue: Date?, newValue: Date?) {
