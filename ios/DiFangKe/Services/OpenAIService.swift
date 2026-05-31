@@ -637,7 +637,15 @@ class OpenAIService {
             return address
         }
 
-        if let place = places.first(where: { $0.placeID == footprint.placeID }) {
+        let matchedPlace = places.first(where: { place in
+            if place.placeID == footprint.placeID && place.isUserDefined { return true }
+            guard place.isUserDefined else { return false }
+            guard !address.isEmpty else { return false }
+            return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == address || 
+                   (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == address)
+        })
+        
+        if let place = matchedPlace {
             let name = place.name.trimmingCharacters(in: .whitespacesAndNewlines)
             if !name.isEmpty {
                 return name

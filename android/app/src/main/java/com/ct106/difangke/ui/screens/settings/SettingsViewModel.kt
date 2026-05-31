@@ -156,10 +156,16 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val isCheckingUpdate: StateFlow<Boolean> = _isCheckingUpdate.asStateFlow()
 
     fun checkUpdate() {
+        val updateManager = UpdateManager.getInstance(getApplication())
+        if (updateManager.isPlayStoreInstall()) {
+            updateManager.openPlayStore()
+            return
+        }
+
         viewModelScope.launch {
             _isCheckingUpdate.value = true
             android.widget.Toast.makeText(getApplication(), "请求服务器中...", android.widget.Toast.LENGTH_SHORT).show()
-            val info = UpdateManager.getInstance(getApplication()).checkUpdate()
+            val info = updateManager.checkUpdate()
             if (info == null) {
                 android.widget.Toast.makeText(getApplication(), "无法连接到更新服务器，请检查网络", android.widget.Toast.LENGTH_LONG).show()
             }

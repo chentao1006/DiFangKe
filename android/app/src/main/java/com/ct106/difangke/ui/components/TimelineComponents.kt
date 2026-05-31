@@ -591,6 +591,8 @@ fun RecordingStatusCard(
                     Spacer(modifier = Modifier.height(12.dp))
                     if (pointsJson != null) {
                         MiniMapView(
+                            lat = currentLat,
+                            lon = currentLon,
                             pointsJson = pointsJson,
                             markersJson = markersJson,
                             allPlaces = allPlaces,
@@ -781,6 +783,8 @@ fun MiniMapView(
             amap.clear()
             amap.addImportantPlaceCircles(allPlaces)
             
+            var handledCentering = false
+            
             if (isCurrentLocation && lat != null && lon != null) {
                 val myLocationStyle = com.amap.api.maps.model.MyLocationStyle()
                 myLocationStyle.myLocationType(com.amap.api.maps.model.MyLocationStyle.LOCATION_TYPE_LOCATION_ROTATE_NO_CENTER)
@@ -792,7 +796,10 @@ fun MiniMapView(
                     amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(target, 13.5f))
                     hasCentred = true
                 }
-            } else if (pointsJson != null) {
+                handledCentering = true
+            }
+            
+            if (!handledCentering && pointsJson != null) {
                 try {
                     val array = org.json.JSONArray(pointsJson)
                     val validPoints = mutableListOf<com.amap.api.maps.model.LatLng>()
@@ -988,9 +995,12 @@ fun MiniMapView(
                                 hasCentred = true
                             }
                         }
+                        handledCentering = true
                     }
                 } catch (e: Exception) {}
-            } else if (lat != null && lon != null) {
+            }
+            
+            if (!handledCentering && lat != null && lon != null) {
                 val target = com.amap.api.maps.model.LatLng(lat, lon)
                 amap.addMarker(com.amap.api.maps.model.MarkerOptions().position(target))
                 if (!hasCentred) {

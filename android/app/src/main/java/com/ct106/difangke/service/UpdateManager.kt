@@ -113,4 +113,39 @@ class UpdateManager private constructor(private val context: Context) {
             Toast.makeText(context, "启动浏览器失败: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
+
+    /**
+     * 判断应用是否是从 Google Play Store 安装的
+     */
+    fun isPlayStoreInstall(): Boolean {
+        return try {
+            val installer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                context.packageManager.getInstallSourceInfo(context.packageName).installingPackageName
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getInstallerPackageName(context.packageName)
+            }
+            installer == "com.android.vending"
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 打开 Google Play Store 对应的应用页面
+     */
+    fun openPlayStore() {
+        val appPackageName = context.packageName
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$appPackageName")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: ActivityNotFoundException) {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$appPackageName")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        }
+    }
 }

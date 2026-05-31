@@ -267,16 +267,50 @@ class OpenAIService private constructor() {
 
         if (!force && existing?.aiGenerated == true) return@withContext true
 
+        val allPlaces = db.placeDao().getAll()
+        val allActivities = db.activityTypeDao().getAll()
+
         data class SimpleItem(val time: Date, val desc: String)
         val items = mutableListOf<SimpleItem>()
 
         for (fp in footprints) {
-            if (FootprintTitles.isGeneric(fp.title)) continue
+            if (fp.statusValue == "ignored") continue
+
+            val matchedPlace = fp.placeID?.let { pid ->
+                allPlaces.find { it.placeID == pid && it.isUserDefined }
+            }
+            
+            val locationText = when {
+                matchedPlace != null && matchedPlace.name.isNotBlank() -> matchedPlace.name.trim()
+                !fp.address.isNullOrBlank() && fp.address != "null" && fp.address != "[]" -> fp.address.trim()
+                !fp.title.isNullOrBlank() && !FootprintTitles.isGeneric(fp.title) -> fp.title.trim()
+                else -> ""
+            }
+            
+            if (locationText.isEmpty() || locationText == "未知位置") {
+                continue
+            }
+
             val start = TIME_FMT.format(fp.startTime)
             val end = TIME_FMT.format(fp.endTime)
-            var desc = "$start-$end｜${fp.title}"
-            if (fp.isHighlight == true) desc += "｜重点"
-            items.add(SimpleItem(fp.startTime, desc))
+            
+            val parts = mutableListOf<String>("$start-$end")
+            parts.add(locationText)
+            
+            val activity = allActivities.find { it.id == fp.activityTypeValue || it.name == fp.activityTypeValue }
+            if (activity != null && activity.name.isNotBlank()) {
+                parts.add("活动：${activity.name.trim()}")
+            }
+            
+            if (!fp.reason.isNullOrBlank()) {
+                parts.add("备注：${fp.reason.trim()}")
+            }
+            
+            if (fp.isHighlight == true) {
+                parts.add("重点")
+            }
+            
+            items.add(SimpleItem(fp.startTime, parts.joinToString("｜")))
         }
 
         for (tp in transports) {
