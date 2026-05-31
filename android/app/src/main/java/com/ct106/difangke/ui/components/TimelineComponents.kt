@@ -596,7 +596,11 @@ fun RecordingStatusCard(
                             allPlaces = allPlaces,
                             onClick = onNavigateToMap
                         )
-                    } else if (currentLat != null && currentLon != null) {
+                    } else if (isTracking) {
+                        // 即使 currentLat/Lon 暂时为空，只要正在记录，就强制渲染底图
+                        // 这是一个关键的保活/初始化策略：部分手机上，如果不挂载 MapView，
+                        // 后台的 AMapLocationClient 会一直无法获取到首次定位（返回错误或无响应）。
+                        // 挂载一个空地图能触发高德 SDK 的核心初始化，打通定位链路。
                         MiniMapView(
                             lat = currentLat, 
                             lon = currentLon,
@@ -792,32 +796,155 @@ fun MiniMapView(
                 try {
                     val array = org.json.JSONArray(pointsJson)
                     val validPoints = mutableListOf<com.amap.api.maps.model.LatLng>()
-                    val segments = mutableListOf<List<com.amap.api.maps.model.LatLng>>()
-                    var currentSegment = mutableListOf<com.amap.api.maps.model.LatLng>()
+                    class SegmentInfo(val points: MutableList<com.amap.api.maps.model.LatLng> = mutableListOf(), var connectToNextWithDash: Boolean = false)
+                    val segmentsInfo = mutableListOf<SegmentInfo>()
+                    var currentSegment = SegmentInfo()
+
                     for (i in 0 until array.length()) {
                         val p = array.getJSONArray(i)
                         val lat = p.getDouble(0)
                         val lon = p.getDouble(1)
                         if (lat == 0.0 && lon == 0.0) {
-                            if (currentSegment.isNotEmpty()) {
-                                segments.add(currentSegment)
-                                currentSegment = mutableListOf()
+                            if (currentSegment.points.isNotEmpty()) {
+                                currentSegment.connectToNextWithDash = true
+                                segmentsInfo.add(currentSegment)
+                                currentSegment = SegmentInfo()
                             }
                         } else {
                             val ll = com.amap.api.maps.model.LatLng(lat, lon)
-                            currentSegment.add(ll)
+                            currentSegment.points.add(ll)
                             validPoints.add(ll)
                         }
                     }
-                    if (currentSegment.isNotEmpty()) {
-                        segments.add(currentSegment)
+                    if (currentSegment.points.isNotEmpty()) {
+                        segmentsInfo.add(currentSegment)
+                    }
+
+                    val processedSegments = segmentsInfo.map { segmentInfo ->
+                        val segment = segmentInfo.points
+                        val splineLatLngs = mutableListOf<com.amap.api.maps.model.LatLng>()
+                        
+                        if (segment.size > 1) {
+                            val filtered = mutableListOf<com.amap.api.maps.model.LatLng>()
+                            filtered.add(segment.first())
+                            for (i in 1 until segment.size - 1) {
+                                val prev = filtered.last()
+                                val curr = segment[i]
+                                val dist = com.amap.api.maps.AMapUtils.calculateLineDistance(prev, curr)
+                                if (dist > 4f) {
+                                    filtered.add(curr)
+                                }
+                            }
+                            if (segment.size > 2) {
+                                filtered.add(segment.last())
+                            } else if (segment.size == 2) {
+                                filtered.add(segment[1])
+                            }
+
+                            val averagedLatLngs = mutableListOf<com.amap.api.maps.model.LatLng>()
+                            val windowSize = 5
+                            val halfWindow = windowSize / 2
+                            for (i in filtered.indices) {
+                                if (i == 0 || i == filtered.size - 1) {
+                                    averagedLatLngs.add(filtered[i])
+                                    continue
+                                }
+                                var sumLat = 0.0; var sumLng = 0.0; var count = 0
+                                val start = maxOf(0, i - halfWindow)
+                                val end = minOf(filtered.size - 1, i + halfWindow)
+                                for (j in start..end) {
+                                    sumLat += filtered[j].latitude
+                                    sumLng += filtered[j].longitude
+                                    count++
+                                }
+                                averagedLatLngs.add(com.amap.api.maps.model.LatLng(sumLat / count, sumLng / count))
+                            }
+
+                            if (averagedLatLngs.size >= 3) {
+                                val granularity = 10
+                                for (i in 0 until averagedLatLngs.size - 1) {
+                                    val p0 = averagedLatLngs[maxOf(i - 1, 0)]
+                                    val p1 = averagedLatLngs[i]
+                                    val p2 = averagedLatLngs[i + 1]
+                                    val p3 = averagedLatLngs[minOf(i + 2, averagedLatLngs.size - 1)]
+                                    for (tStep in 0 until granularity) {
+                                        val t = tStep.toDouble() / granularity.toDouble()
+                                        val t2 = t * t; val t3 = t2 * t
+                                        val lat = 0.5 * ((2.0 * p1.latitude) + (-p0.latitude + p2.latitude) * t + (2.0 * p0.latitude - 5.0 * p1.latitude + 4.0 * p2.latitude - p3.latitude) * t2 + (-p0.latitude + 3.0 * p1.latitude - 3.0 * p2.latitude + p3.latitude) * t3)
+                                        val lon = 0.5 * ((2.0 * p1.longitude) + (-p0.longitude + p2.longitude) * t + (2.0 * p0.longitude - 5.0 * p1.longitude + 4.0 * p2.longitude - p3.longitude) * t2 + (-p0.longitude + 3.0 * p1.longitude - 3.0 * p2.longitude + p3.longitude) * t3)
+                                        splineLatLngs.add(com.amap.api.maps.model.LatLng(lat, lon))
+                                    }
+                                }
+                                splineLatLngs.add(averagedLatLngs.last())
+                            } else {
+                                splineLatLngs.addAll(averagedLatLngs)
+                            }
+                        }
+                        Pair(segmentInfo, splineLatLngs)
                     }
 
                     if (validPoints.isNotEmpty()) {
-                        segments.forEach { segment ->
-                            amap.addPolyline(
-                                com.amap.api.maps.model.PolylineOptions().addAll(segment).width(12f).color(primaryColor).useGradient(true)
-                            )
+                        processedSegments.forEach { (_, splined) ->
+                            if (splined.isNotEmpty()) {
+                                val options = com.amap.api.maps.model.PolylineOptions().addAll(splined).width(12f).color(primaryColor).useGradient(true)
+                                    .lineJoinType(com.amap.api.maps.model.PolylineOptions.LineJoinType.LineJoinRound)
+                                    .lineCapType(com.amap.api.maps.model.PolylineOptions.LineCapType.LineCapRound)
+                                amap.addPolyline(options)
+                            }
+                        }
+
+                        for (i in 0 until processedSegments.size - 1) {
+                            val (segA, splinedA) = processedSegments[i]
+                            val (_, splinedB) = processedSegments[i + 1]
+                            
+                            if (segA.connectToNextWithDash && splinedA.isNotEmpty() && splinedB.isNotEmpty()) {
+                                val p0 = splinedA.last()
+                                val p3 = splinedB.first()
+                                
+                                val p0TangentPrev = if (splinedA.size >= 10) splinedA[splinedA.size - 1 - minOf(splinedA.size - 1, 10)] else if (splinedA.size >= 2) splinedA.first() else null
+                                val p3TangentNext = if (splinedB.size >= 10) splinedB[minOf(splinedB.size - 1, 10)] else if (splinedB.size >= 2) splinedB.last() else null
+                                
+                                val dLat0 = if (p0TangentPrev != null) p0.latitude - p0TangentPrev.latitude else 0.0
+                                val dLon0 = if (p0TangentPrev != null) p0.longitude - p0TangentPrev.longitude else 0.0
+                                val dLat3 = if (p3TangentNext != null) p3TangentNext.latitude - p3.latitude else 0.0
+                                val dLon3 = if (p3TangentNext != null) p3TangentNext.longitude - p3.longitude else 0.0
+                                
+                                val distLat = p3.latitude - p0.latitude
+                                val distLon = p3.longitude - p0.longitude
+                                val dist = Math.sqrt(distLat*distLat + distLon*distLon)
+                                
+                                val len0 = Math.sqrt(dLat0*dLat0 + dLon0*dLon0)
+                                val len3 = Math.sqrt(dLat3*dLat3 + dLon3*dLon3)
+                                
+                                val scale0 = if (len0 > 0) (dist * 0.35) / len0 else 0.0
+                                val scale3 = if (len3 > 0) (dist * 0.35) / len3 else 0.0
+                                
+                                val c1 = com.amap.api.maps.model.LatLng(
+                                    p0.latitude + (if(len0 > 0) dLat0 * scale0 else distLat * 0.3),
+                                    p0.longitude + (if(len0 > 0) dLon0 * scale0 else distLon * 0.3)
+                                )
+                                val c2 = com.amap.api.maps.model.LatLng(
+                                    p3.latitude - (if(len3 > 0) dLat3 * scale3 else distLat * 0.3),
+                                    p3.longitude - (if(len3 > 0) dLon3 * scale3 else distLon * 0.3)
+                                )
+                                
+                                val bezierPoints = mutableListOf<com.amap.api.maps.model.LatLng>()
+                                val steps = 20
+                                for (j in 0..steps) {
+                                    val t = j.toDouble() / steps.toDouble()
+                                    val u = 1.0 - t
+                                    val u2 = u * u
+                                    val u3 = u2 * u
+                                    val t2 = t * t
+                                    val t3 = t2 * t
+                                    val lat = u3 * p0.latitude + 3.0 * u2 * t * c1.latitude + 3.0 * u * t2 * c2.latitude + t3 * p3.latitude
+                                    val lon = u3 * p0.longitude + 3.0 * u2 * t * c1.longitude + 3.0 * u * t2 * c2.longitude + t3 * p3.longitude
+                                    bezierPoints.add(com.amap.api.maps.model.LatLng(lat, lon))
+                                }
+                                
+                                val dashedOptions = com.amap.api.maps.model.PolylineOptions().addAll(bezierPoints).width(12f).color(primaryColor).setDottedLine(true)
+                                amap.addPolyline(dashedOptions)
+                            }
                         }
                         
                         if (validPoints.size == 1) {

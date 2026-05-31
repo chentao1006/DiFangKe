@@ -59,9 +59,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                         Manifest.permission.ACCESS_FINE_LOCATION,
                         Manifest.permission.ACCESS_COARSE_LOCATION
                     )
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        permissions.add(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                    }
+                    // 移除 ACCESS_BACKGROUND_LOCATION，因为在 Android 11+ 上同时请求前台和后台定位会导致系统直接忽略请求
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         permissions.add(Manifest.permission.POST_NOTIFICATIONS)
                     }

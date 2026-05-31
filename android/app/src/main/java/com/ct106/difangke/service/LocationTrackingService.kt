@@ -85,6 +85,7 @@ class LocationTrackingService : Service() {
     private var lastNotifiedStayStart: Long? = null
     private var currentIntervalTier = -1 // -1: initial, 0: stationary, 1: moving, 2: fast
     private var currentAccuracyMode = "automatic"
+    private var hasAcquiredFirstLocation = false
     private val ongoingStayMaxPointGapMs = (AppConfig.TRANSPORT_MAX_GAP_THRESHOLD * 1000).toLong()
 
     private var wasVpnOrProxyActive: Boolean? = null
@@ -117,8 +118,8 @@ class LocationTrackingService : Service() {
     }
 
     private fun getBestLocationMode(): AMapLocationClientOption.AMapLocationMode {
-        return if (isVpnOrProxyActive()) {
-            Log.i(TAG, "检测到 VPN 或代理处于激活状态，使用 Device_Sensors 模式（仅 GPS）定位以防止定位漂移")
+        return if (isVpnOrProxyActive() && hasAcquiredFirstLocation) {
+            Log.i(TAG, "检测到 VPN 或代理处于激活状态，且已获取过首次定位，使用 Device_Sensors 模式（仅 GPS）定位以防止定位漂移")
             AMapLocationClientOption.AMapLocationMode.Device_Sensors
         } else {
             if (currentAccuracyMode == "powerSaving") {
@@ -130,15 +131,19 @@ class LocationTrackingService : Service() {
     }
 
     private fun updateLocationClientOption(tier: Int) {
-        val newInterval = when (currentAccuracyMode) {
-            "high" -> 5000L
-            "balanced" -> 15000L
-            "powerSaving" -> 60000L
-            else -> {
-                when (tier) {
-                    2 -> 8000L    // 高速：8秒
-                    1 -> 15000L   // 正常移动：15秒
-                    else -> 30000L // 停留：30秒
+        val newInterval = if (!hasAcquiredFirstLocation) {
+            2000L // 首次定位成功前，保持高频重试（2秒），防止冷启动失败后等待太久
+        } else {
+            when (currentAccuracyMode) {
+                "high" -> 5000L
+                "balanced" -> 15000L
+                "powerSaving" -> 60000L
+                else -> {
+                    when (tier) {
+                        2 -> 8000L    // 高速：8秒
+                        1 -> 15000L   // 正常移动：15秒
+                        else -> 30000L // 停留：30秒
+                    }
                 }
             }
         }
@@ -162,6 +167,13 @@ class LocationTrackingService : Service() {
         }
 
         if (location != null && location.errorCode == 0) {
+            if (!hasAcquiredFirstLocation) {
+                hasAcquiredFirstLocation = true
+                Log.i(TAG, "首次定位成功，恢复正常采样频率")
+                val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
+                updateLocationClientOption(tier)
+            }
+            
             val speed = location.speed
             // 根据速度调整采样频率以节省耗电
             // 0: 停留 (<0.5m/s), 1: 正常运动 (0.5~10m/s), 2: 高速 (10m/s以上)

@@ -107,6 +107,45 @@ fun DFKMapScreen(
                 myLocationStyle.myLocationType(MyLocationStyle.LOCATION_TYPE_LOCATION_ROTATE_NO_CENTER)
             }
             amap.myLocationStyle = myLocationStyle
+            
+            // 设置 LocationSource，修复点击定位按钮定位到大西洋(0,0)的问题
+            amap.setLocationSource(object : com.amap.api.maps.LocationSource {
+                private var locationClient: com.amap.api.location.AMapLocationClient? = null
+
+                override fun activate(listener: com.amap.api.maps.LocationSource.OnLocationChangedListener?) {
+                    if (locationClient == null) {
+                        try {
+                            locationClient = com.amap.api.location.AMapLocationClient(view.context.applicationContext)
+                            val clientOption = com.amap.api.location.AMapLocationClientOption().apply {
+                                locationMode = com.amap.api.location.AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+                                interval = 2000
+                            }
+                            locationClient?.setLocationOption(clientOption)
+                            locationClient?.setLocationListener { location ->
+                                if (location != null) {
+                                    if (location.errorCode == 0) {
+                                        listener?.onLocationChanged(location)
+                                    } else {
+                                        // 添加 Toast 方便排查特定设备无法定位的具体原因
+                                        android.widget.Toast.makeText(view.context, "定位失败: ${location.errorCode} ${location.errorInfo}", android.widget.Toast.LENGTH_SHORT).show()
+                                        android.util.Log.e("MapLocation", "定位失败: ${location.errorCode} ${location.errorInfo}")
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                    locationClient?.startLocation()
+                }
+
+                override fun deactivate() {
+                    locationClient?.stopLocation()
+                    locationClient?.onDestroy()
+                    locationClient = null
+                }
+            })
+            
             amap.isMyLocationEnabled = true
 
             amap.clear()
@@ -115,32 +154,178 @@ fun DFKMapScreen(
             // 绘制轨迹
             if (pathPoints.isNotEmpty()) {
                 val validLatLngs = mutableListOf<LatLng>()
-                val lineSegments = mutableListOf<Pair<List<LatLng>, Boolean>>()
+                class SegmentInfo(val points: MutableList<MapPathPoint> = mutableListOf(), var connectToNextWithDash: Boolean = false)
+                val segments = mutableListOf<SegmentInfo>()
+                var currentSegment = SegmentInfo()
                 var previousPoint: MapPathPoint? = null
+
                 pathPoints.forEach { point ->
                     if (point.isSeparator) {
+                        if (currentSegment.points.isNotEmpty()) {
+                            segments.add(currentSegment)
+                            currentSegment = SegmentInfo()
+                        }
                         previousPoint = null
                     } else {
-                        val ll = LatLng(point.latitude, point.longitude)
-                        validLatLngs.add(ll)
+                        validLatLngs.add(LatLng(point.latitude, point.longitude))
+                        
+                        var isDashed = false
                         val previous = previousPoint
                         if (previous != null && !previous.isSeparator) {
-                            val previousLl = LatLng(previous.latitude, previous.longitude)
-                            val isDashed = previous.timestamp != null &&
-                                point.timestamp != null &&
-                                kotlin.math.abs(point.timestamp - previous.timestamp) > 5 * 60 * 1000L
-                            lineSegments.add(listOf(previousLl, ll) to isDashed)
+                            val timeGap = if (point.timestamp != null && previous.timestamp != null) {
+                                kotlin.math.abs(point.timestamp - previous.timestamp)
+                            } else 0L
+                            if (timeGap > 5 * 60 * 1000L) {
+                                isDashed = true
+                            }
                         }
+
+                        if (isDashed && previous != null) {
+                            if (currentSegment.points.isNotEmpty()) {
+                                currentSegment.connectToNextWithDash = true
+                                segments.add(currentSegment)
+                                currentSegment = SegmentInfo()
+                            }
+                        }
+                        
+                        currentSegment.points.add(point)
                         previousPoint = point
                     }
                 }
+                if (currentSegment.points.isNotEmpty()) {
+                    segments.add(currentSegment)
+                }
 
-                lineSegments.forEach { (segment, isDashed) ->
-                    val options = PolylineOptions().addAll(segment).width(15f).color(polylineColor).useGradient(!isDashed)
-                    if (isDashed) {
-                        options.setDottedLine(true)
+                // 处理并平滑所有连续线段
+                val processedSegments = segments.map { segmentInfo ->
+                    val segment = segmentInfo.points
+                    val splineLatLngs = mutableListOf<LatLng>()
+                    
+                    if (segment.size > 1) {
+                        val filtered = mutableListOf<MapPathPoint>()
+                        filtered.add(segment.first())
+                        for (i in 1 until segment.size - 1) {
+                            val prev = filtered.last()
+                            val curr = segment[i]
+                            val dist = com.amap.api.maps.AMapUtils.calculateLineDistance(
+                                LatLng(prev.latitude, prev.longitude),
+                                LatLng(curr.latitude, curr.longitude)
+                            )
+                            if (dist > 4f) {
+                                filtered.add(curr)
+                            }
+                        }
+                        if (segment.size > 2) {
+                            filtered.add(segment.last())
+                        } else if (segment.size == 2) {
+                            filtered.add(segment[1])
+                        }
+
+                        val averagedLatLngs = mutableListOf<LatLng>()
+                        val windowSize = 5
+                        val halfWindow = windowSize / 2
+                        for (i in filtered.indices) {
+                            if (i == 0 || i == filtered.size - 1) {
+                                averagedLatLngs.add(LatLng(filtered[i].latitude, filtered[i].longitude))
+                                continue
+                            }
+                            var sumLat = 0.0; var sumLng = 0.0; var count = 0
+                            val start = maxOf(0, i - halfWindow)
+                            val end = minOf(filtered.size - 1, i + halfWindow)
+                            for (j in start..end) {
+                                sumLat += filtered[j].latitude
+                                sumLng += filtered[j].longitude
+                                count++
+                            }
+                            averagedLatLngs.add(LatLng(sumLat / count, sumLng / count))
+                        }
+
+                        if (averagedLatLngs.size >= 3) {
+                            val granularity = 10
+                            for (i in 0 until averagedLatLngs.size - 1) {
+                                val p0 = averagedLatLngs[maxOf(i - 1, 0)]
+                                val p1 = averagedLatLngs[i]
+                                val p2 = averagedLatLngs[i + 1]
+                                val p3 = averagedLatLngs[minOf(i + 2, averagedLatLngs.size - 1)]
+                                for (tStep in 0 until granularity) {
+                                    val t = tStep.toDouble() / granularity.toDouble()
+                                    val t2 = t * t; val t3 = t2 * t
+                                    val lat = 0.5 * ((2.0 * p1.latitude) + (-p0.latitude + p2.latitude) * t + (2.0 * p0.latitude - 5.0 * p1.latitude + 4.0 * p2.latitude - p3.latitude) * t2 + (-p0.latitude + 3.0 * p1.latitude - 3.0 * p2.latitude + p3.latitude) * t3)
+                                    val lon = 0.5 * ((2.0 * p1.longitude) + (-p0.longitude + p2.longitude) * t + (2.0 * p0.longitude - 5.0 * p1.longitude + 4.0 * p2.longitude - p3.longitude) * t2 + (-p0.longitude + 3.0 * p1.longitude - 3.0 * p2.longitude + p3.longitude) * t3)
+                                    splineLatLngs.add(LatLng(lat, lon))
+                                }
+                            }
+                            splineLatLngs.add(averagedLatLngs.last())
+                        } else {
+                            splineLatLngs.addAll(averagedLatLngs)
+                        }
                     }
-                    amap.addPolyline(options)
+                    Pair(segmentInfo, splineLatLngs)
+                }
+
+                // 绘制实线
+                processedSegments.forEach { (_, splined) ->
+                    if (splined.isNotEmpty()) {
+                        val options = PolylineOptions().addAll(splined).width(15f).color(polylineColor).useGradient(true)
+                            .lineJoinType(PolylineOptions.LineJoinType.LineJoinRound)
+                            .lineCapType(PolylineOptions.LineCapType.LineCapRound)
+                        amap.addPolyline(options)
+                    }
+                }
+
+                // 绘制虚线：使用三次贝塞尔曲线，使其顺着前后实线的切线方向延伸
+                for (i in 0 until processedSegments.size - 1) {
+                    val (segA, splinedA) = processedSegments[i]
+                    val (_, splinedB) = processedSegments[i + 1]
+                    
+                    if (segA.connectToNextWithDash && splinedA.isNotEmpty() && splinedB.isNotEmpty()) {
+                        val p0 = splinedA.last()
+                        val p3 = splinedB.first()
+                        
+                        val p0TangentPrev = if (splinedA.size >= 10) splinedA[splinedA.size - 1 - minOf(splinedA.size - 1, 10)] else if (splinedA.size >= 2) splinedA.first() else null
+                        val p3TangentNext = if (splinedB.size >= 10) splinedB[minOf(splinedB.size - 1, 10)] else if (splinedB.size >= 2) splinedB.last() else null
+                        
+                        val dLat0 = if (p0TangentPrev != null) p0.latitude - p0TangentPrev.latitude else 0.0
+                        val dLon0 = if (p0TangentPrev != null) p0.longitude - p0TangentPrev.longitude else 0.0
+                        val dLat3 = if (p3TangentNext != null) p3TangentNext.latitude - p3.latitude else 0.0
+                        val dLon3 = if (p3TangentNext != null) p3TangentNext.longitude - p3.longitude else 0.0
+                        
+                        val distLat = p3.latitude - p0.latitude
+                        val distLon = p3.longitude - p0.longitude
+                        val dist = Math.sqrt(distLat*distLat + distLon*distLon)
+                        
+                        val len0 = Math.sqrt(dLat0*dLat0 + dLon0*dLon0)
+                        val len3 = Math.sqrt(dLat3*dLat3 + dLon3*dLon3)
+                        
+                        val scale0 = if (len0 > 0) (dist * 0.35) / len0 else 0.0
+                        val scale3 = if (len3 > 0) (dist * 0.35) / len3 else 0.0
+                        
+                        val c1 = LatLng(
+                            p0.latitude + (if(len0 > 0) dLat0 * scale0 else distLat * 0.3),
+                            p0.longitude + (if(len0 > 0) dLon0 * scale0 else distLon * 0.3)
+                        )
+                        val c2 = LatLng(
+                            p3.latitude - (if(len3 > 0) dLat3 * scale3 else distLat * 0.3),
+                            p3.longitude - (if(len3 > 0) dLon3 * scale3 else distLon * 0.3)
+                        )
+                        
+                        val bezierPoints = mutableListOf<LatLng>()
+                        val steps = 20
+                        for (j in 0..steps) {
+                            val t = j.toDouble() / steps.toDouble()
+                            val u = 1.0 - t
+                            val u2 = u * u
+                            val u3 = u2 * u
+                            val t2 = t * t
+                            val t3 = t2 * t
+                            val lat = u3 * p0.latitude + 3.0 * u2 * t * c1.latitude + 3.0 * u * t2 * c2.latitude + t3 * p3.latitude
+                            val lon = u3 * p0.longitude + 3.0 * u2 * t * c1.longitude + 3.0 * u * t2 * c2.longitude + t3 * p3.longitude
+                            bezierPoints.add(LatLng(lat, lon))
+                        }
+                        
+                        val dashedOptions = PolylineOptions().addAll(bezierPoints).width(15f).color(polylineColor).setDottedLine(true)
+                        amap.addPolyline(dashedOptions)
+                    }
                 }
 
                 amap.addFootprintMarkers(footprintMarkers)

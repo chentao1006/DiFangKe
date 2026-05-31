@@ -79,8 +79,8 @@ interface FootprintDao {
         WHERE startTime = :start 
         AND endTime > :start 
         AND statusValue = 'candidate'
-        AND json_array_length(latitudeJson) <= 1
-        AND json_array_length(longitudeJson) <= 1
+        AND IFNULL(latitudeJson, '') NOT LIKE '%,%'
+        AND IFNULL(longitudeJson, '') NOT LIKE '%,%'
     """)
     suspend fun deleteStartBoundaryCandidates(start: Date)
 }

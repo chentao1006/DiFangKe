@@ -336,35 +336,141 @@ extension Transport {
             ))
         }
 
+        // 优化虚线绘制：使用三次贝塞尔曲线使虚线顺着前后实线的切线方向自然延伸
+        for i in 0..<segments.count {
+            if segments[i].isDashed && segments[i].coordinates.count == 2 {
+                let p0 = segments[i].coordinates[0]
+                let p3 = segments[i].coordinates[1]
+                
+                var p0TangentPrev: CLLocationCoordinate2D? = nil
+                if i > 0 && !segments[i-1].isDashed {
+                    let prevSolid = segments[i-1].coordinates
+                    if prevSolid.count >= 10 {
+                        p0TangentPrev = prevSolid[prevSolid.count - 1 - Swift.min(prevSolid.count - 1, 10)]
+                    } else if prevSolid.count >= 2 {
+                        p0TangentPrev = prevSolid.first!
+                    }
+                }
+                
+                var p3TangentNext: CLLocationCoordinate2D? = nil
+                if i < segments.count - 1 && !segments[i+1].isDashed {
+                    let nextSolid = segments[i+1].coordinates
+                    if nextSolid.count >= 10 {
+                        p3TangentNext = nextSolid[Swift.min(nextSolid.count - 1, 10)]
+                    } else if nextSolid.count >= 2 {
+                        p3TangentNext = nextSolid.last!
+                    }
+                }
+                
+                let dLat0 = p0TangentPrev != nil ? p0.latitude - p0TangentPrev!.latitude : 0
+                let dLon0 = p0TangentPrev != nil ? p0.longitude - p0TangentPrev!.longitude : 0
+                let dLat3 = p3TangentNext != nil ? p3TangentNext!.latitude - p3.latitude : 0
+                let dLon3 = p3TangentNext != nil ? p3TangentNext!.longitude - p3.longitude : 0
+                
+                let distLat = p3.latitude - p0.latitude
+                let distLon = p3.longitude - p0.longitude
+                let dist = sqrt(distLat*distLat + distLon*distLon)
+                
+                let len0 = sqrt(dLat0*dLat0 + dLon0*dLon0)
+                let len3 = sqrt(dLat3*dLat3 + dLon3*dLon3)
+                
+                let scale0 = len0 > 0 ? (dist * 0.35) / len0 : 0
+                let scale3 = len3 > 0 ? (dist * 0.35) / len3 : 0
+                
+                let c1 = CLLocationCoordinate2D(
+                    latitude: p0.latitude + (len0 > 0 ? dLat0 * scale0 : distLat * 0.3),
+                    longitude: p0.longitude + (len0 > 0 ? dLon0 * scale0 : distLon * 0.3)
+                )
+                let c2 = CLLocationCoordinate2D(
+                    latitude: p3.latitude - (len3 > 0 ? dLat3 * scale3 : distLat * 0.3),
+                    longitude: p3.longitude - (len3 > 0 ? dLon3 * scale3 : distLon * 0.3)
+                )
+                
+                var bezierPoints: [CLLocationCoordinate2D] = []
+                let steps = 20
+                for j in 0...steps {
+                    let t = Double(j) / Double(steps)
+                    let u = 1.0 - t
+                    let u2 = u * u
+                    let u3 = u2 * u
+                    let t2 = t * t
+                    let t3 = t2 * t
+                    
+                    let lat = u3 * p0.latitude + 3.0 * u2 * t * c1.latitude + 3.0 * u * t2 * c2.latitude + t3 * p3.latitude
+                    let lon = u3 * p0.longitude + 3.0 * u2 * t * c1.longitude + 3.0 * u * t2 * c2.longitude + t3 * p3.longitude
+                    bezierPoints.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
+                }
+                
+                segments[i] = TransportLineSegment(id: segments[i].id, coordinates: bezierPoints, isDashed: true)
+            }
+        }
+
         return segments
     }
 }
 
 extension Array where Element == CLLocationCoordinate2D {
-    /// 使用 Catmull-Rom 插值算法对坐标点进行平滑处理，使其呈现出优雅的曲线感
+    /// 使用 Catmull-Rom 插值算法结合滑动平均滤波，不严格贴合原始坐标，画出抗漂移的优雅曲线
     func smoothed(granularity: Int = 10) -> [CLLocationCoordinate2D] {
         guard count >= 3 else { return self }
         
         var result: [CLLocationCoordinate2D] = []
         
-        // 预处理：过滤掉极近的点，避免插值抖动
+        // 1. 预处理：过滤掉过近的点，避免局部坐标堆叠导致的插值乱缠
         var filtered: [CLLocationCoordinate2D] = [self[0]]
         for i in 1..<count {
             let p1 = filtered.last!
             let p2 = self[i]
             let dist = sqrt(pow(p2.latitude - p1.latitude, 2) + pow(p2.longitude - p1.longitude, 2))
-            if dist > 0.00001 { // 约 1 米
+            if dist > 0.00004 { // 约 4-5 米，剔除小范围原地漂移
                 filtered.append(p2)
             }
         }
         
-        guard filtered.count >= 3 else { return self }
+        // 确保最后一个点被包含
+        if let last = self.last {
+            let p1 = filtered.last!
+            let dist = sqrt(pow(last.latitude - p1.latitude, 2) + pow(last.longitude - p1.longitude, 2))
+            if dist > 0 {
+                filtered.append(last)
+            }
+        }
         
-        for i in 0..<filtered.count - 1 {
-            let p0 = filtered[Swift.max(i - 1, 0)]
-            let p1 = filtered[i]
-            let p2 = filtered[i + 1]
-            let p3 = filtered[Swift.min(i + 2, filtered.count - 1)]
+        guard filtered.count >= 3 else { return self }
+
+        // 2. 核心：移动平均滤波（滑动窗口）。
+        // 这一步打破了“严格通过原始坐标”的限制，把左右横跳的漂移点强制往中心路径拉扯。
+        var averaged: [CLLocationCoordinate2D] = []
+        let windowSize = 5
+        let halfWindow = windowSize / 2
+        
+        for i in 0..<filtered.count {
+            if i == 0 || i == filtered.count - 1 {
+                // 首尾两端不漂移，作为锚点固定
+                averaged.append(filtered[i])
+                continue
+            }
+            var sumLat = 0.0
+            var sumLng = 0.0
+            var validCount = 0.0
+            
+            let start = Swift.max(0, i - halfWindow)
+            let end = Swift.min(filtered.count - 1, i + halfWindow)
+            
+            for j in start...end {
+                sumLat += filtered[j].latitude
+                sumLng += filtered[j].longitude
+                validCount += 1
+            }
+            averaged.append(CLLocationCoordinate2D(latitude: sumLat / validCount, longitude: sumLng / validCount))
+        }
+
+        // 3. Catmull-Rom 样条插值：让已经被拉直的路线呈现出优雅的曲线感
+        for i in 0..<averaged.count - 1 {
+            let p0 = averaged[Swift.max(i - 1, 0)]
+            let p1 = averaged[i]
+            let p2 = averaged[i + 1]
+            let p3 = averaged[Swift.min(i + 2, averaged.count - 1)]
             
             for t in 0..<granularity {
                 let s = Double(t) / Double(granularity)
@@ -373,7 +479,7 @@ extension Array where Element == CLLocationCoordinate2D {
                 result.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
             }
         }
-        result.append(filtered.last!)
+        result.append(averaged.last!)
         return result
     }
     

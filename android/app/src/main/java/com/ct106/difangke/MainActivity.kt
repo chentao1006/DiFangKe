@@ -27,9 +27,6 @@ class MainActivity : ComponentActivity() {
         val db = app.database
         lifecycleScope.launch {
             com.ct106.difangke.data.db.DefaultDataSeeder.seedIfNeeded(db, prefs)
-            
-            // 检查电池优化
-            requestIgnoreBatteryOptimizations()
         }
         
         val deepLinkDate = intent.getLongExtra("date", -1L).let { if (it == -1L) null else it }
@@ -37,24 +34,6 @@ class MainActivity : ComponentActivity() {
         setContent {
             DiFangKeTheme {
                 NavGraph(initialDate = deepLinkDate)
-            }
-        }
-    }
-
-    private fun requestIgnoreBatteryOptimizations() {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-            try {
-                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                    data = Uri.parse("package:$packageName")
-                }
-                startActivity(intent)
-            } catch (e: Exception) {
-                // 部分机型可能不支持该直接意图，跳转至设置页面
-                try {
-                    val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                    startActivity(intent)
-                } catch (e2: Exception) {}
             }
         }
     }
