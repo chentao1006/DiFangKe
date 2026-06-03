@@ -1443,8 +1443,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     self.triggerNotificationSummaryRefresh()
                 }
             }
+            
+            // consolidation 完成后，等待 3 秒让 requestLocation() 的回调也处理完毕，
+            // 再执行一次合并，消除启动时因新定位点产生的重复足迹"中间态"。
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            await MainActor.run { [weak self] in
+                guard let self = self, let context = self.modelContext else { return }
+                self.mergeRecentFootprints(in: context)
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            }
         }
     }
+
 
     func stopTracking() {
         locationManager.stopUpdatingLocation()
@@ -1676,6 +1686,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                         fp.endTime = segment.end
                         fp.date = Calendar.current.startOfDay(for: segment.start)
                         fp.duration = segment.duration
+                        fp.duration = segment.duration
                         fp.locationHash = "SPLIT_FIXED"
                         splitFootprints.append(fp)
                     } else {
@@ -1686,8 +1697,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                             footprintLocations: segment.coords,
                             locationHash: "SPLIT_FIXED",
                             duration: segment.duration,
-                            address: nil
+                            status: fp.status
                         )
+                        // Inherit from base
+                        newFp.placeID = fp.placeID
+                        newFp.address = fp.address
                         context.insert(newFp)
                         splitFootprints.append(newFp)
                     }
@@ -1702,6 +1716,75 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
         }
+    }
+
+    /// 检查今日最新的几个足迹，如果同一地点且时间连续，则合并，以旧的足迹为准，保留用户修改
+    @MainActor
+    public func mergeRecentFootprints(in context: ModelContext) {
+        let now = Date()
+        let startOfDay = Calendar.current.startOfDay(for: now)
+        let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
+        
+        let descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate { $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored" },
+            sortBy: [SortDescriptor(\.startTime, order: .forward)]
+        )
+        
+        guard let todayFps = try? context.fetch(descriptor), todayFps.count >= 2 else { return }
+        
+        var recentFps = Array(todayFps.suffix(5))
+        var i = 0
+        while i < recentFps.count - 1 {
+            let base = recentFps[i]
+            let next = recentFps[i + 1]
+            
+            let timeGap = next.startTime.timeIntervalSince(base.endTime)
+            if timeGap > AppConfig.shared.stayMergeGapThreshold {
+                i += 1
+                continue
+            }
+            
+            var isSamePlace = false
+            if let pid = base.placeID, pid == next.placeID {
+                isSamePlace = true
+            } else {
+                let lat1 = base.latitude
+                let lon1 = base.longitude
+                let lat2 = next.latitude
+                let lon2 = next.longitude
+                let loc1 = CLLocation(latitude: lat1, longitude: lon1)
+                let loc2 = CLLocation(latitude: lat2, longitude: lon2)
+                if loc1.distance(from: loc2) < AppConfig.shared.mergeDistanceThreshold {
+                    isSamePlace = true
+                }
+            }
+            
+            if isSamePlace {
+                base.endTime = max(base.endTime, next.endTime)
+                base.duration = base.endTime.timeIntervalSince(base.startTime)
+                
+                var newLocations = base.footprintLocations
+                newLocations.append(contentsOf: next.footprintLocations)
+                base.footprintLocations = newLocations
+                
+                var mergedPhotos = base.photoAssetIDs
+                for pid in next.photoAssetIDs {
+                    if !mergedPhotos.contains(pid) { mergedPhotos.append(pid) }
+                }
+                base.photoAssetIDs = mergedPhotos
+                
+                if base.activityTypeValue == nil {
+                    base.activityTypeValue = next.activityTypeValue
+                }
+                
+                context.delete(next)
+                recentFps.remove(at: i + 1)
+                // Do not increment i, continue to check next
+            } else {
+                i += 1
+            }
+        }
+        try? context.save()
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {

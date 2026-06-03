@@ -445,6 +445,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val endOfDay = cal.time
 
             withContext(Dispatchers.Default) {
+                // 如果是今天，先执行一次近期足迹的合并，确保用户修改不被新的分段覆盖
+                if (isToday(date)) {
+                    builder.mergeRecentFootprintsForToday()
+                }
+
                 // 1. 获取足迹和交通记录 (用于传给 AI)
                 val footprints = db.footprintDao().getBetween(startOfDay, endOfDay)
                 val transports = db.transportRecordDao().getForDay(startOfDay, endOfDay)

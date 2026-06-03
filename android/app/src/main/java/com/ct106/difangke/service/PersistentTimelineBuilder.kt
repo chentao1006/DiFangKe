@@ -405,4 +405,95 @@ class PersistentTimelineBuilder(private val context: Context) {
         }
         return cal.time
     }
+
+    /**
+     * 检查今日最新的几个足迹，如果同一地点且时间连续，则合并，以旧的足迹为准，保留用户修改
+     */
+    suspend fun mergeRecentFootprintsForToday() = withContext(Dispatchers.IO) {
+        val now = Date()
+        val startOfDay = getStartOfDay(now)
+        val endOfDay = Calendar.getInstance().apply {
+            time = startOfDay
+            add(Calendar.DAY_OF_YEAR, 1)
+        }.time
+
+        // 获取今天的所有足迹并按开始时间排序
+        val todayFps = db.footprintDao().getBetween(startOfDay, endOfDay).sortedBy { it.startTime }
+        if (todayFps.size < 2) return@withContext
+
+        // 只检查最近的 5 个足迹
+        val recentFps = todayFps.takeLast(5).toMutableList()
+        var i = 0
+        while (i < recentFps.size - 1) {
+            val base = recentFps[i]
+            val next = recentFps[i + 1]
+
+            // 检查地点是否一致（基于 PlaceID 或距离）
+            var isSamePlace = false
+            if (base.placeID != null && base.placeID == next.placeID) {
+                isSamePlace = true
+            } else {
+                val lat1 = gson.fromJson(base.latitudeJson, Array<Double>::class.java).average()
+                val lon1 = gson.fromJson(base.longitudeJson, Array<Double>::class.java).average()
+                val lat2 = gson.fromJson(next.latitudeJson, Array<Double>::class.java).average()
+                val lon2 = gson.fromJson(next.longitudeJson, Array<Double>::class.java).average()
+                if (!lat1.isNaN() && !lon1.isNaN() && !lat2.isNaN() && !lon2.isNaN()) {
+                    val dist = processor.haversineMeters(lat1, lon1, lat2, lon2)
+                    if (dist < AppConfig.MERGE_DISTANCE_THRESHOLD) {
+                        isSamePlace = true
+                    }
+                }
+            }
+
+            // 时间检查
+            val timeGap = (next.startTime.time - base.endTime.time) / 1000L
+            val gapLimit = if (isSamePlace) 3600L else AppConfig.STAY_MERGE_GAP_THRESHOLD.toLong()
+            if (timeGap > gapLimit) {
+                i++
+                continue
+            }
+
+            if (isSamePlace) {
+                // 执行合并：以 base（旧足迹）为准，延长 endTime，合并坐标，合并照片
+                val mergedLats = gson.fromJson(base.latitudeJson, Array<Double>::class.java).toList() +
+                        gson.fromJson(next.latitudeJson, Array<Double>::class.java).toList()
+                val mergedLons = gson.fromJson(base.longitudeJson, Array<Double>::class.java).toList() +
+                        gson.fromJson(next.longitudeJson, Array<Double>::class.java).toList()
+
+                val mergedPhotos = try {
+                    val p1 = JSONArray(base.photoAssetIDsJson)
+                    val p2 = JSONArray(next.photoAssetIDsJson)
+                    val result = JSONArray()
+                    val seen = mutableSetOf<String>()
+                    for (j in 0 until p1.length()) {
+                        val pid = p1.getString(j)
+                        if (seen.add(pid)) result.put(pid)
+                    }
+                    for (j in 0 until p2.length()) {
+                        val pid = p2.getString(j)
+                        if (seen.add(pid)) result.put(pid)
+                    }
+                    result.toString()
+                } catch (e: Exception) { base.photoAssetIDsJson }
+
+                val mergedFp = base.copy(
+                    endTime = maxOf(base.endTime, next.endTime),
+                    latitudeJson = gson.toJson(mergedLats),
+                    longitudeJson = gson.toJson(mergedLons),
+                    photoAssetIDsJson = mergedPhotos,
+                    // 如果新的有活动类型而旧的没有，可以继承
+                    activityTypeValue = base.activityTypeValue ?: next.activityTypeValue
+                )
+
+                db.footprintDao().update(mergedFp)
+                db.footprintDao().delete(next)
+
+                recentFps[i] = mergedFp
+                recentFps.removeAt(i + 1)
+                // i 不递增，继续尝试与下一个合并
+            } else {
+                i++
+            }
+        }
+    }
 }
