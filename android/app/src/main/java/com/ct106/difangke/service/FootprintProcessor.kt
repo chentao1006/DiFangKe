@@ -211,4 +211,34 @@ class FootprintProcessor private constructor() {
                 cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLon / 2).pow(2)
         return R * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
+
+    /**
+     * 判断两个足迹之间的间隙是否包含真实的位移（避免因为漂移造成的异常跳变被强行合并）
+     */
+    fun hasSignificantMovement(
+        currentLat: Double,
+        currentLon: Double,
+        nextLat: Double,
+        nextLon: Double,
+        points: List<RawLocationStore.RawPoint>
+    ): Boolean {
+        if (points.isEmpty()) return false
+
+        // 放宽到停留阈值的 1.8 倍，容忍正常漂移
+        val bufferThreshold = AppConfig.STAY_DISTANCE_THRESHOLD * 1.8
+
+        var outlierCount = 0
+        for (p in points) {
+            val d1 = haversineMeters(p.latitude, p.longitude, currentLat, currentLon)
+            val d2 = haversineMeters(p.latitude, p.longitude, nextLat, nextLon)
+
+            // 如果该点既远离前一个停留中心，也远离后一个停留中心
+            if (d1 > bufferThreshold && d2 > bufferThreshold) {
+                outlierCount++
+            }
+        }
+
+        // 只要有超过2个点都在远离状态，就认为发生了真实位移
+        return outlierCount > 2
+    }
 }

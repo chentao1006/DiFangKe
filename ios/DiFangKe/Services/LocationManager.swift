@@ -1532,6 +1532,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         for (_, dayFootprints) in grouped {
             let sorted = dayFootprints.sorted { $0.startTime < $1.startTime }
             var workingSorted = sorted
+            
+            // 获取当天的所有交通记录，避免在内层循环中每次查询
+            let startOfDay = Calendar.current.startOfDay(for: sorted.first?.startTime ?? Date())
+            let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
+            let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
+            })
+            let allDayTransports = (try? context.fetch(tpDesc)) ?? []
+
             var i = 0
             while i < workingSorted.count - 1 {
                 let base = workingSorted[i]
@@ -1546,10 +1555,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // 硬规则：若两段停留之间存在交通记录，则禁止合并，避免“出门回来仍是一条长足迹”。
                 let bEnd = base.endTime
                 let nStart = next.startTime
-                let tpBetweenDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                    $0.statusRaw != "ignored" && $0.endTime > bEnd && $0.startTime < nStart
-                })
-                let hasTransportBetween = ((try? context.fetch(tpBetweenDesc))?.isEmpty == false)
+                
+                // 核心修复：避免 SwiftData #Predicate 在 Date 比较时的隐式失败，改为内存中匹配
+                let hasTransportBetween = allDayTransports.contains { t in
+                    return t.endTime > bEnd && t.startTime < nStart
+                }
+                
                 if hasTransportBetween {
                     i += 1
                     continue
@@ -1732,13 +1743,30 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         guard let todayFps = try? context.fetch(descriptor), todayFps.count >= 2 else { return }
         
+        let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
+        })
+        let allDayTransports = (try? context.fetch(tpDesc)) ?? []
+        
         var recentFps = Array(todayFps.suffix(5))
         var i = 0
         while i < recentFps.count - 1 {
             let base = recentFps[i]
             let next = recentFps[i + 1]
             
-            let timeGap = next.startTime.timeIntervalSince(base.endTime)
+            let bEnd = base.endTime
+            let nStart = next.startTime
+            
+            let hasTransportBetween = allDayTransports.contains { t in
+                t.endTime > bEnd && t.startTime < nStart
+            }
+            
+            if hasTransportBetween {
+                i += 1
+                continue
+            }
+            
+            let timeGap = nStart.timeIntervalSince(bEnd)
             if timeGap > AppConfig.shared.stayMergeGapThreshold {
                 i += 1
                 continue

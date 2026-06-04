@@ -1916,7 +1916,7 @@ class PersistentTimelineBuilder {
         let transports = (try? context.fetch(tpDesc)) ?? []
         guard !transports.isEmpty else { return }
 
-        let minSegment = max(AppConfig.shared.liveStayMinDurationThreshold, 120)
+        let minSegment: TimeInterval = 60 // 允许短暂的足迹被保留，只要它们是被交通切割的
         var hasChanges = false
 
         for fp in fps {
@@ -2044,6 +2044,12 @@ class PersistentTimelineBuilder {
         let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
         guard fps.count >= 2 else { return }
         
+        let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
+        })
+        let allDayTransports = (try? context.fetch(tpDesc)) ?? []
+        
+        
         var i = 0
         while i < fps.count - 1 {
             let current = fps[i]
@@ -2063,10 +2069,12 @@ class PersistentTimelineBuilder {
             // 硬规则：只要两个足迹之间存在有效交通记录，就绝不能合并。
             let cEnd = current.endTime
             let nStart = next.startTime
-            let transportBetweenDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                $0.statusRaw != "ignored" && $0.endTime > cEnd && $0.startTime < nStart
-            })
-            let hasTransportBetween = ((try? context.fetch(transportBetweenDesc))?.isEmpty == false)
+            
+            // 核心修复：避免 SwiftData #Predicate 在 Date 比较时的隐式失败，改为内存中匹配
+            let hasTransportBetween = allDayTransports.contains { t in
+                return t.endTime > cEnd && t.startTime < nStart
+            }
+            
             if hasTransportBetween {
                 i += 1
                 continue

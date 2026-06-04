@@ -453,6 +453,44 @@ class PersistentTimelineBuilder(private val context: Context) {
                 continue
             }
 
+            // 检查期间是否有交通记录
+            val transportBetween = db.transportRecordDao().getForDay(base.endTime, next.startTime)
+            if (transportBetween.isNotEmpty()) {
+                i++
+                continue
+            }
+
+            // 检查它们之间是否有真正的位移（避免因为漂移导致中心点偏移被错误合并）
+            val todayDate = Date(base.endTime.time)
+            val gapPoints = com.ct106.difangke.data.location.RawLocationStore.getInstance(context).loadLocations(todayDate).filter {
+                it.timestamp.time in base.endTime.time..next.startTime.time
+            }
+            val baseLat = gson.fromJson(base.latitudeJson, Array<Double>::class.java).average()
+            val baseLon = gson.fromJson(base.longitudeJson, Array<Double>::class.java).average()
+            val nextLat = gson.fromJson(next.latitudeJson, Array<Double>::class.java).average()
+            val nextLon = gson.fromJson(next.longitudeJson, Array<Double>::class.java).average()
+
+            var hasRealMovement = false
+            if (!baseLat.isNaN() && !baseLon.isNaN() && !nextLat.isNaN() && !nextLon.isNaN()) {
+                hasRealMovement = processor.hasSignificantMovement(
+                    currentLat = baseLat,
+                    currentLon = baseLon,
+                    nextLat = nextLat,
+                    nextLon = nextLon,
+                    points = gapPoints
+                )
+            }
+
+            // 如果有显著位移，并且距离稍微偏远，则不要合并
+            val dist = if (!baseLat.isNaN() && !baseLon.isNaN() && !nextLat.isNaN() && !nextLon.isNaN()) {
+                processor.haversineMeters(baseLat, baseLon, nextLat, nextLon)
+            } else { 0.0 }
+
+            if (hasRealMovement && dist >= (AppConfig.MERGE_DISTANCE_THRESHOLD / 2)) {
+                i++
+                continue
+            }
+
             if (isSamePlace) {
                 // 执行合并：以 base（旧足迹）为准，延长 endTime，合并坐标，合并照片
                 val mergedLats = gson.fromJson(base.latitudeJson, Array<Double>::class.java).toList() +
