@@ -415,11 +415,6 @@ struct DFKMapView: View {
                         .transition(.opacity)
                 }
             }
-            .onAppear {
-                if !isInteractive {
-                    loadSnapshot(for: geometry.size)
-                }
-            }
             .task(id: snapshotCacheKey(for: geometry.size)) {
                 guard !isInteractive else { return }
                 loadSnapshot(for: geometry.size, forceWidgetRefresh: false)
@@ -541,7 +536,7 @@ struct DFKMapView: View {
 
         let activity = fp.getActivityType(from: allActivities)
         let activityColor = activity?.color ?? Color.secondary.opacity(0.5)
-        let iconName = activity?.icon ?? "questionmark.circle.dashed"
+        let iconName = activity?.icon ?? FootprintIconDefaults.map
         let iconSize: CGFloat = isMiniTimelineMode ? 6 : (activity?.icon == nil ? 22 : 16) * scale
 
         return ZStack {
@@ -753,7 +748,7 @@ struct DFKMapView: View {
         let h = Int(size.height / 10) * 10
         let sizeKey = "\(w)x\(h)"
         let styleKey = UITraitCollection.current.userInterfaceStyle == .dark ? "dark" : "light"
-        return [sizeKey, styleKey, annotationKey, pointKey, footprintKey, transportKey, photoKey, footprintPhotoKey, heatmapKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
+        return [FootprintIconDefaults.mapSnapshotVersion, sizeKey, styleKey, annotationKey, pointKey, footprintKey, transportKey, photoKey, footprintPhotoKey, heatmapKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
     }
 
     private func loadSnapshot(for size: CGSize, forceWidgetRefresh: Bool = false) {
@@ -930,7 +925,7 @@ struct DFKMapView: View {
                 } else {
                     let activity = fp.getActivityType(from: allActivities)
                     let activityColor = UIColor(activity?.color ?? Color.secondary.opacity(0.5))
-                    let iconName = activity?.icon ?? "questionmark.circle.dashed"
+                    let iconName = activity?.icon ?? FootprintIconDefaults.map
 
                     ctx.cgContext.setFillColor(activityColor.cgColor)
                     ctx.cgContext.fillEllipse(in: rect)
@@ -1363,7 +1358,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 coordinate: aggregated.coordinate,
                 kind: .footprint(aggregated.id),
                 image: Coordinator.footprintImage(
-                    symbolName: activity?.icon ?? "questionmark.circle.dashed",
+                    symbolName: activity?.icon ?? FootprintIconDefaults.map,
                     color: UIColor(activity?.color ?? Color.secondary.opacity(0.5)),
                     duration: aggregated.totalDuration
                 )

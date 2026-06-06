@@ -495,7 +495,7 @@ final class WidgetDataSyncManager {
                                 } else {
                                     let activity = allActivities.first { $0.id.uuidString == fp.activityTypeValue || $0.name == fp.activityTypeValue }
                                     let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
-                                    let iconName = activity?.icon ?? "questionmark.circle.dashed"
+                                    let iconName = activity?.icon ?? FootprintIconDefaults.map
 
                                     ctx.cgContext.setFillColor(activityColor.cgColor)
                                     ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)

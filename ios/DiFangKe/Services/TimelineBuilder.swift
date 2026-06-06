@@ -4,6 +4,12 @@ import SwiftData
 import MapKit
 import Photos
 
+enum FootprintIconDefaults {
+    static let map = "mappin"
+    static let card = "questionmark.circle.dashed"
+    static let mapSnapshotVersion = "footprint-map-pin-v2"
+}
+
 // Add TimelineItem enum
 enum TimelineItem: Identifiable {
     case footprint(Footprint)
@@ -42,7 +48,7 @@ enum TimelineItem: Identifiable {
         switch self {
         case .footprint(let f):
             // Note: In a real app, this should resolve the activity type icon
-            return f.activityTypeValue ?? "mappin.and.ellipse"
+            return f.activityTypeValue ?? FootprintIconDefaults.card
         case .transport(let t):
             return t.currentType.icon
         }
@@ -52,7 +58,7 @@ enum TimelineItem: Identifiable {
     func getIcon(allActivityTypes: [ActivityType]) -> String {
         switch self {
         case .footprint(let f):
-            return f.getActivityType(from: allActivityTypes)?.icon ?? "mappin.and.ellipse"
+            return f.getActivityType(from: allActivityTypes)?.icon ?? FootprintIconDefaults.card
         case .transport(let t):
             return t.currentType.icon
         }

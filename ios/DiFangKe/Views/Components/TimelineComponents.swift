@@ -796,7 +796,7 @@ struct FootprintCardView: View {
     
     private var timelineIndicator: some View {
         let activity = footprint.getActivityType(from: allActivities)
-        let iconName = activity?.icon ?? "mappin.circle.fill"
+        let iconName = activity?.icon ?? FootprintIconDefaults.card
         let iconColor = activity?.color ?? .secondary.opacity(0.4)
         
         return VStack(spacing: 0) {

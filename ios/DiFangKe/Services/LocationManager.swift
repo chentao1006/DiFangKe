@@ -2364,11 +2364,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         var isNewPlace = false
         var isLongTimeNoSee = false
         var lastVisitDate: Date? = nil
+        var notificationDate = startTime
         
         if let last = history.first {
             lastVisitDate = last.startTime
+            notificationDate = last.startTime
             let days = Calendar.current.dateComponents([.day], from: lastVisitDate!, to: startTime).day ?? 0
-            if days >= 30 {
+            if days >= 365 {
                 isLongTimeNoSee = true
             }
         } else {
@@ -2383,15 +2385,26 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 body = "你第一次在「\(placeName)」留下足迹，开启一段新回忆吧。"
             } else {
                 let days = Calendar.current.dateComponents([.day], from: lastVisitDate!, to: startTime).day ?? 0
-                body = "你已经有 \(days) 天没来「\(placeName)」了，欢迎回来。"
+                let absenceDuration = formatLongAbsenceDuration(days: days)
+                body = "你已经有 \(absenceDuration) 没来「\(placeName)」了，欢迎回来。"
             }
             
             NotificationManager.shared.sendHighlightNotification(
                 title: title,
                 body: body,
-                date: startTime
+                date: notificationDate
             )
         }
+    }
+
+    private func formatLongAbsenceDuration(days: Int) -> String {
+        guard days >= 365 else {
+            return "\(days) 天"
+        }
+
+        let years = days / 365
+        let remainingDays = days % 365
+        return remainingDays >= 30 ? "\(years) 年多" : "\(years) 年"
     }
     
     private func saveOngoingTitle() {
