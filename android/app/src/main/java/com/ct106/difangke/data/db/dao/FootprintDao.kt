@@ -32,6 +32,16 @@ interface FootprintDao {
         @Query("SELECT * FROM footprints WHERE footprintID = :id LIMIT 1")
         suspend fun getById(id: String): FootprintEntity?
 
+        @Query(
+                "SELECT * FROM footprints WHERE footprintID != :id AND endTime <= :start AND statusValue != 'ignored' ORDER BY endTime DESC LIMIT 1"
+        )
+        suspend fun getPreviousBefore(id: String, start: Date): FootprintEntity?
+
+        @Query(
+                "SELECT * FROM footprints WHERE footprintID != :id AND startTime >= :end AND statusValue != 'ignored' ORDER BY startTime ASC LIMIT 1"
+        )
+        suspend fun getNextAfter(id: String, end: Date): FootprintEntity?
+
         @Insert(onConflict = OnConflictStrategy.REPLACE)
         suspend fun insert(footprint: FootprintEntity)
 

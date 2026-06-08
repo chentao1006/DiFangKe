@@ -88,8 +88,19 @@ class LocationTrackingService : Service() {
         private var currentIntervalTier = -1 // -1: initial, 0: stationary, 1: moving, 2: fast
         private var currentAccuracyMode = "automatic"
         private var hasAcquiredFirstLocation = false
+        private var lastLocationUpdateTime: Long? = null
+        private var lastStationaryProbeTime: Long = 0L
+        private var isStationaryProbeActive = false
         private val ongoingStayMaxPointGapMs =
                 (AppConfig.TRANSPORT_MAX_GAP_THRESHOLD * 1000).toLong()
+        private val watchdogHandler = Handler(Looper.getMainLooper())
+        private val locationWatchdog =
+                object : Runnable {
+                        override fun run() {
+                                runStationaryDepartureProbeIfNeeded()
+                                watchdogHandler.postDelayed(this, 60_000L)
+                        }
+                }
 
         private var wasVpnOrProxyActive: Boolean? = null
 
@@ -180,6 +191,7 @@ class LocationTrackingService : Service() {
                 }
 
                 if (location != null && location.errorCode == 0) {
+                        lastLocationUpdateTime = location.time.takeIf { it > 0L } ?: System.currentTimeMillis()
                         if (!hasAcquiredFirstLocation) {
                                 hasAcquiredFirstLocation = true
                                 Log.i(TAG, "首次定位成功，恢复正常采样频率")
@@ -215,6 +227,12 @@ class LocationTrackingService : Service() {
                                         Date(location.time),
                                         getShortAddress(location) // 优化：提取短地址
                                 )
+                        }
+                        if (isStationaryProbeActive) {
+                                isStationaryProbeActive = false
+                                val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
+                                updateLocationClientOption(tier)
+                                locationClient?.startLocation()
                         }
                 } else {
                         Log.e(
@@ -293,6 +311,8 @@ class LocationTrackingService : Service() {
                                         notification
                                 )
                                 locationClient?.startLocation()
+                                watchdogHandler.removeCallbacks(locationWatchdog)
+                                watchdogHandler.postDelayed(locationWatchdog, 60_000L)
 
                                 stateFlow.value = TrackingState.Tracking()
                                 Log.i(
@@ -302,6 +322,7 @@ class LocationTrackingService : Service() {
                         }
                         ACTION_STOP -> {
                                 locationClient?.disableBackgroundLocation(true)
+                                watchdogHandler.removeCallbacks(locationWatchdog)
                                 stopForeground(STOP_FOREGROUND_REMOVE)
 
                                 // 清理持久化的停留状态
@@ -316,6 +337,38 @@ class LocationTrackingService : Service() {
                         }
                 }
                 return START_STICKY
+        }
+
+        private fun runStationaryDepartureProbeIfNeeded() {
+                if (currentAccuracyMode == "powerSaving") return
+                val stay = ongoingStayStart ?: return
+                val now = System.currentTimeMillis()
+                val stationaryDuration = now - stay.timestamp.time
+                if (stationaryDuration <= 10 * 60_000L) return
+
+                val lastUpdate = lastLocationUpdateTime
+                val updateGap = if (lastUpdate != null) now - lastUpdate else Long.MAX_VALUE
+                if (updateGap <= 3 * 60_000L) return
+                if (now - lastStationaryProbeTime <= 5 * 60_000L) return
+                lastStationaryProbeTime = now
+                isStationaryProbeActive = true
+
+                Log.i(
+                        TAG,
+                        "Long stationary stay has no fresh location for ${if (updateGap == Long.MAX_VALUE) "unknown duration" else "${updateGap / 1000}s"}. Requesting departure probe."
+                )
+                locationClient?.setLocationOption(
+                        AMapLocationClientOption().apply {
+                                locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+                                interval = 2000L
+                                isOnceLocation = true
+                                isNeedAddress = true
+                                isMockEnable = false
+                                isOffset = true
+                                isSensorEnable = true
+                        }
+                )
+                locationClient?.startLocation()
         }
 
         private suspend fun handleNewLocation(

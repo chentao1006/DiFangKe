@@ -101,11 +101,6 @@ struct EditPlaceSheet: View {
                     }
                 }
 
-                Section(header: Text("记录设置"), footer: Text("开启后，系统将不再记录发生在此地点的足迹。")) {
-                    Toggle("忽略此地点的足迹", isOn: $place.isIgnored)
-                        .tint(.orange)
-                }
-
                 Section {
                     Button(role: .destructive) {
                         showDeleteConfirm = true

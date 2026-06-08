@@ -1028,6 +1028,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     private var refreshTimer: AnyCancellable?
     private var locationWatchdogTimer: AnyCancellable?
+    private var lastStationaryProbeTime: Date = .distantPast
     
     override init() {
         super.init()
@@ -1204,8 +1205,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
 
-        // Location watchdog: if we're "moving" but location updates stop arriving,
-        // proactively restart high-accuracy updates to avoid multi-minute gaps.
+        // Location watchdog: recover stalled updates while moving, and probe long stays
+        // so leaving indoor venues does not depend solely on delayed visit/region events.
         locationWatchdogTimer = Timer.publish(every: 60, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
@@ -1223,6 +1224,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         let status = locationManager.authorizationStatus
         guard status == .authorizedAlways else { return }
+        guard shouldRunActiveLocationRecovery else { return }
+
+        let now = Date()
 
         // Intervene when we believe the user is actually moving OR when uiIsMoving is true.
         let motion = HealthManager.shared.currentMotionType
@@ -1232,21 +1236,58 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             || motion == .cycling
             || motion == .automotive
             || uiIsMoving // 扩大监测范围：只要 UI 层认为在移动就介入
-        guard isMovingBySensor else { return }
 
-        guard let last = lastUpdateTime else { return }
-        let gap = Date().timeIntervalSince(last)
+        guard let last = lastUpdateTime else {
+            requestStationaryDepartureProbeIfNeeded(now: now, lastUpdateGap: .infinity)
+            return
+        }
+        let gap = now.timeIntervalSince(last)
+
+        if !isMovingBySensor {
+            requestStationaryDepartureProbeIfNeeded(now: now, lastUpdateGap: gap)
+            return
+        }
+
         guard gap > 45 else { return } // 移动中 45 秒没点就恢复，避免开头几百米丢失
         
         // Throttle recovery attempts to at most once per minute while moving.
-        if Date().timeIntervalSince(lastRecoveryBoostTime) < 60 {
+        if now.timeIntervalSince(lastRecoveryBoostTime) < 60 {
             return
         }
-        lastRecoveryBoostTime = Date()
+        lastRecoveryBoostTime = now
 
         print("[LocationManager] ⚠️ No location updates for \(Int(gap))s while moving. Restarting updates…")
         ensureSignificantMonitoringActive()
         forceHighAccuracyBoost()
+    }
+
+    private func requestStationaryDepartureProbeIfNeeded(now: Date, lastUpdateGap: TimeInterval) {
+        guard let stop = potentialStopStartLocation else { return }
+
+        let stationaryDuration = now.timeIntervalSince(stop.timestamp)
+        guard stationaryDuration > 10 * 60 else { return }
+
+        // During a confirmed long stay, do a low-frequency active probe. This catches
+        // indoor departures where Core Motion, Visit Monitoring, or the region exit
+        // callback may be delayed until the user has already moved several hundred meters.
+        guard lastUpdateGap > 3 * 60 else { return }
+        guard now.timeIntervalSince(lastStationaryProbeTime) > 5 * 60 else { return }
+        lastStationaryProbeTime = now
+
+        let gapDescription = lastUpdateGap.isFinite ? "\(Int(lastUpdateGap))s" : "unknown duration"
+        print("[LocationManager] 🧭 Long stationary stay has no fresh location for \(gapDescription). Requesting departure probe…")
+        ensureSignificantMonitoringActive()
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.distanceFilter = 5.0
+        locationManager.activityType = .fitness
+        locationManager.requestLocation()
+        locationManager.startUpdatingLocation()
+    }
+
+    private var shouldRunActiveLocationRecovery: Bool {
+        let modeRaw = UserDefaults.standard.string(forKey: LocationAccuracyMode.userDefaultsKey) ?? LocationAccuracyMode.automatic.rawValue
+        let mode = LocationAccuracyMode(rawValue: modeRaw) ?? .automatic
+        return mode != .powerSaving
     }
     
     private func checkMidnightSift() {

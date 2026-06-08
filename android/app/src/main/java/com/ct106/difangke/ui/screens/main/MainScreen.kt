@@ -510,9 +510,8 @@ fun TimelinePage(
         
         // 计算中心点作为兜底（如果 pointsJson 为空，地图至少能定位到当天的某个足迹）
         val centerPoint = items.filterIsInstance<TimelineItem.FootprintItem>()
-            .firstOrNull()?.let { it.latitude to it.longitude }
-            ?: items.filterIsInstance<TimelineItem.TransportItem>()
-                .firstOrNull()?.let { 0.0 to 0.0 } // 优先用足迹
+            .firstOrNull { it.latitude.isFinite() && it.longitude.isFinite() && it.latitude != 0.0 && it.longitude != 0.0 }
+            ?.let { it.latitude to it.longitude }
 
         TimelineContent(
             items = items,

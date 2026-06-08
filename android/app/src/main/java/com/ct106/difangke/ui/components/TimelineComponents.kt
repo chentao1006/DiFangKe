@@ -587,9 +587,13 @@ fun RecordingStatusCard(
                         }
                     }
 
-                    // 小地图 (如果今天有轨迹，显示轨迹；否则显示当前位置)
-                    Spacer(modifier = Modifier.height(12.dp))
-                    if (pointsJson != null) {
+                    // 小地图：只有真实轨迹或定位成功后才显示，避免地图 SDK 默认中心显示成北京。
+                    val hasCurrentLocation = currentLat.isRenderableCoordinate() && currentLon.isRenderableCoordinate()
+                    val hasTrajectory = pointsJson.hasRenderableMapPoints()
+                    if (hasTrajectory || (isTracking && hasCurrentLocation)) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+                    if (hasTrajectory) {
                         MiniMapView(
                             lat = currentLat,
                             lon = currentLon,
@@ -598,11 +602,7 @@ fun RecordingStatusCard(
                             allPlaces = allPlaces,
                             onClick = onNavigateToMap
                         )
-                    } else if (isTracking) {
-                        // 即使 currentLat/Lon 暂时为空，只要正在记录，就强制渲染底图
-                        // 这是一个关键的保活/初始化策略：部分手机上，如果不挂载 MapView，
-                        // 后台的 AMapLocationClient 会一直无法获取到首次定位（返回错误或无响应）。
-                        // 挂载一个空地图能触发高德 SDK 的核心初始化，打通定位链路。
+                    } else if (isTracking && hasCurrentLocation) {
                         MiniMapView(
                             lat = currentLat, 
                             lon = currentLon,
@@ -712,15 +712,17 @@ fun DaySummaryCard(
                 
                 Spacer(modifier = Modifier.height(16.dp))
                 
-                // 全天小地图预览 (与 iOS 一致)
-                MiniMapView(
-                    lat = centerLat,
-                    lon = centerLon,
-                    pointsJson = pointsJson,
-                    markersJson = markersJson,
-                    allPlaces = allPlaces,
-                    onClick = onNavigateToMap
-                )
+                // 全天小地图预览：有轨迹或有效中心点才显示。
+                if (pointsJson.hasRenderableMapPoints() || (centerLat.isRenderableCoordinate() && centerLon.isRenderableCoordinate())) {
+                    MiniMapView(
+                        lat = centerLat,
+                        lon = centerLon,
+                        pointsJson = pointsJson,
+                        markersJson = markersJson,
+                        allPlaces = allPlaces,
+                        onClick = onNavigateToMap
+                    )
+                }
             }
         }
     }
@@ -744,6 +746,11 @@ fun MiniMapView(
     allPlaces: List<PlaceEntity> = emptyList(),
     onClick: () -> Unit
 ) {
+    val hasCurrentLocation = isCurrentLocation && lat.isRenderableCoordinate() && lon.isRenderableCoordinate()
+    val hasTrajectory = pointsJson.hasRenderableMapPoints()
+    val hasCenter = lat.isRenderableCoordinate() && lon.isRenderableCoordinate()
+    if (!hasCurrentLocation && !hasTrajectory && !hasCenter) return
+
     val context = LocalContext.current
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
@@ -1000,8 +1007,10 @@ fun MiniMapView(
                 } catch (e: Exception) {}
             }
             
-            if (!handledCentering && lat != null && lon != null) {
-                val target = com.amap.api.maps.model.LatLng(lat, lon)
+            val fallbackLat = lat
+            val fallbackLon = lon
+            if (!handledCentering && fallbackLat.isRenderableCoordinate() && fallbackLon.isRenderableCoordinate()) {
+                val target = com.amap.api.maps.model.LatLng(fallbackLat!!, fallbackLon!!)
                 amap.addMarker(com.amap.api.maps.model.MarkerOptions().position(target))
                 if (!hasCentred) {
                     amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(target, 13.5f))
@@ -1027,6 +1036,27 @@ fun MiniMapView(
                 }
         )
     }
+}
+
+private fun Double?.isRenderableCoordinate(): Boolean {
+    val value = this ?: return false
+    return value.isFinite() && value != 0.0
+}
+
+private fun String?.hasRenderableMapPoints(): Boolean {
+    if (isNullOrBlank() || this == "[]") return false
+    return runCatching {
+        val array = org.json.JSONArray(this)
+        for (i in 0 until array.length()) {
+            val point = array.optJSONArray(i) ?: continue
+            val lat = point.optDouble(0, Double.NaN)
+            val lon = point.optDouble(1, Double.NaN)
+            if (lat.isFinite() && lon.isFinite() && lat != 0.0 && lon != 0.0) {
+                return@runCatching true
+            }
+        }
+        false
+    }.getOrDefault(false)
 }
 
 @Composable

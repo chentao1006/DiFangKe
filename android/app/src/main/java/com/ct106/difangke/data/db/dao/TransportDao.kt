@@ -40,6 +40,15 @@ interface TransportRecordDao {
     @Query("SELECT * FROM transport_records WHERE recordID = :id LIMIT 1")
     suspend fun getById(id: String): TransportRecordEntity?
 
+    @Query("SELECT * FROM transport_records WHERE statusRaw = 'active' AND endTime > :start AND startTime < :end ORDER BY startTime ASC")
+    suspend fun getActiveBetween(start: Date, end: Date): List<TransportRecordEntity>
+
+    @Query("SELECT * FROM transport_records WHERE statusRaw = 'active' AND startTime < :date AND endTime >= :lower AND endTime <= :upper ORDER BY endTime DESC LIMIT 1")
+    suspend fun getAdjacentEndingAt(date: Date, lower: Date, upper: Date): TransportRecordEntity?
+
+    @Query("SELECT * FROM transport_records WHERE statusRaw = 'active' AND endTime > :date AND startTime >= :lower AND startTime <= :upper ORDER BY startTime ASC LIMIT 1")
+    suspend fun getAdjacentStartingAt(date: Date, lower: Date, upper: Date): TransportRecordEntity?
+
     @Query("SELECT * FROM transport_records ORDER BY startTime DESC")
     suspend fun getAllSync(): List<TransportRecordEntity>
 

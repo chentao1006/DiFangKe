@@ -566,6 +566,19 @@ struct RecordingStatusCard: View {
 }
 
 // MARK: - Footprint Card View
+private struct AdjacentFootprintMergeCandidate {
+    let base: Footprint
+    let other: Footprint
+
+    var first: Footprint {
+        base.startTime <= other.startTime ? base : other
+    }
+
+    var second: Footprint {
+        base.startTime <= other.startTime ? other : base
+    }
+}
+
 struct FootprintCardView: View {
     @Bindable var footprint: Footprint
     let allPlaces: [Place]
@@ -586,7 +599,11 @@ struct FootprintCardView: View {
     @State private var highlightVisible: Bool = false
     @State private var showingDeleteConfirm = false
     @State private var showingIgnoreConfirm = false
+    @State private var showingMergeConfirm = false
+    @State private var showingAddImportantPlace = false
+    @State private var showingSplitFootprint = false
     @State private var confirmedAnimating: Bool = false
+    @State private var pendingMergeCandidate: AdjacentFootprintMergeCandidate?
     
     var body: some View {
         if footprint.status == .ignored {
@@ -605,14 +622,7 @@ struct FootprintCardView: View {
                         }
                         
                         HStack(spacing: 6) {
-                            let matchedPlace = allPlaces.first(where: { place in
-                                if place.placeID == footprint.placeID && place.isUserDefined { return true }
-                                guard place.isUserDefined else { return false }
-                                let fpAddr = (footprint.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                                guard !fpAddr.isEmpty else { return false }
-                                return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr || 
-                                       (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr)
-                            })
+                            let matchedPlace = matchedImportantPlace
                             let displayText = matchedPlace?.name ?? footprint.address ?? "未知地点"
                             
                             Text(displayText)
@@ -705,6 +715,25 @@ struct FootprintCardView: View {
             } message: {
                 Text("添加为忽略地点后，以后将不再记录此处的足迹，且现有的同地点足迹也将被隐藏。")
             }
+            .alert("合并相邻足迹？", isPresented: $showingMergeConfirm) {
+                Button("合并") {
+                    if let pendingMergeCandidate {
+                        mergeAdjacentFootprints(pendingMergeCandidate)
+                    }
+                    pendingMergeCandidate = nil
+                }
+                Button("取消", role: .cancel) {
+                    pendingMergeCandidate = nil
+                }
+            } message: {
+                Text(mergeConfirmationMessage)
+            }
+            .sheet(isPresented: $showingAddImportantPlace) {
+                AddToFavoriteModal(footprint: footprint)
+            }
+            .sheet(isPresented: $showingSplitFootprint) {
+                FootprintSplitView(footprint: footprint)
+            }
             .onAppear {
                 if footprint.isHighlight == true {
                     withAnimation(.easeOut(duration: 0.3).delay(0.2)) { highlightVisible = true }
@@ -747,6 +776,17 @@ struct FootprintCardView: View {
                 }
             }
         }
+    }
+
+    private var matchedImportantPlace: Place? {
+        allPlaces.first(where: { place in
+            if place.placeID == footprint.placeID && place.isUserDefined { return true }
+            guard place.isUserDefined else { return false }
+            let fpAddr = (footprint.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fpAddr.isEmpty else { return false }
+            return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr ||
+                   (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr)
+        })
     }
     
     private var timeRangeString: String {
@@ -809,23 +849,40 @@ struct FootprintCardView: View {
                 Spacer().frame(height: 8)
             }
             
-            ZStack(alignment: .bottomTrailing) {
-                Image(systemName: iconName)
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(iconColor)
-                    .frame(width: 32, height: 32)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground))
-                
-                if footprint.isHighlight == true {
-                    Image(systemName: "star.fill")
-                        .font(.system(size: 14))
-                        .foregroundColor(Color.dfkHighlight)
-                        .padding(2)
-                        .background(Circle().fill(Color(uiColor: .systemBackground)))
-                        .offset(x: 4, y: 4)
+            Menu {
+                Button {
+                    applyActivityType(nil)
+                } label: {
+                    Label("无", systemImage: "circle.slash")
                 }
+
+                ForEach(allActivities) { type in
+                    Button {
+                        applyActivityType(type)
+                    } label: {
+                        Label(type.name, systemImage: type.icon)
+                    }
+                }
+            } label: {
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: iconName)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(iconColor)
+                        .frame(width: 32, height: 32)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+
+                    if footprint.isHighlight == true {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(Color.dfkHighlight)
+                            .padding(2)
+                            .background(Circle().fill(Color(uiColor: .systemBackground)))
+                            .offset(x: 4, y: 4)
+                    }
+                }
+                .frame(width: 32, height: 32)
             }
-            .frame(width: 32, height: 32)
+            .buttonStyle(.plain)
             
             if showTimeline {
                 Rectangle().fill(Color.secondary.opacity(0.15))
@@ -841,6 +898,22 @@ struct FootprintCardView: View {
     
     @ViewBuilder
     private var longPressMenu: some View {
+        if let mergeCandidate = adjacentMergeCandidate {
+            Button {
+                pendingMergeCandidate = mergeCandidate
+                showingMergeConfirm = true
+            } label: {
+                Label("合并相邻足迹", systemImage: "arrow.triangle.merge")
+            }
+            Divider()
+        }
+
+        Button {
+            showingSplitFootprint = true
+        } label: {
+            Label("拆分足迹", systemImage: "slider.horizontal.below.square.filled.and.square")
+        }
+
         Button { onTap(footprint, true) } label: { Label("编辑", systemImage: "pencil") }
         Button {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
@@ -852,12 +925,202 @@ struct FootprintCardView: View {
         } label: { Label(footprint.isHighlight == true ? "取消收藏" : "收藏", systemImage: footprint.isHighlight == true ? "star.slash" : "star.fill") }
         
         Divider()
-        
-        Button {
-            showingIgnoreConfirm = true
-        } label: { Label("忽略地点", systemImage: "mappin.slash") }
+
+        if matchedImportantPlace == nil {
+            Button {
+                showingAddImportantPlace = true
+            } label: { Label("添加重要地点", systemImage: "mappin.and.ellipse") }
+
+            Button {
+                showingIgnoreConfirm = true
+            } label: { Label("忽略地点", systemImage: "mappin.slash") }
+        }
         
         Button(role: .destructive) { showingDeleteConfirm = true } label: { Label("删除", systemImage: "trash") }
+    }
+
+    private var adjacentMergeCandidate: AdjacentFootprintMergeCandidate? {
+        let allFootprints = adjacentSearchFootprints()
+        guard let index = allFootprints.firstIndex(where: { $0.footprintID == footprint.footprintID }) else {
+            return nil
+        }
+
+        if index > 0 {
+            let previous = allFootprints[index - 1]
+            if canMergeAdjacentFootprints(previous, footprint) {
+                return AdjacentFootprintMergeCandidate(base: previous, other: footprint)
+            }
+        }
+
+        if index < allFootprints.count - 1 {
+            let next = allFootprints[index + 1]
+            if canMergeAdjacentFootprints(footprint, next) {
+                return AdjacentFootprintMergeCandidate(base: footprint, other: next)
+            }
+        }
+
+        return nil
+    }
+
+    private var mergeConfirmationMessage: String {
+        guard let pendingMergeCandidate else {
+            return "合并后会保留较早的足迹，并删除另一条相邻足迹。"
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        let first = pendingMergeCandidate.first
+        let second = pendingMergeCandidate.second
+        return "将合并 \(formatter.string(from: first.startTime))-\(formatter.string(from: first.endTime)) 和 \(formatter.string(from: second.startTime))-\(formatter.string(from: second.endTime)) 两条足迹。"
+    }
+
+    private func adjacentSearchFootprints() -> [Footprint] {
+        let lowerBound = footprint.startTime.addingTimeInterval(-172800)
+        let upperBound = footprint.endTime.addingTimeInterval(172800)
+        let descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate {
+                $0.statusValue != "ignored" &&
+                $0.endTime >= lowerBound &&
+                $0.startTime <= upperBound
+            },
+            sortBy: [SortDescriptor(\.startTime, order: .forward)]
+        )
+        return (try? modelContext.fetch(descriptor)) ?? []
+    }
+
+    private func canMergeAdjacentFootprints(_ first: Footprint, _ second: Footprint) -> Bool {
+        guard first.status != .ignored, second.status != .ignored else { return false }
+        guard first.footprintID != second.footprintID else { return false }
+        return !hasTransportBetween(first, second)
+    }
+
+    private func hasTransportBetween(_ first: Footprint, _ second: Footprint) -> Bool {
+        let lowerBound = min(first.endTime, second.endTime)
+        let upperBound = max(first.startTime, second.startTime)
+        guard upperBound > lowerBound else { return false }
+
+        let descriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate {
+                $0.statusRaw != "ignored" &&
+                $0.endTime > lowerBound &&
+                $0.startTime < upperBound
+            }
+        )
+        return ((try? modelContext.fetch(descriptor)) ?? []).isEmpty == false
+    }
+
+    private func mergeAdjacentFootprints(_ candidate: AdjacentFootprintMergeCandidate) {
+        let base = candidate.first
+        let other = candidate.second
+
+        base.startTime = min(base.startTime, other.startTime)
+        base.endTime = max(base.endTime, other.endTime)
+        base.date = Calendar.current.startOfDay(for: base.startTime)
+        base.status = .manual
+
+        var mergedLocations = base.footprintLocations
+        mergedLocations.append(contentsOf: other.footprintLocations)
+        base.footprintLocations = mergedLocations
+
+        if base.reason?.isEmpty ?? true {
+            base.reason = other.reason
+        }
+        if base.address?.isEmpty ?? true {
+            base.address = other.address
+            base.isAddressEditedByHand = other.isAddressEditedByHand
+        }
+        if base.placeID == nil {
+            base.placeID = other.placeID
+        }
+        if base.activityTypeValue == nil {
+            base.activityTypeValue = other.activityTypeValue
+        }
+        if base.isHighlight != true {
+            base.isHighlight = other.isHighlight
+        }
+        base.stepCount = combinedOptionalSum(base.stepCount, other.stepCount)
+        base.walkingDistance = combinedOptionalSum(base.walkingDistance, other.walkingDistance)
+        base.floorsAscended = combinedOptionalSum(base.floorsAscended, other.floorsAscended)
+
+        var mergedPhotos = base.photoAssetIDs
+        for photoID in other.photoAssetIDs where !mergedPhotos.contains(photoID) {
+            mergedPhotos.append(photoID)
+        }
+        base.photoAssetIDs = mergedPhotos
+
+        var mergedMetadata = base.photoMetadata
+        for metadata in other.photoMetadata where !mergedMetadata.contains(metadata) {
+            mergedMetadata.append(metadata)
+        }
+        base.photoMetadata = mergedMetadata
+
+        modelContext.delete(other)
+        try? modelContext.save()
+
+        invalidateTimelineAfterMerge(start: base.startTime, end: base.endTime)
+        Aptabase.shared.trackEvent("footprint_adjacent_merged")
+    }
+
+    private func combinedOptionalSum(_ lhs: Int?, _ rhs: Int?) -> Int? {
+        switch (lhs, rhs) {
+        case let (left?, right?): return left + right
+        case let (left?, nil): return left
+        case let (nil, right?): return right
+        case (nil, nil): return nil
+        }
+    }
+
+    private func applyActivityType(_ activity: ActivityType?) {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+            if footprint.modelContext == nil {
+                modelContext.insert(footprint)
+            }
+            footprint.activityTypeValue = activity?.id.uuidString
+            footprint.status = .manual
+            try? modelContext.save()
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+
+        let day = Calendar.current.startOfDay(for: footprint.startTime)
+        TimelineBuilder.timelineCache.removeValue(forKey: day)
+        NotificationCenter.default.post(
+            name: NSNotification.Name("FootprintDataChanged"),
+            object: nil,
+            userInfo: ["date": day]
+        )
+    }
+
+    private func combinedOptionalSum(_ lhs: Double?, _ rhs: Double?) -> Double? {
+        switch (lhs, rhs) {
+        case let (left?, right?): return left + right
+        case let (left?, nil): return left
+        case let (nil, right?): return right
+        case (nil, nil): return nil
+        }
+    }
+
+    private func invalidateTimelineAfterMerge(start: Date, end: Date) {
+        let calendar = Calendar.current
+        let startDay = calendar.startOfDay(for: start)
+        let effectiveEnd = max(start, end.addingTimeInterval(-0.001))
+        let endDay = calendar.startOfDay(for: effectiveEnd)
+
+        var cursor = startDay
+        while cursor <= endDay {
+            TimelineBuilder.timelineCache.removeValue(forKey: cursor)
+            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+
+        NotificationCenter.default.post(
+            name: NSNotification.Name("FootprintDataChanged"),
+            object: nil,
+            userInfo: ["date": startDay]
+        )
+
+        if calendar.isDateInToday(start) || calendar.isDateInToday(end) {
+            locationManager.triggerNotificationSummaryRefresh()
+        }
     }
     
     private func confirmFootprint() {

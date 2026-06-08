@@ -50,6 +50,8 @@ fun FootprintDetailScreen(
     val footprint by viewModel.footprint.collectAsState()
     val activityTypes by viewModel.activityTypes.collectAsState()
     val allPlaces by viewModel.allPlaces.collectAsState()
+    val previousFootprint by viewModel.previousFootprint.collectAsState()
+    val nextFootprint by viewModel.nextFootprint.collectAsState()
     
     var title by remember { mutableStateOf("") }
     var reason by remember { mutableStateOf("") }
@@ -64,6 +66,10 @@ fun FootprintDetailScreen(
     var showLocationPicker by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
     var showingDeleteAlert by remember { mutableStateOf(false) }
+    var showingTimeDialog by remember { mutableStateOf(false) }
+    var showingSplitDialog by remember { mutableStateOf(false) }
+    var showingMergeDialog by remember { mutableStateOf(false) }
+    var mergeUsePrevious by remember { mutableStateOf(true) }
     
     if (showingDeleteAlert) {
         AlertDialog(
@@ -88,6 +94,65 @@ fun FootprintDetailScreen(
                 }
             }
         )
+    }
+
+    footprint?.let { fp ->
+        if (showingTimeDialog) {
+            FootprintTimeAdjustDialog(
+                footprint = fp,
+                previous = previousFootprint,
+                next = nextFootprint,
+                onDismiss = { showingTimeDialog = false },
+                onSave = { start, end ->
+                    viewModel.adjustTime(start, end) {
+                        showingTimeDialog = false
+                    }
+                }
+            )
+        }
+
+        if (showingSplitDialog) {
+            FootprintSplitDialog(
+                footprint = fp,
+                onDismiss = { showingSplitDialog = false },
+                onSave = { split ->
+                    viewModel.splitFootprint(split) {
+                        showingSplitDialog = false
+                    }
+                }
+            )
+        }
+
+        if (showingMergeDialog) {
+            val target = if (mergeUsePrevious) previousFootprint else nextFootprint
+            val mergeTimeFormat = remember { SimpleDateFormat("HH:mm", Locale.CHINA) }
+            AlertDialog(
+                onDismissRequest = { showingMergeDialog = false },
+                title = { Text("合并相邻足迹") },
+                text = {
+                    Text(
+                        if (target != null) {
+                            "将合并 ${mergeTimeFormat.format(target.startTime)}-${mergeTimeFormat.format(target.endTime)} 和 ${mergeTimeFormat.format(fp.startTime)}-${mergeTimeFormat.format(fp.endTime)} 两条足迹。"
+                        } else {
+                            "没有可合并的相邻足迹。"
+                        }
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = target != null,
+                        onClick = {
+                            viewModel.mergeAdjacent(mergeUsePrevious) {
+                                showingMergeDialog = false
+                            }
+                        }
+                    ) { Text("合并") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showingMergeDialog = false }) { Text("取消") }
+                }
+            )
+        }
     }
 
     LaunchedEffect(footprintId) {
@@ -141,6 +206,55 @@ fun FootprintDetailScreen(
                             contentDescription = if (isHighlight) "取消收藏" else "收藏",
                             tint = if (isHighlight) Color(0xFFFFCC00) else MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                    var showMoreMenu by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { showMoreMenu = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                        }
+                        DropdownMenu(
+                            expanded = showMoreMenu,
+                            onDismissRequest = { showMoreMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("调整时间") },
+                                onClick = {
+                                    showMoreMenu = false
+                                    showingTimeDialog = true
+                                },
+                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("拆分足迹") },
+                                onClick = {
+                                    showMoreMenu = false
+                                    showingSplitDialog = true
+                                },
+                                leadingIcon = { Icon(Icons.Default.ContentCut, contentDescription = null) }
+                            )
+                            if (previousFootprint != null) {
+                                DropdownMenuItem(
+                                    text = { Text("与上一条合并") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        mergeUsePrevious = true
+                                        showingMergeDialog = true
+                                    },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.CallMerge, contentDescription = null) }
+                                )
+                            }
+                            if (nextFootprint != null) {
+                                DropdownMenuItem(
+                                    text = { Text("与下一条合并") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        mergeUsePrevious = false
+                                        showingMergeDialog = true
+                                    },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.CallMerge, contentDescription = null) }
+                                )
+                            }
+                        }
                     }
                     TextButton(onClick = {
                         viewModel.updateFootprint(title, reason, addressText, selectedPlaceID, selectedActivityType, isHighlight) {
@@ -333,6 +447,17 @@ fun FootprintDetailScreen(
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.primary.copy(alpha=0.7f)
                             )
+                            IconButton(
+                                onClick = { showingTimeDialog = true },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Edit,
+                                    contentDescription = "调整足迹时间",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = Color.Gray.copy(alpha = 0.65f)
+                                )
+                            }
                         }
                     }
                 }
@@ -400,6 +525,139 @@ fun FootprintDetailScreen(
             }
         }
     }
+}
+
+@Composable
+private fun FootprintTimeAdjustDialog(
+    footprint: FootprintEntity,
+    previous: FootprintEntity?,
+    next: FootprintEntity?,
+    onDismiss: () -> Unit,
+    onSave: (Date, Date) -> Unit
+) {
+    val formatter = remember { SimpleDateFormat("HH:mm", Locale.CHINA) }
+    val dayStart = remember(footprint.date) {
+        Calendar.getInstance().apply {
+            time = footprint.date
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.time
+    }
+    val dayEnd = remember(dayStart) { Date(dayStart.time + 24 * 60 * 60_000L) }
+    val rangeStart = maxOf(previous?.endTime?.time ?: dayStart.time, dayStart.time)
+    val rangeEnd = minOf(next?.startTime?.time ?: dayEnd.time, dayEnd.time)
+    val totalMinutes = maxOf(1, ((rangeEnd - rangeStart) / 60_000L).toInt())
+    var startMinute by remember(footprint.footprintID, rangeStart) {
+        mutableFloatStateOf(((footprint.startTime.time - rangeStart) / 60_000L).coerceIn(0L, (totalMinutes - 1).toLong()).toFloat())
+    }
+    var endMinute by remember(footprint.footprintID, rangeStart) {
+        mutableFloatStateOf(((footprint.endTime.time - rangeStart) / 60_000L).coerceIn(1L, totalMinutes.toLong()).toFloat())
+    }
+    if (endMinute <= startMinute) endMinute = startMinute + 1
+
+    val startDate = Date(rangeStart + startMinute.toLong() * 60_000L)
+    val endDate = Date(rangeStart + endMinute.toLong() * 60_000L)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("调整时间") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text(
+                    "可调整范围 ${formatter.format(Date(rangeStart))}-${formatter.format(Date(rangeEnd))}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "${formatter.format(startDate)} - ${formatter.format(endDate)}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text("开始", style = MaterialTheme.typography.labelMedium)
+                Slider(
+                    value = startMinute,
+                    onValueChange = { value ->
+                        startMinute = value.coerceIn(0f, endMinute - 1f)
+                    },
+                    valueRange = 0f..totalMinutes.toFloat(),
+                    steps = maxOf(0, totalMinutes - 1)
+                )
+                Text("结束", style = MaterialTheme.typography.labelMedium)
+                Slider(
+                    value = endMinute,
+                    onValueChange = { value ->
+                        endMinute = value.coerceIn(startMinute + 1f, totalMinutes.toFloat())
+                    },
+                    valueRange = 0f..totalMinutes.toFloat(),
+                    steps = maxOf(0, totalMinutes - 1)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(startDate, endDate) }) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+@Composable
+private fun FootprintSplitDialog(
+    footprint: FootprintEntity,
+    onDismiss: () -> Unit,
+    onSave: (Date) -> Unit
+) {
+    val formatter = remember { SimpleDateFormat("HH:mm", Locale.CHINA) }
+    val durationMinutes = maxOf(1, ((footprint.endTime.time - footprint.startTime.time) / 60_000L).toInt())
+    val canSplit = durationMinutes >= 2
+    var splitMinute by remember(footprint.footprintID) {
+        mutableFloatStateOf((durationMinutes / 2).coerceIn(1, maxOf(1, durationMinutes - 1)).toFloat())
+    }
+    val splitDate = Date(footprint.startTime.time + splitMinute.toLong() * 60_000L)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("拆分足迹") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                if (!canSplit) {
+                    Text("这条足迹太短，无法拆分。")
+                } else {
+                    Text(
+                        "拆分点 ${formatter.format(splitDate)}",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Slider(
+                        value = splitMinute,
+                        onValueChange = { value ->
+                            splitMinute = value.coerceIn(1f, (durationMinutes - 1).toFloat())
+                        },
+                        valueRange = 1f..(durationMinutes - 1).toFloat(),
+                        steps = maxOf(0, durationMinutes - 3)
+                    )
+                    Text(
+                        "${formatter.format(footprint.startTime)}-${formatter.format(splitDate)} / ${formatter.format(splitDate)}-${formatter.format(footprint.endTime)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = canSplit, onClick = { onSave(splitDate) }) {
+                Text("拆分")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
