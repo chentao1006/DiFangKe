@@ -991,7 +991,13 @@ struct FootprintCardView: View {
     private func canMergeAdjacentFootprints(_ first: Footprint, _ second: Footprint) -> Bool {
         guard first.status != .ignored, second.status != .ignored else { return false }
         guard first.footprintID != second.footprintID else { return false }
+        guard isSameDayFootprint(first), isSameDayFootprint(second) else { return false }
+        guard Calendar.current.isDate(first.startTime, inSameDayAs: second.startTime) else { return false }
         return !hasTransportBetween(first, second)
+    }
+
+    private func isSameDayFootprint(_ footprint: Footprint) -> Bool {
+        Calendar.current.isDate(footprint.startTime, inSameDayAs: footprint.endTime.addingTimeInterval(-0.001))
     }
 
     private func hasTransportBetween(_ first: Footprint, _ second: Footprint) -> Bool {

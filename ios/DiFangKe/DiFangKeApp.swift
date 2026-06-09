@@ -201,11 +201,6 @@ struct DiFangKeApp: App {
                                     setupDefaultData(context: context)
                                     WidgetDataSyncManager.shared.updateContainer(container)
                                 }
-                                .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RefreshModelContainer"))) { _ in
-                                    Task {
-                                        await refreshContainer()
-                                    }
-                                }
                                 .transition(.opacity)
                         }
                     }
@@ -258,17 +253,14 @@ struct DiFangKeApp: App {
         ])
         
         let isFirstLaunch = !UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
-        let kvs = NSUbiquitousKeyValueStore.default
         let shouldEnableCloudKit = shouldUseCloudServices
-        let hasHistoricalData = shouldEnableCloudKit ? kvs.bool(forKey: "hasSeededDefaultData") : false
-        let shouldPauseSync = isFirstLaunch && hasHistoricalData && !UserDefaults.standard.bool(forKey: "isSyncChoiceMade")
         
         let modelConfiguration = ModelConfiguration(
             "dfk_v5_stable",
             schema: schema, 
             isStoredInMemoryOnly: false,
             groupContainer: AppConfig.shared.appGroupID.isEmpty ? .none : .identifier(AppConfig.shared.appGroupID),
-            cloudKitDatabase: shouldPauseSync || !shouldEnableCloudKit ? .none : .automatic
+            cloudKitDatabase: shouldEnableCloudKit ? .automatic : .none
         )
         
         do {
@@ -300,36 +292,6 @@ struct DiFangKeApp: App {
         }
     }
     
-    private func refreshContainer() async {
-        let schema = Schema([
-            Footprint.self, Place.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self, TransportRecord.self
-        ])
-        let shouldEnableCloudKit = shouldUseCloudServices
-        let modelConfiguration = ModelConfiguration(
-            "dfk_v5_stable",
-            schema: schema, 
-            isStoredInMemoryOnly: false,
-            groupContainer: AppConfig.shared.appGroupID.isEmpty ? .none : .identifier(AppConfig.shared.appGroupID),
-            cloudKitDatabase: shouldEnableCloudKit ? .automatic : .none
-        )
-        if let newContainer = try? ModelContainer(for: schema, configurations: [modelConfiguration]) {
-            await MainActor.run {
-                self.modelContainer = newContainer
-                
-                // 重要：重置所有服务所持有的 Context
-                let context = newContainer.mainContext
-                locationManager.modelContext = context
-                PhotoService.shared.modelContext = context
-                OpenAIService.shared.modelContainer = newContainer
-                
-                // 同步更新 Widget 管理器中的容器
-                WidgetDataSyncManager.shared.updateContainer(newContainer)
-                
-                print("[DiFangKeApp] ModelContainer Refreshed with CloudKit enabled.")
-            }
-        }
-    }
-
     private var shouldUseCloudServices: Bool {
 #if targetEnvironment(simulator)
         return false

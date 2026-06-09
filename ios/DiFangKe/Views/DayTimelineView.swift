@@ -991,9 +991,6 @@ struct DayTimelineView: View {
                         UserDefaults.standard.set(true, forKey: "isSyncChoiceMade")
                         UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
                         
-                        // 通知 App 重新加载带 CloudKit 的 ModelContainer
-                        NotificationCenter.default.post(name: NSNotification.Name("RefreshModelContainer"), object: nil)
-                        
                         Task {
                             await locationManager.performRawDataSync(showOverlay: true)
                         }
@@ -1031,9 +1028,6 @@ struct DayTimelineView: View {
                 locationManager.showSyncInquiry = false
                 UserDefaults.standard.set(true, forKey: "isSyncChoiceMade")
                 UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
-                
-                // 即使不同步，也要让 Container 恢复正常（虽然云端已被删，但后续需要正常开启 iCloud 备份本地数据）
-                NotificationCenter.default.post(name: NSNotification.Name("RefreshModelContainer"), object: nil)
                 
                 Task {
                     await locationManager.purgeCloudData()

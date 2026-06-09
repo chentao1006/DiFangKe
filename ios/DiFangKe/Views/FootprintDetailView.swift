@@ -377,125 +377,156 @@ extension FootprintModalView {
     
     
     private var addressSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 8) {
-                HStack(alignment: .top, spacing: 6) {
-                    Menu {
-                        SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint, isDraft: isDraft) {
-                            showingSearchSheet = true
-                        }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 6) {
-                            if isUpdatingAddress {
-                                Text("正在重新获取地址...")
-                                    .font(.system(.title3, design: .rounded).bold())
-                                    .foregroundColor(Color.dfkMainText.opacity(0.5))
-                            } else {
-                                let matchedPlace = savedPlaces.first(where: { place in
-                                    if place.placeID == footprint.placeID && place.isUserDefined { return true }
-                                    guard place.isUserDefined else { return false }
-                                    let fpAddr = (footprint.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                                    guard !fpAddr.isEmpty else { return false }
-                                    return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr || 
-                                           (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr)
-                                })
-                                let displayText = matchedPlace?.name ?? footprint.address ?? "未知地点"
-                                
-                                HStack(spacing: 8) {
-                                    Text(displayText)
-                                        .font(.system(.title3, design: .rounded).bold())
-                                        .foregroundColor(matchedPlace != nil ? .orange : Color.dfkMainText)
-                                        .lineLimit(2)
-                                        .multilineTextAlignment(.leading)
-                                    
-                                    Image(systemName: "pencil")
-                                        .font(.system(size: 14))
-                                        .foregroundColor(.secondary.opacity(0.6))
-                                }
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
+        VStack(alignment: .leading, spacing: 10) {
+            Menu {
+                SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint, isDraft: isDraft) {
+                    showingSearchSheet = true
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.05)))
-                
-                VStack(alignment: .trailing, spacing: 0) {
-                    Menu {
-                        Button {
-                            withAnimation {
-                                ensureFootprintManaged()
-                                footprint.activityTypeValue = nil
-                                footprint.status = .manual
-                                hasChanged = true
-                                if !isDraft { try? modelContext.save() }
-                            }
-                        } label: {
-                            Label("无", systemImage: "circle.slash")
-                        }
-                        ForEach(allActivities) { type in
-                            Button {
-                                withAnimation {
-                                    ensureFootprintManaged()
-                                    footprint.activityTypeValue = type.id.uuidString
-                                    footprint.status = .manual
-                                    hasChanged = true
-                                    if !isDraft { try? modelContext.save() }
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                }
-                            } label: {
-                                Label(type.name, systemImage: type.icon)
-                            }
-                        }
-                        
-                        Divider()
-                        
-                        Button {
-                            showingActivityTypeEditor = true
-                        } label: {
-                            Label("添加活动类型", systemImage: "plus")
-                        }
-                    } label: {
-                        ZStack {
-                            if isGeneratingAI {
-                                ProgressView()
-                                    .scaleEffect(0.8)
-                            } else {
-                                if let activity = footprint.getActivityType(from: allActivities) {
-                                    Image(systemName: activity.icon)
-                                        .font(.system(size: 24, weight: .semibold))
-                                        .foregroundColor(activity.color)
-                                } else {
-                                    Image(systemName: "questionmark.circle.dashed")
-                                        .font(.system(size: 24, weight: .semibold))
-                                        .foregroundColor(.secondary.opacity(0.7))
-                                }
-                            }
-                        }
-                        .frame(width: 45, height: 45)
-                        .background(Circle().fill(Color.secondary.opacity(0.05)))
-                        .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    
-                    if footprint.activityTypeValue == nil {
-                        Image(systemName: "arrowtriangle.up.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(Color.secondary.opacity(0.04)) // Match bubble bg
-                            .padding(.trailing, 15)
-                            .offset(y: 5) // Move down to touch the bubble
-                            .zIndex(1)
-                    }
-                }
+            } label: {
+                detailMenuRow(
+                    title: nil,
+                    value: isUpdatingAddress ? "正在重新获取地址..." : displayPlaceText,
+                    valueColor: isUpdatingAddress ? Color.dfkMainText.opacity(0.5) : (matchedPlaceByAddress != nil ? .orange : Color.dfkMainText),
+                    valueFont: placeValueFont,
+                    textLineLimit: 1,
+                    textMinimumScaleFactor: 0.72,
+                    iconFont: .system(size: 18, weight: .semibold),
+                    leadingIcon: "mappin.and.ellipse"
+                )
             }
-            
+            .buttonStyle(.plain)
+
+            Menu {
+                Button {
+                    clearActivityType()
+                } label: {
+                    Label("无", systemImage: "circle.slash")
+                }
+                ForEach(allActivities) { type in
+                    Button {
+                        applyActivityType(type)
+                    } label: {
+                        Label(type.name, systemImage: type.icon)
+                    }
+                }
+
+                Divider()
+
+                Button {
+                    showingActivityTypeEditor = true
+                } label: {
+                    Label("添加活动类型", systemImage: "plus")
+                }
+            } label: {
+                detailMenuRow(
+                    title: nil,
+                    value: selectedActivityName,
+                    valueColor: selectedActivityColor,
+                    valueFont: .system(size: 16, weight: .semibold, design: .rounded),
+                    textColor: .primary,
+                    iconFont: .system(size: 16, weight: .semibold),
+                    leadingIcon: selectedActivityIcon
+                )
+            }
+            .buttonStyle(.plain)
+
             if footprint.activityTypeValue == nil {
                 activitySuggestionsRow
-                    .padding(.top, -4) // Reduce gap to touch triangle
+                    .padding(.top, -2)
             }
         }
+    }
+
+    private var matchedPlaceByAddress: Place? {
+        savedPlaces.first(where: { place in
+            if place.placeID == footprint.placeID && place.isUserDefined { return true }
+            guard place.isUserDefined else { return false }
+            let fpAddr = (footprint.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fpAddr.isEmpty else { return false }
+            return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr ||
+            place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr
+        })
+    }
+
+    private var displayPlaceText: String {
+        matchedPlaceByAddress?.name ?? footprint.address ?? "未知地点"
+    }
+
+    private var placeValueFont: Font {
+        let text = isUpdatingAddress ? "正在重新获取地址..." : displayPlaceText
+        let count = text.count
+
+        switch count {
+        case ...10:
+            return .system(.title3, design: .rounded).bold()
+        case 11...16:
+            return .system(size: 18, weight: .bold, design: .rounded)
+        case 17...24:
+            return .system(size: 16, weight: .semibold, design: .rounded)
+        default:
+            return .system(size: 15, weight: .semibold, design: .rounded)
+        }
+    }
+
+    private var selectedActivityName: String {
+        footprint.getActivityType(from: allActivities)?.name ?? "未设置"
+    }
+
+    private var selectedActivityIcon: String {
+        footprint.getActivityType(from: allActivities)?.icon ?? "circle.slash"
+    }
+
+    private var selectedActivityColor: Color {
+        footprint.getActivityType(from: allActivities)?.color ?? .secondary
+    }
+
+    @ViewBuilder
+    private func detailMenuRow(
+        title: String?,
+        value: String,
+        valueColor: Color,
+        valueFont: Font = .system(.title3, design: .rounded).bold(),
+        textColor: Color? = nil,
+        textLineLimit: Int = 2,
+        textMinimumScaleFactor: CGFloat = 1,
+        iconFont: Font = .system(size: 13, weight: .semibold),
+        leadingIcon: String? = nil
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let title, !title.isEmpty {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+
+            HStack(alignment: .center, spacing: 12) {
+                HStack(alignment: .center, spacing: 6) {
+                    if let leadingIcon {
+                        Image(systemName: leadingIcon)
+                            .font(iconFont)
+                            .foregroundColor(valueColor)
+                    }
+
+                    Text(value)
+                        .font(valueFont)
+                        .foregroundColor(textColor ?? valueColor)
+                        .lineLimit(textLineLimit)
+                        .minimumScaleFactor(textMinimumScaleFactor)
+                        .multilineTextAlignment(.leading)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: "pencil")
+                    .font(.system(size: 14))
+                    .foregroundColor(.secondary.opacity(0.6))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.05)))
+        .contentShape(Rectangle())
     }
     
     private var activitySuggestionsRow: some View {
@@ -561,53 +592,73 @@ extension FootprintModalView {
             allActivities.first { $0.id == lite.id }
         }
     }
+
+    private func clearActivityType() {
+        withAnimation {
+            ensureFootprintManaged()
+            footprint.activityTypeValue = nil
+            footprint.status = .manual
+            hasChanged = true
+            if !isDraft { try? modelContext.save() }
+        }
+    }
+
+    private func applyActivityType(_ type: ActivityType) {
+        withAnimation {
+            ensureFootprintManaged()
+            footprint.activityTypeValue = type.id.uuidString
+            footprint.status = .manual
+            hasChanged = true
+            if !isDraft { try? modelContext.save() }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+    }
     
     private var timeSection: some View {
-        HStack(alignment: .top, spacing: 8) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) { 
-                    Image(systemName: "calendar")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.secondary)
-                    Text(footprint.date.formatted(.dateTime.year().month().day().weekday()))
-                        .font(.system(size: 14, design: .rounded))
-                        .foregroundColor(Color.secondary) 
+        Button {
+            showingTimeAdjustment = true
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "calendar")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.secondary)
+                        Text(footprint.date.formatted(.dateTime.year().month().day().weekday()))
+                            .font(.system(size: 14, design: .rounded))
+                            .foregroundColor(Color.secondary)
+                    }
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.secondary)
+                        Text(timeRangeString)
+                            .font(.system(size: 14, design: .monospaced))
+                            .foregroundColor(Color.secondary)
+                    }
+                    HStack(spacing: 6) {
+                        Image(systemName: "hourglass")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.secondary)
+                        Text("停留 \(durationString)")
+                            .font(.system(size: 14, design: .rounded))
+                            .foregroundColor(Color.secondary)
+                    }
                 }
-                HStack(spacing: 6) { 
-                    Image(systemName: "clock")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.secondary)
-                    Text(timeRangeString)
-                        .font(.system(size: 14, design: .monospaced))
-                        .foregroundColor(Color.secondary) 
-                }
-                HStack(spacing: 6) { 
-                    Image(systemName: "hourglass")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.secondary)
-                    Text("停留 \(durationString)")
-                        .font(.system(size: 14, design: .rounded))
-                        .foregroundColor(Color.secondary) 
-                }
-            }
-            Spacer(minLength: 8)
-            Button {
-                showingTimeAdjustment = true
-            } label: {
+                Spacer(minLength: 8)
                 Image(systemName: "pencil")
                     .font(.system(size: 14))
                     .foregroundColor(.secondary.opacity(0.6))
-                    .frame(width: 32, height: 32)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("调整足迹时间")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.04)))
+            .contentShape(RoundedRectangle(cornerRadius: 12))
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("调整足迹时间")
         .padding(.top, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.04)))
     }
     
     private var matchedPlace: Place? {
@@ -953,6 +1004,11 @@ private struct FootprintTimeAdjustmentView: View {
     @State private var draftEnd: Date = Date()
     @State private var rawPoints: [CLLocation] = []
     @State private var isLoadingRawPoints = true
+    @State private var hasInitializedRange = false
+
+    private var minimumFootprintDuration: TimeInterval {
+        max(60, ceil(AppConfig.shared.stayDurationThreshold / 60) * 60)
+    }
 
     private var selectedPoints: [CLLocation] {
         rawPoints.filter { $0.timestamp >= draftStart && $0.timestamp <= draftEnd }
@@ -965,7 +1021,7 @@ private struct FootprintTimeAdjustmentView: View {
     }
 
     private var canSave: Bool {
-        draftEnd.timeIntervalSince(draftStart) >= 60
+        hasInitializedRange && draftEnd.timeIntervalSince(draftStart) >= minimumFootprintDuration
     }
 
     var body: some View {
@@ -986,29 +1042,35 @@ private struct FootprintTimeAdjustmentView: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Text("可调整范围")
+                        Text("调整时间")
                             .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
                         Spacer()
-                        Text("\(timeText(rangeStart))-\(timeText(rangeEnd))")
-                            .font(.system(size: 13, design: .monospaced))
+                        Text("\(timeText(hasInitializedRange ? draftStart : footprint.startTime))-\(timeText(hasInitializedRange ? draftEnd : footprint.endTime))")
+                            .font(.system(size: 22, weight: .bold, design: .monospaced))
+                            .foregroundColor(.dfkMainText)
                     }
-                    .foregroundColor(.secondary)
 
-                    FootprintTimeRangeSlider(
-                        rangeStart: rangeStart,
-                        rangeEnd: rangeEnd,
-                        start: $draftStart,
-                        end: $draftEnd
-                    )
-                    .frame(height: 44)
+                    if hasInitializedRange {
+                        FootprintTimeRangeSlider(
+                            rangeStart: rangeStart,
+                            rangeEnd: rangeEnd,
+                            start: $draftStart,
+                            end: $draftEnd
+                        )
+                        .frame(height: 34)
+                    } else {
+                        Color.clear
+                            .frame(height: 34)
+                    }
 
                     HStack {
-                        Text(timeText(draftStart))
+                        Text(timeText(hasInitializedRange ? rangeStart : footprint.startTime))
                         Spacer()
-                        Text(timeText(draftEnd))
+                        Text(timeText(hasInitializedRange ? rangeEnd : footprint.endTime))
                     }
-                    .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.dfkMainText)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.secondary)
                 }
                 .padding(16)
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color.secondary.opacity(0.05)))
@@ -1055,8 +1117,9 @@ private struct FootprintTimeAdjustmentView: View {
             rangeEnd = dayEnd
         }
 
-        draftStart = min(max(footprint.startTime, rangeStart), rangeEnd.addingTimeInterval(-60))
-        draftEnd = max(min(footprint.endTime, rangeEnd), draftStart.addingTimeInterval(60))
+        draftStart = min(max(footprint.startTime, rangeStart), rangeEnd.addingTimeInterval(-minimumFootprintDuration))
+        draftEnd = max(min(footprint.endTime, rangeEnd), draftStart.addingTimeInterval(minimumFootprintDuration))
+        hasInitializedRange = true
     }
 
     private func loadRawPoints() {
@@ -1098,7 +1161,7 @@ private struct FootprintTimeAdjustmentView: View {
         let oldStart = footprint.startTime
         let oldEnd = footprint.endTime
         let roundedStart = roundedToMinute(draftStart)
-        let roundedEnd = roundedToMinute(max(draftEnd, roundedStart.addingTimeInterval(60)))
+        let roundedEnd = roundedToMinute(max(draftEnd, roundedStart.addingTimeInterval(minimumFootprintDuration)))
         let didChangeStart = minuteKey(oldStart) != minuteKey(roundedStart)
         let didChangeEnd = minuteKey(oldEnd) != minuteKey(roundedEnd)
 
@@ -1108,7 +1171,7 @@ private struct FootprintTimeAdjustmentView: View {
         }
 
         let start = didChangeStart ? roundedStart : oldStart
-        let end = didChangeEnd ? max(roundedEnd, start.addingTimeInterval(60)) : max(oldEnd, start.addingTimeInterval(60))
+        let end = didChangeEnd ? max(roundedEnd, start.addingTimeInterval(minimumFootprintDuration)) : max(oldEnd, start.addingTimeInterval(minimumFootprintDuration))
 
         footprint.startTime = start
         footprint.endTime = end
@@ -1268,14 +1331,21 @@ struct FootprintSplitView: View {
     @State private var splitTime: Date = Date()
     @State private var rawPoints: [CLLocation] = []
     @State private var isLoadingRawPoints = true
+    @State private var firstActivityTypeValue: String?
+    @State private var secondActivityTypeValue: String?
+    @State private var hasInitializedActivityDrafts = false
+
+    private var minimumFootprintDuration: TimeInterval {
+        max(60, ceil(AppConfig.shared.stayDurationThreshold / 60) * 60)
+    }
 
     private var canSplit: Bool {
-        footprint.endTime.timeIntervalSince(footprint.startTime) >= 120
+        footprint.endTime.timeIntervalSince(footprint.startTime) >= minimumFootprintDuration * 2
     }
 
     private var boundedSplitTime: Date {
-        let minSplit = footprint.startTime.addingTimeInterval(60)
-        let maxSplit = footprint.endTime.addingTimeInterval(-60)
+        let minSplit = footprint.startTime.addingTimeInterval(minimumFootprintDuration)
+        let maxSplit = footprint.endTime.addingTimeInterval(-minimumFootprintDuration)
         return min(max(splitTime, minSplit), maxSplit)
     }
 
@@ -1327,44 +1397,50 @@ struct FootprintSplitView: View {
                     HStack {
                         Text("分割点")
                             .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.secondary)
                         Spacer()
                         Text(timeText(boundedSplitTime))
-                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 22, weight: .bold, design: .monospaced))
+                            .foregroundColor(.dfkMainText)
                     }
-                    .foregroundColor(.secondary)
 
                     FootprintSplitSlider(
                         rangeStart: footprint.startTime,
                         rangeEnd: footprint.endTime,
-                        split: $splitTime
+                        split: $splitTime,
+                        minimumDuration: minimumFootprintDuration
                     )
-                    .frame(height: 44)
+                    .frame(height: 34)
 
                     HStack {
                         Text(timeText(footprint.startTime))
                         Spacer()
                         Text(timeText(footprint.endTime))
                     }
-                    .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.dfkMainText)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.secondary)
                 }
                 .padding(16)
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color.secondary.opacity(0.05)))
 
                 VStack(spacing: 12) {
                     SplitPreviewFootprintCard(
+                        segmentTitle: "新足迹",
                         title: previewTitle,
-                        icon: previewIcon,
-                        iconColor: previewIconColor,
-                        start: footprint.startTime,
-                        end: boundedSplitTime
+                        borderColor: .blue,
+                        start: boundedSplitTime,
+                        end: footprint.endTime,
+                        activities: allActivities,
+                        activityTypeValue: $secondActivityTypeValue
                     )
                     SplitPreviewFootprintCard(
+                        segmentTitle: "原足迹",
                         title: previewTitle,
-                        icon: previewIcon,
-                        iconColor: previewIconColor,
-                        start: boundedSplitTime,
-                        end: footprint.endTime
+                        borderColor: .green,
+                        start: footprint.startTime,
+                        end: boundedSplitTime,
+                        activities: allActivities,
+                        activityTypeValue: $firstActivityTypeValue
                     )
                 }
 
@@ -1394,6 +1470,7 @@ struct FootprintSplitView: View {
         }
         .onAppear {
             splitTime = midpointDate
+            initializeActivityDraftsIfNeeded()
             loadRawPoints()
         }
     }
@@ -1406,22 +1483,11 @@ struct FootprintSplitView: View {
         footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? footprint.address! : "未知地点"
     }
 
-    private var previewIcon: String {
-        if let activityTypeValue = footprint.activityTypeValue {
-            if let activity = allActivities.first(where: { $0.id.uuidString == activityTypeValue || $0.name == activityTypeValue }) {
-                return activity.icon
-            }
-        }
-        return FootprintIconDefaults.card
-    }
-
-    private var previewIconColor: Color {
-        if let activityTypeValue = footprint.activityTypeValue {
-            if let activity = allActivities.first(where: { $0.id.uuidString == activityTypeValue || $0.name == activityTypeValue }) {
-                return activity.color
-            }
-        }
-        return .secondary.opacity(0.4)
+    private func initializeActivityDraftsIfNeeded() {
+        guard !hasInitializedActivityDrafts else { return }
+        firstActivityTypeValue = footprint.activityTypeValue
+        secondActivityTypeValue = footprint.activityTypeValue
+        hasInitializedActivityDrafts = true
     }
 
     private func loadRawPoints() {
@@ -1458,8 +1524,8 @@ struct FootprintSplitView: View {
         let split = roundedToMinute(boundedSplitTime)
         let oldStart = footprint.startTime
         let oldEnd = footprint.endTime
-        let firstEnd = max(split, oldStart.addingTimeInterval(60))
-        let secondStart = min(split, oldEnd.addingTimeInterval(-60))
+        let firstEnd = max(split, oldStart.addingTimeInterval(minimumFootprintDuration))
+        let secondStart = min(split, oldEnd.addingTimeInterval(-minimumFootprintDuration))
         let ratio = split.timeIntervalSince(oldStart) / max(1, oldEnd.timeIntervalSince(oldStart))
 
         let firstCoordinates = coordinates(from: oldStart, to: firstEnd, fallbackStartRatio: 0, fallbackEndRatio: splitRatio)
@@ -1468,6 +1534,7 @@ struct FootprintSplitView: View {
         footprint.endTime = firstEnd
         footprint.date = Calendar.current.startOfDay(for: oldStart)
         footprint.status = .manual
+        footprint.activityTypeValue = firstActivityTypeValue
         if !firstCoordinates.isEmpty {
             footprint.footprintLocations = firstCoordinates
         }
@@ -1492,7 +1559,7 @@ struct FootprintSplitView: View {
             isPlaceSuggestionIgnored: footprint.isPlaceSuggestionIgnored,
             aiAnalyzed: footprint.aiAnalyzed,
             isAddressEditedByHand: footprint.isAddressEditedByHand,
-            activityTypeValue: footprint.activityTypeValue,
+            activityTypeValue: secondActivityTypeValue,
             stepCount: splitMetric(footprint.stepCount, ratio: ratio, second: true),
             walkingDistance: splitMetric(footprint.walkingDistance, ratio: ratio, second: true),
             floorsAscended: splitMetric(footprint.floorsAscended, ratio: ratio, second: true)
@@ -1590,95 +1657,106 @@ private struct FootprintSplitSlider: View {
     let rangeStart: Date
     let rangeEnd: Date
     @Binding var split: Date
-
-    private let handleSize: CGFloat = 26
-    private let minimumDuration: TimeInterval = 60
+    let minimumDuration: TimeInterval
 
     var body: some View {
-        GeometryReader { proxy in
-            let width = max(1, proxy.size.width - handleSize)
-            let splitX = CGFloat(position(for: split)) * width + handleSize / 2
-
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.secondary.opacity(0.15))
-                    .frame(height: 8)
-                    .padding(.horizontal, handleSize / 2)
-
-                Capsule()
-                    .fill(Color.green)
-                    .frame(width: max(0, splitX - handleSize / 2), height: 8)
-                    .offset(x: handleSize / 2)
-
-                Capsule()
-                    .fill(Color.blue)
-                    .frame(width: max(0, width + handleSize / 2 - splitX), height: 8)
-                    .offset(x: splitX)
-
-                sliderHandle
-                    .position(x: splitX, y: proxy.size.height / 2)
-                    .gesture(DragGesture().onChanged { value in
-                        let proposed = date(for: value.location.x, width: width)
-                        split = min(max(proposed, rangeStart.addingTimeInterval(minimumDuration)), rangeEnd.addingTimeInterval(-minimumDuration))
-                    })
-            }
-        }
-    }
-
-    private var sliderHandle: some View {
-        Circle()
-            .fill(Color(uiColor: .systemBackground))
-            .frame(width: handleSize, height: handleSize)
-            .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
-            .overlay(Circle().stroke(Color.primary.opacity(0.28), lineWidth: 3))
-    }
-
-    private func position(for date: Date) -> Double {
-        let total = rangeEnd.timeIntervalSince(rangeStart)
-        guard total > 0 else { return 0 }
-        return min(1, max(0, date.timeIntervalSince(rangeStart) / total))
-    }
-
-    private func date(for x: CGFloat, width: CGFloat) -> Date {
-        let clamped = min(max(0, x - handleSize / 2), width)
-        let ratio = Double(clamped / width)
-        let raw = rangeStart.addingTimeInterval(rangeEnd.timeIntervalSince(rangeStart) * ratio)
-        return Date(timeIntervalSince1970: (raw.timeIntervalSince1970 / 60).rounded() * 60)
+        NativeTimeSlider(
+            rangeStart: rangeStart,
+            rangeEnd: rangeEnd,
+            value: $split,
+            allowedStart: rangeStart.addingTimeInterval(minimumDuration),
+            allowedEnd: rangeEnd.addingTimeInterval(-minimumDuration),
+            step: 60,
+            minimumTrackTintColor: .systemGreen,
+            maximumTrackTintColor: .systemBlue,
+            accessibilityLabel: "分割点"
+        )
     }
 }
 
 private struct SplitPreviewFootprintCard: View {
+    let segmentTitle: String
     let title: String
-    let icon: String
-    let iconColor: Color
+    let borderColor: Color
     let start: Date
     let end: Date
+    let activities: [ActivityType]
+    @Binding var activityTypeValue: String?
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 20, weight: .bold))
-                .foregroundColor(iconColor)
-                .frame(width: 34, height: 34)
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text(title)
-                    .font(.system(.headline, design: .rounded))
-                    .foregroundColor(.dfkMainText)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Text("\(timeText(start))-\(timeText(end))")
-                        .font(.system(size: 12, design: .monospaced))
-                    Text("·")
-                    Text(durationText)
-                        .font(.system(size: 12))
-                }
-                .foregroundColor(.secondary)
+        Menu {
+            Button {
+                activityTypeValue = nil
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            } label: {
+                Label("无", systemImage: "circle.slash")
             }
-            Spacer(minLength: 0)
+
+            ForEach(activities) { type in
+                Button {
+                    activityTypeValue = type.id.uuidString
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                } label: {
+                    Label(type.name, systemImage: type.icon)
+                }
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(iconColor)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(iconColor.opacity(0.12)))
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(segmentTitle)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(borderColor)
+                        Text(title)
+                            .font(.system(.headline, design: .rounded))
+                            .foregroundColor(.dfkMainText)
+                            .lineLimit(1)
+                    }
+
+                    HStack(spacing: 4) {
+                        Text("\(timeText(start))-\(timeText(end))")
+                            .font(.system(size: 12, design: .monospaced))
+                        Text("·")
+                        Text(durationText)
+                            .font(.system(size: 12))
+                    }
+                    .foregroundColor(.secondary)
+                }
+                Spacer(minLength: 0)
+
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary.opacity(0.65))
+            }
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(borderColor.opacity(0.75), lineWidth: 1.5)
+            )
+            .shadow(color: .black.opacity(0.10), radius: 10, x: 0, y: 4)
+            .contentShape(RoundedRectangle(cornerRadius: 14))
         }
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .buttonStyle(.plain)
+    }
+
+    private var selectedActivity: ActivityType? {
+        guard let activityTypeValue else { return nil }
+        return activities.first { $0.id.uuidString == activityTypeValue || $0.name == activityTypeValue }
+    }
+
+    private var icon: String {
+        selectedActivity?.icon ?? FootprintIconDefaults.card
+    }
+
+    private var iconColor: Color {
+        selectedActivity?.color ?? .secondary.opacity(0.45)
     }
 
     private var durationText: String {
@@ -1698,68 +1776,265 @@ private struct SplitPreviewFootprintCard: View {
     }
 }
 
-private struct FootprintTimeRangeSlider: View {
+private struct FootprintTimeRangeSlider: UIViewRepresentable {
     let rangeStart: Date
     let rangeEnd: Date
     @Binding var start: Date
     @Binding var end: Date
+    private let minimumDuration = max(60, ceil(AppConfig.shared.stayDurationThreshold / 60) * 60)
 
-    private let handleSize: CGFloat = 26
-    private let minimumDuration: TimeInterval = 60
+    func makeUIView(context: Context) -> NativeTimeRangeSliderView {
+        NativeTimeRangeSliderView()
+    }
 
-    var body: some View {
-        GeometryReader { proxy in
-            let width = max(1, proxy.size.width - handleSize)
-            let startX = CGFloat(position(for: start)) * width + handleSize / 2
-            let endX = CGFloat(position(for: end)) * width + handleSize / 2
+    func updateUIView(_ view: NativeTimeRangeSliderView, context: Context) {
+        view.configure(
+            rangeStart: rangeStart,
+            rangeEnd: rangeEnd,
+            start: start,
+            end: end,
+            minimumDuration: minimumDuration,
+            step: 60,
+            accentColor: UIColor(Color.dfkAccent),
+            onStartChange: { start = $0 },
+            onEndChange: { end = $0 }
+        )
+    }
+}
 
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.secondary.opacity(0.15))
-                    .frame(height: 8)
-                    .padding(.horizontal, handleSize / 2)
+private final class NativeTimeRangeSliderView: UIView {
+    private let trackLayer = CALayer()
+    private let selectedTrackLayer = CALayer()
+    private let startSlider = ThumbHitTestSlider(frame: .zero)
+    private let endSlider = ThumbHitTestSlider(frame: .zero)
 
-                Capsule()
-                    .fill(Color.dfkAccent)
-                    .frame(width: max(0, endX - startX), height: 8)
-                    .offset(x: startX)
+    private var rangeStart = Date()
+    private var rangeEnd = Date()
+    private var start = Date()
+    private var end = Date()
+    private var minimumDuration: TimeInterval = 60
+    private var step: TimeInterval = 60
+    private var onStartChange: ((Date) -> Void)?
+    private var onEndChange: ((Date) -> Void)?
+    private var isConfiguring = false
 
-                sliderHandle
-                    .position(x: startX, y: proxy.size.height / 2)
-                    .gesture(DragGesture().onChanged { value in
-                        let proposed = date(for: value.location.x, width: width)
-                        start = min(max(proposed, rangeStart), end.addingTimeInterval(-minimumDuration))
-                    })
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setup()
+    }
 
-                sliderHandle
-                    .position(x: endX, y: proxy.size.height / 2)
-                    .gesture(DragGesture().onChanged { value in
-                        let proposed = date(for: value.location.x, width: width)
-                        end = max(min(proposed, rangeEnd), start.addingTimeInterval(minimumDuration))
-                    })
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        trackLayer.backgroundColor = UIColor.secondaryLabel.withAlphaComponent(0.15).cgColor
+        trackLayer.cornerRadius = 3
+        selectedTrackLayer.cornerRadius = 3
+        layer.addSublayer(trackLayer)
+        layer.addSublayer(selectedTrackLayer)
+
+        [startSlider, endSlider].forEach { slider in
+            slider.isContinuous = true
+            slider.minimumTrackTintColor = .clear
+            slider.maximumTrackTintColor = .clear
+            addSubview(slider)
+        }
+        startSlider.accessibilityLabel = "开始时间"
+        endSlider.accessibilityLabel = "结束时间"
+        startSlider.addTarget(self, action: #selector(startChanged(_:)), for: .valueChanged)
+        endSlider.addTarget(self, action: #selector(endChanged(_:)), for: .valueChanged)
+    }
+
+    func configure(
+        rangeStart: Date,
+        rangeEnd: Date,
+        start: Date,
+        end: Date,
+        minimumDuration: TimeInterval,
+        step: TimeInterval,
+        accentColor: UIColor,
+        onStartChange: @escaping (Date) -> Void,
+        onEndChange: @escaping (Date) -> Void
+    ) {
+        let duration = rangeEnd.timeIntervalSince(rangeStart)
+        guard duration >= minimumDuration else {
+            isConfiguring = true
+            [startSlider, endSlider].forEach { slider in
+                slider.minimumValue = 0
+                slider.maximumValue = Float(max(step, minimumDuration))
+                slider.setValue(0, animated: false)
             }
+            isConfiguring = false
+            setNeedsLayout()
+            return
+        }
+
+        isConfiguring = true
+        self.rangeStart = rangeStart
+        self.rangeEnd = rangeEnd
+        self.minimumDuration = minimumDuration
+        self.step = step
+        self.onStartChange = onStartChange
+        self.onEndChange = onEndChange
+        selectedTrackLayer.backgroundColor = accentColor.cgColor
+
+        let clampedEnd = clamp(rounded(end), minDate: rangeStart.addingTimeInterval(minimumDuration), maxDate: rangeEnd)
+        let clampedStart = clamp(rounded(start), minDate: rangeStart, maxDate: clampedEnd.addingTimeInterval(-minimumDuration))
+        self.start = clampedStart
+        self.end = clampedEnd
+
+        let maximumValue = Float(max(step, duration))
+        [startSlider, endSlider].forEach { slider in
+            slider.minimumValue = 0
+            slider.maximumValue = maximumValue
+        }
+        startSlider.setValue(Float(clampedStart.timeIntervalSince(rangeStart)), animated: false)
+        endSlider.setValue(Float(clampedEnd.timeIntervalSince(rangeStart)), animated: false)
+        isConfiguring = false
+
+        if clampedStart != start {
+            DispatchQueue.main.async { onStartChange(clampedStart) }
+        }
+        if clampedEnd != end {
+            DispatchQueue.main.async { onEndChange(clampedEnd) }
+        }
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        startSlider.frame = bounds
+        endSlider.frame = bounds
+        updateTrackLayers()
+    }
+
+    private func updateTrackLayers() {
+        let minX = thumbCenterX(for: startSlider, value: startSlider.minimumValue)
+        let maxX = thumbCenterX(for: startSlider, value: startSlider.maximumValue)
+        let startX = thumbCenterX(for: startSlider, value: startSlider.value)
+        let endX = thumbCenterX(for: endSlider, value: endSlider.value)
+        let trackY = bounds.midY - 3
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        trackLayer.frame = CGRect(x: minX, y: trackY, width: max(0, maxX - minX), height: 6)
+        selectedTrackLayer.frame = CGRect(x: min(startX, endX), y: trackY, width: abs(endX - startX), height: 6)
+        CATransaction.commit()
+    }
+
+    private func thumbCenterX(for slider: UISlider, value: Float) -> CGFloat {
+        let track = slider.trackRect(forBounds: slider.bounds)
+        return slider.thumbRect(forBounds: slider.bounds, trackRect: track, value: value).midX
+    }
+
+    @objc private func startChanged(_ sender: UISlider) {
+        guard !isConfiguring else { return }
+        let proposed = rangeStart.addingTimeInterval(TimeInterval(sender.value))
+        let newStart = clamp(rounded(proposed), minDate: rangeStart, maxDate: end.addingTimeInterval(-minimumDuration))
+        start = newStart
+        sender.setValue(Float(newStart.timeIntervalSince(rangeStart)), animated: false)
+        onStartChange?(newStart)
+        updateTrackLayers()
+    }
+
+    @objc private func endChanged(_ sender: UISlider) {
+        guard !isConfiguring else { return }
+        let proposed = rangeStart.addingTimeInterval(TimeInterval(sender.value))
+        let newEnd = clamp(rounded(proposed), minDate: start.addingTimeInterval(minimumDuration), maxDate: rangeEnd)
+        end = newEnd
+        sender.setValue(Float(newEnd.timeIntervalSince(rangeStart)), animated: false)
+        onEndChange?(newEnd)
+        updateTrackLayers()
+    }
+
+    private func rounded(_ date: Date) -> Date {
+        guard step > 0 else { return date }
+        return Date(timeIntervalSince1970: (date.timeIntervalSince1970 / step).rounded() * step)
+    }
+
+    private func clamp(_ date: Date, minDate: Date, maxDate: Date) -> Date {
+        guard minDate <= maxDate else { return minDate }
+        return min(max(date, minDate), maxDate)
+    }
+}
+
+private struct NativeTimeSlider: UIViewRepresentable {
+    let rangeStart: Date
+    let rangeEnd: Date
+    @Binding var value: Date
+    let allowedStart: Date
+    let allowedEnd: Date
+    let step: TimeInterval
+    let minimumTrackTintColor: UIColor
+    let maximumTrackTintColor: UIColor
+    let accessibilityLabel: String
+
+    func makeUIView(context: Context) -> UISlider {
+        let slider = ThumbHitTestSlider(frame: .zero)
+        slider.isContinuous = true
+        slider.addTarget(context.coordinator, action: #selector(Coordinator.valueChanged(_:)), for: .valueChanged)
+        slider.accessibilityLabel = accessibilityLabel
+        return slider
+    }
+
+    func updateUIView(_ slider: UISlider, context: Context) {
+        context.coordinator.parent = self
+
+        slider.minimumValue = 0
+        slider.maximumValue = Float(max(step, rangeEnd.timeIntervalSince(rangeStart)))
+        slider.minimumTrackTintColor = minimumTrackTintColor
+        slider.maximumTrackTintColor = maximumTrackTintColor
+        slider.accessibilityLabel = accessibilityLabel
+
+        let clampedDate = clamped(value)
+        if clampedDate != value {
+            DispatchQueue.main.async {
+                self.value = clampedDate
+            }
+        }
+
+        let sliderValue = Float(clampedDate.timeIntervalSince(rangeStart))
+        if !slider.isTracking || abs(slider.value - sliderValue) > Float(step) {
+            slider.setValue(sliderValue, animated: false)
         }
     }
 
-    private var sliderHandle: some View {
-        Circle()
-            .fill(Color(uiColor: .systemBackground))
-            .frame(width: handleSize, height: handleSize)
-            .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
-            .overlay(Circle().stroke(Color.dfkAccent, lineWidth: 3))
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
     }
 
-    private func position(for date: Date) -> Double {
-        let total = rangeEnd.timeIntervalSince(rangeStart)
-        guard total > 0 else { return 0 }
-        return min(1, max(0, date.timeIntervalSince(rangeStart) / total))
+    private func clamped(_ date: Date) -> Date {
+        min(max(rounded(date), allowedStart), allowedEnd)
     }
 
-    private func date(for x: CGFloat, width: CGFloat) -> Date {
-        let clamped = min(max(0, x - handleSize / 2), width)
-        let ratio = Double(clamped / width)
-        let raw = rangeStart.addingTimeInterval(rangeEnd.timeIntervalSince(rangeStart) * ratio)
-        return Date(timeIntervalSince1970: (raw.timeIntervalSince1970 / 60).rounded() * 60)
+    private func rounded(_ date: Date) -> Date {
+        guard step > 0 else { return date }
+        return Date(timeIntervalSince1970: (date.timeIntervalSince1970 / step).rounded() * step)
+    }
+
+    final class Coordinator: NSObject {
+        var parent: NativeTimeSlider
+
+        init(_ parent: NativeTimeSlider) {
+            self.parent = parent
+        }
+
+        @objc func valueChanged(_ sender: UISlider) {
+            let rawDate = parent.rangeStart.addingTimeInterval(TimeInterval(sender.value))
+            let newValue = parent.clamped(rawDate)
+            sender.setValue(Float(newValue.timeIntervalSince(parent.rangeStart)), animated: false)
+            parent.value = newValue
+        }
+    }
+}
+
+private final class ThumbHitTestSlider: UISlider {
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        let track = trackRect(forBounds: bounds)
+        let thumb = thumbRect(forBounds: bounds, trackRect: track, value: value)
+        return thumb.insetBy(dx: -22, dy: -22).contains(point)
     }
 }
 
@@ -1790,11 +2065,17 @@ private struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ mapView: MKMapView, coordinator: Coordinator) {
+        coordinator.pendingMapUpdate?.cancel()
         coordinator.mapView = nil
         coordinator.dataKey = ""
         mapView.delegate = nil
-        mapView.removeOverlays(mapView.overlays)
-        mapView.removeAnnotations(mapView.annotations)
+        let overlays = mapView.overlays
+        let annotations = mapView.annotations
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak mapView] in
+            guard let mapView else { return }
+            mapView.removeOverlays(overlays)
+            mapView.removeAnnotations(annotations)
+        }
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
@@ -1806,21 +2087,41 @@ private struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
         var parent: FootprintTimeAdjustmentMapView
         weak var mapView: MKMapView?
         var dataKey = ""
+        var fitKey = ""
         weak var leadingPolyline: MKPolyline?
         weak var trailingPolyline: MKPolyline?
+        var pendingMapUpdate: DispatchWorkItem?
 
         init(_ parent: FootprintTimeAdjustmentMapView) {
             self.parent = parent
         }
 
         func updateMap(on mapView: MKMapView) {
+            let shouldThrottle = parent.leadingCoordinates != nil || parent.trailingCoordinates != nil || parent.markerCoordinate != nil
+            guard shouldThrottle else {
+                applyMapUpdate(on: mapView)
+                return
+            }
+
+            guard pendingMapUpdate == nil else { return }
+            let workItem = DispatchWorkItem { [weak self, weak mapView] in
+                guard let self, let mapView else { return }
+                self.pendingMapUpdate = nil
+                self.applyMapUpdate(on: mapView)
+            }
+            pendingMapUpdate = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
+        }
+
+        private func applyMapUpdate(on mapView: MKMapView) {
             let coordinates = Self.sample(parent.coordinates.filter(\.isRawPointsRenderable), maxCount: FootprintTimeAdjustmentMapView.maxRenderedPoints)
             let leadingCoordinates = Self.sample(parent.leadingCoordinates?.filter(\.isRawPointsRenderable) ?? [], maxCount: FootprintTimeAdjustmentMapView.maxRenderedPoints)
             let trailingCoordinates = Self.sample(parent.trailingCoordinates?.filter(\.isRawPointsRenderable) ?? [], maxCount: FootprintTimeAdjustmentMapView.maxRenderedPoints)
             let markerKey = parent.markerCoordinate?.rawPointsCoordinateKey ?? ""
+            let baseKey = "\(coordinates.count)|\(coordinates.first?.rawPointsCoordinateKey ?? "")|\(coordinates.last?.rawPointsCoordinateKey ?? "")"
             let leadingKey = "\(leadingCoordinates.count)|\(leadingCoordinates.first?.rawPointsCoordinateKey ?? "")|\(leadingCoordinates.last?.rawPointsCoordinateKey ?? "")"
             let trailingKey = "\(trailingCoordinates.count)|\(trailingCoordinates.first?.rawPointsCoordinateKey ?? "")|\(trailingCoordinates.last?.rawPointsCoordinateKey ?? "")"
-            let key = "\(coordinates.count)|\(coordinates.first?.rawPointsCoordinateKey ?? "")|\(coordinates.last?.rawPointsCoordinateKey ?? "")|\(leadingKey)|\(trailingKey)|\(markerKey)"
+            let key = "\(baseKey)|\(leadingKey)|\(trailingKey)|\(markerKey)"
             guard key != dataKey else { return }
             dataKey = key
 
@@ -1830,28 +2131,25 @@ private struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
             leadingPolyline = nil
             trailingPolyline = nil
             if !leadingCoordinates.isEmpty || !trailingCoordinates.isEmpty {
-                if leadingCoordinates.count >= 2 {
-                    let polyline = MKPolyline(coordinates: leadingCoordinates, count: leadingCoordinates.count)
-                    leadingPolyline = polyline
-                    mapView.addOverlay(polyline)
+                if !leadingCoordinates.isEmpty {
+                    mapView.addOverlay(FootprintTimeDotOverlay(coordinates: leadingCoordinates, color: .systemGreen, diameter: 7))
                 }
-                if trailingCoordinates.count >= 2 {
-                    let polyline = MKPolyline(coordinates: trailingCoordinates, count: trailingCoordinates.count)
-                    trailingPolyline = polyline
-                    mapView.addOverlay(polyline)
+                if !trailingCoordinates.isEmpty {
+                    mapView.addOverlay(FootprintTimeDotOverlay(coordinates: trailingCoordinates, color: .systemBlue, diameter: 7))
                 }
-            } else if coordinates.count >= 2 {
-                mapView.addOverlay(MKPolyline(coordinates: coordinates, count: coordinates.count))
+            } else if !coordinates.isEmpty {
+                mapView.addOverlay(FootprintTimeDotOverlay(coordinates: coordinates, color: UIColor(Color.dfkAccent), diameter: 7))
             }
-            if !coordinates.isEmpty {
-                mapView.addOverlay(FootprintTimeDotOverlay(coordinates: coordinates, color: UIColor(Color.dfkAccent), diameter: 4))
-            }
+
             if let marker = parent.markerCoordinate, marker.isRawPointsRenderable {
                 let annotation = MKPointAnnotation()
                 annotation.coordinate = marker
                 mapView.addAnnotation(annotation)
             }
-            scheduleFit(on: mapView, key: key)
+            if baseKey != fitKey {
+                fitKey = baseKey
+                scheduleFit(on: mapView, key: key)
+            }
         }
 
         private func scheduleFit(on mapView: MKMapView, key: String, attempt: Int = 0) {
@@ -1970,15 +2268,22 @@ private final class FootprintTimeDotOverlayRenderer: MKOverlayRenderer {
         guard let dotOverlay = overlay as? FootprintTimeDotOverlay else { return }
         context.setFillColor(dotOverlay.color.withAlphaComponent(0.72).cgColor)
 
+        // Keep dot size visually stable across zoom while avoiding extreme GPU workloads
+        // at very small zoomScale values.
+        let scale = max(CGFloat(zoomScale), 0.01)
+        let unclampedDiameter = dotOverlay.diameter / scale
+        let diameter = min(max(unclampedDiameter, 3), 120)
+        let radius = diameter / 2
+
         for coordinate in dotOverlay.coordinates {
             let mapPoint = MKMapPoint(coordinate)
             guard mapRect.contains(mapPoint) else { continue }
             let point = self.point(for: mapPoint)
             let rect = CGRect(
-                x: point.x - dotOverlay.diameter / 2,
-                y: point.y - dotOverlay.diameter / 2,
-                width: dotOverlay.diameter,
-                height: dotOverlay.diameter
+                x: point.x - radius,
+                y: point.y - radius,
+                width: diameter,
+                height: diameter
             )
             context.fillEllipse(in: rect)
         }

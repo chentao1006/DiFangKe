@@ -875,23 +875,13 @@ struct TimelinePageView: View {
             }
         } else {
             let isToday = Calendar.current.isDateInToday(date)
-            
-            if isToday {
-                let cloudChangedKeys = CloudSettingsManager.shared.syncFromCloudNow()
-                if cloudChangedKeys.contains("raw_recording_source_device_id") {
-                    await locationManager.refreshForRecordingDeviceChange()
-                }
-
-                // 手动下拉应先上传本地轨迹，再拉取其他设备更新，保证多设备刷新可见最新足迹。
-                async let syncTask: () = locationManager.performRawDataSync(onlyRecent: true, skipUpload: false)
-                async let cloudSettingsSyncTask: () = {
-                    CloudSettingsManager.shared.manualSyncNow()
-                    CloudSettingsManager.shared.triggerDataSyncPulseManual()
-                }()
-                
-                // 等待两者完成
-                _ = await (syncTask, cloudSettingsSyncTask)
+            let cloudChangedKeys = CloudSettingsManager.shared.syncFromCloudNow()
+            if cloudChangedKeys.contains("raw_recording_source_device_id") {
+                await locationManager.refreshForRecordingDeviceChange()
             }
+            CloudSettingsManager.shared.manualSyncNow()
+            TimelineBuilder.timelineCache.removeValue(forKey: Calendar.current.startOfDay(for: date))
+            try? await Task.sleep(nanoseconds: 800_000_000)
             
             // 3. 下拉只重新读取已保存结果；重新生成会覆盖时间线编辑页的手动调整，
             // 必须走明确的“重新生成”入口，不能藏在刷新手势里。

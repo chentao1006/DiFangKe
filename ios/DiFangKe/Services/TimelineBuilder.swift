@@ -2075,6 +2075,13 @@ class PersistentTimelineBuilder {
             // 硬规则：只要两个足迹之间存在有效交通记录，就绝不能合并。
             let cEnd = current.endTime
             let nStart = next.startTime
+
+            let currentIsSameDay = calendar.isDate(current.startTime, inSameDayAs: current.endTime.addingTimeInterval(-0.001))
+            let nextIsSameDay = calendar.isDate(next.startTime, inSameDayAs: next.endTime.addingTimeInterval(-0.001))
+            guard currentIsSameDay, nextIsSameDay, calendar.isDate(current.startTime, inSameDayAs: next.startTime) else {
+                i += 1
+                continue
+            }
             
             // 核心修复：避免 SwiftData #Predicate 在 Date 比较时的隐式失败，改为内存中匹配
             let hasTransportBetween = allDayTransports.contains { t in

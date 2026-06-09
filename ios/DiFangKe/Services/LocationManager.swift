@@ -519,15 +519,15 @@ final class RawLocationStore {
             uploadIndex += batchSize
         }
 
-        // 2. 下载最近 7 天其他设备的文件
+        // 2. 下载最近 N 天其他设备的文件，和上传窗口保持一致
         do {
             let calendar = Calendar.current
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd"
             
-            // 计算最近 7 天的所有日期字符串
+            // 计算最近 N 天的所有日期字符串
             var dateStrings: [String] = []
-            for i in 0..<7 {
+            for i in 0..<lookbackDays {
                 if let date = calendar.date(byAdding: .day, value: -i, to: Date()) {
                     dateStrings.append(formatter.string(from: date))
                 }
@@ -1596,6 +1596,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // 硬规则：若两段停留之间存在交通记录，则禁止合并，避免“出门回来仍是一条长足迹”。
                 let bEnd = base.endTime
                 let nStart = next.startTime
+
+                let calendar = Calendar.current
+                let baseIsSameDay = calendar.isDate(base.startTime, inSameDayAs: base.endTime.addingTimeInterval(-0.001))
+                let nextIsSameDay = calendar.isDate(next.startTime, inSameDayAs: next.endTime.addingTimeInterval(-0.001))
+                guard baseIsSameDay, nextIsSameDay, calendar.isDate(base.startTime, inSameDayAs: next.startTime) else {
+                    i += 1
+                    continue
+                }
                 
                 // 核心修复：避免 SwiftData #Predicate 在 Date 比较时的隐式失败，改为内存中匹配
                 let hasTransportBetween = allDayTransports.contains { t in
@@ -1797,6 +1805,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             let bEnd = base.endTime
             let nStart = next.startTime
+
+            let calendar = Calendar.current
+            let baseIsSameDay = calendar.isDate(base.startTime, inSameDayAs: base.endTime.addingTimeInterval(-0.001))
+            let nextIsSameDay = calendar.isDate(next.startTime, inSameDayAs: next.endTime.addingTimeInterval(-0.001))
+            guard baseIsSameDay, nextIsSameDay, calendar.isDate(base.startTime, inSameDayAs: next.startTime) else {
+                i += 1
+                continue
+            }
             
             let hasTransportBetween = allDayTransports.contains { t in
                 t.endTime > bEnd && t.startTime < nStart
@@ -1874,7 +1890,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             || motion == .running
             || motion == .cycling
             || motion == .automotive
-        let isMovingByGPS = location.speed > 0.5
+        let isFreshLocation = abs(location.timestamp.timeIntervalSinceNow) < 30
+        let isMovingByGPS = isFreshLocation && location.speed >= 0 && location.speed > 0.5
         updateUIMovementState(isMovingEvidence: (isMovingBySensor || isMovingByGPS), source: "didUpdateLocations")
         
         // --- 核心改进：预先过滤离谱漂移点，防止污染原始轨迹 CSV ---
@@ -2056,9 +2073,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // A: 如果有匹配地点，且地点 ID 变了，判定为离开
             // B: 如果没有匹配地点，且位移超过 150m，且精度尚可，判定为离开（放宽到 150m 减少因室内飘移导致的停留时刻重置）
             let isSamePlace = (startPlace != nil && startPlace?.placeID == currentPlace?.placeID)
-            let distance = location.distance(from: startLoc)
-            
-            if !isSamePlace && distance > 150.0 && location.horizontalAccuracy < 100.0 {
+            if hasConfirmedDeparture(from: startLoc, to: location, isSamePlace: isSamePlace, isMovingBySensor: isMovingBySensor) {
                 // 已经离开当前地点，设为空以表示正在移动中
                 potentialStopStartLocation = nil
                 clearOngoingPlaceOverride()
@@ -2092,6 +2107,29 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         // --- 10 AM 往年今日检查 ---
         checkDailyPastMemories()
+    }
+
+    private func hasConfirmedDeparture(
+        from startLoc: CLLocation,
+        to location: CLLocation,
+        isSamePlace: Bool,
+        isMovingBySensor: Bool
+    ) -> Bool {
+        guard !isSamePlace else { return false }
+        guard location.horizontalAccuracy >= 0 && location.horizontalAccuracy < 100.0 else { return false }
+
+        let distance = location.distance(from: startLoc)
+        guard distance > 150.0 else { return false }
+
+        // 长时间宅家/办公后，启动时常会先收到一个单点 GPS 漂移。没有运动证据时不要仅凭
+        // 150m 左右的单点位移清空当前停留，否则首页会短暂或持续显示“正在移动”。
+        let stayDuration = Date().timeIntervalSince(startLoc.timestamp)
+        if stayDuration > 30 * 60 && !isMovingBySensor {
+            let driftResistantThreshold = max(300.0, location.horizontalAccuracy * 3.0)
+            return distance > driftResistantThreshold
+        }
+
+        return true
     }
     
     private func checkDailyPastMemories() {
@@ -3282,6 +3320,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 let currentDuration = potentialStopStartLocation.map { last.timestamp.timeIntervalSince($0.timestamp) } ?? 0
                 if let healing = result.2, result.3 > currentDuration + 300 {
                     self.potentialStopStartLocation = healing
+                    self.uiIsMoving = false
+                    self.lastMovingEvidenceTime = .distantPast
                     savePotentialStop()
                 }
             }
