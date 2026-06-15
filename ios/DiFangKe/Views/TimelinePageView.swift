@@ -4,6 +4,53 @@ import MapKit
 import SwiftData
 import Photos
 
+struct MissingTransportSuggestion: Identifiable, Equatable {
+    let newerFootprint: Footprint
+    let olderFootprint: Footprint
+
+    var id: String {
+        "\(newerFootprint.footprintID.uuidString)-\(olderFootprint.footprintID.uuidString)"
+    }
+
+    var startTime: Date { olderFootprint.endTime }
+    var endTime: Date { newerFootprint.startTime }
+
+    var duration: TimeInterval {
+        max(0, endTime.timeIntervalSince(startTime))
+    }
+
+    var distance: Double {
+        CLLocation(latitude: olderFootprint.latitude, longitude: olderFootprint.longitude)
+            .distance(from: CLLocation(latitude: newerFootprint.latitude, longitude: newerFootprint.longitude))
+    }
+}
+
+private extension Footprint {
+    func placeName(from places: [Place]) -> String {
+        if let placeID,
+           let place = places.first(where: { $0.placeID == placeID && $0.isUserDefined }) {
+            return place.name
+        }
+
+        let trimmedAddress = address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedAddress.isEmpty ? "未知地点" : trimmedAddress
+    }
+}
+
+private enum TimelineListEntry: Identifiable {
+    case item(TimelineItem)
+    case missingTransport(MissingTransportSuggestion)
+
+    var id: String {
+        switch self {
+        case .item(let item):
+            return "item-\(item.id)"
+        case .missingTransport(let suggestion):
+            return "missing-\(suggestion.id)"
+        }
+    }
+}
+
 struct TimelinePageView: View {
     @Environment(\.modelContext) private var modelContext
     let date: Date
@@ -45,6 +92,7 @@ struct TimelinePageView: View {
     @State private var totalDailyMileage: Double = 0
     @State private var dayPhotoAssets: [PHAsset] = []
     @State private var lastSummaryTimelineSignature: String?
+    @State private var creatingSuggestionID: String?
     
     init(date: Date, footprints: [Footprint], manualSelections: [TransportManualSelection], allPlaces: [Place], offset: Int, locationManager: LocationManager, pastLimitOffset: Int, isActivePage: Bool = true, isFromHistory: Bool = false, dailyInsight: DailyInsight? = nil) {
         self.date = date
@@ -301,6 +349,31 @@ struct TimelinePageView: View {
             return $0.startTime > $1.startTime
         }
     }
+
+    private var timelineListEntries: [TimelineListEntry] {
+        let items = displayedTimelineItems
+        guard items.count >= 2 else {
+            return items.map(TimelineListEntry.item)
+        }
+
+        var entries: [TimelineListEntry] = []
+        for index in items.indices {
+            let current = items[index]
+            entries.append(.item(current))
+
+            guard index < items.count - 1,
+                  case .footprint(let newerFootprint) = current,
+                  case .footprint(let olderFootprint) = items[index + 1] else {
+                continue
+            }
+
+            let suggestion = MissingTransportSuggestion(newerFootprint: newerFootprint, olderFootprint: olderFootprint)
+            guard shouldShowMissingTransportSuggestion(suggestion) else { continue }
+            entries.append(.missingTransport(suggestion))
+        }
+
+        return entries
+    }
     
     private var timelineScrollView: some View {
         ScrollView {
@@ -407,11 +480,11 @@ struct TimelinePageView: View {
                 emptyStateView
             }
         } else {
-            let items = displayedTimelineItems
-            let count = items.count
-            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                switch item {
-                case .footprint(let footprint):
+            let entries = timelineListEntries
+            let count = entries.count
+            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                switch entry {
+                case .item(.footprint(let footprint)):
                     FootprintCardView(
                         footprint: footprint, 
                         allPlaces: allPlaces,
@@ -424,7 +497,7 @@ struct TimelinePageView: View {
                         self.selectedFootprint = item
                     }
                     .padding(.horizontal, 16)
-                case .transport(let transport):
+                case .item(.transport(let transport)):
                     TransportCardView(
                         transport: transport,
                         allPlaces: allPlaces,
@@ -436,6 +509,20 @@ struct TimelinePageView: View {
                         },
                         onDelete: { selected in
                             deleteTransport(selected)
+                        }
+                    )
+                    .padding(.horizontal, 16)
+                case .missingTransport(let suggestion):
+                    MissingTransportSuggestionCard(
+                        suggestion: suggestion,
+                        isFirst: index == 0,
+                        isLast: index == count - 1,
+                        isToday: isToday,
+                        isCreating: creatingSuggestionID == suggestion.id,
+                        onSelect: {
+                            Task { @MainActor in
+                                await createMissingTransport(from: suggestion)
+                            }
                         }
                     )
                     .padding(.horizontal, 16)
@@ -490,6 +577,122 @@ struct TimelinePageView: View {
                 await refreshAiSummary(force: true)
             }
         }
+    }
+
+    private func shouldShowMissingTransportSuggestion(_ suggestion: MissingTransportSuggestion) -> Bool {
+        guard suggestion.distance > AppConfig.shared.transportMinDistanceThreshold,
+              suggestion.duration > AppConfig.shared.transportMinDurationThreshold else {
+            return false
+        }
+
+        return true
+    }
+
+    @MainActor
+    private func createMissingTransport(from suggestion: MissingTransportSuggestion) async {
+        guard creatingSuggestionID == nil else { return }
+        creatingSuggestionID = suggestion.id
+        defer { creatingSuggestionID = nil }
+
+        let older = suggestion.olderFootprint
+        let newer = suggestion.newerFootprint
+        let targetDate = older.date
+        let olderEndTime = older.endTime
+        let newerStartTime = newer.startTime
+        let olderCoordinate = CLLocationCoordinate2D(latitude: older.latitude, longitude: older.longitude)
+        let newerCoordinate = CLLocationCoordinate2D(latitude: newer.latitude, longitude: newer.longitude)
+        let startLocation = older.placeName(from: allPlaces)
+        let endLocation = newer.placeName(from: allPlaces)
+        let rawPoints = await Task.detached {
+            RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
+        }.value
+        let gapPoints = TimelineBuilder.extractPoints(from: rawPoints, start: olderEndTime, end: newerStartTime)
+
+        var routePoints = gapPoints.map {
+            CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp)
+        }
+        let startCoord = CodableCoordinate(lat: olderCoordinate.latitude, lon: olderCoordinate.longitude, timestamp: olderEndTime, isSyntheticPadding: true)
+        let endCoord = CodableCoordinate(lat: newerCoordinate.latitude, lon: newerCoordinate.longitude, timestamp: newerStartTime, isSyntheticPadding: true)
+
+        if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.first, footprint: startCoord) {
+            routePoints.insert(startCoord, at: 0)
+        } else if routePoints.isEmpty {
+            routePoints = [startCoord]
+        }
+        if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.last, footprint: endCoord) {
+            routePoints.append(endCoord)
+        } else if routePoints.count == 1 {
+            routePoints.append(endCoord)
+        }
+
+        // 手动补录的交通应完整覆盖两足迹之间的整段空白，
+        // 不能因为原始点只覆盖到中间一段，就把头尾再拆成微小足迹。
+        let actualStartTime = olderEndTime
+        let actualEndTime = newerStartTime
+        let pathDistance = max(TimelineBuilder.calculatePathDistance(routePoints), suggestion.distance)
+        let duration = max(actualEndTime.timeIntervalSince(actualStartTime), 1)
+        let speed = pathDistance / duration
+
+#if !WIDGET_EXTENSION
+        let metrics = await HealthManager.shared.fetchMetrics(from: actualStartTime, to: actualEndTime)
+        let motionType = await HealthManager.shared.queryMostFrequentActivity(from: actualStartTime, to: actualEndTime)
+#else
+        let metrics = (steps: 0, distance: 0.0, floors: 0)
+        let motionType = MotionType.unknown
+#endif
+
+        let determinedType = TransportType.from(
+            speed: speed,
+            motionType: motionType,
+            stepCount: metrics.steps,
+            walkingDistance: metrics.distance,
+            floorsClimbed: metrics.floors,
+            duration: duration,
+            distanceMeters: pathDistance
+        )
+
+        let pointsData = (try? JSONEncoder().encode(routePoints)) ?? Data()
+        let record = TransportRecord(
+            day: Calendar.current.startOfDay(for: actualStartTime),
+            startTime: actualStartTime,
+            endTime: actualEndTime,
+            startLocation: startLocation,
+            endLocation: endLocation,
+            typeRaw: determinedType.rawValue,
+            distance: pathDistance,
+            averageSpeed: speed,
+            pointsData: pointsData,
+            statusRaw: "active",
+            stepCount: metrics.steps
+        )
+
+        modelContext.insert(record)
+        try? modelContext.save()
+        TimelineBuilder.timelineCache.removeValue(forKey: Calendar.current.startOfDay(for: date))
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+
+        let createdTransport = Transport(
+            id: record.recordID,
+            startTime: record.startTime,
+            endTime: record.endTime,
+            startLocation: startLocation,
+            endLocation: endLocation,
+            type: determinedType,
+            distance: pathDistance,
+            averageSpeed: speed,
+            points: routePoints.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) },
+            pathPoints: routePoints.map {
+                TransportPathPoint(
+                    coordinate: CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon),
+                    timestamp: $0.timestamp,
+                    isSyntheticPadding: $0.isSyntheticPadding ?? false
+                )
+            },
+            stepCount: metrics.steps
+        )
+
+        refreshTimeline(force: false)
+        selectedTransport = createdTransport
     }
     
     @MainActor

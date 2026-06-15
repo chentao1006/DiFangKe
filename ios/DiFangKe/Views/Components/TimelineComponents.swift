@@ -5,6 +5,8 @@ import SwiftData
 import Aptabase
 import Photos
 
+private let timelineMiniMapAspectRatio: CGFloat = 1.618
+
 // MARK: - Day Summary Card
 struct DaySummaryCard: View {
     let date: Date
@@ -76,7 +78,7 @@ struct DaySummaryCard: View {
                         photoAssets: photoAssets,
                         onTimelineItemTap: onTimelineItemTap
                     )
-                    .frame(height: 140)
+                    .aspectRatio(timelineMiniMapAspectRatio, contentMode: .fit)
                     .cornerRadius(12)
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -93,7 +95,7 @@ struct DaySummaryCard: View {
                     // Placeholder if truly no data
                     RoundedRectangle(cornerRadius: 12)
                         .fill(Color.secondary.opacity(0.05))
-                        .frame(height: 140)
+                        .aspectRatio(timelineMiniMapAspectRatio, contentMode: .fit)
                         .overlay(
                             VStack(spacing: 8) {
                                 Image(systemName: "map.fill")
@@ -287,10 +289,14 @@ struct FullFrameTrajectoryMapView: View {
         
         if !allCoords.isEmpty {
             if let region = allCoords.boundingRegion(paddingFactor: 1.4) {
-                withAnimation {
+                if hasAutoCentered {
+                    withAnimation {
+                        cameraPosition = .region(region)
+                    }
+                } else {
                     cameraPosition = .region(region)
-                    hasAutoCentered = true
                 }
+                hasAutoCentered = true
             }
         } else if showsUserLocation, let lastLoc = LocationManager.shared.lastLocation {
             cameraPosition = .region(MKCoordinateRegion(center: lastLoc.coordinate, latitudinalMeters: 1000, longitudinalMeters: 1000))
@@ -484,7 +490,7 @@ struct RecordingStatusCard: View {
                     photoAssets: photoAssets,
                     onTimelineItemTap: onTimelineItemTap
                 )
-                .frame(height: 140)
+                .aspectRatio(timelineMiniMapAspectRatio, contentMode: .fit)
                 .cornerRadius(12)
                 .padding(.leading, 0)
                 .padding(.trailing, 12)

@@ -152,6 +152,97 @@ struct TransportCardView: View {
     }
 }
 
+struct MissingTransportSuggestionCard: View {
+    let suggestion: MissingTransportSuggestion
+    var isFirst: Bool = false
+    var isLast: Bool = false
+    var isToday: Bool = false
+    var isCreating: Bool = false
+    var onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(alignment: .center, spacing: 0) {
+                VStack(spacing: 0) {
+                    Rectangle().fill(Color.secondary.opacity(0.15))
+                        .frame(width: 1.5)
+                        .frame(height: 8)
+                        .opacity(isFirst && !isToday ? 0 : 1)
+
+                    Image(systemName: "questionmark.circle.dashed")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 32, height: 32)
+
+                    Rectangle().fill(Color.secondary.opacity(0.15))
+                        .frame(width: 1.5)
+                        .frame(maxHeight: .infinity)
+                        .padding(.bottom, -12)
+                        .opacity(isLast ? 0 : 1)
+                }
+                .frame(width: 54)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Text("\(suggestion.startTime.formatted(date: .omitted, time: .shortened))-\(suggestion.endTime.formatted(date: .omitted, time: .shortened))")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.secondary)
+
+                        Text("·")
+                            .foregroundColor(.secondary.opacity(0.3))
+
+                        Text(durationString)
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+
+                        Text("·")
+                            .foregroundColor(.secondary.opacity(0.3))
+
+                        Text(distanceString)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack(spacing: 8) {
+                        Text(isCreating ? "正在生成交通..." : "添加交通方式")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.leading, 4)
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .contentShape(Rectangle())
+            .padding(.bottom, 8)
+        }
+        .buttonStyle(.plain)
+        .disabled(isCreating)
+    }
+
+    private var distanceString: String {
+        if suggestion.distance < 1000 {
+            return String(format: "%.0f米", suggestion.distance)
+        }
+        return String(format: "%.1f公里", suggestion.distance / 1000.0)
+    }
+
+    private var durationString: String {
+        let seconds = suggestion.duration
+        if seconds < 60 {
+            return "1分钟内"
+        }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 {
+            return "\(minutes)分钟"
+        }
+        let hours = minutes / 60
+        let mins = minutes % 60
+        return mins > 0 ? "\(hours)小时\(mins)分" : "\(hours)小时"
+    }
+}
+
 // MARK: - TransportModalView
 struct TransportModalView: View {
     let transport: Transport
@@ -546,4 +637,3 @@ struct TransportModalView: View {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 }
-

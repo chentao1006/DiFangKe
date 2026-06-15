@@ -2157,6 +2157,52 @@ class PersistentTimelineBuilder {
             i += 1
         }
     }
+
+    private static func shouldExtendExistingFootprint(_ existing: Footprint, with candidate: CandidateFootprint, matchedPlace: Place?) -> Bool {
+        if let placeID = matchedPlace?.placeID, existing.placeID == placeID {
+            let timeGap = candidate.startTime.timeIntervalSince(existing.endTime)
+            return timeGap < max(AppConfig.shared.stayMergeGapThreshold, AppConfig.shared.samePlaceMergeGapThreshold)
+        }
+
+        return FootprintProcessor.shared.shouldMerge(lastFootprint: existing, newCandidate: candidate)
+    }
+
+    @MainActor
+    private static func latestMergeableFootprint(
+        endingBefore candidateEnd: Date,
+        startOfDay: Date,
+        context: ModelContext
+    ) -> Footprint? {
+        var descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate {
+                $0.statusValue != "ignored" && $0.endTime > startOfDay && $0.endTime <= candidateEnd
+            },
+            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+        )
+        descriptor.fetchLimit = 1
+        return try? context.fetch(descriptor).first
+    }
+
+    @MainActor
+    private static func hasTransportOverlap(
+        between start: Date,
+        and end: Date,
+        startOfDay: Date,
+        context: ModelContext
+    ) -> Bool {
+        guard end > start else { return false }
+
+        let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay) ?? end
+        let descriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate {
+                $0.statusRaw != "ignored" && $0.startTime < endOfDay && $0.endTime > startOfDay
+            }
+        )
+        let transports = (try? context.fetch(descriptor)) ?? []
+        return transports.contains { transport in
+            transport.endTime > start && transport.startTime < end
+        }
+    }
     
     @MainActor
     private static func processPoints(points: [CLLocation], date: Date, context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle) async {
@@ -2243,8 +2289,42 @@ class PersistentTimelineBuilder {
                     fp.placeID = matched.placeID
                     fp.address = matched.name
                 }
-                context.insert(fp)
-                lastFp = fp
+
+                let candidate = CandidateFootprint(
+                    startTime: fp.startTime,
+                    endTime: fp.endTime,
+                    centerCoordinate: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude),
+                    duration: fp.endTime.timeIntervalSince(fp.startTime),
+                    rawLocations: footprintClusterPoints
+                )
+
+                     let matchedPlace = allPlaces.first { place in place.placeID == fp.placeID }
+                if let existing = latestMergeableFootprint(endingBefore: fp.endTime, startOfDay: startOfDay, context: context),
+                   !hasTransportOverlap(between: existing.endTime, and: fp.startTime, startOfDay: startOfDay, context: context),
+                   shouldExtendExistingFootprint(existing, with: candidate, matchedPlace: matchedPlace) {
+                    existing.endTime = max(existing.endTime, fp.endTime)
+                    existing.date = Calendar.current.startOfDay(for: existing.startTime)
+
+                    var mergedLocations = existing.footprintLocations
+                    mergedLocations.append(contentsOf: fp.footprintLocations)
+                    existing.footprintLocations = mergedLocations
+
+                    if existing.placeID == nil, let matchedPlace {
+                        existing.placeID = matchedPlace.placeID
+                    }
+                    if !existing.isAddressEditedByHand {
+                        if let matchedPlace {
+                            existing.address = matchedPlace.name
+                        } else if existing.address == nil || existing.address?.isEmpty == true {
+                            existing.address = fp.address
+                        }
+                    }
+
+                    lastFp = existing
+                } else {
+                    context.insert(fp)
+                    lastFp = fp
+                }
                 i = split ?? j // 保留停留簇末尾的离开轨迹给交通，避免交通开头变直线
             } else {
                 // i 及其后续一小段不足以构成停留，那么从 i 到下一个停留起始点之间就是交通

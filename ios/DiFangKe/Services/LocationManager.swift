@@ -3561,6 +3561,46 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                                 }
                                 if overlapsTransport { continue }
 
+                                let matchedPlace = self.matchedPlaceFor(coordinate: gap.center)
+                                let candidate = CandidateFootprint(
+                                    startTime: gap.start,
+                                    endTime: gap.end,
+                                    centerCoordinate: gap.center,
+                                    duration: gap.duration,
+                                    rawLocations: []
+                                )
+                                let gapEnd = gap.end
+
+                                var previousDescriptor = FetchDescriptor<Footprint>(
+                                    predicate: #Predicate {
+                                        $0.statusValue != "ignored" && $0.endTime > startOfDay && $0.endTime <= gapEnd
+                                    },
+                                    sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+                                )
+                                previousDescriptor.fetchLimit = 1
+
+                                if let lastFp = (try? context.fetch(previousDescriptor))?.first,
+                                   !transportRanges.contains(where: { range in
+                                       range.1 > lastFp.endTime && range.0 < gap.start
+                                   }),
+                                   self.shouldMergeExistingFootprint(lastFp, with: candidate, matchedPlace: matchedPlace) {
+                                    lastFp.endTime = max(lastFp.endTime, gap.end)
+
+                                    var mergedLocations = lastFp.footprintLocations
+                                    mergedLocations.append(contentsOf: gap.points)
+                                    lastFp.footprintLocations = mergedLocations
+
+                                    if lastFp.placeID == nil, let matchedPlace {
+                                        lastFp.placeID = matchedPlace.placeID
+                                    }
+                                    if !lastFp.isAddressEditedByHand, let matchedPlace {
+                                        lastFp.address = matchedPlace.name
+                                    }
+
+                                    insertedFootprints.append(lastFp)
+                                    continue
+                                }
+
                                 let newFp = Footprint(
                                     date: Calendar.current.startOfDay(for: gap.start),
                                     startTime: gap.start,
@@ -3571,7 +3611,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                                 )
                                 context.insert(newFp)
                                 
-                                if let mPlace = self.matchedPlaceFor(coordinate: gap.center) {
+                                if let mPlace = matchedPlace {
                                     let pid = mPlace.placeID
                                     newFp.placeID = pid
                                     newFp.address = mPlace.name

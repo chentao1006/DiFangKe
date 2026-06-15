@@ -11,6 +11,11 @@ final class DFKMapSnapshotCache {
     private let memoryCache = NSCache<NSString, UIImage>()
     private let fileManager = FileManager.default
     private let cacheDirectory: URL
+    private let maxDiskCacheSizeBytes: Int64 = 200 * 1024 * 1024
+    private let maxFileAge: TimeInterval = 30 * 24 * 60 * 60
+    private let maxUnusedAge: TimeInterval = 14 * 24 * 60 * 60
+    private let cleanupInterval: TimeInterval = 12 * 60 * 60
+    private let ioQueue = DispatchQueue(label: "com.difangke.mapSnapshotCache", qos: .utility)
 
     private init() {
         memoryCache.countLimit = 24
@@ -19,6 +24,7 @@ final class DFKMapSnapshotCache {
         if !fileManager.fileExists(atPath: cacheDirectory.path) {
             try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
         }
+        scheduleCleanupIfNeeded(force: false)
     }
 
     private func cacheURL(for key: String) -> URL {
@@ -32,25 +38,29 @@ final class DFKMapSnapshotCache {
         if let memoryImage = memoryCache.object(forKey: key as NSString) {
             return memoryImage
         }
-        
+
         let url = cacheURL(for: key)
         if let data = try? Data(contentsOf: url), let diskImage = UIImage(data: data) {
             memoryCache.setObject(diskImage, forKey: key as NSString)
+            updateAccessDate(for: url)
+            scheduleCleanupIfNeeded(force: false)
             return diskImage
         }
-        
+
         return nil
     }
 
     func setImage(_ image: UIImage, for key: String) {
         memoryCache.setObject(image, forKey: key as NSString)
-        
+
         let url = cacheURL(for: key)
-        Task.detached(priority: .background) {
+        ioQueue.async {
             if let data = image.pngData() {
                 try? data.write(to: url)
+                Self.setDates(for: url, accessDate: Date(), modificationDate: Date())
             }
         }
+        scheduleCleanupIfNeeded(force: false)
     }
 
     func calculateCacheSize() -> Int64 {
@@ -70,6 +80,96 @@ final class DFKMapSnapshotCache {
         for file in files {
             try? fileManager.removeItem(at: file)
         }
+        UserDefaults.standard.removeObject(forKey: Self.lastCleanupKey)
+    }
+
+    private func updateAccessDate(for url: URL) {
+        ioQueue.async {
+            Self.setDates(for: url, accessDate: Date(), modificationDate: nil)
+        }
+    }
+
+    private func scheduleCleanupIfNeeded(force: Bool) {
+        let now = Date()
+        let defaults = UserDefaults.standard
+        if !force,
+           let lastCleanup = defaults.object(forKey: Self.lastCleanupKey) as? Date,
+           now.timeIntervalSince(lastCleanup) < cleanupInterval {
+            return
+        }
+
+        defaults.set(now, forKey: Self.lastCleanupKey)
+        ioQueue.async { [cacheDirectory, maxFileAge, maxUnusedAge, maxDiskCacheSizeBytes] in
+            let fileManager = FileManager.default
+            let resourceKeys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .contentAccessDateKey]
+            let files = (try? fileManager.contentsOfDirectory(
+                at: cacheDirectory,
+                includingPropertiesForKeys: Array(resourceKeys),
+                options: [.skipsHiddenFiles]
+            )) ?? []
+
+            struct CacheEntry {
+                let url: URL
+                let size: Int64
+                let modificationDate: Date
+                let accessDate: Date
+            }
+
+            let entries: [CacheEntry] = files.compactMap { url in
+                guard let values = try? url.resourceValues(forKeys: resourceKeys),
+                      values.isRegularFile == true else {
+                    return nil
+                }
+
+                let modificationDate = values.contentModificationDate ?? .distantPast
+                let accessDate = values.contentAccessDate ?? modificationDate
+                let size = Int64(values.fileSize ?? 0)
+                return CacheEntry(url: url, size: size, modificationDate: modificationDate, accessDate: accessDate)
+            }
+
+            let expirationDate = now.addingTimeInterval(-maxFileAge)
+            let unusedDeadline = now.addingTimeInterval(-maxUnusedAge)
+
+            var retainedEntries: [CacheEntry] = []
+            for entry in entries {
+                if entry.modificationDate < expirationDate || entry.accessDate < unusedDeadline {
+                    try? fileManager.removeItem(at: entry.url)
+                } else {
+                    retainedEntries.append(entry)
+                }
+            }
+
+            var totalSize = retainedEntries.reduce(Int64(0)) { $0 + $1.size }
+            if totalSize <= maxDiskCacheSizeBytes {
+                return
+            }
+
+            for entry in retainedEntries.sorted(by: { $0.accessDate < $1.accessDate }) {
+                try? fileManager.removeItem(at: entry.url)
+                totalSize -= entry.size
+                if totalSize <= maxDiskCacheSizeBytes {
+                    break
+                }
+            }
+        }
+    }
+
+    private static let lastCleanupKey = "dfk.mapSnapshotCache.lastCleanup"
+
+    nonisolated private static func setDates(
+        for url: URL,
+        accessDate: Date?,
+        modificationDate: Date?
+    ) {
+        var mutableURL = url
+        var values = URLResourceValues()
+        if let accessDate = accessDate {
+            values.contentAccessDate = accessDate
+        }
+        if let modificationDate = modificationDate {
+            values.contentModificationDate = modificationDate
+        }
+        try? mutableURL.setResourceValues(values)
     }
 }
 
@@ -172,6 +272,8 @@ struct DFKMapView: View {
 
     @State private var isRequestingWidgetSnapshot = false
     @State private var selectedAggregatedFootprint: AggregatedFootprint?
+    @State private var interactiveMapReady = false
+    @State private var interactiveActivationTask: Task<Void, Never>?
 
     private var hasVisibleContent: Bool {
         !points.isEmpty ||
@@ -238,6 +340,9 @@ struct DFKMapView: View {
         }
         allCoords.append(contentsOf: validPhotoAnnotations.map(\.coordinate))
         allCoords.append(contentsOf: validHeatmapPoints.map(\.coordinate))
+        if let selectedTimeCoordinate, selectedTimeCoordinate.isRenderableMapCoordinate {
+            allCoords.append(selectedTimeCoordinate)
+        }
 
         if allCoords.isEmpty,
            showsUserLocation,
@@ -343,66 +448,88 @@ struct DFKMapView: View {
 
             ZStack {
                 Group {
-                    if isInteractive && isValidSize && rendersLiveMap {
-                        Map(position: $cameraPosition) {
-                            ForEach(userDefinedPlaces) { place in
-                                MapCircle(center: place.coordinate, radius: max(5, min(Double(place.radius), 10_000)))
-                                    .foregroundStyle(Color.orange.opacity(0.1))
-                                    .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                            }
+                    if isInteractive && isValidSize && rendersLiveMap && interactiveMapReady {
+                        if isMiniTimelineMode {
+                            StableInteractiveMapView(
+                                region: interactiveRegion,
+                                showsUserLocation: showsUserLocation,
+                                userDefinedPlaces: userDefinedPlaces,
+                                transportItems: transportItems,
+                                aggregatedFootprints: validAggregatedFootprints,
+                                photoAnnotations: validPhotoAnnotations,
+                                heatmapPoints: validHeatmapPoints,
+                                mainAnnotationCoordinate: validMainAnnotationCoordinate,
+                                selectedTimeCoordinate: selectedTimeCoordinate,
+                                allActivities: allActivities,
+                                onFootprintTap: handleFootprintTap(for:),
+                                onTransportTap: { transport in
+                                    onTimelineItemTap?(.transport(transport))
+                                },
+                                onPhotoTap: { asset in
+                                    onPhotoTap?(asset)
+                                }
+                            )
+                        } else {
+                            Map(position: $cameraPosition) {
+                                ForEach(userDefinedPlaces) { place in
+                                    MapCircle(center: place.coordinate, radius: max(5, min(Double(place.radius), 10_000)))
+                                        .foregroundStyle(Color.orange.opacity(0.1))
+                                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                                }
 
-                            transportMapContent()
+                                transportMapContent()
 
-                            ForEach(validAggregatedFootprints) { aggregated in
-                                Annotation("", coordinate: aggregated.coordinate) {
-                                    aggregatedAnnotationContent(for: aggregated)
-                                        .onTapGesture {
-                                            handleFootprintTap(for: aggregated)
-                                        }
+                                ForEach(validAggregatedFootprints) { aggregated in
+                                    Annotation("", coordinate: aggregated.coordinate) {
+                                        aggregatedAnnotationContent(for: aggregated)
+                                            .onTapGesture {
+                                                handleFootprintTap(for: aggregated)
+                                            }
+                                    }
+                                }
+
+                                ForEach(validPhotoAnnotations, id: \.asset.localIdentifier) { entry in
+                                    Annotation("", coordinate: entry.coordinate) {
+                                        photoAnnotationContent(for: entry.asset)
+                                            .zIndex(100)
+                                    }
+                                }
+
+                                ForEach(validHeatmapPoints) { point in
+                                    Annotation("", coordinate: point.coordinate) {
+                                        heatmapAnnotationContent(for: point)
+                                    }
+                                }
+
+                                if let coordinate = validMainAnnotationCoordinate {
+                                    Annotation(mainAnnotationTitle ?? "", coordinate: coordinate) {
+                                        Circle()
+                                            .fill(Color.dfkAccent)
+                                            .frame(width: isInteractive ? 18 : 14, height: isInteractive ? 18 : 14)
+                                            .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
+                                    }
+                                }
+                                
+                                if let coordinate = selectedTimeCoordinate, coordinate.isRenderableMapCoordinate {
+                                    Annotation("", coordinate: coordinate) {
+                                        Circle()
+                                            .fill(Color.red)
+                                            .frame(width: 14, height: 14)
+                                            .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
+                                            .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
+                                    }
+                                }
+
+                                if showsUserLocation {
+                                    UserAnnotation()
                                 }
                             }
-
-                            ForEach(validPhotoAnnotations, id: \.asset.localIdentifier) { entry in
-                                Annotation("", coordinate: entry.coordinate) {
-                                    photoAnnotationContent(for: entry.asset)
-                                        .zIndex(100)
-                                }
+                            .mapStyle(.standard(emphasis: .muted))
+                            .mapControls {
+                                MapUserLocationButton()
+                                MapCompass()
+                                MapScaleView()
                             }
-
-                            ForEach(validHeatmapPoints) { point in
-                                Annotation("", coordinate: point.coordinate) {
-                                    heatmapAnnotationContent(for: point)
-                                }
-                            }
-
-                            if let coordinate = validMainAnnotationCoordinate {
-                                Annotation(mainAnnotationTitle ?? "", coordinate: coordinate) {
-                                    Circle()
-                                        .fill(Color.dfkAccent)
-                                        .frame(width: isInteractive ? 18 : 14, height: isInteractive ? 18 : 14)
-                                        .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
-                                }
-                            }
-                            
-                            if let coordinate = selectedTimeCoordinate, coordinate.isRenderableMapCoordinate {
-                                Annotation("", coordinate: coordinate) {
-                                    Circle()
-                                        .fill(Color.red)
-                                        .frame(width: 14, height: 14)
-                                        .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
-                                        .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
-                                }
-                            }
-
-                            if showsUserLocation {
-                                UserAnnotation()
-                            }
-                        }
-                        .mapStyle(.standard(emphasis: .muted))
-                        .mapControls {
-                            MapUserLocationButton()
-                            MapCompass()
-                            MapScaleView()
                         }
                     } else {
                         snapshotContent(for: geometry.size)
@@ -415,11 +542,23 @@ struct DFKMapView: View {
                         .transition(.opacity)
                 }
             }
+            .onAppear {
+                guard isInteractive else { return }
+                interactiveActivationTask?.cancel()
+                interactiveMapReady = false
+                interactiveActivationTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 180_000_000)
+                    if Task.isCancelled { return }
+                    interactiveMapReady = true
+                }
+            }
             .task(id: snapshotCacheKey(for: geometry.size)) {
                 guard !isInteractive else { return }
                 loadSnapshot(for: geometry.size, forceWidgetRefresh: false)
             }
             .onDisappear {
+                interactiveActivationTask?.cancel()
+                interactiveMapReady = false
                 snapshotTask?.cancel()
                 isSnapshotLoading = false
             }
@@ -1203,6 +1342,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
     let photoAnnotations: [(asset: PHAsset, coordinate: CLLocationCoordinate2D)]
     let heatmapPoints: [DFKMapView.HeatmapPoint]
     let mainAnnotationCoordinate: CLLocationCoordinate2D?
+    let selectedTimeCoordinate: CLLocationCoordinate2D?
     let allActivities: [ActivityType]
     let onFootprintTap: (DFKMapView.AggregatedFootprint) -> Void
     let onTransportTap: (Transport) -> Void
@@ -1257,7 +1397,28 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             scaleView.bottomAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.bottomAnchor, constant: -16)
         ])
 
+        if let region {
+            mapView.region = region
+        }
+
         return mapView
+    }
+
+    static func dismantleUIView(_ mapView: MKMapView, coordinator: Coordinator) {
+        coordinator.overlayStyles.removeAll()
+        coordinator.footprintsByID.removeAll()
+        coordinator.transportsByID.removeAll()
+        coordinator.photosByID.removeAll()
+
+        mapView.delegate = nil
+
+        let overlays = mapView.overlays
+        let annotations = mapView.annotations.filter { !($0 is MKUserLocation) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak mapView] in
+            guard let mapView else { return }
+            mapView.removeOverlays(overlays)
+            mapView.removeAnnotations(annotations)
+        }
     }
 
     private static func makeCircularControlContainer(for control: UIView) -> UIView {
@@ -1388,6 +1549,14 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 image: Coordinator.mainMarkerImage()
             ))
         }
+
+        if let selectedTimeCoordinate, selectedTimeCoordinate.isRenderableMapCoordinate {
+            mapView.addAnnotation(MapImageAnnotation(
+                coordinate: selectedTimeCoordinate,
+                kind: .selectedTime,
+                image: Coordinator.selectedTimeImage()
+            ))
+        }
     }
 
     private struct LineSegment {
@@ -1504,7 +1673,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 if let asset = photosByID[id] {
                     parent.onPhotoTap(asset)
                 }
-            case .heatmap, .main:
+            case .heatmap, .main, .selectedTime:
                 break
             }
         }
@@ -1610,6 +1779,19 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             if minutes < 480 { return 1.25 }
             return 1.35
         }
+
+        static func selectedTimeImage() -> UIImage {
+            let size = CGSize(width: 14, height: 14)
+            let renderer = UIGraphicsImageRenderer(size: size)
+            return renderer.image { context in
+                let rect = CGRect(origin: .zero, size: size)
+                UIColor.systemRed.setFill()
+                context.cgContext.fillEllipse(in: rect)
+                UIColor.systemBackground.setStroke()
+                context.cgContext.setLineWidth(2)
+                context.cgContext.strokeEllipse(in: rect.insetBy(dx: 1, dy: 1))
+            }
+        }
     }
 }
 
@@ -1627,6 +1809,7 @@ private final class MapImageAnnotation: NSObject, MKAnnotation {
         case photo(String)
         case heatmap(String)
         case main
+        case selectedTime
     }
 
     let kind: Kind
