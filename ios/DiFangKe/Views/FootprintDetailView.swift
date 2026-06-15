@@ -469,11 +469,11 @@ extension FootprintModalView {
     }
 
     private var selectedActivityName: String {
-        footprint.getActivityType(from: allActivities)?.name ?? "未设置"
+        footprint.getActivityType(from: allActivities)?.name ?? "活动类型"
     }
 
     private var selectedActivityIcon: String {
-        footprint.getActivityType(from: allActivities)?.icon ?? "circle.slash"
+        footprint.getActivityType(from: allActivities)?.icon ?? "questionmark.circle.dashed"
     }
 
     private var selectedActivityColor: Color {

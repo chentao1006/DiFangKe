@@ -18,10 +18,11 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
           "image-name" : "dfk_logo.png",
-          "name" : "dfk_logo"
+          "name" : "dfk_logo",
+          "opacity" : 1
         }
       ],
       "shadow" : {
