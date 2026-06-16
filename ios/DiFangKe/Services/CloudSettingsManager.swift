@@ -187,7 +187,7 @@ class CloudSettingsManager: ObservableObject {
         return false
 #else
         let isICloudSyncEnabled = UserDefaults.standard.object(forKey: "isICloudSyncEnabled") as? Bool ?? true
-        return isICloudSyncEnabled && FileManager.default.ubiquityIdentityToken != nil
+        return isICloudSyncEnabled
 #endif
     }
 }

@@ -2049,58 +2049,63 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 同步今日地图显示区域给小组件
         self.updateSharedWidgetRegion()
         
-        // 2. 更新内存数据并处理足迹分析
-        self.updateTodayTotalPoints()
-        self.allTodayPoints.append(location)
+        let preferredID = RawLocationStore.shared.preferredRecordingDeviceID()
+        let isPrimary = preferredID.isEmpty || preferredID == RawLocationStore.shared.currentDeviceIdentifier
         
-        // 处理候选足迹逻辑
-        var unclassifiedQueue = self.trackingPoints.filter {
-            $0.timestamp > (self.lastProcessedTimestamp ?? .distantPast) &&
-            $0.timestamp < location.timestamp
-        }
-        if let candidate = self.footprintProcessor.processNewLocation(location, queue: &unclassifiedQueue) {
-            self.handleNewCandidateFootprint(candidate)
-        }
-        self.trackingPoints.append(location)
-        
-        // 3. 更新当前停留状态用于 UI 显示
-        if let startLoc = potentialStopStartLocation {
-            // 改进：增加地点粘性。如果当前位置依然匹配到与起始点相同的“重要地点”，则不应判定为离开并重置停留时间。
-            let startPlace = matchedPlaceFor(coordinate: startLoc.coordinate)
-            let currentPlace = matchedPlaceFor(coordinate: location.coordinate)
+        if isPrimary {
+            // 2. 更新内存数据并处理足迹分析
+            self.updateTodayTotalPoints()
+            self.allTodayPoints.append(location)
             
-            // 判定是否离开：
-            // A: 如果有匹配地点，且地点 ID 变了，判定为离开
-            // B: 如果没有匹配地点，且位移超过 150m，且精度尚可，判定为离开（放宽到 150m 减少因室内飘移导致的停留时刻重置）
-            let isSamePlace = (startPlace != nil && startPlace?.placeID == currentPlace?.placeID)
-            if hasConfirmedDeparture(from: startLoc, to: location, isSamePlace: isSamePlace, isMovingBySensor: isMovingBySensor) {
-                // 已经离开当前地点，设为空以表示正在移动中
-                potentialStopStartLocation = nil
-                clearOngoingPlaceOverride()
-                savePotentialStop()
-                ongoingTitle = nil
-                saveOngoingTitle()
+            // 处理候选足迹逻辑
+            var unclassifiedQueue = self.trackingPoints.filter {
+                $0.timestamp > (self.lastProcessedTimestamp ?? .distantPast) &&
+                $0.timestamp < location.timestamp
             }
-        } else {
-            // 目前没有记录停留起点（正在移动中）
-            // 只有当确定没有明显移动证据时（uiIsMoving = false），才将其设为新的停留起点
-            if !uiIsMoving {
-                potentialStopStartLocation = location
-                clearOngoingPlaceOverride()
-                savePotentialStop()
-                ongoingTitle = nil
-                saveOngoingTitle()
+            if let candidate = self.footprintProcessor.processNewLocation(location, queue: &unclassifiedQueue) {
+                self.handleNewCandidateFootprint(candidate)
             }
-        }
+            self.trackingPoints.append(location)
         
-        // 4. 触发正在持续停留的 AI 分析 (停留 10 分钟后触发第一次，之后每 60 分钟刷新)
-        if let start = potentialStopStartLocation?.timestamp {
-            let duration = Date().timeIntervalSince(start)
-            if duration >= 10 * 60 {
-                let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
-                if isAiEnabled && !isAnalyzingOngoing && (ongoingTitle == nil || (lastAIAnalysisTime != nil && Date().timeIntervalSince(lastAIAnalysisTime!) > 60 * 60)) {
-                    // 只在有坐标时分析
-                    analyzeOngoingStay(at: location)
+            // 3. 更新当前停留状态用于 UI 显示
+            if let startLoc = potentialStopStartLocation {
+                // 改进：增加地点粘性。如果当前位置依然匹配到与起始点相同的“重要地点”，则不应判定为离开并重置停留时间。
+                let startPlace = matchedPlaceFor(coordinate: startLoc.coordinate)
+                let currentPlace = matchedPlaceFor(coordinate: location.coordinate)
+                
+                // 判定是否离开：
+                // A: 如果有匹配地点，且地点 ID 变了，判定为离开
+                // B: 如果没有匹配地点，且位移超过 150m，且精度尚可，判定为离开（放宽到 150m 减少因室内飘移导致的停留时刻重置）
+                let isSamePlace = (startPlace != nil && startPlace?.placeID == currentPlace?.placeID)
+                if hasConfirmedDeparture(from: startLoc, to: location, isSamePlace: isSamePlace, isMovingBySensor: isMovingBySensor) {
+                    // 已经离开当前地点，设为空以表示正在移动中
+                    potentialStopStartLocation = nil
+                    clearOngoingPlaceOverride()
+                    savePotentialStop()
+                    ongoingTitle = nil
+                    saveOngoingTitle()
+                }
+            } else {
+                // 目前没有记录停留起点（正在移动中）
+                // 只有当确定没有明显移动证据时（uiIsMoving = false），才将其设为新的停留起点
+                if !uiIsMoving {
+                    potentialStopStartLocation = location
+                    clearOngoingPlaceOverride()
+                    savePotentialStop()
+                    ongoingTitle = nil
+                    saveOngoingTitle()
+                }
+            }
+            
+            // 4. 触发正在持续停留的 AI 分析 (停留 10 分钟后触发第一次，之后每 60 分钟刷新)
+            if let start = potentialStopStartLocation?.timestamp {
+                let duration = Date().timeIntervalSince(start)
+                if duration >= 10 * 60 {
+                    let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
+                    if isAiEnabled && !isAnalyzingOngoing && (ongoingTitle == nil || (lastAIAnalysisTime != nil && Date().timeIntervalSince(lastAIAnalysisTime!) > 60 * 60)) {
+                        // 只在有坐标时分析
+                        analyzeOngoingStay(at: location)
+                    }
                 }
             }
         }

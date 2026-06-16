@@ -8,6 +8,22 @@ import Aptabase
 // MARK: - FootprintModalView
 // Replaces old FootprintDetailView content to ensure scope visibility
 
+class ReasonState: ObservableObject {
+    @Published var text: String = ""
+}
+
+struct IsolatedReasonField: View {
+    @ObservedObject var reasonState: ReasonState
+    @FocusState.Binding var isFocused: Bool
+
+    var body: some View {
+        TextField("输入感悟...", text: $reasonState.text, axis: .vertical)
+            .font(.body)
+            .foregroundColor(Color.dfkMainText.opacity(0.85))
+            .focused($isFocused)
+    }
+}
+
 struct FootprintModalView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
@@ -25,6 +41,7 @@ struct FootprintModalView: View {
     @State private var showAI = false
     @FocusState private var addressFocused: Bool
     @FocusState private var reasonFocused: Bool
+    @StateObject private var reasonState = ReasonState()
     var autoFocus: Bool = false
     @State private var showingDeleteAlert = false
     @State private var showAddPhotoDialog = false
@@ -132,6 +149,7 @@ struct FootprintModalView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { 
                         // checkAndGenerateAIContent() // Removed AI generation for titles/remarks
+                        saveDraftReasonIfNeeded()
                         if !isDraft { try? modelContext.save() }
                         onDismiss?(hasChanged)
                         dismiss() 
@@ -155,6 +173,8 @@ struct FootprintModalView: View {
                 }
             }
             .onAppear {
+                reasonState.text = footprint.reason ?? ""
+                
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { withAnimation(.easeOut(duration: 0.25)) { showMap = true } }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { withAnimation(.easeOut(duration: 0.3)) { showAI = true } }
                 
@@ -272,6 +292,7 @@ struct FootprintModalView: View {
                 Text(aiErrorMessage)
             }
         .onDisappear {
+            saveDraftReasonIfNeeded()
             if hasChanged {
                 Aptabase.shared.trackEvent("footprint_edited")
                 footprint.status = .manual
@@ -286,6 +307,21 @@ struct FootprintModalView: View {
 }
 
 extension FootprintModalView {
+    private func saveDraftReasonIfNeeded() {
+        let text = reasonState.text
+        if text != (footprint.reason ?? "") {
+            ensureFootprintManaged()
+            footprint.reason = text
+            footprint.aiAnalyzed = true
+            footprint.status = .manual
+            if footprint.locationHash == "ONGOING_STAY" {
+                footprint.locationHash = "MANUAL_STAY"
+            }
+            hasChanged = true
+            if !isDraft { try? modelContext.save() }
+        }
+    }
+
     private func openPhotoPicker() {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
 
@@ -812,23 +848,7 @@ extension FootprintModalView {
             Text("足迹感悟与备注").font(.system(size: 13, weight: .semibold)).foregroundColor(.secondary).padding(.leading, 8)
             
             HStack(alignment: .top, spacing: 6) {
-                TextField("输入感悟...", text: Binding(
-                    get: { footprint.reason ?? "" },
-                    set: {
-                        ensureFootprintManaged()
-                        footprint.reason = $0
-                        footprint.aiAnalyzed = true
-                        footprint.status = .manual
-                        if footprint.locationHash == "ONGOING_STAY" {
-                            footprint.locationHash = "MANUAL_STAY"
-                        }
-                        hasChanged = true
-                        if !isDraft { try? modelContext.save() }
-                    }
-                ), axis: Axis.vertical)
-                .font(.body)
-                .foregroundColor(Color.dfkMainText.opacity(0.85))
-                .focused($reasonFocused)
+                IsolatedReasonField(reasonState: reasonState, isFocused: $reasonFocused)
                 
                 if !reasonFocused {
                     Image(systemName: "pencil")
@@ -846,6 +866,11 @@ extension FootprintModalView {
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(reasonFocused ? Color.dfkAccent.opacity(0.3) : Color.clear, lineWidth: 1)
             )
+            .onChange(of: reasonFocused) { _, focused in
+                if !focused {
+                    saveDraftReasonIfNeeded()
+                }
+            }
         }
     }
     

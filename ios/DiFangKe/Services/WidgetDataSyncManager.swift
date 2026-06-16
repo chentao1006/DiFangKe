@@ -92,10 +92,18 @@ final class WidgetDataSyncManager {
     private func ensureContainer() {
         if container == nil {
             let schema = Schema([Footprint.self, Place.self, TransportRecord.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self])
+            
+            let isMac: Bool = {
+                if ProcessInfo.processInfo.isiOSAppOnMac { return true }
+                if ProcessInfo.processInfo.isMacCatalystApp { return true }
+                return false
+            }()
+            let useGroupContainer = !groupID.isEmpty && !isMac
+            
             let config = ModelConfiguration(
                 "dfk_v5_stable", 
                 schema: schema, 
-                groupContainer: .identifier(groupID),
+                groupContainer: useGroupContainer ? .identifier(groupID) : .none,
                 cloudKitDatabase: .none // 核心修复：强制禁用小组件同步容器的 CloudKit，防止与主 App 冲突
             )
             do {
@@ -549,7 +557,13 @@ final class WidgetDataSyncManager {
 #if targetEnvironment(simulator)
         return .standard
 #else
-        return UserDefaults(suiteName: groupID) ?? .standard
+        let isMac: Bool = {
+            if ProcessInfo.processInfo.isiOSAppOnMac { return true }
+            if ProcessInfo.processInfo.isMacCatalystApp { return true }
+            return false
+        }()
+        let useGroupContainer = !groupID.isEmpty && !isMac
+        return useGroupContainer ? (UserDefaults(suiteName: groupID) ?? .standard) : .standard
 #endif
     }
 }
