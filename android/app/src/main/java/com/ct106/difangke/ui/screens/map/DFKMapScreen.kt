@@ -48,16 +48,21 @@ fun DFKMapScreen(
         topBar = {
             TopAppBar(
                 title = { 
-                    val isToday = remember(dateTimestamp) {
-                        if (dateTimestamp == null) true
+                    val titleText = remember(dateTimestamp) {
+                        if (dateTimestamp == null) "今日足迹"
                         else {
                             val cal1 = Calendar.getInstance()
                             val cal2 = Calendar.getInstance().apply { timeInMillis = dateTimestamp }
-                            cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) && 
-                            cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
+                            val isToday = cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) && 
+                                          cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
+                            if (isToday) "今日足迹"
+                            else {
+                                val sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+                                "${sdf.format(cal2.time)} 足迹"
+                            }
                         }
                     }
-                    Text(if (isToday) "今日足迹" else "历史足迹") 
+                    Text(titleText) 
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -97,13 +102,13 @@ fun DFKMapScreen(
             amap.uiSettings.isRotateGesturesEnabled = false
             amap.uiSettings.isTiltGesturesEnabled = false
             
-            // 策略选择：如果没有轨迹点，就开启高德自动定位找人；如果有轨迹，就手动聚焦到轨迹末端
+            // 策略选择：如果没有数据，就开启高德自动定位找人；如果有轨迹或足迹，就手动聚焦
             val myLocationStyle = MyLocationStyle()
-            if (pathPoints.isEmpty()) {
+            if (pathPoints.isEmpty() && footprintMarkers.isEmpty()) {
                 // 情况 A：今天还没出门，开启自动定位并将地图移动到当前位置
                 myLocationStyle.myLocationType(MyLocationStyle.LOCATION_TYPE_LOCATE)
             } else {
-                // 情况 B：已有轨迹，显示蓝点但不自动改变相机（由我们代码控制相机）
+                // 情况 B：已有轨迹或足迹，显示蓝点但不自动改变相机（由我们代码控制相机）
                 myLocationStyle.myLocationType(MyLocationStyle.LOCATION_TYPE_LOCATION_ROTATE_NO_CENTER)
             }
             amap.myLocationStyle = myLocationStyle
@@ -150,10 +155,15 @@ fun DFKMapScreen(
 
             amap.clear()
             amap.addImportantPlaceCircles(allPlaces)
+            amap.addFootprintMarkers(footprintMarkers)
+
+            val validLatLngs = mutableListOf<LatLng>()
+            footprintMarkers.forEach {
+                validLatLngs.add(LatLng(it.latitude, it.longitude))
+            }
             
             // 绘制轨迹
             if (pathPoints.isNotEmpty()) {
-                val validLatLngs = mutableListOf<LatLng>()
                 class SegmentInfo(val points: MutableList<MapPathPoint> = mutableListOf(), var connectToNextWithDash: Boolean = false)
                 val segments = mutableListOf<SegmentInfo>()
                 var currentSegment = SegmentInfo()
@@ -327,12 +337,11 @@ fun DFKMapScreen(
                         amap.addPolyline(dashedOptions)
                     }
                 }
+            }
 
-                amap.addFootprintMarkers(footprintMarkers)
-                
-                // 核心优化：自动调整缩放和范围，使轨迹完整显示
-                if (!hasCentredToNow) {
-                    if (validLatLngs.size > 1) {
+            // 核心优化：自动调整缩放和范围，使轨迹和足迹完整显示
+            if (!hasCentredToNow) {
+                if (validLatLngs.size > 1) {
                         val boundsBuilder = LatLngBounds.Builder()
                         validLatLngs.forEach { boundsBuilder.include(it) }
                         val bounds = boundsBuilder.build()
@@ -377,4 +386,3 @@ fun DFKMapScreen(
             }
         }
     }
-}
