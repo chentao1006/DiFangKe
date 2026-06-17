@@ -702,8 +702,20 @@ struct DFKMapView: View {
         let fontSize = isInteractive ? 6.5 * scale : 5.5 * scale
 
         return ZStack(alignment: .top) {
+            Ellipse()
+                .fill(Color.black.opacity(0.35))
+                .frame(width: size * 0.45, height: size * 0.15)
+                .blur(radius: 1.0 * scale)
+                .offset(y: size * 1.2 - (size * 0.15) / 2)
+
             MapPinTeardropShape()
-                .fill(activityColor)
+                .fill(
+                    LinearGradient(
+                        colors: [activityColor, activityColor.darker(by: 0.15)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
                 .frame(width: size, height: size * 1.2)
                 .overlay(
                     MapPinTeardropShape()
@@ -711,7 +723,17 @@ struct DFKMapView: View {
                 )
 
             Circle()
-                .fill(Color(uiColor: .systemBackground))
+                .fill(
+                    LinearGradient(
+                        gradient: Gradient(stops: [
+                            .init(color: Color(uiColor: .systemBackground), location: 0.0),
+                            .init(color: Color(uiColor: .systemBackground), location: 0.5),
+                            .init(color: Color(uiColor: .systemGray4), location: 1.0)
+                        ]),
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
                 .frame(width: size * 0.8, height: size * 0.8)
                 .offset(y: size * 0.1)
 

@@ -2626,9 +2626,13 @@ struct AssetThumbnailView: View {
             Color(uiColor: .systemGray6) // 用实色代替半透明
             
             if let img = image {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFill()
+                Color.clear
+                    .overlay(
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFill()
+                    )
+                    .clipped()
             } else if !isLoading {
                 Group {
                     if authStatus == .denied || authStatus == .restricted {
