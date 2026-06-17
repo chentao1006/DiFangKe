@@ -1052,17 +1052,22 @@ private struct FootprintTimeAdjustmentView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 18) {
-                FootprintTimeAdjustmentMapView(coordinates: selectedCoordinates)
-                    .frame(height: 300)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .overlay(alignment: .bottomLeading) {
-                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
-                            .font(.caption.bold())
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(Color.black.opacity(0.45)))
-                            .padding(12)
+                GeometryReader { proxy in
+                    if proxy.size.width > 1 && proxy.size.height > 1 {
+                        FootprintTimeAdjustmentMapView(coordinates: selectedCoordinates)
+                            .frame(minWidth: 1, minHeight: 1)
+                    }
+                }
+                .frame(height: 300)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(alignment: .bottomLeading) {
+                    Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
+                        .font(.caption.bold())
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.black.opacity(0.45)))
+                        .padding(12)
                     }
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -1400,18 +1405,23 @@ struct FootprintSplitView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
-                FootprintTimeAdjustmentMapView(
-                    coordinates: selectedCoordinates,
-                    leadingCoordinates: firstSegmentCoordinates,
-                    trailingCoordinates: secondSegmentCoordinates,
-                    markerCoordinate: splitCoordinate
-                )
-                    .frame(height: 300)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .overlay(alignment: .bottomLeading) {
-                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
-                            .font(.caption.bold())
-                            .foregroundColor(.white)
+                GeometryReader { proxy in
+                    if proxy.size.width > 1 && proxy.size.height > 1 {
+                        FootprintTimeAdjustmentMapView(
+                            coordinates: selectedCoordinates,
+                            leadingCoordinates: firstSegmentCoordinates,
+                            trailingCoordinates: secondSegmentCoordinates,
+                            markerCoordinate: splitCoordinate
+                        )
+                        .frame(minWidth: 1, minHeight: 1)
+                    }
+                }
+                .frame(height: 300)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(alignment: .bottomLeading) {
+                    Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
+                        .font(.caption.bold())
+                        .foregroundColor(.white)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             .background(Capsule().fill(Color.black.opacity(0.45)))
@@ -2076,10 +2086,9 @@ private struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> MKMapView {
-        let mapView = MKMapView(frame: .zero)
+        let mapView = SafeMKMapView(frame: .zero)
         mapView.delegate = context.coordinator
         mapView.mapType = .standard
-        mapView.preferredConfiguration = MKStandardMapConfiguration(elevationStyle: .flat)
         mapView.pointOfInterestFilter = .excludingAll
         mapView.showsCompass = false
         mapView.showsScale = false
@@ -2104,8 +2113,24 @@ private struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
+        guard let safeMap = mapView as? SafeMKMapView else { return }
         context.coordinator.parent = self
-        context.coordinator.updateMap(on: mapView)
+        
+        let updateBlock = { [weak coordinator = context.coordinator, weak safeMap] in
+            guard let safeMap, let coordinator else { return }
+            coordinator.updateMap(on: safeMap)
+        }
+        
+        safeMap.onLayoutSubviews = { [weak safeMap] in
+            guard let safeMap else { return }
+            if safeMap.bounds.width > 10 && safeMap.bounds.height > 10 {
+                updateBlock()
+            }
+        }
+        
+        if safeMap.bounds.width > 10 && safeMap.bounds.height > 10 {
+            updateBlock()
+        }
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
@@ -2554,10 +2579,11 @@ private struct MiniMapView: View {
     let title: String
     var radius: Double = 80
     @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var interactiveMapReady = false
     
     var body: some View {
         GeometryReader { geometry in
-            if geometry.size.width > 0 && geometry.size.height > 0 {
+            if geometry.size.width > 0 && geometry.size.height > 0 && interactiveMapReady {
                 Map(position: $cameraPosition) {
                     Marker("", coordinate: coordinate).tint(Color.orange)
                     MapCircle(center: coordinate, radius: radius)
@@ -2566,6 +2592,7 @@ private struct MiniMapView: View {
                 }
                 .mapStyle(.standard)
                 .disabled(true)
+                .frame(minWidth: 1, minHeight: 1)
             } else {
                 Color.clear
             }
@@ -2577,6 +2604,9 @@ private struct MiniMapView: View {
         .onAppear {
             let span = radius * 6
             cameraPosition = .region(MKCoordinateRegion(center: coordinate, latitudinalMeters: span, longitudinalMeters: span))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                interactiveMapReady = true
+            }
         }
     }
 }
@@ -2592,49 +2622,46 @@ struct AssetThumbnailView: View {
     @State private var creationDate: Date?
     
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                Color.secondary.opacity(0.08)
-                
-                if let img = image {
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: geo.size.width, height: geo.size.height)
-                } else if !isLoading {
-                    Group {
-                        if authStatus == .denied || authStatus == .restricted {
-                            Image(systemName: "lock.fill").font(.caption2)
-                        } else if authStatus == .notDetermined {
-                            Image(systemName: "photo.badge.plus").font(.caption2)
-                        } else if isMissing {
-                            Image(systemName: "photo").font(.caption2)
-                        } else {
-                            Image(systemName: "hand.raised.fill").font(.caption2)
-                        }
+        ZStack {
+            Color(uiColor: .systemGray6) // 用实色代替半透明
+            
+            if let img = image {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFill()
+            } else if !isLoading {
+                Group {
+                    if authStatus == .denied || authStatus == .restricted {
+                        Image(systemName: "lock.fill").font(.caption2)
+                    } else if authStatus == .notDetermined {
+                        Image(systemName: "photo.badge.plus").font(.caption2)
+                    } else if isMissing {
+                        Image(systemName: "photo").font(.caption2)
+                    } else {
+                        Image(systemName: "hand.raised.fill").font(.caption2)
                     }
-                    .foregroundColor(.secondary.opacity(0.5))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        handleStateTap()
-                    }
-                } else {
-                    ProgressView().scaleEffect(0.7)
                 }
+                .foregroundColor(Color(uiColor: .systemGray)) // 用实色代替半透明
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    handleStateTap()
+                }
+            } else {
+                Image(systemName: "photo").font(.caption2).foregroundColor(Color(uiColor: .systemGray))
             }
-            .clipped()
-            .overlay(alignment: .bottomLeading) {
-                if showsTime, let date = creationDate {
-                    Text(date, format: .dateTime.hour(.twoDigits(amPM: .abbreviated)).minute(.twoDigits))
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .background(Color.black.opacity(0.4))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                        .padding(4)
-                }
+        }
+        .clipped()
+        .overlay(alignment: .bottomLeading) {
+            if showsTime, let date = creationDate {
+                Text(date, format: .dateTime.hour(.twoDigits(amPM: .abbreviated)).minute(.twoDigits))
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(Color(uiColor: .darkGray)) // 用实色代替半透明
+                    .cornerRadius(4)
+                    .padding(4)
             }
         }
         .onAppear {

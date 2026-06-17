@@ -40,6 +40,8 @@
       </Testables>
    </TestAction>
    <LaunchAction
+      enableGPUValidationMode = "0"
+      enableGPUFrameCaptureMode = "0"
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = ""
       selectedLauncherIdentifier = "Xcode.IDEFoundation.Launcher.PosixSpawn"
@@ -49,6 +51,14 @@
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
       allowLocationSimulation = "YES">
+      <EnvironmentVariables>
+         <EnvironmentVariable
+            key = "MTL_DEBUG_LAYER"
+            value = "0"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+      </EnvironmentVariables>
+
       <BuildableProductRunnable
          runnableDebuggingMode = "0">
          <BuildableReference

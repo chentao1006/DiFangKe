@@ -11,6 +11,7 @@ import com.amap.api.maps.model.LatLng
 import com.amap.api.maps.model.MarkerOptions
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.AppConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.max
@@ -27,11 +28,22 @@ fun AMap.addFootprintMarkers(markers: List<FootprintMapMarker>) {
     markers
         .filter { it.latitude.isFinite() && it.longitude.isFinite() }
         .forEach { marker ->
+            val bitmap = createFootprintMarkerBitmap(marker)
+            
+            // Calculate anchor based on uniform size
+            val scale = 2.9f
+            val size = (34f * scale).toInt()
+            val bitmapHeight = (size * 1.4f).toInt() + 8
+            val radius = size / 2f
+            val pinTopCenterY = radius + 4f
+            val pinBottomY = pinTopCenterY + radius * 1.4f
+            val anchorV = pinBottomY / bitmapHeight.toFloat()
+            
             addMarker(
                 MarkerOptions()
                     .position(LatLng(marker.latitude, marker.longitude))
-                    .anchor(0.5f, 0.5f)
-                    .icon(BitmapDescriptorFactory.fromBitmap(createFootprintMarkerBitmap(marker)))
+                    .anchor(0.5f, anchorV)
+                    .icon(BitmapDescriptorFactory.fromBitmap(bitmap))
                     .zIndex(100f)
             )
         }
@@ -99,38 +111,129 @@ private fun FootprintEntity.firstCoordinateOrNull(): Pair<Double, Double>? {
     }.getOrNull()
 }
 
+private fun formatDurationMinimal(durationSeconds: Long): Pair<String, String> {
+    val totalMinutes = (durationSeconds / 60).toInt()
+    if (totalMinutes < 60) {
+        return Pair("${max(1, totalMinutes)}", "分钟")
+    }
+    val hours = totalMinutes / 60.0
+    if (hours >= 10.0) {
+        return Pair("${Math.round(hours)}", "小时")
+    }
+    val formatted = Math.round(hours * 10) / 10.0
+    val formattedStr = if (formatted % 1.0 == 0.0) "${formatted.toInt()}" else "$formatted"
+    return Pair(formattedStr, "小时")
+}
+
 private fun createFootprintMarkerBitmap(marker: FootprintMapMarker): Bitmap {
-    val baseScale = 1f + 0.45f * ((marker.durationSeconds / 3600.0).coerceIn(0.0, 8.0) / 8.0).toFloat()
-    val scale = baseScale * 2f // 放大一倍
+    val scale = 2.9f // 统一大小, 缩小一点
     val size = (34f * scale).toInt()
     val stroke = max(2f, 2.5f * scale)
-    val bitmap = Bitmap.createBitmap(size + 8, size + 8, Bitmap.Config.ARGB_8888)
+    val bitmap = Bitmap.createBitmap(size + 8, (size * 1.4f).toInt() + 8, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
     val center = bitmap.width / 2f
     val radius = size / 2f
+    val pinTopCenterY = radius + 4f
+
+    val cornerEffect = android.graphics.CornerPathEffect(size * 0.05f)
 
     val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = parseColor(marker.colorHex, Color.rgb(0, 160, 172))
         style = Paint.Style.FILL
+        pathEffect = cornerEffect
     }
     val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.STROKE
         strokeWidth = stroke
+        pathEffect = cornerEffect
     }
     val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
+        color = parseColor(marker.colorHex, Color.rgb(0, 160, 172)) // 活动色
         textAlign = Paint.Align.CENTER
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        textSize = 15f * scale
+        textSize = 14f * scale
     }
 
-    canvas.drawCircle(center, center, radius, fillPaint)
-    canvas.drawCircle(center, center, radius - stroke / 2f, strokePaint)
+    val path = android.graphics.Path()
+    val rectF = android.graphics.RectF(center - radius, pinTopCenterY - radius, center + radius, pinTopCenterY + radius)
+    path.arcTo(rectF, 125f, 290f)
+    path.lineTo(center, pinTopCenterY + radius * 1.4f)
+    path.close()
+
+    canvas.drawPath(path, fillPaint)
+    canvas.drawPath(path, strokePaint)
+    
+    // 圆形白色底
+    val whiteCirclePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(center, pinTopCenterY, radius * 0.8f, whiteCirclePaint)
 
     val glyph = mapGlyph(marker.icon)
-    val y = center - (iconPaint.descent() + iconPaint.ascent()) / 2f
+    val y = pinTopCenterY - (iconPaint.descent() + iconPaint.ascent()) / 2f
     canvas.drawText(glyph, center, y, iconPaint)
+
+    if (marker.durationSeconds >= AppConfig.STAY_DURATION_THRESHOLD.toLong()) {
+    val durationTuple = formatDurationMinimal(marker.durationSeconds)
+    val numberText = durationTuple.first
+    val unitText = durationTuple.second
+
+    // 加深颜色：HSV 降低亮度 0.3
+    val baseColor = parseColor(marker.colorHex, Color.rgb(0, 160, 172))
+    val darkerColor = run {
+        val hsv = FloatArray(3)
+        Color.colorToHSV(baseColor, hsv)
+        hsv[2] = maxOf(0f, hsv[2] - 0.30f)
+        Color.HSVToColor(hsv)
+    }
+
+    val numberPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = darkerColor
+        textAlign = Paint.Align.LEFT
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        textSize = 6f * scale
+    }
+    val unitPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = darkerColor
+        textAlign = Paint.Align.LEFT
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        textSize = 6f * scale * 0.75f
+    }
+    val numberWidth = numberPaint.measureText(numberText)
+    val unitWidth = unitPaint.measureText(unitText)
+    val textWidth = numberWidth + unitWidth
+    
+    val bannerWidth = textWidth + 4f * scale // 稍微增加一点内边距
+    val bannerHeight = 8f * scale
+    val bannerY = pinTopCenterY + radius - bannerHeight / 2f - 6f * scale
+    
+    val bannerRect = android.graphics.RectF(
+        center - bannerWidth / 2f,
+        bannerY,
+        center + bannerWidth / 2f,
+        bannerY + bannerHeight
+    )
+    val bannerBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(240, 255, 255, 255)
+        style = Paint.Style.FILL
+    }
+    canvas.drawRoundRect(bannerRect, 3f * scale, 3f * scale, bannerBgPaint)
+
+    val bannerStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = parseColor(marker.colorHex, Color.rgb(0, 160, 172))
+        style = Paint.Style.STROKE
+        strokeWidth = 0.5f * scale
+    }
+    canvas.drawRoundRect(bannerRect, 3f * scale, 3f * scale, bannerStrokePaint)
+    
+    val textY = bannerY + bannerHeight / 2f - (numberPaint.descent() + numberPaint.ascent()) / 2f
+    val startX = center - textWidth / 2f
+    canvas.drawText(numberText, startX, textY, numberPaint)
+    canvas.drawText(unitText, startX + numberWidth, textY, unitPaint)
+    } // end duration threshold check
+
     return bitmap
 }
 

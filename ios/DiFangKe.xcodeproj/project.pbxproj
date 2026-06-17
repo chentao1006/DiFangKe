@@ -26,6 +26,7 @@
 		B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */; };
 		BB95F1637D3ABD303156926C /* EditPlaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D7A089B6F99853042F8B6A1 /* EditPlaceSheet.swift */; };
 		C199604340369E777F064D7B /* Config.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8406ACF5012D1DB8F428AB9C /* Config.plist */; };
+		C641B0512FE2720C009DC763 /* SafeMKMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C641B0502FE2720C009DC763 /* SafeMKMapView.swift */; };
 		C64D3D9E2F80058600BB3C3F /* IgnoredPlacesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3D9D2F80058600BB3C3F /* IgnoredPlacesView.swift */; };
 		C64D3DA02F8111A800BB3C3F /* RawLogsManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3D9F2F8111A800BB3C3F /* RawLogsManagerView.swift */; };
 		C64D3DA22F81251E00BB3C3F /* AiSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3DA12F81251E00BB3C3F /* AiSettingsView.swift */; };
@@ -121,6 +122,7 @@
 		A54AB938AAFF2E0EF442F6AA /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TimelineEditView.swift; sourceTree = "<group>"; };
 		BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoService.swift; sourceTree = "<group>"; };
+		C641B0502FE2720C009DC763 /* SafeMKMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeMKMapView.swift; sourceTree = "<group>"; };
 		C64D3D9D2F80058600BB3C3F /* IgnoredPlacesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IgnoredPlacesView.swift; sourceTree = "<group>"; };
 		C64D3D9F2F8111A800BB3C3F /* RawLogsManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawLogsManagerView.swift; sourceTree = "<group>"; };
 		C64D3DA12F81251E00BB3C3F /* AiSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiSettingsView.swift; sourceTree = "<group>"; };
@@ -302,6 +304,7 @@
 		C68544322F84E84200C605E9 /* Components */ = {
 			isa = PBXGroup;
 			children = (
+				C641B0502FE2720C009DC763 /* SafeMKMapView.swift */,
 				C685444D2F877C2800C605E9 /* MiniCalendarView.swift */,
 				C685442E2F84E84200C605E9 /* FlowLayout.swift */,
 				C685442F2F84E84200C605E9 /* LocationSelectionComponents.swift */,
@@ -475,6 +478,7 @@
 				C68EFC122F8AA05900C1F901 /* AppConfig.swift in Sources */,
 				988AA12CFD19A21CA1592A1D /* SettingsView.swift in Sources */,
 				6C8D388180D8BFA81BBF320B /* RecycleBinView.swift in Sources */,
+				C641B0512FE2720C009DC763 /* SafeMKMapView.swift in Sources */,
 				C6D2DE3A2F90E39800466878 /* HealthManager.swift in Sources */,
 				D452A546B9150F52A9DA068F /* LocationAccuracyMode.swift in Sources */,
 				32BD3192C18CDD34C8B5EB24 /* TimelineEditView.swift in Sources */,
@@ -585,7 +589,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = DiFangKe/DiFangKe.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 5;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = DiFangKe/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
@@ -757,7 +761,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = DiFangKe/DiFangKe.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 5;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = DiFangKe/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "地方客";

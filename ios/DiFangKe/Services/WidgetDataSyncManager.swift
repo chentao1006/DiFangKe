@@ -8,7 +8,7 @@ import WidgetKit
 @MainActor
 final class WidgetDataSyncManager {
     static let shared = WidgetDataSyncManager()
-    static let snapshotFileVersion = "v4"
+    static let snapshotFileVersion = "v9"
 
     private struct AggregatedFootprintSnapshot {
         let coordinate: CLLocationCoordinate2D
@@ -93,17 +93,10 @@ final class WidgetDataSyncManager {
         if container == nil {
             let schema = Schema([Footprint.self, Place.self, TransportRecord.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self])
             
-            let isMac: Bool = {
-                if ProcessInfo.processInfo.isiOSAppOnMac { return true }
-                if ProcessInfo.processInfo.isMacCatalystApp { return true }
-                return false
-            }()
-            let useGroupContainer = !groupID.isEmpty && !isMac
-            
             let config = ModelConfiguration(
                 "dfk_v5_stable", 
                 schema: schema, 
-                groupContainer: useGroupContainer ? .identifier(groupID) : .none,
+                groupContainer: groupID.isEmpty ? .none : .identifier(groupID),
                 cloudKitDatabase: .none // 核心修复：强制禁用小组件同步容器的 CloudKit，防止与主 App 冲突
             )
             do {
@@ -454,25 +447,21 @@ final class WidgetDataSyncManager {
 
                                     if clCoords.count >= 2, let midCoord = clCoords.widgetMidpoint {
                                         let midPoint = snapshot.point(for: midCoord)
-                                        let iconSize: CGFloat = 20
-                                        let rect = CGRect(x: midPoint.x - iconSize/2, y: midPoint.y - iconSize/2, width: iconSize, height: iconSize)
-
-                                        let strokeColor = theme == .dark ? UIColor.black : UIColor.white
-
-                                        // 背景框
-                                        let path = UIBezierPath(roundedRect: rect, cornerRadius: 5)
-                                        themeColor.setFill()
+                                        let rect = CGRect(x: midPoint.x - 10, y: midPoint.y - 10, width: 20, height: 20)
+                                        let path = UIBezierPath(ovalIn: rect)
+                                        
+                                        let bgColor = theme == .dark ? UIColor.black : UIColor.white
+                                        bgColor.setFill()
                                         path.fill()
-                                        strokeColor.setStroke()
+                                        themeColor.setStroke()
                                         path.lineWidth = 1.2
                                         path.stroke()
 
-                                        // 图标
                                         let transportType = TransportType(rawValue: tr.manualTypeRaw ?? tr.typeRaw) ?? .slow
                                         if let iconImage = UIImage(systemName: transportType.sfSymbol) {
                                             let symbolSize: CGFloat = 12
                                             let symbolRect = CGRect(x: midPoint.x - symbolSize/2, y: midPoint.y - symbolSize/2, width: symbolSize, height: symbolSize)
-                                            iconImage.withTintColor(strokeColor).drawAspectFit(in: symbolRect)
+                                            iconImage.withTintColor(themeColor).drawAspectFit(in: symbolRect)
                                         }
                                     }
                                 }
@@ -483,41 +472,90 @@ final class WidgetDataSyncManager {
                                 let fp = aggregated.representative
                                 let point = snapshot.point(for: aggregated.coordinate)
                                 let hours = aggregated.totalDuration / 3600.0
-                                let dotScale: CGFloat = 1.0 + (1.5 - 1.0) * min(1.0, max(0.0, (hours - 0.5) / (12.0 - 0.5)))
-                                let size = 28 * dotScale // 尺寸调整，适应小尺寸
+                                let dotScale: CGFloat = 1.0 + (1.45 - 1.0) * min(1.0, max(0.0, (hours - 0.5) / (12.0 - 0.5)))
+                                let markerSize = 24 * dotScale
+                                let radius = markerSize / 2
+                                let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
+                                
+                                let activity = allActivities.first { $0.id.uuidString == fp.activityTypeValue || $0.name == fp.activityTypeValue }
+                                let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
                                 let strokeColor = theme == .dark ? UIColor.black : UIColor.white
+
+                                let pinPath = CGMutablePath()
+                                pinPath.addArc(center: center, radius: radius, startAngle: 125 * .pi / 180, endAngle: 55 * .pi / 180, clockwise: false)
+                                pinPath.addLine(to: CGPoint(x: center.x, y: center.y + radius * 1.4))
+                                pinPath.closeSubpath()
+
+                                ctx.cgContext.setFillColor(activityColor.cgColor)
+                                ctx.cgContext.addPath(pinPath)
+                                ctx.cgContext.fillPath()
+                                ctx.cgContext.setStrokeColor(strokeColor.cgColor)
+                                ctx.cgContext.setLineWidth(0.5 * dotScale)
+                                ctx.cgContext.setLineJoin(.round)
+                                ctx.cgContext.addPath(pinPath)
+                                ctx.cgContext.strokePath()
+
+                                let rect = CGRect(x: center.x - radius, y: center.y - radius, width: markerSize, height: markerSize)
+                                let innerCircleRect = rect.insetBy(dx: markerSize * 0.1, dy: markerSize * 0.1)
+                                let bgColor = theme == .dark ? UIColor.black : UIColor.white
+                                ctx.cgContext.setFillColor(bgColor.cgColor)
+                                ctx.cgContext.fillEllipse(in: innerCircleRect)
 
                                 if let latestPhotoAssetID = aggregated.latestPhotoAssetID,
                                    let photoImage = footprintPhotoImages[latestPhotoAssetID] {
-                                    let rect = CGRect(x: point.x - size/2, y: point.y - size/2, width: size, height: size)
-                                    let path = UIBezierPath(roundedRect: rect, cornerRadius: 8 * dotScale)
+                                    let clipPath = UIBezierPath(ovalIn: innerCircleRect)
                                     ctx.cgContext.saveGState()
-                                    path.addClip()
-                                    photoImage.drawAspectFill(in: rect)
+                                    clipPath.addClip()
+                                    photoImage.drawAspectFill(in: innerCircleRect)
                                     ctx.cgContext.restoreGState()
-
-                                    ctx.cgContext.setStrokeColor(UIColor.white.cgColor)
-                                    ctx.cgContext.setLineWidth(1.5)
-                                    ctx.cgContext.addPath(path.cgPath)
-                                    ctx.cgContext.strokePath()
                                 } else {
-                                    let activity = allActivities.first { $0.id.uuidString == fp.activityTypeValue || $0.name == fp.activityTypeValue }
-                                    let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
                                     let iconName = activity?.icon ?? FootprintIconDefaults.map
-
-                                    ctx.cgContext.setFillColor(activityColor.cgColor)
-                                    ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-                                    ctx.cgContext.fillPath()
-
-                                    ctx.cgContext.setStrokeColor(strokeColor.cgColor)
-                                    ctx.cgContext.setLineWidth(1.5)
-                                    ctx.cgContext.addArc(center: point, radius: size/2, startAngle: 0, endAngle: .pi * 2, clockwise: true)
-                                    ctx.cgContext.strokePath()
                                     if let iconImage = UIImage(systemName: iconName) {
-                                        let iconSize = (size * 0.55)
-                                        let iconRect = CGRect(x: point.x - iconSize/2, y: point.y - iconSize/2, width: iconSize, height: iconSize)
-                                        iconImage.withTintColor(strokeColor).drawAspectFit(in: iconRect)
+                                        let iconSize = markerSize * 0.68
+                                        let iconRect = CGRect(x: center.x - iconSize/2, y: center.y - iconSize/2, width: iconSize, height: iconSize)
+                                        iconImage.withTintColor(activityColor).drawAspectFit(in: iconRect)
                                     }
+                                }
+
+                                if aggregated.totalDuration >= AppConfig.shared.stayDurationThreshold {
+                                    let durationTuple = self.formatDuration(aggregated.totalDuration)
+                                    let numberFont = UIFont.systemFont(ofSize: 5.5 * dotScale, weight: .bold)
+                                    let unitFont = UIFont.systemFont(ofSize: 5.5 * dotScale * 0.75, weight: .bold)
+                                    
+                                    let darkerActivityColor: UIColor = {
+                                        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+                                        activityColor.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+                                        return UIColor(hue: h, saturation: min(s * 1.1, 1), brightness: max(b - 0.30, 0), alpha: a)
+                                    }()
+                                    
+                                    let attrStr = NSMutableAttributedString(
+                                        string: durationTuple.number,
+                                        attributes: [.font: numberFont, .foregroundColor: darkerActivityColor]
+                                    )
+                                    attrStr.append(NSAttributedString(
+                                        string: durationTuple.unit,
+                                        attributes: [.font: unitFont, .foregroundColor: darkerActivityColor]
+                                    ))
+                                    
+                                    let textSize = attrStr.size()
+                                    let bannerWidth = textSize.width + 4
+                                    let bannerHeight = textSize.height + 2
+                                    let bannerY = center.y + radius - bannerHeight / 2 - 6 * dotScale
+                                    let bannerRect = CGRect(x: center.x - bannerWidth / 2, y: bannerY, width: bannerWidth, height: bannerHeight)
+                                    let bannerPath = UIBezierPath(roundedRect: bannerRect, cornerRadius: 3)
+                                    
+                                    bgColor.setFill()
+                                    bannerPath.fill()
+                                    activityColor.setStroke()
+                                    bannerPath.lineWidth = 0.5 * dotScale
+                                    bannerPath.stroke()
+                                    
+                                    attrStr.draw(in: CGRect(
+                                        x: center.x - textSize.width / 2,
+                                        y: bannerY + (bannerHeight - textSize.height) / 2,
+                                        width: textSize.width,
+                                        height: textSize.height
+                                    ))
                                 }
                             }
                         }
@@ -553,17 +591,24 @@ final class WidgetDataSyncManager {
         return containerURL!.appendingPathComponent(fileName)
     }
 
+    private func formatDuration(_ duration: TimeInterval) -> (number: String, unit: String) {
+        let totalMinutes = Int(duration / 60)
+        if totalMinutes < 60 {
+            return ("\(max(1, totalMinutes))", "分钟")
+        }
+        let hours = Double(totalMinutes) / 60.0
+        if hours >= 10.0 {
+            return ("\(Int(round(hours)))", "小时")
+        }
+        let formatted = String(format: "%g", (hours * 10).rounded() / 10)
+        return (formatted, "小时")
+    }
+
     private func sharedDefaults() -> UserDefaults? {
 #if targetEnvironment(simulator)
         return .standard
 #else
-        let isMac: Bool = {
-            if ProcessInfo.processInfo.isiOSAppOnMac { return true }
-            if ProcessInfo.processInfo.isMacCatalystApp { return true }
-            return false
-        }()
-        let useGroupContainer = !groupID.isEmpty && !isMac
-        return useGroupContainer ? (UserDefaults(suiteName: groupID) ?? .standard) : .standard
+        return groupID.isEmpty ? .standard : (UserDefaults(suiteName: groupID) ?? .standard)
 #endif
     }
 }

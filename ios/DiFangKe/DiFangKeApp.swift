@@ -255,18 +255,11 @@ struct DiFangKeApp: App {
         let isFirstLaunch = !UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
         let shouldEnableCloudKit = shouldUseCloudServices
         
-        let isMac: Bool = {
-            if ProcessInfo.processInfo.isiOSAppOnMac { return true }
-            if ProcessInfo.processInfo.isMacCatalystApp { return true }
-            return false
-        }()
-        let useGroupContainer = !AppConfig.shared.appGroupID.isEmpty && !isMac
-        
         let modelConfiguration = ModelConfiguration(
             "dfk_v5_stable",
             schema: schema, 
             isStoredInMemoryOnly: false,
-            groupContainer: useGroupContainer ? .identifier(AppConfig.shared.appGroupID) : .none,
+            groupContainer: AppConfig.shared.appGroupID.isEmpty ? .none : .identifier(AppConfig.shared.appGroupID),
             cloudKitDatabase: shouldEnableCloudKit ? .automatic : .none
         )
         

@@ -264,6 +264,7 @@ struct TransportModalView: View {
     @State private var localEndOverride: String? = nil
     @State private var mapPhotos: [PHAsset] = []
     @State private var selectedPhotoAsset: IdentifiableString?
+    @State private var interactiveMapReady = false
     
     enum LocationType: Identifiable {
         case start, end
@@ -324,7 +325,7 @@ struct TransportModalView: View {
             ZStack(alignment: .top) {
                 // 1. Map View
                 GeometryReader { geometry in
-                    if geometry.size.width > 1 && geometry.size.height > 1 {
+                    if geometry.size.width > 1 && geometry.size.height > 1 && interactiveMapReady {
                         Map(position: $position) {
                             // Important Places Circles (isUserDefined)
                             ForEach(allPlaces.filter {
@@ -554,6 +555,10 @@ struct TransportModalView: View {
                 }
             }
             .onAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    interactiveMapReady = true
+                }
+                
                 // 默认范围不要变：显式设置 camera 为交通路径的范围，避免被 allPlaces 的 MapCircle 撑开
                 if let region = transport.points.boundingRegion() {
                     position = .region(region)

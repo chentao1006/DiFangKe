@@ -397,6 +397,47 @@ final class RawLocationStore {
         }
     }
 
+    /// 从源文件中批量删除多个点 (匹配时间戳)
+    func deleteLocations(at timestamps: Set<Double>, for date: Date) {
+        saveQueue.sync { [weak self] in
+            guard let self = self else { return }
+            
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            let prefix = formatter.string(from: date)
+            
+            guard let files = try? self.fileManager.contentsOfDirectory(at: self.baseDirectory, includingPropertiesForKeys: nil) else { return }
+            let targetFiles = files.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "csv" }
+            
+            for url in targetFiles {
+                guard let data = try? Data(contentsOf: url),
+                      let content = String(data: data, encoding: .utf8) else { continue }
+                
+                let lines = content.components(separatedBy: .newlines)
+                let originalCount = lines.count
+                let filteredLines = lines.filter { line in
+                    guard !line.isEmpty else { return false }
+                    let parts = line.split(separator: ",")
+                    if let ts = Double(parts[0]) {
+                        for targetTs in timestamps {
+                            if abs(ts - targetTs) < 0.0001 { return false }
+                        }
+                    }
+                    return true
+                }
+                
+                if filteredLines.count < originalCount - 1 {
+                    let newContent = filteredLines.joined(separator: "\n") + "\n"
+                    try? newContent.write(to: url, atomically: true, encoding: .utf8)
+                }
+            }
+            
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: NSNotification.Name("RawLocationDataDeleted"), object: nil, userInfo: ["date": date])
+            }
+        }
+    }
+
     /// 核心算法：识别并剔除轨迹中的突发性漂移点（Spike Filter）
     /// 几分钟内跨越数公里又回到附近，属于典型的坐标跳变 (支持连续多点跳转检测)
     static func filterRidiculousSpikes(_ points: [CLLocation]) -> [CLLocation] {

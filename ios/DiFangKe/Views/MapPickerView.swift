@@ -1,7 +1,32 @@
 import SwiftUI
 import MapKit
 
-struct MapPickerView: UIViewRepresentable {
+struct MapPickerView: View {
+    @Binding var selectedCoord: CLLocationCoordinate2D?
+    @Binding var radius: Float
+    @Binding var address: String
+    let centerTrigger: UUID
+    @Binding var shouldSnapToUser: Bool
+    let userCoord: CLLocationCoordinate2D?
+    var radiusTrigger: UUID = UUID()
+
+    var body: some View {
+        GeometryReader { proxy in
+            _MapPickerView(
+                selectedCoord: $selectedCoord,
+                radius: $radius,
+                address: $address,
+                centerTrigger: centerTrigger,
+                shouldSnapToUser: $shouldSnapToUser,
+                userCoord: userCoord,
+                radiusTrigger: radiusTrigger
+            )
+            .frame(minWidth: 1, minHeight: 1)
+        }
+    }
+}
+
+struct _MapPickerView: UIViewRepresentable {
     @Binding var selectedCoord: CLLocationCoordinate2D?
     @Binding var radius: Float
     @Binding var address: String
@@ -11,7 +36,7 @@ struct MapPickerView: UIViewRepresentable {
     var radiusTrigger: UUID = UUID()
 
     func makeUIView(context: Context) -> MKMapView {
-        let map = MKMapView()
+        let map = SafeMKMapView(frame: .zero)
         map.delegate = context.coordinator
         map.showsUserLocation = true
         map.isZoomEnabled = true
@@ -43,33 +68,57 @@ struct MapPickerView: UIViewRepresentable {
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
-        if shouldSnapToUser {
-            if let userLoc = mapView.userLocation.location {
-                mapView.setCenter(userLoc.coordinate, animated: true)
-                let region = MKCoordinateRegion(center: userLoc.coordinate, latitudinalMeters: 600, longitudinalMeters: 600)
-                mapView.setRegion(region, animated: true)
+        guard let safeMap = mapView as? SafeMKMapView else { return }
+        
+        // Capture properties needed for update
+        let currentSnap = shouldSnapToUser
+        let currentSelectedCoord = selectedCoord
+        let currentCenterTrigger = centerTrigger
+        let currentRadiusTrigger = radiusTrigger
+        let currentRadius = radius
+        
+        let updateBlock = { [weak coordinator = context.coordinator, weak safeMap] in
+            guard let safeMap, let coordinator else { return }
+            
+            if currentSnap {
+                if let userLoc = safeMap.userLocation.location {
+                    safeMap.setCenter(userLoc.coordinate, animated: true)
+                    let region = MKCoordinateRegion(center: userLoc.coordinate, latitudinalMeters: 600, longitudinalMeters: 600)
+                    safeMap.setRegion(region, animated: true)
+                }
+                DispatchQueue.main.async { self.shouldSnapToUser = false }
+            } else if let coord = currentSelectedCoord, coordinator.lastTrigger != currentCenterTrigger {
+                safeMap.setCenter(coord, animated: true)
+                coordinator.lastTrigger = currentCenterTrigger
             }
-            DispatchQueue.main.async { shouldSnapToUser = false }
-        } else if let coord = selectedCoord, context.coordinator.lastTrigger != centerTrigger {
-            mapView.setCenter(coord, animated: true)
-            context.coordinator.lastTrigger = centerTrigger
+            
+            if coordinator.lastRadiusTrigger != currentRadiusTrigger {
+                coordinator.lastRadiusTrigger = currentRadiusTrigger
+                coordinator.isUpdatingFromSlider = true
+                let center = currentSelectedCoord ?? safeMap.centerCoordinate
+                let screenCircleDiameter = 120.0
+                let mapWidth = Double(safeMap.bounds.width)
+                guard mapWidth > 0 else { return }
+                let spanMeters = Double(currentRadius) * 2.0 * (mapWidth / screenCircleDiameter)
+                let region = MKCoordinateRegion(center: center, latitudinalMeters: spanMeters, longitudinalMeters: spanMeters)
+                safeMap.setRegion(region, animated: false) // Change to false to stop drift
+                
+                // Immediately sync back to avoid next frame update calculation drift
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    coordinator.isUpdatingFromSlider = false
+                }
+            }
         }
         
-        if context.coordinator.lastRadiusTrigger != radiusTrigger {
-            context.coordinator.lastRadiusTrigger = radiusTrigger
-            context.coordinator.isUpdatingFromSlider = true
-            let center = selectedCoord ?? mapView.centerCoordinate
-            let screenCircleDiameter = 120.0
-            let mapWidth = Double(mapView.bounds.width)
-            guard mapWidth > 0 else { return }
-            let spanMeters = Double(radius) * 2.0 * (mapWidth / screenCircleDiameter)
-            let region = MKCoordinateRegion(center: center, latitudinalMeters: spanMeters, longitudinalMeters: spanMeters)
-            mapView.setRegion(region, animated: false) // Change to false to stop drift
-            
-            // Immediately sync back to avoid next frame update calculation drift
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                context.coordinator.isUpdatingFromSlider = false
+        safeMap.onLayoutSubviews = { [weak safeMap] in
+            guard let safeMap else { return }
+            if safeMap.bounds.width > 10 && safeMap.bounds.height > 10 {
+                updateBlock()
             }
+        }
+        
+        if safeMap.bounds.width > 10 && safeMap.bounds.height > 10 {
+            updateBlock()
         }
     }
 
