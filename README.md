@@ -49,11 +49,14 @@
 
 ## 下载安装
 
-**iOS**：在 App Store 搜索“地方客”或点击[这里](https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162)下载。
+[![Download on the App Store](./assets/app_store.png)](https://apps.apple.com/cn/app/%E5%9C%B0%E6%96%B9%E5%AE%A2/id6761982162)
+[![Get it on Google Play](./assets/en-play-badge.png)](https://play.google.com/store/apps/details?id=com.ct106.difangke)
 
-   <img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/zh-cn?size=250x83&releaseDate=1276560000&h=7914488fd5b3e64803716a5035e4e790" alt="Download on the App Store" style="height: 48px; margin-right: 18px; vertical-align: middle;">
+或者直接下载 [APK](https://difang.app/download/difangke.apk?v=27)。
 
-   <img src="./assets/qrcode.png" alt="地方客下载二维码" width="120" style="vertical-align: middle; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); background: #fff; padding: 4px;">
+扫码访问官网：
+
+![地方客官网](./assets/qrcode.png)
 
 ## 隐私与支持
 
