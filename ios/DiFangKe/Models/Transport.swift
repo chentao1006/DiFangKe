@@ -374,16 +374,23 @@ extension Transport {
                 let len0 = sqrt(dLat0*dLat0 + dLon0*dLon0)
                 let len3 = sqrt(dLat3*dLat3 + dLon3*dLon3)
                 
-                let scale0 = len0 > 0 ? (dist * 0.35) / len0 : 0
-                let scale3 = len3 > 0 ? (dist * 0.35) / len3 : 0
+                // 限制最大控制点距离，避免长距离虚线弯曲或打结太夸张 (0.005 约等于 500 米，大于 2 公里时限制弯曲)
+                let maxTangent = 0.005
+                let tLen0 = Swift.min(dist * 0.35, maxTangent)
+                let tLen3 = Swift.min(dist * 0.35, maxTangent)
+                let tLenFallback = Swift.min(dist * 0.3, maxTangent)
+                
+                let scale0 = len0 > 0 ? tLen0 / len0 : 0
+                let scale3 = len3 > 0 ? tLen3 / len3 : 0
+                let fallbackScale = dist > 0 ? tLenFallback / dist : 0
                 
                 let c1 = CLLocationCoordinate2D(
-                    latitude: p0.latitude + (len0 > 0 ? dLat0 * scale0 : distLat * 0.3),
-                    longitude: p0.longitude + (len0 > 0 ? dLon0 * scale0 : distLon * 0.3)
+                    latitude: p0.latitude + (len0 > 0 ? dLat0 * scale0 : distLat * fallbackScale),
+                    longitude: p0.longitude + (len0 > 0 ? dLon0 * scale0 : distLon * fallbackScale)
                 )
                 let c2 = CLLocationCoordinate2D(
-                    latitude: p3.latitude - (len3 > 0 ? dLat3 * scale3 : distLat * 0.3),
-                    longitude: p3.longitude - (len3 > 0 ? dLon3 * scale3 : distLon * 0.3)
+                    latitude: p3.latitude - (len3 > 0 ? dLat3 * scale3 : distLat * fallbackScale),
+                    longitude: p3.longitude - (len3 > 0 ? dLon3 * scale3 : distLon * fallbackScale)
                 )
                 
                 var bezierPoints: [CLLocationCoordinate2D] = []

@@ -45,7 +45,7 @@ final class ActivityType: Identifiable {
     }
     
     // Suggestion logic for inferring activities
-    static func getSuggestedActivities(for footprint: Footprint, allActivities: [ActivityTypeLite], allPlaces: [PlaceLite], history: [FootprintLite] = []) -> [ActivityTypeLite] {
+    static func getSuggestedActivities(for footprint: Footprint, allActivities: [ActivityTypeLite], allPlaces: [PlaceLite], history: [FootprintLite] = [], includeFallback: Bool = true) -> [ActivityTypeLite] {
         var suggested: [ActivityTypeLite] = []
         
         // 1. Confident Matches (These can be used for auto-assignment)
@@ -112,7 +112,7 @@ final class ActivityType: Identifiable {
         }
 
         // Stable Fallback for remaining slots
-        if suggested.count < 5 {
+        if includeFallback && suggested.count < 5 {
             let existingIds = Set(suggested.map { $0.id })
             let others = allActivities.filter { !existingIds.contains($0.id) }.sorted { $0.sortOrder < $1.sortOrder }
             for a in others where suggested.count < 5 {
@@ -120,7 +120,7 @@ final class ActivityType: Identifiable {
             }
         }
         
-        return Array(suggested.prefix(5))
+        return includeFallback ? Array(suggested.prefix(5)) : suggested
     }
     
     /// Only returns a match if it is highly certain (e.g. History or User-defined Place)

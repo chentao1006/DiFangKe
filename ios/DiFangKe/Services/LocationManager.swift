@@ -2030,20 +2030,20 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 let motion = HealthManager.shared.currentMotionType
                 let isMovingBySensor = motion == .walking || motion == .running || motion == .cycling || motion == .automotive
                 
-                // 高速驾驶优先走车载导航模式，但仍保留距离过滤，避免无限采样
+                // 高速驾驶也使用 fitness 模式，避免 automotiveNavigation 导致后台被系统强制降频或挂起
                 if motion == .automotive || speed > 15.0 {
-                    if manager.desiredAccuracy != kCLLocationAccuracyBest || manager.distanceFilter != 10.0 || manager.activityType != .automotiveNavigation {
+                    if manager.desiredAccuracy != kCLLocationAccuracyBest || manager.distanceFilter != 10.0 || manager.activityType != .fitness {
                         manager.desiredAccuracy = kCLLocationAccuracyBest
                         manager.distanceFilter = 10.0
-                        manager.activityType = .automotiveNavigation
+                        manager.activityType = .fitness
                     }
                 // 只要传感器认为在动，或者速度 > 0.5m/s
                 } else if isMovingBySensor || speed > 0.5 {
                     let targetAccuracy = kCLLocationAccuracyBest
-                    if manager.desiredAccuracy != targetAccuracy || manager.distanceFilter != kCLDistanceFilterNone || manager.activityType != .other {
+                    if manager.desiredAccuracy != targetAccuracy || manager.distanceFilter != kCLDistanceFilterNone || manager.activityType != .fitness {
                         manager.desiredAccuracy = targetAccuracy
                         manager.distanceFilter = kCLDistanceFilterNone
-                        manager.activityType = .other
+                        manager.activityType = .fitness
                     }
                 }
                 updateRegionMonitoring(isStationary: false)
@@ -2384,7 +2384,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         case .high:
             locationManager.desiredAccuracy = kCLLocationAccuracyBest
             locationManager.distanceFilter = kCLDistanceFilterNone
-            locationManager.activityType = .other
+            locationManager.activityType = .fitness
         case .balanced:
             locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
             locationManager.distanceFilter = 10.0

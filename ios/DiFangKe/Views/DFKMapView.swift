@@ -652,7 +652,7 @@ struct DFKMapView: View {
                     Text("暂无地图数据")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                } else if isSnapshotLoading {
+                } else if isSnapshotLoading || (isInteractive && !interactiveMapReady) {
                     ProgressView()
                         .controlSize(.small)
                         .tint(.secondary)
@@ -667,9 +667,9 @@ struct DFKMapView: View {
                         .font(.caption2)
                     }
                 } else {
-                    Text("地图暂不可用")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.secondary)
                 }
             }
         }
@@ -836,7 +836,8 @@ struct DFKMapView: View {
                     )
             }
 
-            if let coord = transport.points.distanceMidpoint {
+            let smoothedPoints = transport.lineSegments.flatMap { $0.coordinates }.filter(\.isRenderableMapCoordinate)
+            if let coord = smoothedPoints.distanceMidpoint {
                 Annotation("", coordinate: coord) {
                     transportAnnotationContent(for: transport)
                 }
@@ -1110,7 +1111,8 @@ struct DFKMapView: View {
             for item in timelineItems {
                 guard case .transport(let transport) = item, transport.points.count >= 2 else { continue }
 
-                if let midCoord = transport.points.distanceMidpoint {
+                let smoothedPoints = transport.lineSegments.flatMap { $0.coordinates }.filter(\.isRenderableMapCoordinate)
+                if let midCoord = smoothedPoints.distanceMidpoint {
                     let midPoint = snapshot.point(for: midCoord)
                     let rect = CGRect(x: midPoint.x - 10, y: midPoint.y - 10, width: 20, height: 20)
                     let path = UIBezierPath(ovalIn: rect)
@@ -1610,7 +1612,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         }
 
         for transport in transportItems {
-            let segments = Self.transportLineSegments(for: transport)
+            let segments = transport.lineSegments
             guard !segments.isEmpty else { continue }
 
             for segment in segments {
@@ -1633,8 +1635,8 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 mapView.addOverlay(line)
             }
 
-            let validPoints = transport.points.filter(\.isRenderableMapCoordinate)
-            if let midpoint = validPoints.distanceMidpoint {
+            let smoothedPoints = transport.lineSegments.flatMap { $0.coordinates }.filter(\.isRenderableMapCoordinate)
+            if let midpoint = smoothedPoints.distanceMidpoint {
                 mapView.addAnnotation(MapImageAnnotation(
                     coordinate: midpoint,
                     kind: .transport(transport.id.uuidString),
@@ -1689,29 +1691,6 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         }
     }
 
-    private struct LineSegment {
-        let coordinates: [CLLocationCoordinate2D]
-        let isDashed: Bool
-    }
-
-    private static func transportLineSegments(for transport: Transport) -> [LineSegment] {
-        let validPoints = transport.pathPoints.filter { $0.coordinate.isRenderableMapCoordinate }
-        guard validPoints.count >= 2 else { return [] }
-
-        return (0..<(validPoints.count - 1)).map { index in
-            let current = validPoints[index]
-            let next = validPoints[index + 1]
-            let isDashed: Bool
-            if current.isSyntheticPadding || next.isSyntheticPadding {
-                isDashed = true
-            } else if let currentTime = current.timestamp, let nextTime = next.timestamp {
-                isDashed = abs(nextTime.timeIntervalSince(currentTime)) > 5 * 60
-            } else {
-                isDashed = false
-            }
-            return LineSegment(coordinates: [current.coordinate, next.coordinate], isDashed: isDashed)
-        }
-    }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         static let annotationReuseIdentifier = "StableInteractiveMapAnnotation"

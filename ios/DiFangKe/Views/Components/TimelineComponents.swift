@@ -795,6 +795,16 @@ struct FootprintCardView: View {
         })
     }
     
+    private func getSuggestedActivities(includeFallback: Bool = true) -> [ActivityType] {
+        let liteActivities = allActivities.map { $0.convertToLite() }
+        let litePlaces = allPlaces.map { $0.convertToLite() }
+        let suggestions = ActivityType.getSuggestedActivities(for: footprint, allActivities: liteActivities, allPlaces: litePlaces, includeFallback: includeFallback)
+        
+        return suggestions.compactMap { lite in
+            allActivities.first { $0.id == lite.id }
+        }
+    }
+    
     private var timeRangeString: String {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
@@ -861,12 +871,27 @@ struct FootprintCardView: View {
                 } label: {
                     Label("无", systemImage: "circle.slash")
                 }
-
-                ForEach(allActivities) { type in
-                    Button {
-                        applyActivityType(type)
-                    } label: {
-                        Label(type.name, systemImage: type.icon)
+                
+                let genuineSuggestions = getSuggestedActivities(includeFallback: false)
+                if !genuineSuggestions.isEmpty {
+                    Section("推荐活动") {
+                        ForEach(genuineSuggestions) { type in
+                            Button {
+                                applyActivityType(type)
+                            } label: {
+                                Label(type.name, systemImage: type.icon)
+                            }
+                        }
+                    }
+                }
+                
+                Section("所有活动") {
+                    ForEach(allActivities) { type in
+                        Button {
+                            applyActivityType(type)
+                        } label: {
+                            Label(type.name, systemImage: type.icon)
+                        }
                     }
                 }
             } label: {

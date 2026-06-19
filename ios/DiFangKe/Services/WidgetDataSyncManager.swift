@@ -8,7 +8,7 @@ import WidgetKit
 @MainActor
 final class WidgetDataSyncManager {
     static let shared = WidgetDataSyncManager()
-    static let snapshotFileVersion = "v9"
+    static let snapshotFileVersion = "v10"
 
     private struct AggregatedFootprintSnapshot {
         let coordinate: CLLocationCoordinate2D
@@ -481,9 +481,27 @@ final class WidgetDataSyncManager {
                                 let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
                                 let strokeColor = theme == .dark ? UIColor.black : UIColor.white
 
+                                let tailY = center.y + radius * 1.22
+                                let arcEnd = CGPoint(
+                                    x: center.x + cos(55 * .pi / 180) * radius,
+                                    y: center.y + sin(55 * .pi / 180) * radius
+                                )
+                                let arcStart = CGPoint(
+                                    x: center.x + cos(125 * .pi / 180) * radius,
+                                    y: center.y + sin(125 * .pi / 180) * radius
+                                )
                                 let pinPath = CGMutablePath()
                                 pinPath.addArc(center: center, radius: radius, startAngle: 125 * .pi / 180, endAngle: 55 * .pi / 180, clockwise: false)
-                                pinPath.addLine(to: CGPoint(x: center.x, y: center.y + radius * 1.4))
+                                pinPath.addCurve(
+                                    to: CGPoint(x: center.x, y: tailY),
+                                    control1: CGPoint(x: arcEnd.x + radius * 0.18, y: arcEnd.y + radius * 0.22),
+                                    control2: CGPoint(x: center.x + radius * 0.18, y: tailY - radius * 0.02)
+                                )
+                                pinPath.addCurve(
+                                    to: arcStart,
+                                    control1: CGPoint(x: center.x - radius * 0.18, y: tailY - radius * 0.02),
+                                    control2: CGPoint(x: arcStart.x - radius * 0.18, y: arcStart.y + radius * 0.22)
+                                )
                                 pinPath.closeSubpath()
 
                                 ctx.cgContext.setFillColor(activityColor.cgColor)

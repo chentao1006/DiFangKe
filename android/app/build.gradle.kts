@@ -102,6 +102,8 @@ android {
 
     sourceSets {
         getByName("main") {
+            // Native AMap binaries are loaded from app/libs. Keep a single source of truth
+            // so stale duplicates under src/main/jniLibs do not get repackaged by mistake.
             jniLibs.setSrcDirs(listOf("libs"))
         }
     }
