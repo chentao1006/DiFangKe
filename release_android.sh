@@ -5,8 +5,10 @@ ROOT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 GRADLE_FILE="$ROOT_DIR/android/app/build.gradle.kts"
 APK_SOURCE="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
+AAB_SOURCE="$ROOT_DIR/android/app/build/outputs/bundle/release/app-release.aab"
 DEPLOY_DIR="$ROOT_DIR/download"
 APK_DEST="$DEPLOY_DIR/difangke.apk"
+AAB_DEST="$DEPLOY_DIR/difangke.aab"
 JSON_DEST="$DEPLOY_DIR/update_android.json"
 
 # --- 参数解析 ---
@@ -37,12 +39,12 @@ if [ "$ONLY_RELEASE" = false ]; then
     echo "----------------------------------------"
     echo ""
 
-    echo "🏗️  开始打包 APK (assembleRelease)..."
+    echo "🏗️  开始打包 APK + AAB (assembleRelease bundleRelease)..."
 
     # 1. 运行打包命令 (确保 gradlew 有执行权限)
     cd "$ROOT_DIR/android"
     chmod +x gradlew
-    ./gradlew clean assembleRelease --no-configuration-cache
+    ./gradlew clean assembleRelease bundleRelease --no-configuration-cache
     if [ $? -ne 0 ]; then
         echo "❌ 错误: 打包失败，请检查上面的编译报错。"
         exit 1
@@ -62,6 +64,16 @@ if [ ! -f "$APK_SOURCE" ]; then
     if [ ! -f "$APK_SOURCE" ]; then
         echo "❌ 错误: 找不到签名的 APK 文件 (app-release.apk)。"
         echo "💡 提示: 请确保 build.gradle.kts 中配置了正确的 signingConfigs 且密码正确。"
+        exit 1
+    fi
+fi
+
+if [ ! -f "$AAB_SOURCE" ]; then
+    AAB_SOURCE="$ROOT_DIR/android/app/build/outputs/bundle/release/app-release.aab"
+
+    if [ ! -f "$AAB_SOURCE" ]; then
+        echo "❌ 错误: 找不到上架用的 AAB 文件 (app-release.aab)。"
+        echo "💡 提示: 请确保 bundleRelease 执行成功且 release signingConfigs 配置正确。"
         exit 1
     fi
 fi
@@ -105,6 +117,9 @@ fi
 
 cp "$APK_SOURCE" "$APK_DEST"
 echo "✅ 已复制 APK 至: $APK_DEST"
+
+cp "$AAB_SOURCE" "$AAB_DEST"
+echo "✅ 已复制上架 AAB 至: $AAB_DEST"
 
 # 5. 更新 JSON
 cat <<EOF > "$JSON_DEST"
