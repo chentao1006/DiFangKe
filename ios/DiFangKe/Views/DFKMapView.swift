@@ -809,6 +809,8 @@ struct DFKMapView: View {
     private func transportMapContent() -> some MapContent {
         let backgroundLineWidth: CGFloat = (isInteractive ? 5 : 3) + 2.5
         let foregroundLineWidth: CGFloat = isInteractive ? 5 : 3
+        let dashedOpacity: Double = 0.4
+        let dashedLineWidth: CGFloat = isInteractive ? 1.4 : 0.8
 
         ForEach(transportItems) { transport in
             ForEach(transport.lineSegments) { segment in
@@ -826,9 +828,9 @@ struct DFKMapView: View {
 
                 MapPolyline(coordinates: segment.coordinates)
                     .stroke(
-                        Color.dfkAccent.opacity(0.7),
+                        Color.dfkAccent.opacity(segment.isDashed ? dashedOpacity : 0.7),
                         style: StrokeStyle(
-                            lineWidth: segment.isDashed ? (isInteractive ? 2 : 1.2) : foregroundLineWidth,
+                            lineWidth: segment.isDashed ? dashedLineWidth : foregroundLineWidth,
                             lineCap: .round,
                             lineJoin: .round,
                             dash: segment.isDashed ? [5, 5] : []
@@ -1099,8 +1101,10 @@ struct DFKMapView: View {
                     for i in 1..<projected.count {
                         ctx.cgContext.addLine(to: projected[i])
                     }
-                    ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(0.65).cgColor)
-                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.5 : 4)
+                    ctx.cgContext.setStrokeColor(
+                        themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
+                    )
+                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.0 : 4)
                     ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
                     ctx.cgContext.strokePath()
                 }
@@ -1616,20 +1620,22 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             guard !segments.isEmpty else { continue }
 
             for segment in segments {
-                let border = MKPolyline(coordinates: segment.coordinates, count: segment.coordinates.count)
-                context.coordinator.overlayStyles[ObjectIdentifier(border)] = OverlayStyle(
-                    strokeColor: UIColor.systemBackground,
-                    fillColor: nil,
-                    lineWidth: 7.5,
-                    dashPattern: segment.isDashed ? [8 as NSNumber, 8 as NSNumber] : nil
-                )
-                mapView.addOverlay(border)
+                if !segment.isDashed {
+                    let border = MKPolyline(coordinates: segment.coordinates, count: segment.coordinates.count)
+                    context.coordinator.overlayStyles[ObjectIdentifier(border)] = OverlayStyle(
+                        strokeColor: UIColor.systemBackground,
+                        fillColor: nil,
+                        lineWidth: 7.5,
+                        dashPattern: nil
+                    )
+                    mapView.addOverlay(border)
+                }
 
                 let line = MKPolyline(coordinates: segment.coordinates, count: segment.coordinates.count)
                 context.coordinator.overlayStyles[ObjectIdentifier(line)] = OverlayStyle(
-                    strokeColor: UIColor(Color.dfkAccent),
+                    strokeColor: UIColor(Color.dfkAccent).withAlphaComponent(segment.isDashed ? 0.4 : 1.0),
                     fillColor: nil,
-                    lineWidth: 5,
+                    lineWidth: segment.isDashed ? 2.8 : 5,
                     dashPattern: segment.isDashed ? [8 as NSNumber, 8 as NSNumber] : nil
                 )
                 mapView.addOverlay(line)

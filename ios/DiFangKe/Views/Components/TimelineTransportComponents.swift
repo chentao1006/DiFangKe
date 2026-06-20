@@ -394,9 +394,9 @@ struct TransportModalView: View {
 
                                 MapPolyline(coordinates: segment.coordinates)
                                     .stroke(
-                                        Color.dfkAccent.opacity(0.7),
+                                        Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.7),
                                         style: StrokeStyle(
-                                            lineWidth: segment.isDashed ? 2 : 5,
+                                            lineWidth: segment.isDashed ? 1.4 : 5,
                                             lineCap: .round,
                                             lineJoin: .round,
                                             dash: segment.isDashed ? [5, 5] : []
