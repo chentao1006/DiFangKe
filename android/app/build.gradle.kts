@@ -1,3 +1,11 @@
+import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputDirectory
+import org.gradle.api.tasks.TaskAction
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -7,9 +15,88 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val requiredNdkVersion = "27.1.12297006"
+val requiredNativePageAlignment = 16 * 1024
+
+abstract class VerifyNativePageSizeTask : DefaultTask() {
+    @get:InputDirectory
+    abstract val nativeLibDir: DirectoryProperty
+
+    @get:Input
+    abstract val sdkDir: Property<String>
+
+    @get:Input
+    abstract val ndkVersion: Property<String>
+
+    @get:Input
+    abstract val requiredAlignment: Property<Int>
+
+    @TaskAction
+    fun verify() {
+        val readelf = findReadelf()
+        val nativeLibs = nativeLibDir.get().asFile
+            .listFiles { file -> file.isFile && file.extension == "so" }
+            ?.sortedBy { nativeLib -> nativeLib.name }
+            ?: emptyList()
+
+        val incompatibleLibs = nativeLibs.mapNotNull { nativeLib ->
+            val process = ProcessBuilder(readelf.absolutePath, "-lW", nativeLib.absolutePath)
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().use { reader -> reader.readText() }
+            val exitCode = process.waitFor()
+            if (exitCode != 0) {
+                throw GradleException("llvm-readelf failed for ${nativeLib.name}:\n$output")
+            }
+
+            val loadAlignments = output
+                .lineSequence()
+                .filter { line -> line.trimStart().startsWith("LOAD") }
+                .mapNotNull { line -> line.trim().split(Regex("\\s+")).lastOrNull()?.removePrefix("0x")?.toIntOrNull(16) }
+                .toList()
+
+            if (loadAlignments.isEmpty() || loadAlignments.any { alignment -> alignment < requiredAlignment.get() }) {
+                val alignmentSummary = if (loadAlignments.isEmpty()) {
+                    "no LOAD segment alignment found"
+                } else {
+                    loadAlignments.joinToString { alignment -> "0x${alignment.toString(16)}" }
+                }
+                "${nativeLib.name}: $alignmentSummary"
+            } else {
+                null
+            }
+        }
+
+        if (incompatibleLibs.isNotEmpty()) {
+            throw GradleException(
+                "AMap native libraries are not Android 16 KB page-size compatible. " +
+                    "Upgrade app/libs to AMap SDK artifacts built with the new ABI/NDK toolchain, then rerun the build.\n" +
+                    incompatibleLibs.joinToString(separator = "\n")
+            )
+        }
+    }
+
+    private fun findReadelf(): File {
+        val executableNamesByHost = listOf(
+            "darwin-arm64" to "llvm-readelf",
+            "darwin-x86_64" to "llvm-readelf",
+            "linux-x86_64" to "llvm-readelf",
+            "windows-x86_64" to "llvm-readelf.exe"
+        )
+
+        return executableNamesByHost
+            .map { (host, executableName) ->
+                File("${sdkDir.get()}/ndk/${ndkVersion.get()}/toolchains/llvm/prebuilt/$host/bin/$executableName")
+            }
+            .firstOrNull { candidate -> candidate.isFile }
+            ?: throw GradleException("NDK ${ndkVersion.get()} llvm-readelf was not found under ${sdkDir.get()}.")
+    }
+}
+
 android {
     namespace = "com.ct106.difangke"
     compileSdk = 36
+    ndkVersion = requiredNdkVersion
 
     // 从源码 AppConfig.kt 中动态读取配置的函数
     fun readConfigValue(key: String): String {
@@ -98,6 +185,13 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            excludes += listOf(
+                "**/armeabi-v7a/*.so",
+                "**/x86/*.so",
+                "**/x86_64/*.so"
+            )
+        }
     }
 
     sourceSets {
@@ -173,4 +267,28 @@ dependencies {
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+}
+
+val nativeVerificationProperties = Properties()
+val nativeVerificationPropertiesFile = rootProject.file("local.properties")
+if (nativeVerificationPropertiesFile.exists()) {
+    nativeVerificationPropertiesFile.inputStream().use(nativeVerificationProperties::load)
+}
+
+val verifyAmapNativePageSize by tasks.registering(VerifyNativePageSizeTask::class) {
+    group = "verification"
+    description = "Verifies bundled AMap arm64 native libraries support Android 16 KB page sizes."
+    nativeLibDir.set(layout.projectDirectory.dir("libs/arm64-v8a"))
+    sdkDir.set(
+        nativeVerificationProperties.getProperty("sdk.dir")
+            ?: System.getenv("ANDROID_HOME")
+            ?: System.getenv("ANDROID_SDK_ROOT")
+            ?: ""
+    )
+    ndkVersion.set(requiredNdkVersion)
+    requiredAlignment.set(requiredNativePageAlignment)
+}
+
+tasks.named("preBuild") {
+    dependsOn(verifyAmapNativePageSize)
 }

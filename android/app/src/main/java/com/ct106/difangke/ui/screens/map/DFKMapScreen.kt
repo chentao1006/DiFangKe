@@ -155,7 +155,7 @@ fun DFKMapScreen(
 
             amap.clear()
             amap.addImportantPlaceCircles(allPlaces)
-            amap.addFootprintMarkers(footprintMarkers)
+            amap.addFootprintMarkers(footprintMarkers, isDark = isDark)
 
             val validLatLngs = mutableListOf<LatLng>()
             footprintMarkers.forEach {
@@ -307,16 +307,21 @@ fun DFKMapScreen(
                         val len0 = Math.sqrt(dLat0*dLat0 + dLon0*dLon0)
                         val len3 = Math.sqrt(dLat3*dLat3 + dLon3*dLon3)
                         
-                        val scale0 = if (len0 > 0) (dist * 0.35) / len0 else 0.0
-                        val scale3 = if (len3 > 0) (dist * 0.35) / len3 else 0.0
+                        val maxTangent = 0.005
+                        val tLen0 = minOf(dist * 0.35, maxTangent)
+                        val tLen3 = minOf(dist * 0.35, maxTangent)
+                        val tLenFallback = minOf(dist * 0.3, maxTangent)
+                        val scale0 = if (len0 > 0) tLen0 / len0 else 0.0
+                        val scale3 = if (len3 > 0) tLen3 / len3 else 0.0
+                        val fallbackScale = if (dist > 0) tLenFallback / dist else 0.0
                         
                         val c1 = LatLng(
-                            p0.latitude + (if(len0 > 0) dLat0 * scale0 else distLat * 0.3),
-                            p0.longitude + (if(len0 > 0) dLon0 * scale0 else distLon * 0.3)
+                            p0.latitude + (if(len0 > 0) dLat0 * scale0 else distLat * fallbackScale),
+                            p0.longitude + (if(len0 > 0) dLon0 * scale0 else distLon * fallbackScale)
                         )
                         val c2 = LatLng(
-                            p3.latitude - (if(len3 > 0) dLat3 * scale3 else distLat * 0.3),
-                            p3.longitude - (if(len3 > 0) dLon3 * scale3 else distLon * 0.3)
+                            p3.latitude - (if(len3 > 0) dLat3 * scale3 else distLat * fallbackScale),
+                            p3.longitude - (if(len3 > 0) dLon3 * scale3 else distLon * fallbackScale)
                         )
                         
                         val bezierPoints = mutableListOf<LatLng>()

@@ -158,6 +158,31 @@ class RawLocationStore private constructor(context: Context) {
                 .onFailure { Log.e(TAG, "deleteLocation failed", it) }
     }
 
+    fun deleteLocations(timestamps: Set<Double>, date: Date, context: Context) {
+        if (timestamps.isEmpty()) return
+        val file = getFile(date)
+        if (!file.exists()) return
+
+        runCatching {
+            val lines = file.readLines()
+            val filteredLines = lines.filter { line ->
+                if (line.isBlank()) return@filter false
+                val parts = line.split(",")
+                if (parts.isEmpty()) return@filter false
+                val ts = parts[0].toDoubleOrNull() ?: return@filter true
+                timestamps.none { target -> abs(ts - target) <= 0.01 }
+            }
+
+            if (filteredLines.size < lines.size) {
+                file.writeText(filteredLines.joinToString("\n") + "\n")
+                val intent = Intent("com.ct106.difangke.RAW_LOCATION_DATA_DELETED").apply {
+                    putExtra("date", date.time)
+                }
+                context.sendBroadcast(intent)
+            }
+        }.onFailure { Log.e(TAG, "deleteLocations failed", it) }
+    }
+
     /** 查找所有有数据的日期（对应 iOS refreshAvailableRawDates） */
     fun getAvailableDates(): Set<Date> {
         val dates = mutableSetOf<Date>()

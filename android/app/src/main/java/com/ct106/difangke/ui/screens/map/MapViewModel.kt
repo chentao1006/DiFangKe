@@ -52,13 +52,19 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
             val startOfTarget = cal.time
 
             // 1. 加载数据库中的已结算足迹
-            val footprints = db.footprintDao().getBetween(startOfTarget, Date(startOfTarget.time + 86400000L))
-            _footprintMarkers.value = buildFootprintMapMarkers(footprints, db.activityTypeDao().getAll())
+            val endOfTarget = Date(startOfTarget.time + 86400000L)
+            val footprints = db.footprintDao().getBetween(startOfTarget, endOfTarget)
+            _footprintMarkers.value = buildFootprintMapMarkers(
+                footprints = footprints,
+                activityTypes = db.activityTypeDao().getAll(),
+                visibleStart = startOfTarget,
+                visibleEnd = endOfTarget
+            )
             val dbPoints = mutableListOf<MapPathPoint>()
             // 不再将足迹漂移点加入轨迹，只保留交通线
 
             // 加载交通轨迹
-            val transports = db.transportRecordDao().getForDay(startOfTarget, Date(startOfTarget.time + 86400000L))
+            val transports = db.transportRecordDao().getForDay(startOfTarget, endOfTarget)
             transports.forEach { tp ->
                 dbPoints.addAll(parseTransportPathPoints(tp.pointsJson))
                 // 插入分隔符，防止不同的交通记录被连成一条直线

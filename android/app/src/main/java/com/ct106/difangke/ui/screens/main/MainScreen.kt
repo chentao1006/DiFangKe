@@ -586,6 +586,10 @@ fun TimelineContent(
                         pointCount = totalPoints,
                         pointsJson = dailyPoints,
                         markersJson = dailyMarkers,
+                        footprintMarkers = buildFootprintMapMarkers(
+                            items.filterIsInstance<TimelineItem.FootprintItem>().map { it.footprint },
+                            activityTypes
+                        ),
                         allPlaces = allPlaces,
                         onNavigateToMap = onMapClick,
                         onEnableTracking = onEnableTracking,

@@ -13,6 +13,7 @@ import com.ct106.difangke.data.model.representativeLatitude
 import com.ct106.difangke.data.model.representativeLongitude
 import com.ct106.difangke.service.LocationTrackingService
 import com.ct106.difangke.service.OpenAIService
+import com.ct106.difangke.ui.components.buildFootprintMapMarkers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -290,7 +291,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 db.footprintDao().observeBetween(start, end),
                 db.activityTypeDao().observeAll()
             ) { footprints, activityTypes ->
-                buildFootprintMarkersJson(footprints, activityTypes)
+                buildFootprintMarkersJson(footprints, activityTypes, start, end)
             }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
         }
     }
@@ -589,26 +590,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun buildFootprintMarkersJson(
         footprints: List<FootprintEntity>,
-        activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>
+        activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
+        visibleStart: Date,
+        visibleEnd: Date
     ): String? {
-        val activityById = activityTypes.associateBy { it.id }
         val array = org.json.JSONArray()
-        footprints.forEach { fp ->
-            try {
-                val lat = fp.representativeLatitude
-                val lon = fp.representativeLongitude
-                if (lat != 0.0 && lon != 0.0) {
-                    val activity = activityById[fp.activityTypeValue]
-                    array.put(
-                        org.json.JSONObject()
-                            .put("lat", lat)
-                            .put("lon", lon)
-                            .put("icon", activity?.icon ?: "place")
-                            .put("color", activity?.colorHex ?: "#00A0AC")
-                            .put("duration", fp.duration)
-                    )
-                }
-            } catch (e: Exception) {}
+        buildFootprintMapMarkers(footprints, activityTypes, visibleStart, visibleEnd).forEach { marker ->
+            array.put(
+                org.json.JSONObject()
+                    .put("lat", marker.latitude)
+                    .put("lon", marker.longitude)
+                    .put("icon", marker.icon ?: "place")
+                    .put("color", marker.colorHex ?: "#00A0AC")
+                    .put("duration", marker.durationSeconds)
+            )
         }
         return if (array.length() > 0) array.toString() else null
     }

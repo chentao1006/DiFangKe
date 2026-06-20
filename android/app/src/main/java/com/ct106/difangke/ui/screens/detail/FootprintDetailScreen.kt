@@ -70,6 +70,7 @@ fun FootprintDetailScreen(
     var showingSplitDialog by remember { mutableStateOf(false) }
     var showingMergeDialog by remember { mutableStateOf(false) }
     var mergeUsePrevious by remember { mutableStateOf(true) }
+    var skipDisposeSave by remember { mutableStateOf(false) }
     
     if (showingDeleteAlert) {
         AlertDialog(
@@ -161,6 +162,22 @@ fun FootprintDetailScreen(
 
     val matchedPlace by viewModel.matchedPlace.collectAsState()
 
+    fun saveDraftReasonIfNeeded(afterSave: () -> Unit = {}) {
+        val fp = footprint ?: return afterSave()
+        if (reason != (fp.reason ?: "")) {
+            skipDisposeSave = true
+            viewModel.updateFootprint(title, reason, addressText, selectedPlaceID, selectedActivityType, isHighlight, afterSave)
+        } else {
+            afterSave()
+        }
+    }
+
+    DisposableEffect(footprint?.footprintID) {
+        onDispose {
+            if (!skipDisposeSave) saveDraftReasonIfNeeded()
+        }
+    }
+
     LaunchedEffect(footprint, matchedPlace) {
         footprint?.let {
             title = it.title
@@ -192,7 +209,7 @@ fun FootprintDetailScreen(
             TopAppBar(
                 title = { Text("足迹详情", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = { saveDraftReasonIfNeeded { onBack() } }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
@@ -257,6 +274,7 @@ fun FootprintDetailScreen(
                         }
                     }
                     TextButton(onClick = {
+                        skipDisposeSave = true
                         viewModel.updateFootprint(title, reason, addressText, selectedPlaceID, selectedActivityType, isHighlight) {
                             onBack()
                         }
@@ -316,6 +334,7 @@ fun FootprintDetailScreen(
                         ActivityTypeIcon(
                             selectedId = selectedActivityType,
                             allTypes = activityTypes,
+                            suggestedTypes = activityTypes.take(3),
                             onTypeSelected = { selectedActivityType = it }
                         )
                     }
@@ -665,10 +684,12 @@ private fun FootprintSplitDialog(
 fun ActivityTypeIcon(
     selectedId: String?,
     allTypes: List<ActivityTypeEntity>,
+    suggestedTypes: List<ActivityTypeEntity> = emptyList(),
     onTypeSelected: (String?) -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val selected = allTypes.find { it.id == selectedId }
+    val genuineSuggestions = suggestedTypes.distinctBy { it.id }
     
     Box {
         Box(
@@ -723,29 +744,65 @@ fun ActivityTypeIcon(
                 
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
                 
+                if (genuineSuggestions.isNotEmpty()) {
+                    Text(
+                        text = "推荐活动",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    genuineSuggestions.forEach { type ->
+                        ActivityTypeListItem(
+                            type = type,
+                            selectedId = selectedId,
+                            onClick = { onTypeSelected(type.id); showMenu = false }
+                        )
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
+                }
+
+                Text(
+                    text = "所有活动",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.Gray,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
                 allTypes.forEach { type ->
-                    ListItem(
-                        headlineContent = { Text(type.name) },
-                        leadingContent = { 
-                            Icon(
-                                imageVector = com.ct106.difangke.ui.components.getIconForName(type.icon),
-                                contentDescription = null,
-                                tint = try { Color(android.graphics.Color.parseColor(type.colorHex)) } catch (e: Exception) { Color.Gray },
-                                modifier = Modifier.size(24.dp)
-                            )
-                        },
-                        trailingContent = {
-                            if (selectedId == type.id) {
-                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                            }
-                        },
-                        modifier = Modifier.clickable { onTypeSelected(type.id); showMenu = false }
+                    ActivityTypeListItem(
+                        type = type,
+                        selectedId = selectedId,
+                        onClick = { onTypeSelected(type.id); showMenu = false }
                     )
                 }
             }
         }
     }
 }
+}
+
+@Composable
+private fun ActivityTypeListItem(
+    type: ActivityTypeEntity,
+    selectedId: String?,
+    onClick: () -> Unit
+) {
+    ListItem(
+        headlineContent = { Text(type.name) },
+        leadingContent = {
+            Icon(
+                imageVector = com.ct106.difangke.ui.components.getIconForName(type.icon),
+                contentDescription = null,
+                tint = try { Color(android.graphics.Color.parseColor(type.colorHex)) } catch (e: Exception) { Color.Gray },
+                modifier = Modifier.size(24.dp)
+            )
+        },
+        trailingContent = {
+            if (selectedId == type.id) {
+                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            }
+        },
+        modifier = Modifier.clickable(onClick = onClick)
+    )
 }
 
 @Composable
@@ -827,7 +884,7 @@ fun DetailMapView(
                     .color(primaryColor)
                     .useGradient(true)
             )
-            amap.addFootprintMarkers(buildFootprintMapMarkers(listOf(footprint), activityTypes))
+            amap.addFootprintMarkers(buildFootprintMapMarkers(listOf(footprint), activityTypes), isDark = isDark)
             
             // 移动相机到轨迹范围 (优化版)
             if (points.size == 1) {

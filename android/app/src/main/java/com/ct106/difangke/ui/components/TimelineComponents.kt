@@ -424,6 +424,7 @@ fun RecordingStatusCard(
     pointCount: Int = 0,
     pointsJson: String? = null,
     markersJson: String? = null,
+    footprintMarkers: List<FootprintMapMarker> = emptyList(),
     allPlaces: List<PlaceEntity> = emptyList(),
     onNavigateToMap: () -> Unit,
     onEnableTracking: () -> Unit,
@@ -590,15 +591,17 @@ fun RecordingStatusCard(
                     // 小地图：只有真实轨迹或定位成功后才显示，避免地图 SDK 默认中心显示成北京。
                     val hasCurrentLocation = currentLat.isRenderableCoordinate() && currentLon.isRenderableCoordinate()
                     val hasTrajectory = pointsJson.hasRenderableMapPoints()
-                    if (hasTrajectory || (isTracking && hasCurrentLocation)) {
+                    val hasFootprintMarkers = footprintMarkers.isNotEmpty() || parseFootprintMapMarkers(markersJson).isNotEmpty()
+                    if (hasTrajectory || hasFootprintMarkers || (isTracking && hasCurrentLocation)) {
                         Spacer(modifier = Modifier.height(12.dp))
                     }
-                    if (hasTrajectory) {
+                    if (hasTrajectory || hasFootprintMarkers) {
                         MiniMapView(
                             lat = currentLat,
                             lon = currentLon,
                             pointsJson = pointsJson,
                             markersJson = markersJson,
+                            footprintMarkers = footprintMarkers,
                             allPlaces = allPlaces,
                             onClick = onNavigateToMap
                         )
@@ -742,6 +745,7 @@ fun MiniMapView(
     lon: Double? = null,
     pointsJson: String? = null,
     markersJson: String? = null,
+    footprintMarkers: List<FootprintMapMarker> = emptyList(),
     isCurrentLocation: Boolean = false,
     allPlaces: List<PlaceEntity> = emptyList(),
     onClick: () -> Unit
@@ -930,16 +934,21 @@ fun MiniMapView(
                                 val len0 = Math.sqrt(dLat0*dLat0 + dLon0*dLon0)
                                 val len3 = Math.sqrt(dLat3*dLat3 + dLon3*dLon3)
                                 
-                                val scale0 = if (len0 > 0) (dist * 0.35) / len0 else 0.0
-                                val scale3 = if (len3 > 0) (dist * 0.35) / len3 else 0.0
+                                val maxTangent = 0.005
+                                val tLen0 = minOf(dist * 0.35, maxTangent)
+                                val tLen3 = minOf(dist * 0.35, maxTangent)
+                                val tLenFallback = minOf(dist * 0.3, maxTangent)
+                                val scale0 = if (len0 > 0) tLen0 / len0 else 0.0
+                                val scale3 = if (len3 > 0) tLen3 / len3 else 0.0
+                                val fallbackScale = if (dist > 0) tLenFallback / dist else 0.0
                                 
                                 val c1 = com.amap.api.maps.model.LatLng(
-                                    p0.latitude + (if(len0 > 0) dLat0 * scale0 else distLat * 0.3),
-                                    p0.longitude + (if(len0 > 0) dLon0 * scale0 else distLon * 0.3)
+                                    p0.latitude + (if(len0 > 0) dLat0 * scale0 else distLat * fallbackScale),
+                                    p0.longitude + (if(len0 > 0) dLon0 * scale0 else distLon * fallbackScale)
                                 )
                                 val c2 = com.amap.api.maps.model.LatLng(
-                                    p3.latitude - (if(len3 > 0) dLat3 * scale3 else distLat * 0.3),
-                                    p3.longitude - (if(len3 > 0) dLon3 * scale3 else distLon * 0.3)
+                                    p3.latitude - (if(len3 > 0) dLat3 * scale3 else distLat * fallbackScale),
+                                    p3.longitude - (if(len3 > 0) dLon3 * scale3 else distLon * fallbackScale)
                                 )
                                 
                                 val bezierPoints = mutableListOf<com.amap.api.maps.model.LatLng>()
@@ -1017,10 +1026,11 @@ fun MiniMapView(
                     hasCentred = true
                 }
             }
-            
+
             // 绘制足迹点标记 (实心圆点)
-            if (markersJson != null) {
-                amap.addFootprintMarkers(parseFootprintMapMarkers(markersJson))
+            val markers = footprintMarkers.ifEmpty { parseFootprintMapMarkers(markersJson) }
+            if (markers.isNotEmpty()) {
+                amap.addFootprintMarkers(markers, isDark = isDark)
             }
         }
 
