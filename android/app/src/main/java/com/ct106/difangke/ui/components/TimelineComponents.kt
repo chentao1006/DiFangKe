@@ -750,10 +750,14 @@ fun MiniMapView(
     allPlaces: List<PlaceEntity> = emptyList(),
     onClick: () -> Unit
 ) {
+    val mapMarkers = remember(footprintMarkers, markersJson) {
+        footprintMarkers.ifEmpty { parseFootprintMapMarkers(markersJson) }
+    }
     val hasCurrentLocation = isCurrentLocation && lat.isRenderableCoordinate() && lon.isRenderableCoordinate()
     val hasTrajectory = pointsJson.hasRenderableMapPoints()
     val hasCenter = lat.isRenderableCoordinate() && lon.isRenderableCoordinate()
-    if (!hasCurrentLocation && !hasTrajectory && !hasCenter) return
+    val hasFootprintMarkers = mapMarkers.any { it.latitude.isRenderableCoordinate() && it.longitude.isRenderableCoordinate() }
+    if (!hasCurrentLocation && !hasTrajectory && !hasCenter && !hasFootprintMarkers) return
 
     val context = LocalContext.current
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
@@ -793,6 +797,9 @@ fun MiniMapView(
             
             amap.clear()
             amap.addImportantPlaceCircles(allPlaces)
+            val markerPoints = mapMarkers
+                .filter { it.latitude.isRenderableCoordinate() && it.longitude.isRenderableCoordinate() }
+                .map { com.amap.api.maps.model.LatLng(it.latitude, it.longitude) }
             
             var handledCentering = false
             
@@ -969,15 +976,16 @@ fun MiniMapView(
                                 amap.addPolyline(dashedOptions)
                             }
                         }
-                        
-                        if (validPoints.size == 1) {
+
+                        val cameraPoints = validPoints + markerPoints
+                        if (cameraPoints.size == 1) {
                             if (!hasCentred) {
-                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(validPoints[0], 13.5f))
+                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(cameraPoints[0], 13.5f))
                                 hasCentred = true
                             }
                         } else {
                             val bounds = com.amap.api.maps.model.LatLngBounds.builder().apply {
-                                validPoints.forEach { include(it) }
+                                cameraPoints.forEach { include(it) }
                             }.build()
                             val centerLat = (bounds.northeast.latitude + bounds.southwest.latitude) / 2
                             val centerLon = (bounds.northeast.longitude + bounds.southwest.longitude) / 2
@@ -1015,6 +1023,45 @@ fun MiniMapView(
                     }
                 } catch (e: Exception) {}
             }
+
+            if (!handledCentering && markerPoints.isNotEmpty()) {
+                if (markerPoints.size == 1) {
+                    if (!hasCentred) {
+                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(markerPoints[0], 13.5f))
+                        hasCentred = true
+                    }
+                } else {
+                    val bounds = com.amap.api.maps.model.LatLngBounds.builder().apply {
+                        markerPoints.forEach { include(it) }
+                    }.build()
+                    if (!hasCentred) {
+                        val doBounds = {
+                            val paddingPx = (30 * view.context.resources.displayMetrics.density).toInt()
+                            try {
+                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, paddingPx))
+                                if (amap.cameraPosition.zoom > 16f) {
+                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.zoomTo(16f))
+                                }
+                            } catch (e: Exception) {
+                                val centerLat = (bounds.northeast.latitude + bounds.southwest.latitude) / 2
+                                val centerLon = (bounds.northeast.longitude + bounds.southwest.longitude) / 2
+                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(com.amap.api.maps.model.LatLng(centerLat, centerLon), 13.5f))
+                            }
+                        }
+
+                        if (view.width > 0 && view.height > 0) {
+                            doBounds()
+                        } else {
+                            val centerLat = (bounds.northeast.latitude + bounds.southwest.latitude) / 2
+                            val centerLon = (bounds.northeast.longitude + bounds.southwest.longitude) / 2
+                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(com.amap.api.maps.model.LatLng(centerLat, centerLon), 12f))
+                            amap.setOnMapLoadedListener { doBounds() }
+                        }
+                        hasCentred = true
+                    }
+                }
+                handledCentering = true
+            }
             
             val fallbackLat = lat
             val fallbackLon = lon
@@ -1028,9 +1075,8 @@ fun MiniMapView(
             }
 
             // 绘制足迹点标记 (实心圆点)
-            val markers = footprintMarkers.ifEmpty { parseFootprintMapMarkers(markersJson) }
-            if (markers.isNotEmpty()) {
-                amap.addFootprintMarkers(markers, isDark = isDark)
+            if (mapMarkers.isNotEmpty()) {
+                amap.addFootprintMarkers(mapMarkers, isDark = isDark)
             }
         }
 

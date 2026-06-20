@@ -172,6 +172,7 @@ fun DFKMapScreen(
                 pathPoints.forEach { point ->
                     if (point.isSeparator) {
                         if (currentSegment.points.isNotEmpty()) {
+                            currentSegment.connectToNextWithDash = point.connectsPreviousToNext
                             segments.add(currentSegment)
                             currentSegment = SegmentInfo()
                         }

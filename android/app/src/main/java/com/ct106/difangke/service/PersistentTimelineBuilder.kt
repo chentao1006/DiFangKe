@@ -53,25 +53,12 @@ class PersistentTimelineBuilder(private val context: Context) {
         val preferredCycling = getPreferredCyclingType(startOfDay)
 
         // 2. 加载轨迹点
-        val rawPoints = rawStore.loadLocations(date, filtered = true)
+        val filteredRawPoints = rawStore.loadLocations(date, filtered = true)
+        val unfilteredRawPoints = rawStore.loadLocations(date, filtered = false)
+        val points = removeTinyImpossibleJumps(filteredRawPoints.ifEmpty { unfilteredRawPoints })
+        val transportPoints = removeTinyImpossibleJumps(unfilteredRawPoints.ifEmpty { filteredRawPoints })
 
-        // --- 核心修复：剔除 GPS 跳点 (Spike) ---
-        // 比如 1秒内漂移 100+ 米的噪音
-        val points = mutableListOf<RawLocationStore.RawPoint>()
-        if (rawPoints.isNotEmpty()) points.add(rawPoints[0])
-        for (k in 1 until rawPoints.size) {
-            val p1 = rawPoints[k-1]
-            val p2 = rawPoints[k]
-            val d = processor.haversineMeters(p1.latitude, p1.longitude, p2.latitude, p2.longitude)
-            val t = (p2.timestamp.time - p1.timestamp.time) / 1000.0
-            // 如果速度超过阈值 (约 540km/h) 且时间极短，判定为跳点
-            if (t > 0 && t < AppConfig.TINY_STAY_THRESHOLD && (d / t) > AppConfig.RIDICULOUS_SPEED_THRESHOLD * 1.5) {
-                continue 
-            }
-            points.add(p2)
-        }
-        
-        if (points.isEmpty()) return@withContext
+        if (points.isEmpty() && transportPoints.isEmpty()) return@withContext
 
         db.footprintDao().deleteCandidatesBetween(startOfDay, endOfDay)
         db.footprintDao().deleteStartBoundaryCandidates(startOfDay)
@@ -174,10 +161,51 @@ class PersistentTimelineBuilder(private val context: Context) {
             }
         }
 
+        generateMissingTransportSegmentsForFootprints(startOfDay, endOfDay, transportPoints.ifEmpty { points }, preferredAuto, preferredCycling)
+
         // 5. 合并连续交通段 (iOS Parity: mergeConsecutiveTransports)
         mergeConsecutiveTransports(date, preferredAuto, preferredCycling)
 
         Log.i(TAG, "Finished rebuilding timeline for $date. Found ${footprints.size} footprints.")
+    }
+
+    private fun removeTinyImpossibleJumps(rawPoints: List<RawLocationStore.RawPoint>): List<RawLocationStore.RawPoint> {
+        if (rawPoints.isEmpty()) return emptyList()
+
+        val points = mutableListOf(rawPoints[0])
+        for (k in 1 until rawPoints.size) {
+            val previous = rawPoints[k - 1]
+            val current = rawPoints[k]
+            val distance = processor.haversineMeters(previous.latitude, previous.longitude, current.latitude, current.longitude)
+            val duration = (current.timestamp.time - previous.timestamp.time) / 1000.0
+            if (duration > 0 && duration < AppConfig.TINY_STAY_THRESHOLD && (distance / duration) > AppConfig.RIDICULOUS_SPEED_THRESHOLD * 1.5) {
+                continue
+            }
+            points.add(current)
+        }
+        return points
+    }
+
+    private suspend fun generateMissingTransportSegmentsForFootprints(
+        startOfDay: Date,
+        endOfDay: Date,
+        allDayPoints: List<RawLocationStore.RawPoint>,
+        preferredAuto: TransportType,
+        preferredCycling: TransportType
+    ) {
+        val allFootprints = db.footprintDao().getBetween(startOfDay, endOfDay).sortedBy { it.startTime }
+        if (allFootprints.size < 2) return
+
+        for (i in 0 until allFootprints.size - 1) {
+            val previous = allFootprints[i]
+            val next = allFootprints[i + 1]
+            if (next.startTime <= previous.endTime) continue
+
+            val existingTransport = db.transportRecordDao().getActiveBetween(previous.endTime, next.startTime)
+            if (existingTransport.isNotEmpty()) continue
+
+            generateTransportSegment(previous, next, allDayPoints, preferredAuto, preferredCycling)
+        }
     }
 
     private suspend fun mergeConsecutiveTransports(date: Date, preferredAuto: TransportType, preferredCycling: TransportType) {

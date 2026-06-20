@@ -15,7 +15,8 @@ import java.util.*
 data class MapPathPoint(
     val latitude: Double,
     val longitude: Double,
-    val timestamp: Long? = null
+    val timestamp: Long? = null,
+    val connectsPreviousToNext: Boolean = false
 ) {
     val isSeparator: Boolean
         get() = latitude.isNaN() || longitude.isNaN()
@@ -68,7 +69,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
             transports.forEach { tp ->
                 dbPoints.addAll(parseTransportPathPoints(tp.pointsJson))
                 // 插入分隔符，防止不同的交通记录被连成一条直线
-                dbPoints.add(MapPathPoint(Double.NaN, Double.NaN))
+                dbPoints.add(MapPathPoint(Double.NaN, Double.NaN, connectsPreviousToNext = false))
             }
 
             // 不再使用 rawPoints 的全部流水，避免今天产生大量原地的“毛线团”漂移线
@@ -88,13 +89,19 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                             val lat = element.getDouble(0)
                             val lon = element.getDouble(1)
                             val timestamp = if (element.length() >= 3) normalizeTimestampMillis(element.optDouble(2, 0.0)) else null
-                            add(MapPathPoint(lat, lon, timestamp))
+                            if (lat == 0.0 && lon == 0.0) {
+                                add(MapPathPoint(Double.NaN, Double.NaN, connectsPreviousToNext = true))
+                            } else {
+                                add(MapPathPoint(lat, lon, timestamp))
+                            }
                         }
                         is org.json.JSONObject -> {
                             val lat = element.optDouble("lat", element.optDouble("latitude", Double.NaN))
                             val lon = element.optDouble("lon", element.optDouble("longitude", Double.NaN))
                             val timestamp = normalizeTimestampMillis(element.optDouble("timestamp", 0.0))
-                            if (!lat.isNaN() && !lon.isNaN()) {
+                            if (lat == 0.0 && lon == 0.0) {
+                                add(MapPathPoint(Double.NaN, Double.NaN, connectsPreviousToNext = true))
+                            } else if (!lat.isNaN() && !lon.isNaN()) {
                                 add(MapPathPoint(lat, lon, timestamp))
                             }
                         }

@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -31,6 +32,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
@@ -829,12 +831,37 @@ fun MiniCalendarView(
     val weekDays = listOf("日", "一", "二", "三", "四", "五", "六")
     val isDark = isSystemInDarkTheme()
     val primaryColor = Color(0xFF00A0AC)
+    val surfaceColor = if (isDark) Color(0xFF1C1C1E) else Color.White
+    val titleColor = MaterialTheme.colorScheme.onSurface
+    val secondaryTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+    val disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f)
+    val subtleTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.48f)
+    val dataTextColor = MaterialTheme.colorScheme.onSurface
+    fun changeMonth(delta: Int) {
+        val cal = Calendar.getInstance().apply { time = currentMonth; add(Calendar.MONTH, delta) }
+        currentMonth = cal.time
+    }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
 
     Column(
         modifier = Modifier
             .width(320.dp)
             .clip(RoundedCornerShape(28.dp))
-            .background(if (isDark) Color(0xFF1C1C1E) else Color.White)
+            .background(surfaceColor)
+            .pointerInput(currentMonth) {
+                detectHorizontalDragGestures(
+                    onDragStart = { dragOffset = 0f },
+                    onHorizontalDrag = { _, dragAmount -> dragOffset += dragAmount },
+                    onDragEnd = {
+                        when {
+                            dragOffset > 56f -> changeMonth(-1)
+                            dragOffset < -56f -> changeMonth(1)
+                        }
+                        dragOffset = 0f
+                    },
+                    onDragCancel = { dragOffset = 0f }
+                )
+            }
             .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -845,29 +872,24 @@ fun MiniCalendarView(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
-                onClick = {
-                    val cal = Calendar.getInstance().apply { time = currentMonth; add(Calendar.MONTH, -1) }
-                    currentMonth = cal.time
-                },
+                onClick = { changeMonth(-1) },
                 modifier = Modifier.size(32.dp).background(Color.Gray.copy(alpha = 0.1f), CircleShape)
             ) {
-                Icon(Icons.Default.ChevronLeft, null, modifier = Modifier.size(16.dp), tint = Color.Gray)
+                Icon(Icons.Default.ChevronLeft, null, modifier = Modifier.size(16.dp), tint = secondaryTextColor)
             }
 
             Text(
                 text = SimpleDateFormat("yyyy年M月", Locale.CHINA).format(currentMonth),
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = titleColor
             )
 
             IconButton(
-                onClick = {
-                    val cal = Calendar.getInstance().apply { time = currentMonth; add(Calendar.MONTH, 1) }
-                    currentMonth = cal.time
-                },
+                onClick = { changeMonth(1) },
                 modifier = Modifier.size(32.dp).background(Color.Gray.copy(alpha = 0.1f), CircleShape)
             ) {
-                Icon(Icons.Default.ChevronRight, null, modifier = Modifier.size(16.dp), tint = Color.Gray)
+                Icon(Icons.Default.ChevronRight, null, modifier = Modifier.size(16.dp), tint = secondaryTextColor)
             }
         }
 
@@ -881,7 +903,7 @@ fun MiniCalendarView(
                     modifier = Modifier.weight(1f),
                     textAlign = TextAlign.Center,
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color.Gray.copy(alpha = 0.6f),
+                    color = secondaryTextColor,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -921,11 +943,11 @@ fun MiniCalendarView(
                                     text = Calendar.getInstance().apply { time = date }.get(Calendar.DAY_OF_MONTH).toString(),
                                     color = when {
                                         isSelected -> Color.White
-                                        isFuture -> Color.Gray.copy(alpha = 0.3f)
-                                        !isCurrentMonth -> Color.Gray.copy(alpha = 0.3f)
+                                        isFuture -> disabledTextColor
+                                        !isCurrentMonth -> disabledTextColor
                                         isToday -> primaryColor
-                                        hasData -> if (isDark) Color.White else Color.Black
-                                        else -> Color.Gray.copy(alpha = 0.5f)
+                                        hasData -> dataTextColor
+                                        else -> subtleTextColor
                                     },
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.Medium
@@ -937,7 +959,7 @@ fun MiniCalendarView(
                                             .align(Alignment.BottomCenter)
                                             .padding(bottom = 4.dp)
                                             .size(3.dp)
-                                            .background(if (isToday) primaryColor else Color.Gray.copy(alpha = 0.5f), CircleShape)
+                                            .background(if (isToday) primaryColor else secondaryTextColor, CircleShape)
                                     )
                                 }
                             }
