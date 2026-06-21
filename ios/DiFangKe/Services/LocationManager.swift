@@ -1016,6 +1016,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var rebuildProgress: Double = 0
     var isRebuildingAll: Bool = false
     private var rebuildTask: Task<Void, Never>? = nil
+    private var liveFootprintMergeTask: Task<Void, Never>? = nil
     
     // 从 View 同步过来的参数
     var allPlaces: [Place] = []
@@ -1352,6 +1353,26 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
     }
+
+    /// 新定位到达后，专门收敛“当前地点”可能重复生成的足迹。
+    /// 不在启动时扫描历史数据，避免首屏已经展示的时间线被异步改写。
+    private func scheduleLiveFootprintMerge() {
+        liveFootprintMergeTask?.cancel()
+        liveFootprintMergeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled,
+                  let self,
+                  let context = self.modelContext,
+                  let lastLocation = self.lastLocation,
+                  abs(lastLocation.timestamp.timeIntervalSinceNow) < 30 else {
+                return
+            }
+
+            if self.mergeRecentFootprints(in: context) {
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            }
+        }
+    }
     
     func triggerTimelineSift() async {
         guard let context = modelContext else { return }
@@ -1511,30 +1532,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // On app open, force a fresh high-accuracy location fix
         locationManager.requestLocation() // This will trigger a one-time precise update
         
-        // 后台异步执行维护任务，避免卡启动画面
-        let container = modelContext?.container
-        Task.detached(priority: .background) { [weak self] in
-            guard let self = self, let container = container else { return }
-            let context = ModelContext(container)
-            await self.consolidateFootprints(in: context)
-            
-            // If it's evening, trigger notification summary refresh
-            Task { @MainActor in
-                let hour = Calendar.current.component(.hour, from: Date())
-                if hour >= 18 {
-                    self.triggerNotificationSummaryRefresh()
-                }
-            }
-            
-            // consolidation 完成后，等待 3 秒让 requestLocation() 的回调也处理完毕，
-            // 再执行一次合并，消除启动时因新定位点产生的重复足迹"中间态"。
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            await MainActor.run { [weak self] in
-                guard let self = self, let context = self.modelContext else { return }
-                self.mergeRecentFootprints(in: context)
-                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
-            }
-        }
+        // 启动/回到前台只恢复定位，不重整已保存的时间线。startTracking() 会在
+        // 每次启动和 scene active 时调用；在这里清理、合并或回填历史数据会让
+        // 首屏先显示旧结果、随后又被异步任务改写。重整仅应由新轨迹处理或用户
+        // 主动发起的“重新生成”触发。
     }
 
 
@@ -1587,10 +1588,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // ── 第一步：清理噪点（时长 < 5分钟 或 完全重复的记录）──
         var seen = Set<String>()
         for fp in all {
-            // 删除时长过短的记录
-            // 保护用户手动编辑过、有备注或有照片的足迹，即使时长很短也不删除
-            let hasUserEdits = fp.isAddressEditedByHand || !(fp.reason ?? "").isEmpty || !fp.photoAssetIDs.isEmpty || (fp.isHighlight ?? false)
-            if fp.duration < minKeepDuration && !hasUserEdits {
+            // 删除时长过短的记录。
+            // 用户手动调整时间会将足迹标记为 manual；它同样必须受保护，否则
+            // 启动维护会删掉它，随后 gap filling 又会根据原始轨迹重新生成，形成循环。
+            let hasUserEdits = fp.isUserModifiedForDailySummary
+            guard !hasUserEdits else { continue }
+
+            if fp.duration < minKeepDuration {
                 context.delete(fp)
                 continue
             }
@@ -1627,6 +1631,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             while i < workingSorted.count - 1 {
                 let base = workingSorted[i]
                 let next = workingSorted[i+1]
+
+                // 自动维护绝不能改写人工确认或编辑过的足迹。它们是用户的
+                // 明确时间线边界，合并后会在下次启动的 gap filling 中反复出现。
+                guard !base.isUserModifiedForDailySummary,
+                      !next.isUserModifiedForDailySummary else {
+                    i += 1
+                    continue
+                }
 
                 // 时间间隔：负数表示重叠，视同可合并
                 let timeGap = next.startTime.timeIntervalSince(base.endTime)
@@ -1821,28 +1833,40 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     /// 检查今日最新的几个足迹，如果同一地点且时间连续，则合并，以旧的足迹为准，保留用户修改
     @MainActor
-    public func mergeRecentFootprints(in context: ModelContext) {
+    @discardableResult
+    public func mergeRecentFootprints(in context: ModelContext) -> Bool {
         let now = Date()
         let startOfDay = Calendar.current.startOfDay(for: now)
         let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
+        let recentCutoff = now.addingTimeInterval(-30 * 60)
         
         let descriptor = FetchDescriptor<Footprint>(
             predicate: #Predicate { $0.startTime >= startOfDay && $0.startTime < endOfDay && $0.statusValue != "ignored" },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]
         )
         
-        guard let todayFps = try? context.fetch(descriptor), todayFps.count >= 2 else { return }
+        guard let todayFps = try? context.fetch(descriptor) else { return false }
+        var recentFps = Array(todayFps.filter { $0.endTime >= recentCutoff }.suffix(5))
+        guard recentFps.count >= 2 else { return false }
         
         let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
             $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
         })
         let allDayTransports = (try? context.fetch(tpDesc)) ?? []
         
-        var recentFps = Array(todayFps.suffix(5))
+        var didMerge = false
         var i = 0
         while i < recentFps.count - 1 {
             let base = recentFps[i]
             let next = recentFps[i + 1]
+
+            // 与启动时的 consolidateFootprints 保持同一条边界：人工记录
+            // 不能由实时合并任务自动删除或延长。
+            guard !base.isUserModifiedForDailySummary,
+                  !next.isUserModifiedForDailySummary else {
+                i += 1
+                continue
+            }
             
             let bEnd = base.endTime
             let nStart = next.startTime
@@ -1905,12 +1929,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 context.delete(next)
                 recentFps.remove(at: i + 1)
+                didMerge = true
                 // Do not increment i, continue to check next
             } else {
                 i += 1
             }
         }
+        guard didMerge else { return false }
         try? context.save()
+        return true
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
@@ -2078,6 +2105,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         // 1. 永久保存原始点（RawLocationStore 内部已实现异步队列写入，不会阻塞主线程）
         RawLocationStore.shared.saveLocation(location)
+        scheduleLiveFootprintMerge()
         // 同步最后位置给小组件
         let sharedDefaults = widgetSharedDefaults()
         sharedDefaults.set(location.coordinate.latitude, forKey: "lastLat")

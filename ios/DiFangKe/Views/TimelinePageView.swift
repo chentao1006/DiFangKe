@@ -785,11 +785,6 @@ struct TimelinePageView: View {
         
         if Task.isCancelled { return }
         
-        // 如果是今天，先执行一次近期足迹的合并，确保用户修改不被新的分段覆盖
-        if isToday {
-            locationManager.mergeRecentFootprints(in: modelContext)
-        }
-        
         let items = PersistentTimelineBuilder.fetchTimeline(for: targetDate, in: modelContext)
         applyTimelineItems(items, triggerAiIfChanged: true)
         

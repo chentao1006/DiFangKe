@@ -491,6 +491,7 @@ struct DFKMapView: View {
                                 ForEach(validAggregatedFootprints) { aggregated in
                                     Annotation("", coordinate: aggregated.coordinate, anchor: .bottom) {
                                         aggregatedAnnotationContent(for: aggregated)
+                                            .zIndex(10)
                                             .onTapGesture {
                                                 handleFootprintTap(for: aggregated)
                                             }
@@ -780,8 +781,8 @@ struct DFKMapView: View {
 
     @ViewBuilder
     private func transportAnnotationContent(for transport: Transport) -> some View {
-        let size: CGFloat = isMiniTimelineMode ? 10 : (isInteractive ? 28 : 20)
-        let iconSize: CGFloat = isMiniTimelineMode ? 6 : (isInteractive ? 14 : 10)
+        let size: CGFloat = isMiniTimelineMode ? 7 : (isInteractive ? 18 : 14)
+        let iconSize: CGFloat = isMiniTimelineMode ? 4 : (isInteractive ? 9 : 7)
         
         let transportIcon = ZStack {
             Circle()
@@ -842,6 +843,7 @@ struct DFKMapView: View {
             if let coord = smoothedPoints.distanceMidpoint {
                 Annotation("", coordinate: coord) {
                     transportAnnotationContent(for: transport)
+                        .zIndex(0)
                 }
             }
         }
@@ -854,6 +856,7 @@ struct DFKMapView: View {
         ForEach(aggregatedFootprints) { aggregated in
             Annotation("", coordinate: aggregated.coordinate, anchor: .bottom) {
                 aggregatedAnnotationContent(for: aggregated)
+                    .zIndex(10)
             }
             .tag(aggregated.id)
         }
@@ -1118,7 +1121,7 @@ struct DFKMapView: View {
                 let smoothedPoints = transport.lineSegments.flatMap { $0.coordinates }.filter(\.isRenderableMapCoordinate)
                 if let midCoord = smoothedPoints.distanceMidpoint {
                     let midPoint = snapshot.point(for: midCoord)
-                    let rect = CGRect(x: midPoint.x - 10, y: midPoint.y - 10, width: 20, height: 20)
+                    let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
                     let path = UIBezierPath(ovalIn: rect)
                     UIColor.systemBackground.setFill()
                     path.fill()
@@ -1127,7 +1130,7 @@ struct DFKMapView: View {
                     path.stroke()
 
                     if let iconImage = UIImage(systemName: transport.currentType.sfSymbol) {
-                        drawImageAspectFit(iconImage.withTintColor(themeColor), in: CGRect(x: midPoint.x - 6, y: midPoint.y - 6, width: 12, height: 12))
+                        drawImageAspectFit(iconImage.withTintColor(themeColor), in: CGRect(x: midPoint.x - 4, y: midPoint.y - 4, width: 8, height: 8))
                     }
                 }
             }
@@ -1754,13 +1757,21 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             view.canShowCallout = false
             view.centerOffset = annotation.centerOffset
             
-            // Ensure photos are on the top layer
-            if case .photo = annotation.kind {
-                view.zPriority = .max
-                view.displayPriority = .required
-            } else {
+            // zPriority only controls annotation decluttering. Use the view layer
+            // itself to enforce the visual stack: transport < footprint < photo.
+            switch annotation.kind {
+            case .transport:
                 view.zPriority = .min
                 view.displayPriority = .defaultLow
+                view.layer.zPosition = 0
+            case .footprint:
+                view.zPriority = .max
+                view.displayPriority = .required
+                view.layer.zPosition = 10
+            case .photo, .heatmap, .main, .selectedTime:
+                view.zPriority = .max
+                view.displayPriority = .required
+                view.layer.zPosition = 20
             }
             
             return view
@@ -2076,4 +2087,3 @@ fileprivate extension Color {
         return Color(hue: Double(h), saturation: Double(s), brightness: Double(max(b - percentage, 0.0)), opacity: Double(a))
     }
 }
-

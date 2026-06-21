@@ -449,7 +449,7 @@ final class WidgetDataSyncManager {
 
                                     if clCoords.count >= 2, let midCoord = clCoords.widgetMidpoint {
                                         let midPoint = snapshot.point(for: midCoord)
-                                        let rect = CGRect(x: midPoint.x - 10, y: midPoint.y - 10, width: 20, height: 20)
+                                        let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
                                         let path = UIBezierPath(ovalIn: rect)
                                         
                                         let bgColor = theme == .dark ? UIColor.black : UIColor.white
@@ -461,7 +461,7 @@ final class WidgetDataSyncManager {
 
                                         let transportType = TransportType(rawValue: tr.manualTypeRaw ?? tr.typeRaw) ?? .slow
                                         if let iconImage = UIImage(systemName: transportType.sfSymbol) {
-                                            let symbolSize: CGFloat = 12
+                                            let symbolSize: CGFloat = 8
                                             let symbolRect = CGRect(x: midPoint.x - symbolSize/2, y: midPoint.y - symbolSize/2, width: symbolSize, height: symbolSize)
                                             iconImage.withTintColor(themeColor).drawAspectFit(in: symbolRect)
                                         }
