@@ -76,6 +76,7 @@ struct PlacesManagerView: View {
                 if let place = placeToDelete {
                     modelContext.delete(place)
                     try? modelContext.save()
+                    LocationManager.shared.clearOngoingStayState()
                     CloudSettingsManager.shared.triggerDataSyncPulse()
                 }
                 placeToDelete = nil

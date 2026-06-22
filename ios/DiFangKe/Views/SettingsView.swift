@@ -17,6 +17,7 @@ struct SettingsView: View {
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
     @AppStorage("aiServiceType") private var aiServiceType = "public"
     @AppStorage(LocationAccuracyMode.userDefaultsKey) private var locationAccuracyModeRaw = LocationAccuracyMode.automatic.rawValue
+    @AppStorage(TimelineViewMode.userDefaultsKey) private var timelineViewModeRaw = TimelineViewMode.dateCards.rawValue
     
     @State private var showingSettingsAlert = false
     
@@ -67,9 +68,26 @@ struct SettingsView: View {
     private var selectedLocationAccuracyMode: LocationAccuracyMode {
         LocationAccuracyMode(rawValue: locationAccuracyModeRaw) ?? .automatic
     }
+
+    private var selectedTimelineViewMode: TimelineViewMode {
+        TimelineViewMode(rawValue: timelineViewModeRaw) ?? .dateCards
+    }
     
     var body: some View {
         Form {
+            Section {
+                NavigationLink {
+                    TimelineViewModeSettingsView()
+                } label: {
+                    HStack {
+                        Text("视图")
+                        Spacer()
+                        Text(selectedTimelineViewMode.title)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+
             Section(header: Text("隐私与记录")) {
                 Toggle("开启定位记录", isOn: $isTrackingEnabled)
                     .onChange(of: isTrackingEnabled) { oldValue, newValue in
@@ -300,5 +318,95 @@ struct SettingsView: View {
                 locationManager.triggerNotificationSummaryRefresh()
             }
         }
+    }
+}
+
+private struct TimelineViewModeSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(TimelineViewMode.userDefaultsKey) private var timelineViewModeRaw = TimelineViewMode.dateCards.rawValue
+    @State private var previewMode: TimelineViewMode
+
+    init() {
+        let storedValue = UserDefaults.standard.string(forKey: TimelineViewMode.userDefaultsKey)
+        _previewMode = State(initialValue: TimelineViewMode(rawValue: storedValue ?? "") ?? .dateCards)
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Picker("视图", selection: $previewMode) {
+                ForEach(TimelineViewMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            TimelineViewModePreview(mode: previewMode)
+
+            Button("应用") {
+                timelineViewModeRaw = previewMode.rawValue
+                dismiss()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .tint(.dfkAccent)
+            .frame(maxWidth: .infinity)
+
+            Spacer()
+        }
+        .padding()
+        .navigationTitle("视图")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct TimelineViewModePreview: View {
+    let mode: TimelineViewMode
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(Color.dfkBackground)
+            .overlay {
+                switch mode {
+                case .continuousTimeline:
+                    // 连续时间线尚未实现，预览保持为空白。
+                    Color.clear
+                case .dateCards:
+                    dateCardsPreview
+                }
+            }
+            .aspectRatio(9 / 16, contentMode: .fit)
+    }
+
+    private var dateCardsPreview: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Image(systemName: "chevron.left")
+                Spacer()
+                Text("今天")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Image(systemName: "chevron.right")
+            }
+            .foregroundColor(.secondary)
+
+            ForEach(0..<3, id: \.self) { index in
+                HStack(spacing: 10) {
+                    Image(systemName: index == 1 ? "figure.walk" : "mappin.circle.fill")
+                        .foregroundColor(index == 1 ? .orange : .dfkAccent)
+                    VStack(alignment: .leading, spacing: 5) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.primary.opacity(0.55))
+                            .frame(width: index == 1 ? 70 : 92, height: 8)
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.secondary.opacity(0.25))
+                            .frame(width: 50, height: 6)
+                    }
+                    Spacer()
+                }
+                .padding(12)
+                .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+        .padding(16)
     }
 }

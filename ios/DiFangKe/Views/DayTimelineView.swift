@@ -1008,7 +1008,7 @@ struct DayTimelineView: View {
                     Button {
                         showingPurgeConfirmation = true
                     } label: {
-                        Text("不使用历史记录")
+                        Text("永久删除云端记录")
                             .font(.subheadline.bold())
                             .foregroundColor(.secondary)
                             .padding()
@@ -1022,9 +1022,9 @@ struct DayTimelineView: View {
             .padding(30)
         }
         .transition(.opacity.combined(with: .scale))
-        .alert("确定不进行同步吗？", isPresented: $showingPurgeConfirmation) {
+        .alert("永久删除 iCloud 记录？", isPresented: $showingPurgeConfirmation) {
             Button("同步", role: .cancel) { }
-            Button("确定不同步并删除", role: .destructive) {
+            Button("永久删除", role: .destructive) {
                 locationManager.showSyncInquiry = false
                 UserDefaults.standard.set(true, forKey: "isSyncChoiceMade")
                 UserDefaults.standard.set(true, forKey: "didInitialSyncAfterInstall")
@@ -1034,7 +1034,7 @@ struct DayTimelineView: View {
                 }
             }
         } message: {
-            Text("这将会永久删除 iCloud 中的所有记录，且无法恢复。如果您想开启全新的记录体验，请选择确定。")
+            Text("这会删除 iCloud 中的足迹数据库，并可能影响使用同一 iCloud 账号的其他设备。此操作无法恢复。")
         }
     }
 }

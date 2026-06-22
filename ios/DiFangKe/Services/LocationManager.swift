@@ -1463,6 +1463,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         ongoingTitle = nil
         analyzeOngoingStay(at: loc)
     }
+
+    func clearOngoingStayState() {
+        potentialStopStartLocation = nil
+        ongoingTitle = nil
+        clearOngoingPlaceOverride()
+        UserDefaults.standard.removeObject(forKey: "pending_lat")
+        UserDefaults.standard.removeObject(forKey: "pending_lng")
+        UserDefaults.standard.removeObject(forKey: "pending_time")
+        UserDefaults.standard.removeObject(forKey: "pending_title")
+    }
     
     // MARK: - 后台保活与自动恢复
     
@@ -3301,9 +3311,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 ongoingTitle = UserDefaults.standard.string(forKey: "pending_title")
             } else {
                 // 清理过时状态
-                UserDefaults.standard.removeObject(forKey: "pending_lat")
-                UserDefaults.standard.removeObject(forKey: "pending_lng")
-                UserDefaults.standard.removeObject(forKey: "pending_time")
+                clearOngoingStayState()
             }
         }
     }

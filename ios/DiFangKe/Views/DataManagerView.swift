@@ -160,7 +160,7 @@ struct DataManagerView: View {
                     Button("立即清空", role: .destructive) { deleteAllData() }
                     Button("取消", role: .cancel) { }
                 } message: {
-                    Text("仅清空此设备上的本地足迹、地点及配置。\n\n⚠️ 注意：由于 iCloud 开启了实时同步，本地删除操作通常会被同步到云端。如果您仅希望重置本设备而不影响其他设备，请先在‘设置-数据同步’中关闭 iCloud 同步，执行清空后再重新开启（此时会从云端重新拉取数据）。")
+                    Text("仅清空此设备上的本地足迹、地点及配置。\n\n如果当前运行中的数据库仍连接 iCloud，应用会先关闭同步并拒绝删除；请完全退出并重新打开应用后，再执行清空本地数据。")
                 }
             }
         }
@@ -260,26 +260,35 @@ struct DataManagerView: View {
     
     private func deleteAllData() {
         Aptabase.shared.trackEvent("data_cleared")
-        // 按照用户要求：自动关闭同步开关以确保“仅清空本地”
-        UserDefaults.standard.set(false, forKey: "isICloudSyncEnabled")
-        // 同步刷新设置状态
-        CloudSettingsManager.shared.startSyncing() 
+
+        let activeContainerUsesCloudKit = UserDefaults.standard.object(forKey: "activeModelContainerUsesCloudKit") as? Bool
+            ?? (UserDefaults.standard.object(forKey: "isICloudSyncEnabled") as? Bool ?? true)
+
+        guard !activeContainerUsesCloudKit else {
+            UserDefaults.standard.set(false, forKey: "isICloudSyncEnabled")
+            CloudSettingsManager.shared.startSyncing()
+
+            self.alertTitle = "已关闭 iCloud 同步"
+            self.alertMessage = "为避免删除同步到其他设备，本次没有清空任何数据。请完全退出并重新打开应用，确认 iCloud 同步保持关闭后，再执行清空本地数据。"
+            self.showAlert = true
+            return
+        }
 
         do {
-            // 注意：SwiftData + CloudKit 模式下，即便关闭了开关，当前运行中的 Container 可能仍持有云端连接。
-            // 这里的操作通过禁用开关并清空本地模型来最大程度保证本地重置。
             try modelContext.delete(model: Footprint.self)
             try modelContext.delete(model: Place.self)
             try modelContext.delete(model: ActivityType.self)
+            try modelContext.delete(model: TransportManualSelection.self)
             try modelContext.delete(model: TransportRecord.self)
             try modelContext.delete(model: DailyInsight.self)
             
             try modelContext.save()
             
             locationManager.allTodayPoints = []
+            locationManager.clearOngoingStayState()
             
             self.alertTitle = "本地重置成功"
-            self.alertMessage = "iCloud 同步已自动关闭，且所有本地数据已清空。如果您想从云端恢复数据，请在设置中重新开启同步。"
+            self.alertMessage = "当前数据库未连接 iCloud，已仅清空此设备上的本地数据，不会向其他设备同步删除。"
             self.showAlert = true
         } catch {
             self.alertTitle = "操作失败"

@@ -271,6 +271,7 @@ struct DiFangKeApp: App {
             
             await MainActor.run {
                 self.modelContainer = container
+                UserDefaults.standard.set(shouldEnableCloudKit, forKey: "activeModelContainerUsesCloudKit")
                 if isFirstLaunch {
                     UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
                 }
@@ -283,6 +284,7 @@ struct DiFangKeApp: App {
                 let fallbackContainer = try ModelContainer(for: schema, configurations: [fallbackConfig])
                 await MainActor.run {
                     self.modelContainer = fallbackContainer
+                    UserDefaults.standard.set(false, forKey: "activeModelContainerUsesCloudKit")
                 }
             } catch {
                 print("SwiftData FALLBACK CRITICAL ERROR: \(error)")

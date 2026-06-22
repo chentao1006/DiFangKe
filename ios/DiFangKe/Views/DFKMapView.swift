@@ -199,6 +199,8 @@ struct DFKMapView: View {
     var isMiniTimelineMode: Bool = false
     var selectedTimeCoordinate: CLLocationCoordinate2D? = nil
     var timelineUpdateIdentifier: Int? = nil
+    var onMapInteraction: (() -> Void)? = nil
+    var showsMapControls: Bool = true
 
     struct HeatmapPoint: Identifiable {
         let id: String
@@ -249,6 +251,8 @@ struct DFKMapView: View {
         isMiniTimelineMode: Bool = false,
         selectedTimeCoordinate: CLLocationCoordinate2D? = nil,
         timelineUpdateIdentifier: Int? = nil,
+        onMapInteraction: (() -> Void)? = nil,
+        showsMapControls: Bool = true,
         onTimelineItemTap: ((TimelineItem) -> Void)? = nil,
         onPhotoTap: ((PHAsset) -> Void)? = nil
     ) {
@@ -268,6 +272,8 @@ struct DFKMapView: View {
         self.isMiniTimelineMode = isMiniTimelineMode
         self.selectedTimeCoordinate = selectedTimeCoordinate
         self.timelineUpdateIdentifier = timelineUpdateIdentifier
+        self.onMapInteraction = onMapInteraction
+        self.showsMapControls = showsMapControls
         self.onTimelineItemTap = onTimelineItemTap
         self.onPhotoTap = onPhotoTap
     }
@@ -283,6 +289,7 @@ struct DFKMapView: View {
     @State private var selectedAggregatedFootprint: AggregatedFootprint?
     @State private var interactiveMapReady = false
     @State private var interactiveActivationTask: Task<Void, Never>?
+    @Environment(\.colorScheme) private var colorScheme
 
     private var hasVisibleContent: Bool {
         !points.isEmpty ||
@@ -470,6 +477,7 @@ struct DFKMapView: View {
                                 mainAnnotationCoordinate: validMainAnnotationCoordinate,
                                 selectedTimeCoordinate: selectedTimeCoordinate,
                                 allActivities: allActivities,
+                                colorScheme: colorScheme,
                                 onFootprintTap: handleFootprintTap(for:),
                                 onTransportTap: { transport in
                                     onTimelineItemTap?(.transport(transport))
@@ -534,10 +542,15 @@ struct DFKMapView: View {
                                 }
                             }
                             .mapStyle(.standard(emphasis: .muted))
+                            .simultaneousGesture(TapGesture().onEnded { onMapInteraction?() })
+                            .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in onMapInteraction?() })
+                            .simultaneousGesture(MagnificationGesture().onChanged { _ in onMapInteraction?() })
                             .mapControls {
-                                MapUserLocationButton()
-                                MapCompass()
-                                MapScaleView()
+                                if showsMapControls {
+                                    MapUserLocationButton()
+                                    MapCompass()
+                                    MapScaleView()
+                                }
                             }
                         }
                     } else {
@@ -692,62 +705,34 @@ struct DFKMapView: View {
 
     private func aggregatedAnnotationContent(for aggregated: AggregatedFootprint) -> some View {
         let fp = aggregated.representative
-        let scale: CGFloat = 1.45
-        let baseSize: CGFloat = isInteractive ? 30 : 24
-        let size = isMiniTimelineMode ? 12 : baseSize * scale
+        let scale: CGFloat = 1.32
+        let baseSize: CGFloat = isInteractive ? 25 : 20
+        let size = isMiniTimelineMode ? 11 : baseSize * scale
         let activity = fp.getActivityType(from: allActivities)
         let activityColor = activity?.color ?? Color.gray
-        let iconName = activity?.icon ?? FootprintIconDefaults.map
-        let iconSize: CGFloat = isMiniTimelineMode ? 10 : (activity?.icon == nil ? 20 : 14) * scale
+        let iconColor: Color = colorScheme == .dark ? .black : .white
+        let iconName = activity?.icon ?? FootprintIconDefaults.card
+        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (activity?.icon == nil ? 18 : 13) * scale
         let durationTuple = formatDuration(aggregated.totalDuration)
         let fontSize = isInteractive ? 6.5 * scale : 5.5 * scale
 
         return ZStack(alignment: .top) {
-            Ellipse()
-                .fill(Color.black.opacity(0.35))
-                .frame(width: size * 0.45, height: size * 0.15)
-                .blur(radius: 1.0 * scale)
-                .offset(y: size * 1.2 - (size * 0.15) / 2)
-
             MapPinTeardropShape()
-                .fill(
-                    LinearGradient(
-                        colors: [activityColor, activityColor.darker(by: 0.15)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
+                .fill(activityColor)
                 .frame(width: size, height: size * 1.2)
-                .overlay(
-                    MapPinTeardropShape()
-                        .stroke(Color(uiColor: .systemBackground), style: StrokeStyle(lineWidth: 0.5 * scale, lineJoin: .round))
-                )
-
-            Circle()
-                .fill(
-                    LinearGradient(
-                        gradient: Gradient(stops: [
-                            .init(color: Color(uiColor: .systemBackground), location: 0.0),
-                            .init(color: Color(uiColor: .systemBackground), location: 0.5),
-                            .init(color: Color(uiColor: .systemGray4), location: 1.0)
-                        ]),
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(width: size * 0.8, height: size * 0.8)
-                .offset(y: size * 0.1)
 
             // 根据 prefersActivityIcons 决定显示活动图标还是照片封面
             if !prefersActivityIcons, let latestPhotoAssetID = latestPhotoAssetID(for: aggregated) {
+                let photoSize = size * 0.82
                 AssetThumbnailView(assetID: latestPhotoAssetID, showsTime: false)
-                    .frame(width: size * 0.8, height: size * 0.8)
+                    .frame(width: photoSize, height: photoSize)
                     .clipShape(Circle())
-                    .offset(y: size * 0.1)
+                    .overlay(Circle().stroke(iconColor.opacity(0.75), lineWidth: 1))
+                    .offset(y: size * 0.07)
             } else {
                 Image(systemName: iconName)
                     .font(.system(size: iconSize, weight: .bold))
-                    .foregroundColor(activityColor)
+                    .foregroundColor(iconColor)
                     .frame(width: size, height: size)
             }
 
@@ -966,7 +951,7 @@ struct DFKMapView: View {
         let w = Int(size.width / 10) * 10
         let h = Int(size.height / 10) * 10
         let sizeKey = "\(w)x\(h)"
-        let styleKey = UITraitCollection.current.userInterfaceStyle == .dark ? "dark" : "light"
+        let styleKey = colorScheme == .dark ? "dark" : "light"
         return [FootprintIconDefaults.mapSnapshotVersion, sizeKey, styleKey, annotationKey, pointKey, footprintKey, transportKey, photoKey, footprintPhotoKey, heatmapKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
     }
 
@@ -1069,7 +1054,7 @@ struct DFKMapView: View {
         format.scale = UIScreen.main.scale
         let renderer = UIGraphicsImageRenderer(size: snapshot.image.size, format: format)
         let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
-        let strokeColor = UITraitCollection.current.userInterfaceStyle == .dark ? UIColor.black : UIColor.white
+        let strokeColor = colorScheme == .dark ? UIColor.black : UIColor.white
 
         return renderer.image { ctx in
             snapshot.image.draw(at: .zero)
@@ -1138,12 +1123,14 @@ struct DFKMapView: View {
             for aggregated in aggregatedFootprints {
                 let fp = aggregated.representative
                 let point = snapshot.point(for: aggregated.coordinate)
-                let scale: CGFloat = 1.45
-                let markerSize = 24 * scale
+                let scale: CGFloat = 1.32
+                let markerSize = 20 * scale
+                let iconSize = 23 * scale * 0.52
                 let radius = markerSize / 2
                 let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
                 let activity = fp.getActivityType(from: allActivities)
                 let activityColor = UIColor(activity?.color ?? Color.gray)
+                let iconColor: UIColor = colorScheme == .dark ? .black : .white
 
                 let pinPath = CGMutablePath()
                 pinPath.addArc(center: center, radius: radius, startAngle: 125 * .pi / 180, endAngle: 55 * .pi / 180, clockwise: false)
@@ -1153,30 +1140,24 @@ struct DFKMapView: View {
                 ctx.cgContext.setFillColor(activityColor.cgColor)
                 ctx.cgContext.addPath(pinPath)
                 ctx.cgContext.fillPath()
-                ctx.cgContext.setStrokeColor(strokeColor.cgColor)
-                ctx.cgContext.setLineWidth(0.5 * scale)
-                ctx.cgContext.setLineJoin(.round)
-                ctx.cgContext.addPath(pinPath)
-                ctx.cgContext.strokePath()
-
                 let rect = CGRect(x: center.x - radius, y: center.y - radius, width: markerSize, height: markerSize)
-                let innerCircleRect = rect.insetBy(dx: markerSize * 0.1, dy: markerSize * 0.1)
-                ctx.cgContext.setFillColor(UIColor.systemBackground.cgColor)
-                ctx.cgContext.fillEllipse(in: innerCircleRect)
+                let contentRect = rect.insetBy(dx: markerSize * 0.14, dy: markerSize * 0.14)
 
                 // 快照逻辑同步：若 prefersActivityIcons 为 false 且有照片，则显示封面
                 if !prefersActivityIcons, let latestPhotoAssetID = latestPhotoAssetID(for: aggregated),
                    let photoImage = footprintPhotoImages[latestPhotoAssetID] {
-                    let clipPath = UIBezierPath(ovalIn: innerCircleRect)
+                    let clipPath = UIBezierPath(ovalIn: contentRect)
                     ctx.cgContext.saveGState()
                     clipPath.addClip()
-                    drawImageAspectFill(photoImage, in: innerCircleRect)
+                    drawImageAspectFill(photoImage, in: contentRect)
                     ctx.cgContext.restoreGState()
+                    iconColor.setStroke()
+                    clipPath.lineWidth = 1
+                    clipPath.stroke()
                 } else {
-                    let iconName = activity?.icon ?? FootprintIconDefaults.map
+                    let iconName = activity?.icon ?? FootprintIconDefaults.card
                     if let iconImage = UIImage(systemName: iconName) {
-                        let iconSize = markerSize * 0.8
-                        drawImageAspectFit(iconImage.withTintColor(activityColor), in: CGRect(x: center.x - iconSize / 2, y: center.y - iconSize / 2, width: iconSize, height: iconSize))
+                        drawImageAspectFit(iconImage.withTintColor(iconColor), in: CGRect(x: center.x - iconSize / 2, y: center.y - iconSize / 2, width: iconSize, height: iconSize))
                     }
                 }
 
@@ -1483,6 +1464,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
     let mainAnnotationCoordinate: CLLocationCoordinate2D?
     let selectedTimeCoordinate: CLLocationCoordinate2D?
     let allActivities: [ActivityType]
+    let colorScheme: ColorScheme
     let onFootprintTap: (DFKMapView.AggregatedFootprint) -> Void
     let onTransportTap: (Transport) -> Void
     let onPhotoTap: (PHAsset) -> Void
@@ -1656,12 +1638,14 @@ private struct StableInteractiveMapView: UIViewRepresentable {
 
         for aggregated in aggregatedFootprints {
             let activity = aggregated.representative.getActivityType(from: allActivities)
+            let iconColor: UIColor = colorScheme == .dark ? .black : .white
             mapView.addAnnotation(MapImageAnnotation(
                 coordinate: aggregated.coordinate,
                 kind: .footprint(aggregated.id),
                 image: Coordinator.footprintImage(
-                    symbolName: activity?.icon ?? FootprintIconDefaults.map,
+                    symbolName: activity?.icon ?? FootprintIconDefaults.card,
                     color: UIColor(activity?.color ?? Color.secondary.opacity(0.5)),
+                    iconColor: iconColor,
                     duration: aggregated.totalDuration
                 )
             ))
@@ -1804,22 +1788,19 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             }
         }
 
-        static func footprintImage(symbolName: String, color: UIColor, duration: TimeInterval) -> UIImage {
+        static func footprintImage(symbolName: String, color: UIColor, iconColor: UIColor, duration: TimeInterval) -> UIImage {
             let scale = annotationScale(for: duration)
-            let size = CGSize(width: 28 * scale, height: 28 * scale)
+            let size = CGSize(width: 24 * scale, height: 24 * scale)
             let renderer = UIGraphicsImageRenderer(size: size)
             return renderer.image { context in
                 let rect = CGRect(origin: .zero, size: size)
                 color.setFill()
                 context.cgContext.fillEllipse(in: rect)
-                UIColor.systemBackground.setStroke()
-                context.cgContext.setLineWidth(1.5 * scale)
-                context.cgContext.strokeEllipse(in: rect.insetBy(dx: 0.75 * scale, dy: 0.75 * scale))
 
-                let iconSize = CGSize(width: size.width * 0.55, height: size.height * 0.55)
+                let iconSize = CGSize(width: 28 * scale * 0.55, height: 28 * scale * 0.55)
                 let iconOrigin = CGPoint(x: (size.width - iconSize.width) / 2, y: (size.height - iconSize.height) / 2)
                 UIImage(systemName: symbolName)?
-                    .withTintColor(.systemBackground, renderingMode: .alwaysOriginal)
+                    .withTintColor(iconColor, renderingMode: .alwaysOriginal)
                     .draw(in: CGRect(origin: iconOrigin, size: iconSize))
             }
         }
@@ -2086,4 +2067,6 @@ fileprivate extension Color {
         }
         return Color(hue: Double(h), saturation: Double(s), brightness: Double(max(b - percentage, 0.0)), opacity: Double(a))
     }
+
 }
+
