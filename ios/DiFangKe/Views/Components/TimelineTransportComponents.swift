@@ -263,6 +263,7 @@ struct TransportModalView: View {
     @State private var localStartOverride: String? = nil
     @State private var localEndOverride: String? = nil
     @State private var mapPhotos: [PHAsset] = []
+    @State private var mapPhotoImages: [String: UIImage] = [:]
     @State private var selectedPhotoAsset: IdentifiableString?
     @State private var interactiveMapReady = false
     
@@ -295,6 +296,10 @@ struct TransportModalView: View {
                   CLLocationCoordinate2DIsValid(coordinate) else { return nil }
             return (asset, coordinate)
         }
+    }
+
+    private var mapPhotoAssetCacheKey: String {
+        validMapPhotos.map { $0.asset.localIdentifier }.sorted().joined(separator: "|")
     }
     
     // Use the effective type for display
@@ -337,8 +342,8 @@ struct TransportModalView: View {
                                 CLLocationCoordinate2DIsValid($0.coordinate)
                             }) { place in
                                 MapCircle(center: place.coordinate, radius: max(5, min(Double(place.radius), 10_000)))
-                                    .foregroundStyle(Color.orange.opacity(0.1))
-                                    .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                                    .foregroundStyle(Color(uiColor: UIColor.orange.withAlphaComponent(0.1)))
+                                    .stroke(Color(uiColor: UIColor.orange.withAlphaComponent(0.3)), lineWidth: 1)
                             }
 
                             // Start Marker (Physical Look & Title)
@@ -380,23 +385,11 @@ struct TransportModalView: View {
                             }
                             
                             ForEach(transport.lineSegments) { segment in
-                                if !segment.isDashed {
-                                    MapPolyline(coordinates: segment.coordinates)
-                                        .stroke(
-                                            Color(uiColor: .systemBackground),
-                                            style: StrokeStyle(
-                                                lineWidth: 7.5,
-                                                lineCap: .round,
-                                                lineJoin: .round
-                                            )
-                                        )
-                                }
-
                                 MapPolyline(coordinates: segment.coordinates)
                                     .stroke(
                                         Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.7),
                                         style: StrokeStyle(
-                                            lineWidth: segment.isDashed ? 1.4 : 5,
+                                            lineWidth: segment.isDashed ? 1.5 : 3,
                                             lineCap: .round,
                                             lineJoin: .round,
                                             dash: segment.isDashed ? [5, 5] : []
@@ -407,19 +400,30 @@ struct TransportModalView: View {
                             // Photos along the route
                             ForEach(validMapPhotos, id: \.asset.localIdentifier) { entry in
                                 Annotation("", coordinate: entry.coordinate) {
-                                    AssetThumbnailView(assetID: entry.asset.localIdentifier, showsTime: false)
-                                        .frame(width: 56, height: 56)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white, lineWidth: 1.5))
-                                        .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
-                                        .contentShape(Rectangle())
-                                        .onTapGesture {
-                                            selectedPhotoAsset = IdentifiableString(value: entry.asset.localIdentifier)
+                                    ZStack {
+                                        Color(uiColor: .systemGray6)
+                                        if let image = mapPhotoImages[entry.asset.localIdentifier] {
+                                            Image(uiImage: image)
+                                                .resizable()
+                                                .scaledToFill()
+                                        } else {
+                                            Image(systemName: "photo")
+                                                .font(.caption)
+                                                .foregroundColor(Color(uiColor: .systemGray))
                                         }
+                                    }
+                                    .frame(width: 56, height: 56)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white, lineWidth: 1.5))
+                                    .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        selectedPhotoAsset = IdentifiableString(value: entry.asset.localIdentifier)
+                                    }
                                 }
                             }
                         }
-                        .mapStyle(.standard(emphasis: .muted))
+                        .mapStyle(.standard(elevation: .automatic, emphasis: .muted, pointsOfInterest: .excludingAll))
                         .mapControls {
                             MapUserLocationButton()
                             MapCompass()
@@ -570,6 +574,9 @@ struct TransportModalView: View {
                     self.mapPhotos = Array(filtered.suffix(10))
                 }
             }
+            .task(id: mapPhotoAssetCacheKey) {
+                await loadMapPhotoImages()
+            }
 
             .sheet(item: $selectedPhotoAsset) { item in
                 let assetIDs = mapPhotos.map { $0.localIdentifier }
@@ -611,6 +618,66 @@ struct TransportModalView: View {
             onLocationUpdate?()
         }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    @MainActor
+    private func loadMapPhotoImages() async {
+        let assetIDs = validMapPhotos.map { $0.asset.localIdentifier }
+        guard !assetIDs.isEmpty else {
+            mapPhotoImages = [:]
+            return
+        }
+
+        let neededIDs = assetIDs.filter { mapPhotoImages[$0] == nil }
+        if !neededIDs.isEmpty {
+            var loadedImages: [String: UIImage] = [:]
+            for assetID in neededIDs {
+                if Task.isCancelled { return }
+                if let image = await loadMapAssetImage(assetID: assetID, targetSize: CGSize(width: 112, height: 112)) {
+                    loadedImages[assetID] = image
+                }
+            }
+            if !loadedImages.isEmpty {
+                mapPhotoImages.merge(loadedImages, uniquingKeysWith: { _, latest in latest })
+            }
+        }
+
+        let visibleIDs = Set(assetIDs)
+        mapPhotoImages = mapPhotoImages.filter { visibleIDs.contains($0.key) }
+    }
+
+    private func loadMapAssetImage(assetID: String, targetSize: CGSize) async -> UIImage? {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return nil }
+
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+        guard let asset = assets.firstObject else { return nil }
+
+        return await withCheckedContinuation { continuation in
+            let lock = NSLock()
+            var didResume = false
+            func resumeOnce(with image: UIImage?) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !didResume else { return }
+                didResume = true
+                continuation.resume(returning: image)
+            }
+
+            let options = PHImageRequestOptions()
+            options.isNetworkAccessAllowed = false
+            options.deliveryMode = .fastFormat
+            options.resizeMode = .fast
+
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFill,
+                options: options
+            ) { image, _ in
+                resumeOnce(with: image)
+            }
+        }
     }
     
     private var distanceString: String {

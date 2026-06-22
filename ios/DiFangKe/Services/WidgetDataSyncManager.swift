@@ -441,7 +441,7 @@ final class WidgetDataSyncManager {
                                         ctx.cgContext.setStrokeColor(
                                             transportLineColor.withAlphaComponent(segment.isDashed ? 0.5 : 0.8).cgColor
                                         )
-                                        ctx.cgContext.setLineWidth(segment.isDashed ? 1.0 : 4.0)
+                                        ctx.cgContext.setLineWidth(segment.isDashed ? 1.4 : 4.0)
                                         ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
                                         ctx.cgContext.strokePath()
                                     }

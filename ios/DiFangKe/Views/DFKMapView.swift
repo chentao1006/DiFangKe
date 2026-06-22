@@ -199,8 +199,14 @@ struct DFKMapView: View {
     var isMiniTimelineMode: Bool = false
     var selectedTimeCoordinate: CLLocationCoordinate2D? = nil
     var timelineUpdateIdentifier: Int? = nil
-    var onMapInteraction: (() -> Void)? = nil
+    var onMapInteraction: ((MapInteractionType) -> Void)? = nil
     var showsMapControls: Bool = true
+
+    enum MapInteractionType {
+        case tap
+        case pan
+        case zoom
+    }
 
     struct HeatmapPoint: Identifiable {
         let id: String
@@ -251,7 +257,7 @@ struct DFKMapView: View {
         isMiniTimelineMode: Bool = false,
         selectedTimeCoordinate: CLLocationCoordinate2D? = nil,
         timelineUpdateIdentifier: Int? = nil,
-        onMapInteraction: (() -> Void)? = nil,
+        onMapInteraction: ((MapInteractionType) -> Void)? = nil,
         showsMapControls: Bool = true,
         onTimelineItemTap: ((TimelineItem) -> Void)? = nil,
         onPhotoTap: ((PHAsset) -> Void)? = nil
@@ -289,6 +295,7 @@ struct DFKMapView: View {
     @State private var selectedAggregatedFootprint: AggregatedFootprint?
     @State private var interactiveMapReady = false
     @State private var interactiveActivationTask: Task<Void, Never>?
+    @State private var liveMapPhotoImages: [String: UIImage] = [:]
     @Environment(\.colorScheme) private var colorScheme
 
     private var hasVisibleContent: Bool {
@@ -375,6 +382,16 @@ struct DFKMapView: View {
             guard case .footprint(let footprint) = item else { return false }
             return !footprint.photoAssetIDs.isEmpty
         }
+    }
+
+    private var liveMapPhotoAssetIDs: [String] {
+        let footprintIDs = aggregatedFootprints.compactMap { latestPhotoAssetID(for: $0) }
+        let standaloneIDs = validPhotoAnnotations.map { $0.asset.localIdentifier }
+        return Array(Set(footprintIDs + standaloneIDs)).sorted()
+    }
+
+    private var liveMapPhotoAssetCacheKey: String {
+        liveMapPhotoAssetIDs.joined(separator: "|")
     }
 
     private func latestPhotoAssetID(for aggregated: AggregatedFootprint) -> String? {
@@ -527,7 +544,7 @@ struct DFKMapView: View {
                                             .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
                                     }
                                 }
-                                
+
                                 if let coordinate = selectedTimeCoordinate, coordinate.isRenderableMapCoordinate {
                                     Annotation("", coordinate: coordinate) {
                                         Circle()
@@ -541,10 +558,10 @@ struct DFKMapView: View {
                                     UserAnnotation()
                                 }
                             }
-                            .mapStyle(.standard(emphasis: .muted))
-                            .simultaneousGesture(TapGesture().onEnded { onMapInteraction?() })
-                            .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in onMapInteraction?() })
-                            .simultaneousGesture(MagnificationGesture().onChanged { _ in onMapInteraction?() })
+                            .mapStyle(.standard(elevation: .automatic, emphasis: .muted, pointsOfInterest: .excludingAll))
+                            .simultaneousGesture(TapGesture().onEnded { onMapInteraction?(.tap) })
+                            .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in onMapInteraction?(.pan) })
+                            .simultaneousGesture(MagnificationGesture().onChanged { _ in onMapInteraction?(.zoom) })
                             .mapControls {
                                 if showsMapControls {
                                     MapUserLocationButton()
@@ -577,6 +594,10 @@ struct DFKMapView: View {
             .task(id: snapshotCacheKey(for: geometry.size)) {
                 guard !isInteractive else { return }
                 loadSnapshot(for: geometry.size, forceWidgetRefresh: false)
+            }
+            .task(id: liveMapPhotoAssetCacheKey) {
+                guard isInteractive else { return }
+                await loadLiveMapPhotoImages()
             }
             .onDisappear {
                 interactiveActivationTask?.cancel()
@@ -724,11 +745,20 @@ struct DFKMapView: View {
             // 根据 prefersActivityIcons 决定显示活动图标还是照片封面
             if !prefersActivityIcons, let latestPhotoAssetID = latestPhotoAssetID(for: aggregated) {
                 let photoSize = size * 0.82
-                AssetThumbnailView(assetID: latestPhotoAssetID, showsTime: false)
-                    .frame(width: photoSize, height: photoSize)
-                    .clipShape(Circle())
-                    .overlay(Circle().stroke(iconColor.opacity(0.75), lineWidth: 1))
-                    .offset(y: size * 0.07)
+                if let image = liveMapPhotoImages[latestPhotoAssetID] {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: photoSize, height: photoSize)
+                        .clipShape(Circle())
+                        .overlay(Circle().stroke(iconColor.opacity(0.75), lineWidth: 1))
+                        .offset(y: size * 0.07)
+                } else {
+                    Image(systemName: iconName)
+                        .font(.system(size: iconSize, weight: .bold))
+                        .foregroundColor(iconColor)
+                        .frame(width: size, height: size)
+                }
             } else {
                 Image(systemName: iconName)
                     .font(.system(size: iconSize, weight: .bold))
@@ -793,25 +823,12 @@ struct DFKMapView: View {
 
     @MapContentBuilder
     private func transportMapContent() -> some MapContent {
-        let backgroundLineWidth: CGFloat = (isInteractive ? 5 : 3) + 2.5
-        let foregroundLineWidth: CGFloat = isInteractive ? 5 : 3
+        let foregroundLineWidth: CGFloat = isInteractive ? 3 : 2
         let dashedOpacity: Double = 0.4
-        let dashedLineWidth: CGFloat = isInteractive ? 1.4 : 0.8
+        let dashedLineWidth: CGFloat = isInteractive ? 1.5 : 1.1
 
         ForEach(transportItems) { transport in
             ForEach(transport.lineSegments) { segment in
-                if !segment.isDashed {
-                    MapPolyline(coordinates: segment.coordinates)
-                        .stroke(
-                            Color(uiColor: .systemBackground),
-                            style: StrokeStyle(
-                                lineWidth: backgroundLineWidth,
-                                lineCap: .round,
-                                lineJoin: .round
-                            )
-                        )
-                }
-
                 MapPolyline(coordinates: segment.coordinates)
                     .stroke(
                         Color.dfkAccent.opacity(segment.isDashed ? dashedOpacity : 0.7),
@@ -892,11 +909,24 @@ struct DFKMapView: View {
 
     @ViewBuilder
     private func photoAnnotationContent(for asset: PHAsset) -> some View {
-        let content = AssetThumbnailView(assetID: asset.localIdentifier, showsTime: false)
-            .frame(width: isInteractive ? 60 : 46, height: isInteractive ? 60 : 46)
-            .clipShape(RoundedRectangle(cornerRadius: isInteractive ? 8 : 6))
-            .overlay(RoundedRectangle(cornerRadius: isInteractive ? 8 : 6).stroke(Color(uiColor: .systemBackground), lineWidth: 1.5))
-            .contentShape(Rectangle())
+        let size: CGFloat = isInteractive ? 60 : 46
+        let cornerRadius: CGFloat = isInteractive ? 8 : 6
+        let content = ZStack {
+            Color(uiColor: .systemGray6)
+            if let image = liveMapPhotoImages[asset.localIdentifier] {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "photo")
+                    .font(.caption)
+                    .foregroundColor(Color(uiColor: .systemGray))
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+        .overlay(RoundedRectangle(cornerRadius: cornerRadius).stroke(Color(uiColor: .systemBackground), lineWidth: 1.5))
+        .contentShape(Rectangle())
 
         if let onPhotoTap {
             content
@@ -1092,7 +1122,7 @@ struct DFKMapView: View {
                     ctx.cgContext.setStrokeColor(
                         themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
                     )
-                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.0 : 4)
+                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.1 : 2.5)
                     ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
                     ctx.cgContext.strokePath()
                 }
@@ -1335,6 +1365,66 @@ struct DFKMapView: View {
             }
         }
         return images
+    }
+
+    @MainActor
+    private func loadLiveMapPhotoImages() async {
+        let assetIDs = liveMapPhotoAssetIDs
+        guard !assetIDs.isEmpty else {
+            liveMapPhotoImages = [:]
+            return
+        }
+
+        let neededIDs = assetIDs.filter { liveMapPhotoImages[$0] == nil }
+        if !neededIDs.isEmpty {
+            var loadedImages: [String: UIImage] = [:]
+            for assetID in neededIDs {
+                if Task.isCancelled { return }
+                if let image = await loadLiveMapAssetImage(assetID: assetID, targetSize: CGSize(width: 120, height: 120)) {
+                    loadedImages[assetID] = image
+                }
+            }
+            if !loadedImages.isEmpty {
+                liveMapPhotoImages.merge(loadedImages, uniquingKeysWith: { _, latest in latest })
+            }
+        }
+
+        let visibleIDs = Set(assetIDs)
+        liveMapPhotoImages = liveMapPhotoImages.filter { visibleIDs.contains($0.key) }
+    }
+
+    private func loadLiveMapAssetImage(assetID: String, targetSize: CGSize) async -> UIImage? {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return nil }
+
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+        guard let asset = assets.firstObject else { return nil }
+
+        return await withCheckedContinuation { continuation in
+            let lock = NSLock()
+            var didResume = false
+            func resumeOnce(with image: UIImage?) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !didResume else { return }
+                didResume = true
+                continuation.resume(returning: image)
+            }
+
+            let options = PHImageRequestOptions()
+            options.isNetworkAccessAllowed = false
+            options.deliveryMode = .fastFormat
+            options.resizeMode = .fast
+
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFill,
+                options: options
+            ) { image, _ in
+                resumeOnce(with: image)
+            }
+        }
     }
 
     private func loadSnapshotAssetImage(assetID: String, targetSize: CGSize) async -> UIImage? {
@@ -1605,22 +1695,11 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             guard !segments.isEmpty else { continue }
 
             for segment in segments {
-                if !segment.isDashed {
-                    let border = MKPolyline(coordinates: segment.coordinates, count: segment.coordinates.count)
-                    context.coordinator.overlayStyles[ObjectIdentifier(border)] = OverlayStyle(
-                        strokeColor: UIColor.systemBackground,
-                        fillColor: nil,
-                        lineWidth: 7.5,
-                        dashPattern: nil
-                    )
-                    mapView.addOverlay(border)
-                }
-
                 let line = MKPolyline(coordinates: segment.coordinates, count: segment.coordinates.count)
                 context.coordinator.overlayStyles[ObjectIdentifier(line)] = OverlayStyle(
-                    strokeColor: UIColor(Color.dfkAccent).withAlphaComponent(segment.isDashed ? 0.4 : 1.0),
+                    strokeColor: UIColor(Color.dfkAccent).withAlphaComponent(segment.isDashed ? 0.4 : 0.8),
                     fillColor: nil,
-                    lineWidth: segment.isDashed ? 2.8 : 5,
+                    lineWidth: segment.isDashed ? 1.6 : 3,
                     dashPattern: segment.isDashed ? [8 as NSNumber, 8 as NSNumber] : nil
                 )
                 mapView.addOverlay(line)
@@ -1683,7 +1762,6 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             ))
         }
     }
-
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         static let annotationReuseIdentifier = "StableInteractiveMapAnnotation"

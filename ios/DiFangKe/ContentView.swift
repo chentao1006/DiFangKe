@@ -3,6 +3,7 @@ import MapKit
 import SwiftData
 import Photos
 import UIKit
+import Aptabase
 
 enum TimelineViewMode: String, CaseIterable, Identifiable {
     case continuousTimeline
@@ -110,6 +111,13 @@ private final class ContinuousTimelineCache {
         hiddenDates.contains(date)
     }
 
+    func invalidate(_ dates: some Sequence<Date>) {
+        for date in dates {
+            timelinesByDate.removeValue(forKey: date)
+            hiddenDates.remove(date)
+        }
+    }
+
     func store(_ fetchedTimelines: [Date: [TimelineItem]], visibleDates: Set<Date>, hiddenDates: Set<Date>) {
         for (date, items) in fetchedTimelines {
             timelinesByDate[date] = items
@@ -148,6 +156,7 @@ private struct ContinuousTimelineView: View {
     @State private var isShowingSettings = false
     @State private var didRequestInitialTimeline = false
     @State private var allowsMapInteractionCollapse = false
+    @State private var skipsNextMapExpansionCameraReset = false
     @State private var timelineCache = ContinuousTimelineCache()
     @State private var availableTimelineDateSet = Set<Date>()
     @State private var hiddenTimelineDateSet = Set<Date>()
@@ -160,12 +169,11 @@ private struct ContinuousTimelineView: View {
                     cameraPosition: $cameraPosition,
                     isInteractive: true,
                     timelineItems: visibleTimelineItems,
-                    onMapInteraction: {
+                    onMapInteraction: { interactionType in
                         guard allowsMapInteractionCollapse else { return }
-                        if timelineDetent == .medium {
-                            lockVisibleTimelineMapForInteraction()
-                        }
+                        lockVisibleTimelineMapForInteraction()
                         guard timelineDetent != .height(88) else { return }
+                        skipsNextMapExpansionCameraReset = interactionType != .tap
                         withAnimation(.easeOut(duration: 0.2)) {
                             timelineDetent = .height(88)
                         }
@@ -192,6 +200,15 @@ private struct ContinuousTimelineView: View {
             .onChange(of: timelineDetent) { oldValue, newValue in
                 if oldValue == .height(88), newValue != .height(88) {
                     unlockVisibleTimelineMapAfterInteraction()
+                    return
+                }
+                if isMapExpansion(from: oldValue, to: newValue) {
+                    lockVisibleTimelineMapForInteraction()
+                    guard !skipsNextMapExpansionCameraReset else {
+                        skipsNextMapExpansionCameraReset = false
+                        return
+                    }
+                    resetLockedMapCamera(animated: true)
                     return
                 }
                 guard mapInteractionLockedVisibleDates == nil else { return }
@@ -583,12 +600,12 @@ private struct ContinuousTimelineView: View {
         var cachedVisibleDates = Set<Date>()
         var cachedHiddenDates = Set<Date>()
         datesToLoad.removeAll { date in
-            if let cachedTimeline = timelineCache.cachedTimeline(for: date) {
+            if !reloadLoadedDates, let cachedTimeline = timelineCache.cachedTimeline(for: date) {
                 cachedTimelines[date] = cachedTimeline
                 cachedVisibleDates.insert(date)
                 return true
             }
-            if timelineCache.isHidden(date) {
+            if !reloadLoadedDates, timelineCache.isHidden(date) {
                 cachedHiddenDates.insert(date)
                 return true
             }
@@ -784,6 +801,7 @@ private struct ContinuousTimelineView: View {
     private func reloadLoadedTimeline() {
         let datesToReload = Array(Set(timelinesByDate.keys).union(visibleTimelineDates)).sorted()
         guard !datesToReload.isEmpty else { return }
+        timelineCache.invalidate(datesToReload)
         Task(priority: .utility) { @MainActor in
             _ = await loadTimelineIncrementally(for: datesToReload, batchSize: 1, defersMapUpdates: true)
         }
@@ -825,6 +843,35 @@ private struct ContinuousTimelineView: View {
         visibleMapUpdateTask?.cancel()
     }
 
+    private func resetLockedMapCamera(animated: Bool) {
+        let lockedDates = mapInteractionLockedVisibleDates ?? (visibleTimelineDates.isEmpty ? [activeTimelineDate] : visibleTimelineDates)
+        let items = timelineItemsForVisibleDates(visibleDates: lockedDates)
+        visibleTimelineItems = items
+        renderedMapItemIDs = Set(items.map(\.id))
+        renderedMapDetentKey = currentMapDetentKey
+
+        let region: MKCoordinateRegion?
+        if items.isEmpty {
+            region = currentLocationMapRegion()
+        } else {
+            region = adjustedMapRegion(for: mapCameraCoordinates(for: items))
+        }
+
+        guard let region else {
+            renderedMapRegion = nil
+            return
+        }
+
+        renderedMapRegion = region
+        if animated {
+            withAnimation(.easeInOut(duration: 0.24)) {
+                cameraPosition = .region(region)
+            }
+        } else {
+            cameraPosition = .region(region)
+        }
+    }
+
     private func unlockVisibleTimelineMapAfterInteraction() {
         guard mapInteractionLockedVisibleDates != nil else {
             refreshVisibleTimelineMap()
@@ -832,6 +879,16 @@ private struct ContinuousTimelineView: View {
         }
         mapInteractionLockedVisibleDates = nil
         refreshVisibleTimelineMap(delayNanoseconds: 120_000_000)
+    }
+
+    private func isMapExpansion(from oldDetent: PresentationDetent, to newDetent: PresentationDetent) -> Bool {
+        mapVisibilityRank(for: newDetent) > mapVisibilityRank(for: oldDetent)
+    }
+
+    private func mapVisibilityRank(for detent: PresentationDetent) -> Int {
+        if detent == .height(88) { return 2 }
+        if detent == .medium { return 1 }
+        return 0
     }
 
     private func refreshVisibleTimelineMap(for visibleDates: Set<Date>? = nil, delayNanoseconds: UInt64 = 360_000_000) {
@@ -977,6 +1034,7 @@ private struct ContinuousTimelineSheet: View {
 
     @Environment(\.modelContext) private var modelContext
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var activityTypes: [ActivityType]
+    @Query(sort: \Place.name) private var allPlaces: [Place]
     @State private var lastPrefetchOldestDate: Date?
     @State private var selectedFootprint: Footprint?
     @State private var selectedTransport: Transport?
@@ -1004,6 +1062,13 @@ private struct ContinuousTimelineSheet: View {
     @State private var isLoadingMoreEarlier = false
     @State private var isLoadingMoreLater = false
     @State private var loadingGapAfterDates = Set<Date>()
+    @State private var showingResetAlert = false
+    @State private var showingRawPointsDate: IdentifiableDate?
+    @State private var footprintPendingDeletion: Footprint?
+    @State private var transportPendingDeletion: Transport?
+    @State private var footprintPendingSplit: Footprint?
+    @State private var pendingMergeCandidate: ContinuousAdjacentFootprintMergeCandidate?
+    @State private var pendingTransportMergeCandidate: ContinuousAdjacentTransportMergeCandidate?
 
     let dates: [Date]
     let timelinesByDate: [Date: [TimelineItem]]
@@ -1074,7 +1139,7 @@ private struct ContinuousTimelineSheet: View {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             if canLoadEarlierDates {
                                 TimelineLoadMoreButton(
-                                    title: "加载更早的数据",
+                                    title: "查看更早的足迹",
                                     isLoading: isLoadingMoreEarlier,
                                     action: { requestLoadEarlierDates(using: proxy) }
                                 )
@@ -1086,7 +1151,7 @@ private struct ContinuousTimelineSheet: View {
                                    gapDays > 1 {
                                     if hasLoadableTimelineDate(between: previousDate, and: date) {
                                         TimelineLoadMoreButton(
-                                            title: "加载更多数据",
+                                            title: "查看更多足迹",
                                             isLoading: loadingGapAfterDates.contains(previousDate),
                                             action: { requestLoadDates(after: previousDate) }
                                         )
@@ -1108,7 +1173,7 @@ private struct ContinuousTimelineSheet: View {
 
                             if canLoadLaterDates {
                                 TimelineLoadMoreButton(
-                                    title: "加载更多数据",
+                                    title: "查看更多足迹",
                                     isLoading: isLoadingMoreLater,
                                     action: { requestLoadLaterDates() }
                                 )
@@ -1179,7 +1244,22 @@ private struct ContinuousTimelineSheet: View {
                         calendarBackfillTask?.cancel()
                     }
                     .sheet(item: $selectedFootprint) { footprint in
-                        FootprintModalView(footprint: footprint, autoFocus: false) { _ in }
+                        FootprintModalView(footprint: footprint, autoFocus: false) { didChange in
+                            guard didChange else { return }
+                            invalidateAndRefreshTimeline(containing: footprint.startTime)
+                            CloudSettingsManager.shared.triggerDataSyncPulse()
+                        }
+                            .environment(locationManager)
+                    }
+                    .sheet(item: $footprintPendingSplit, onDismiss: {
+                        if let date = footprintPendingSplit?.startTime {
+                            invalidateAndRefreshTimeline(containing: date)
+                        } else {
+                            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                        }
+                        footprintPendingSplit = nil
+                    }) { footprint in
+                        FootprintSplitView(footprint: footprint)
                             .environment(locationManager)
                     }
                     .sheet(item: $selectedTransport) { transport in
@@ -1204,6 +1284,74 @@ private struct ContinuousTimelineSheet: View {
                                 }
                         }
                     }
+                        .sheet(item: $showingRawPointsDate) { item in
+                            RawPointsListView(date: item.date)
+                                .environment(locationManager)
+                        }
+                        .alert("重新生成本日数据", isPresented: $showingResetAlert) {
+                            Button("确定重新生成", role: .destructive) {
+                                locationManager.resetData(for: activeTimelineDate)
+                            }
+                            Button("取消", role: .cancel) { }
+                        } message: {
+                            Text("这将删除已手动修正或确认的足迹记录，并基于原始轨迹点重新分析生成时间线。")
+                        }
+                        .alert("确认删除足迹？", isPresented: Binding(
+                            get: { footprintPendingDeletion != nil },
+                            set: { if !$0 { footprintPendingDeletion = nil } }
+                        )) {
+                            Button("删除", role: .destructive) {
+                                if let footprintPendingDeletion {
+                                    deleteFootprint(footprintPendingDeletion)
+                                }
+                                footprintPendingDeletion = nil
+                            }
+                            Button("取消", role: .cancel) { footprintPendingDeletion = nil }
+                        } message: {
+                            Text("删除后，该足迹将不再出现在时间轴上。")
+                        }
+                        .alert("确认删除此交通记录？", isPresented: Binding(
+                            get: { transportPendingDeletion != nil },
+                            set: { if !$0 { transportPendingDeletion = nil } }
+                        )) {
+                            Button("取消", role: .cancel) { transportPendingDeletion = nil }
+                            Button("删除", role: .destructive) {
+                                if let transportPendingDeletion {
+                                    deleteTransport(transportPendingDeletion)
+                                }
+                                transportPendingDeletion = nil
+                            }
+                        } message: {
+                            Text("删除后该段交通将从时间轴中隐藏。")
+                        }
+                        .alert("合并相邻足迹？", isPresented: Binding(
+                            get: { pendingMergeCandidate != nil },
+                            set: { if !$0 { pendingMergeCandidate = nil } }
+                        )) {
+                            Button("合并") {
+                                if let pendingMergeCandidate {
+                                    mergeAdjacentFootprints(pendingMergeCandidate)
+                                }
+                                pendingMergeCandidate = nil
+                            }
+                            Button("取消", role: .cancel) { pendingMergeCandidate = nil }
+                        } message: {
+                            Text(mergeConfirmationMessage)
+                        }
+                        .alert("合并相邻交通？", isPresented: Binding(
+                            get: { pendingTransportMergeCandidate != nil },
+                            set: { if !$0 { pendingTransportMergeCandidate = nil } }
+                        )) {
+                            Button("合并") {
+                                if let pendingTransportMergeCandidate {
+                                    mergeAdjacentTransports(pendingTransportMergeCandidate)
+                                }
+                                pendingTransportMergeCandidate = nil
+                            }
+                            Button("取消", role: .cancel) { pendingTransportMergeCandidate = nil }
+                        } message: {
+                            Text(transportMergeConfirmationMessage)
+                        }
                     .toolbar { headerToolbar(proxy: proxy) }
                     .navigationBarTitleDisplayMode(.inline)
                 }
@@ -1262,6 +1410,21 @@ private struct ContinuousTimelineSheet: View {
                     scrollToDate(date, using: proxy)
                 }
                 .presentationCompactAdaptation(.popover)
+            }
+            .contextMenu {
+                Button {
+                    showingRawPointsDate = IdentifiableDate(date: activeTimelineDate)
+                } label: {
+                    Label("查看所有轨迹点", systemImage: "dot.radiowaves.left.and.right")
+                }
+
+                Divider()
+
+                Button(role: .destructive) {
+                    showingResetAlert = true
+                } label: {
+                    Label("重新生成本日数据", systemImage: "arrow.counterclockwise")
+                }
             }
         }
 
@@ -1451,16 +1614,41 @@ private struct ContinuousTimelineSheet: View {
             let items = (timelinesByDate[date] ?? []).sorted { $0.startTime < $1.startTime }
             ForEach(items.indices, id: \.self) { index in
                 let item = items[index]
+                let mergeCandidate = adjacentMergeCandidate(for: item)
+                let transportMergeCandidate = adjacentTransportMergeCandidate(for: item)
                 ContinuousTimelineRow(
                     item: item,
                     nextStartTime: items.indices.contains(index + 1) ? items[index + 1].startTime : nil,
                     activityTypes: activityTypes,
                     showsContinuation: true,
                     usesMinimumBottomSpacing: shouldUseMinimumSpacingBeforeCurrentStay(item, at: index, in: items, date: date),
+                    canMergeItem: mergeCandidate != nil || transportMergeCandidate != nil,
                     onTap: {
                         switch item {
-                        case .footprint(let footprint): selectedFootprint = footprint
+                        case .footprint(let footprint): selectedFootprint = storedFootprint(matching: footprint)
                         case .transport(let transport): selectedTransport = transport
+                        }
+                    },
+                    onMerge: {
+                        switch item {
+                        case .footprint:
+                            pendingMergeCandidate = mergeCandidate
+                        case .transport:
+                            pendingTransportMergeCandidate = transportMergeCandidate
+                        }
+                    },
+                    onSplit: {
+                        guard case .footprint(let footprint) = item else { return }
+                        footprintPendingSplit = storedFootprint(matching: footprint)
+                    },
+                    onToggleFavorite: {
+                        guard case .footprint(let footprint) = item else { return }
+                        toggleFavorite(for: footprint)
+                    },
+                    onDelete: {
+                        switch item {
+                        case .footprint(let footprint): footprintPendingDeletion = footprint
+                        case .transport(let transport): transportPendingDeletion = transport
                         }
                     }
                 )
@@ -1833,8 +2021,436 @@ private struct ContinuousTimelineSheet: View {
             record.manualTypeRaw = type.rawValue
             record.typeRaw = type.rawValue
             try? modelContext.save()
+            CloudSettingsManager.shared.triggerDataSyncPulse()
         }
-        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+        invalidateAndRefreshTimeline(containing: transport.startTime)
+    }
+
+    private func storedFootprint(matching footprint: Footprint) -> Footprint {
+        let footprintID = footprint.footprintID
+        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+        return (try? modelContext.fetch(descriptor).first) ?? footprint
+    }
+
+    private func storedTransportRecord(matching transport: Transport) -> TransportRecord? {
+        let transportID = transport.id
+        let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == transportID })
+        return try? modelContext.fetch(descriptor).first
+    }
+
+    private func adjacentMergeCandidate(for item: TimelineItem) -> ContinuousAdjacentFootprintMergeCandidate? {
+        guard case .footprint(let footprint) = item else { return nil }
+        return adjacentMergeCandidate(for: storedFootprint(matching: footprint))
+    }
+
+    private func adjacentMergeCandidate(for footprint: Footprint) -> ContinuousAdjacentFootprintMergeCandidate? {
+        let allFootprints = adjacentSearchFootprints(around: footprint)
+        guard let index = allFootprints.firstIndex(where: { $0.footprintID == footprint.footprintID }) else {
+            return nil
+        }
+
+        if index > 0 {
+            let previous = allFootprints[index - 1]
+            if canMergeAdjacentFootprints(previous, footprint) {
+                return ContinuousAdjacentFootprintMergeCandidate(base: previous, other: footprint)
+            }
+        }
+
+        if index < allFootprints.count - 1 {
+            let next = allFootprints[index + 1]
+            if canMergeAdjacentFootprints(footprint, next) {
+                return ContinuousAdjacentFootprintMergeCandidate(base: footprint, other: next)
+            }
+        }
+
+        return nil
+    }
+
+    private func adjacentSearchFootprints(around footprint: Footprint) -> [Footprint] {
+        let lowerBound = footprint.startTime.addingTimeInterval(-172800)
+        let upperBound = footprint.endTime.addingTimeInterval(172800)
+        let descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate {
+                $0.statusValue != "ignored" &&
+                $0.endTime >= lowerBound &&
+                $0.startTime <= upperBound
+            },
+            sortBy: [SortDescriptor(\.startTime, order: .forward)]
+        )
+        return (try? modelContext.fetch(descriptor)) ?? []
+    }
+
+    private func canMergeAdjacentFootprints(_ first: Footprint, _ second: Footprint) -> Bool {
+        guard first.status != .ignored, second.status != .ignored else { return false }
+        guard first.footprintID != second.footprintID else { return false }
+        guard isSameDayFootprint(first), isSameDayFootprint(second) else { return false }
+        guard Calendar.current.isDate(first.startTime, inSameDayAs: second.startTime) else { return false }
+        return !hasTransportBetween(first, second)
+    }
+
+    private func isSameDayFootprint(_ footprint: Footprint) -> Bool {
+        Calendar.current.isDate(footprint.startTime, inSameDayAs: footprint.endTime.addingTimeInterval(-0.001))
+    }
+
+    private func hasTransportBetween(_ first: Footprint, _ second: Footprint) -> Bool {
+        let lowerBound = min(first.endTime, second.endTime)
+        let upperBound = max(first.startTime, second.startTime)
+        guard upperBound > lowerBound else { return false }
+
+        let descriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate {
+                $0.statusRaw != "ignored" &&
+                $0.endTime > lowerBound &&
+                $0.startTime < upperBound
+            }
+        )
+        return ((try? modelContext.fetch(descriptor)) ?? []).isEmpty == false
+    }
+
+    private func adjacentTransportMergeCandidate(for item: TimelineItem) -> ContinuousAdjacentTransportMergeCandidate? {
+        guard case .transport(let transport) = item,
+              let record = storedTransportRecord(matching: transport) else { return nil }
+        return adjacentTransportMergeCandidate(for: record)
+    }
+
+    private func adjacentTransportMergeCandidate(for record: TransportRecord) -> ContinuousAdjacentTransportMergeCandidate? {
+        let allTransports = adjacentSearchTransports(around: record)
+        guard let index = allTransports.firstIndex(where: { $0.recordID == record.recordID }) else {
+            return nil
+        }
+
+        if index > 0 {
+            let previous = allTransports[index - 1]
+            if canMergeAdjacentTransports(previous, record) {
+                return ContinuousAdjacentTransportMergeCandidate(base: previous, other: record)
+            }
+        }
+
+        if index < allTransports.count - 1 {
+            let next = allTransports[index + 1]
+            if canMergeAdjacentTransports(record, next) {
+                return ContinuousAdjacentTransportMergeCandidate(base: record, other: next)
+            }
+        }
+
+        return nil
+    }
+
+    private func adjacentSearchTransports(around record: TransportRecord) -> [TransportRecord] {
+        let lowerBound = record.startTime.addingTimeInterval(-172800)
+        let upperBound = record.endTime.addingTimeInterval(172800)
+        let descriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate {
+                $0.statusRaw != "ignored" &&
+                $0.endTime >= lowerBound &&
+                $0.startTime <= upperBound
+            },
+            sortBy: [SortDescriptor(\.startTime, order: .forward)]
+        )
+        return (try? modelContext.fetch(descriptor)) ?? []
+    }
+
+    private func canMergeAdjacentTransports(_ first: TransportRecord, _ second: TransportRecord) -> Bool {
+        guard first.statusRaw != "ignored", second.statusRaw != "ignored" else { return false }
+        guard first.recordID != second.recordID else { return false }
+        guard Calendar.current.isDate(first.startTime, inSameDayAs: second.startTime) else { return false }
+        return !hasFootprintBetween(first, second)
+    }
+
+    private func hasFootprintBetween(_ first: TransportRecord, _ second: TransportRecord) -> Bool {
+        let lowerBound = min(first.endTime, second.endTime)
+        let upperBound = max(first.startTime, second.startTime)
+        guard upperBound > lowerBound else { return false }
+
+        let descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate {
+                $0.statusValue != "ignored" &&
+                $0.endTime > lowerBound &&
+                $0.startTime < upperBound
+            }
+        )
+        return ((try? modelContext.fetch(descriptor)) ?? []).isEmpty == false
+    }
+
+    private var mergeConfirmationMessage: String {
+        guard let pendingMergeCandidate else {
+            return "合并后会保留较早的足迹，并删除另一条相邻足迹。"
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        let first = pendingMergeCandidate.first
+        let second = pendingMergeCandidate.second
+        return "将合并：\n\(footprintMergeDescription(for: first, formatter: formatter))\n\(footprintMergeDescription(for: second, formatter: formatter))"
+    }
+
+    private var transportMergeConfirmationMessage: String {
+        guard let pendingTransportMergeCandidate else {
+            return "合并后会保留较早的交通记录，并删除另一条相邻交通。"
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        let first = pendingTransportMergeCandidate.first
+        let second = pendingTransportMergeCandidate.second
+        return "将合并：\n\(transportMergeDescription(for: first, formatter: formatter))\n\(transportMergeDescription(for: second, formatter: formatter))"
+    }
+
+    private func footprintMergeDescription(for footprint: Footprint, formatter: DateFormatter) -> String {
+        "\(formatter.string(from: footprint.startTime))-\(formatter.string(from: footprint.endTime))  \(footprintDisplayTitle(for: footprint))"
+    }
+
+    private func footprintDisplayTitle(for footprint: Footprint) -> String {
+        if let placeID = footprint.placeID,
+           let place = allPlaces.first(where: { $0.placeID == placeID && $0.isUserDefined }) {
+            return place.name
+        }
+        return footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "未知地点"
+    }
+
+    private func transportMergeDescription(for record: TransportRecord, formatter: DateFormatter) -> String {
+        let type = TransportType(rawValue: record.manualTypeRaw ?? record.typeRaw)?.localizedName ?? "交通"
+        let route = "\(transportLocationTitle(record.startLocation)) → \(transportLocationTitle(record.endLocation))"
+        return "\(formatter.string(from: record.startTime))-\(formatter.string(from: record.endTime))  \(type) · \(route)"
+    }
+
+    private func transportLocationTitle(_ title: String) -> String {
+        title.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "未知地点"
+    }
+
+    private func mergeAdjacentFootprints(_ candidate: ContinuousAdjacentFootprintMergeCandidate) {
+        let base = candidate.first
+        let other = candidate.second
+
+        base.startTime = min(base.startTime, other.startTime)
+        base.endTime = max(base.endTime, other.endTime)
+        base.date = Calendar.current.startOfDay(for: base.startTime)
+        base.status = .manual
+
+        var mergedLocations = base.footprintLocations
+        mergedLocations.append(contentsOf: other.footprintLocations)
+        base.footprintLocations = mergedLocations
+
+        if base.reason?.isEmpty ?? true {
+            base.reason = other.reason
+        }
+        if base.address?.isEmpty ?? true {
+            base.address = other.address
+            base.isAddressEditedByHand = other.isAddressEditedByHand
+        }
+        if base.placeID == nil {
+            base.placeID = other.placeID
+        }
+        if base.activityTypeValue == nil {
+            base.activityTypeValue = other.activityTypeValue
+        }
+        if base.isHighlight != true {
+            base.isHighlight = other.isHighlight
+        }
+        base.stepCount = combinedOptionalSum(base.stepCount, other.stepCount)
+        base.walkingDistance = combinedOptionalSum(base.walkingDistance, other.walkingDistance)
+        base.floorsAscended = combinedOptionalSum(base.floorsAscended, other.floorsAscended)
+
+        var mergedPhotos = base.photoAssetIDs
+        for photoID in other.photoAssetIDs where !mergedPhotos.contains(photoID) {
+            mergedPhotos.append(photoID)
+        }
+        base.photoAssetIDs = mergedPhotos
+
+        var mergedMetadata = base.photoMetadata
+        for metadata in other.photoMetadata where !mergedMetadata.contains(metadata) {
+            mergedMetadata.append(metadata)
+        }
+        base.photoMetadata = mergedMetadata
+
+        let mergedStart = base.startTime
+        let mergedEnd = base.endTime
+        modelContext.delete(other)
+        try? modelContext.save()
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+        invalidateTimelineAfterMerge(start: mergedStart, end: mergedEnd)
+        Aptabase.shared.trackEvent("footprint_adjacent_merged")
+    }
+
+    private func mergeAdjacentTransports(_ candidate: ContinuousAdjacentTransportMergeCandidate) {
+        let base = candidate.first
+        let other = candidate.second
+        let baseDurationBeforeMerge = base.endTime.timeIntervalSince(base.startTime)
+        let otherDurationBeforeMerge = other.endTime.timeIntervalSince(other.startTime)
+        let mergedStart = min(base.startTime, other.startTime)
+        let mergedEnd = max(base.endTime, other.endTime)
+
+        base.day = Calendar.current.startOfDay(for: mergedStart)
+        base.startTime = mergedStart
+        base.endTime = mergedEnd
+        base.distance += other.distance
+        let mergedDuration = mergedEnd.timeIntervalSince(mergedStart)
+        base.averageSpeed = mergedDuration > 0 ? base.distance / mergedDuration : 0
+        base.stepCount = combinedOptionalSum(base.stepCount, other.stepCount)
+
+        if base.manualTypeRaw == nil, let otherManualType = other.manualTypeRaw {
+            base.manualTypeRaw = otherManualType
+            base.typeRaw = otherManualType
+        } else if base.manualTypeRaw == nil {
+            base.typeRaw = baseDurationBeforeMerge >= otherDurationBeforeMerge ? base.typeRaw : other.typeRaw
+        }
+
+        if !other.endLocation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           other.endLocation != "终点",
+           other.endLocation != "正在获取位置..." {
+            base.endLocation = other.endLocation
+        }
+
+        let mergedPoints = decodedTransportPoints(base) + decodedTransportPoints(other)
+        if let pointsData = try? JSONEncoder().encode(mergedPoints) {
+            base.pointsData = pointsData
+        }
+
+        cleanupManualSelection(for: other.recordID)
+        modelContext.delete(other)
+        try? modelContext.save()
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+        invalidateTimelineAfterMerge(start: mergedStart, end: mergedEnd)
+        Aptabase.shared.trackEvent("transport_adjacent_merged")
+    }
+
+    private func decodedTransportPoints(_ record: TransportRecord) -> [CodableCoordinate] {
+        (try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData)) ?? []
+    }
+
+    private func cleanupManualSelection(for recordID: UUID) {
+        let descriptor = FetchDescriptor<TransportManualSelection>(predicate: #Predicate { $0.recordID == recordID })
+        for selection in (try? modelContext.fetch(descriptor)) ?? [] {
+            modelContext.delete(selection)
+        }
+    }
+
+    private func combinedOptionalSum(_ lhs: Int?, _ rhs: Int?) -> Int? {
+        switch (lhs, rhs) {
+        case let (left?, right?): return left + right
+        case let (left?, nil): return left
+        case let (nil, right?): return right
+        case (nil, nil): return nil
+        }
+    }
+
+    private func combinedOptionalSum(_ lhs: Double?, _ rhs: Double?) -> Double? {
+        switch (lhs, rhs) {
+        case let (left?, right?): return left + right
+        case let (left?, nil): return left
+        case let (nil, right?): return right
+        case (nil, nil): return nil
+        }
+    }
+
+    private func toggleFavorite(for footprint: Footprint) {
+        let storedFootprint = storedFootprint(matching: footprint)
+        storedFootprint.isHighlight = !(storedFootprint.isHighlight ?? false)
+        try? modelContext.save()
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+        invalidateAndRefreshTimeline(containing: storedFootprint.startTime)
+    }
+
+    private func deleteFootprint(_ footprint: Footprint) {
+        let storedFootprint = storedFootprint(matching: footprint)
+        storedFootprint.status = .ignored
+        try? modelContext.save()
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+        invalidateAndRefreshTimeline(containing: storedFootprint.startTime)
+    }
+
+    private func deleteTransport(_ selected: Transport) {
+        let targetId = selected.id
+
+        let recordDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == targetId })
+        if let record = try? modelContext.fetch(recordDescriptor).first {
+            modelContext.delete(record)
+        }
+
+        let overrideDescriptor = FetchDescriptor<TransportManualSelection>(predicate: #Predicate { $0.recordID == targetId })
+        let existingOverride = (try? modelContext.fetch(overrideDescriptor))?.first
+        let deletionOverride = existingOverride ?? TransportManualSelection(
+            recordID: targetId,
+            startTime: selected.startTime,
+            endTime: selected.endTime,
+            vehicleType: selected.currentType.rawValue,
+            isDeleted: true
+        )
+
+        deletionOverride.startTime = selected.startTime
+        deletionOverride.endTime = selected.endTime
+        deletionOverride.vehicleType = selected.currentType.rawValue
+        deletionOverride.isDeleted = true
+        deletionOverride.startLocationOverride = nil
+        deletionOverride.endLocationOverride = nil
+
+        if existingOverride == nil {
+            modelContext.insert(deletionOverride)
+        }
+
+        try? modelContext.save()
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+        invalidateAndRefreshTimeline(containing: selected.startTime)
+    }
+
+    private func invalidateAndRefreshTimeline(containing date: Date) {
+        let day = Calendar.current.startOfDay(for: date)
+        TimelineBuilder.timelineCache.removeValue(forKey: day)
+        NotificationCenter.default.post(
+            name: NSNotification.Name("FootprintDataChanged"),
+            object: nil,
+            userInfo: ["date": day]
+        )
+    }
+
+    private func invalidateTimelineAfterMerge(start: Date, end: Date) {
+        let calendar = Calendar.current
+        let startDay = calendar.startOfDay(for: start)
+        let effectiveEnd = max(start, end.addingTimeInterval(-0.001))
+        let endDay = calendar.startOfDay(for: effectiveEnd)
+
+        var cursor = startDay
+        while cursor <= endDay {
+            TimelineBuilder.timelineCache.removeValue(forKey: cursor)
+            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+
+        NotificationCenter.default.post(
+            name: NSNotification.Name("FootprintDataChanged"),
+            object: nil,
+            userInfo: ["date": startDay]
+        )
+
+        if calendar.isDateInToday(start) || calendar.isDateInToday(end) {
+            locationManager.triggerNotificationSummaryRefresh()
+        }
+    }
+}
+
+private struct ContinuousAdjacentFootprintMergeCandidate {
+    let base: Footprint
+    let other: Footprint
+
+    var first: Footprint {
+        base.startTime <= other.startTime ? base : other
+    }
+
+    var second: Footprint {
+        base.startTime <= other.startTime ? other : base
+    }
+}
+
+private struct ContinuousAdjacentTransportMergeCandidate {
+    let base: TransportRecord
+    let other: TransportRecord
+
+    var first: TransportRecord {
+        base.startTime <= other.startTime ? base : other
+    }
+
+    var second: TransportRecord {
+        base.startTime <= other.startTime ? other : base
     }
 }
 
@@ -2188,7 +2804,12 @@ private struct ContinuousTimelineRow: View {
     let activityTypes: [ActivityType]
     let showsContinuation: Bool
     let usesMinimumBottomSpacing: Bool
+    let canMergeItem: Bool
     let onTap: () -> Void
+    let onMerge: () -> Void
+    let onSplit: () -> Void
+    let onToggleFavorite: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: ContinuousTimelineLayout.markerSpacing) {
@@ -2210,6 +2831,16 @@ private struct ContinuousTimelineRow: View {
                     .frame(width: 2)
                     .frame(maxHeight: showsContinuation ? .infinity : 8)
             }
+            .overlay(alignment: .top) {
+                if isHighlightedFootprint {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Color.dfkHighlight)
+                        .padding(3)
+                        .background(Color(uiColor: .systemBackground), in: Circle())
+                        .offset(y: markerSize + 2)
+                }
+            }
             .frame(width: ContinuousTimelineLayout.markerSize)
 
             HStack(alignment: .top, spacing: 12) {
@@ -2221,22 +2852,22 @@ private struct ContinuousTimelineRow: View {
                         .padding(.top, 5)
                 } else {
                     VStack(alignment: .leading, spacing: 5) {
-                        HStack(alignment: .firstTextBaseline, spacing: 4) {
-                            Text(title)
-                                .font(titleFont)
-                                .foregroundStyle(titleStyle)
-                                .lineLimit(2)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            if isHighlightedFootprint {
-                                Image(systemName: "star.fill")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(Color.dfkHighlight)
-                            }
-                        }
+                        Text(title)
+                            .font(titleFont)
+                            .foregroundStyle(titleStyle)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(detail)
                             .font(detailFont)
                             .foregroundStyle(detailStyle)
+                        if let footprintNote {
+                            Text(footprintNote)
+                                .font(footprintNoteFont)
+                                .foregroundStyle(detailStyle)
+                                .lineLimit(5)
+                                .truncationMode(.tail)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
 
@@ -2270,7 +2901,51 @@ private struct ContinuousTimelineRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
         .contextMenu {
-            Button("编辑") { onTap() }
+            if case .footprint = item {
+                if canMergeItem {
+                    Button {
+                        onMerge()
+                    } label: {
+                        Label("合并相邻足迹", systemImage: "arrow.triangle.merge")
+                    }
+                    Divider()
+                }
+
+                Button {
+                    onSplit()
+                } label: {
+                    Label("拆分足迹", systemImage: "slider.horizontal.below.square.filled.and.square")
+                }
+            } else if case .transport = item, canMergeItem {
+                Button {
+                    onMerge()
+                } label: {
+                    Label("合并相邻交通", systemImage: "arrow.triangle.merge")
+                }
+                Divider()
+            }
+
+            Button {
+                onTap()
+            } label: {
+                Label("编辑", systemImage: "pencil")
+            }
+
+            if case .footprint(let footprint) = item {
+                Button {
+                    onToggleFavorite()
+                } label: {
+                    Label(footprint.isHighlight == true ? "取消收藏" : "收藏", systemImage: footprint.isHighlight == true ? "star.slash" : "star.fill")
+                }
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
         }
     }
 
@@ -2317,6 +2992,10 @@ private struct ContinuousTimelineRow: View {
 
     private var detailFont: Font {
         .caption
+    }
+
+    private var footprintNoteFont: Font {
+        .footnote
     }
 
     private var titleStyle: HierarchicalShapeStyle {
@@ -2369,6 +3048,11 @@ private struct ContinuousTimelineRow: View {
         case .transport(let transport):
             return transport.distance.formattedTimelineDistance
         }
+    }
+
+    private var footprintNote: String? {
+        guard case .footprint(let footprint) = item else { return nil }
+        return footprint.reason?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 
     private var detail: String {

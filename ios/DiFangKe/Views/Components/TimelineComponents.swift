@@ -652,11 +652,13 @@ struct FootprintCardView: View {
                         .minimumScaleFactor(0.8)
                         .layoutPriority(1)
                         
-                        if let reason = footprint.reason, !reason.isEmpty {
+                                if let reason = footprint.reason?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !reason.isEmpty {
                             Text(reason)
-                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                                .font(.system(size: 14, weight: .medium, design: .rounded))
                                 .foregroundColor(Color.dfkMainText.opacity(0.8))
-                                .lineLimit(3)
+                                .lineLimit(2)
+                                .truncationMode(.tail)
                                 .frame(maxWidth: .infinity, minHeight: 14, alignment: .leading)
                                 .padding(.top, 2)
                         }
@@ -895,23 +897,11 @@ struct FootprintCardView: View {
                     }
                 }
             } label: {
-                ZStack(alignment: .bottomTrailing) {
-                    Image(systemName: iconName)
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(iconColor)
-                        .frame(width: 32, height: 32)
-                        .background(Color(uiColor: .secondarySystemGroupedBackground))
-
-                    if footprint.isHighlight == true {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 14))
-                            .foregroundColor(Color.dfkHighlight)
-                            .padding(2)
-                            .background(Circle().fill(Color(uiColor: .systemBackground)))
-                            .offset(x: 4, y: 4)
-                    }
-                }
-                .frame(width: 32, height: 32)
+                Image(systemName: iconName)
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(iconColor)
+                    .frame(width: 32, height: 32)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground))
             }
             .buttonStyle(.plain)
             
@@ -924,9 +914,20 @@ struct FootprintCardView: View {
             } else {
                 Spacer()
             }
-        }.frame(width: 54)
+        }
+        .overlay(alignment: .top) {
+            if footprint.isHighlight == true {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(Color.dfkHighlight)
+                    .padding(3)
+                    .background(Circle().fill(Color(uiColor: .systemBackground)))
+                    .offset(y: 36)
+            }
+        }
+        .frame(width: 54)
     }
-    
+
     @ViewBuilder
     private var longPressMenu: some View {
         if let mergeCandidate = adjacentMergeCandidate {

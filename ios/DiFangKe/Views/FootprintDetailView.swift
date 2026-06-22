@@ -2603,10 +2603,10 @@ private struct MiniMapView: View {
                 Map(position: $cameraPosition) {
                     Marker("", coordinate: coordinate).tint(Color.orange)
                     MapCircle(center: coordinate, radius: radius)
-                        .foregroundStyle(Color.orange.opacity(0.15))
-                        .stroke(Color.orange.opacity(0.6), lineWidth: 1.5)
+                        .foregroundStyle(Color(uiColor: UIColor.orange.withAlphaComponent(0.15)))
+                        .stroke(Color(uiColor: UIColor.orange.withAlphaComponent(0.6)), lineWidth: 1.5)
                 }
-                .mapStyle(.standard)
+                .mapStyle(.standard(pointsOfInterest: .excludingAll))
                 .disabled(true)
                 .frame(minWidth: 1, minHeight: 1)
             } else {
