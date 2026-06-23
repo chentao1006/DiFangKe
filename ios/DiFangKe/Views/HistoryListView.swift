@@ -107,49 +107,7 @@ private func timelineIconStyle(for item: DaySummary.TimelineIcon, colorScheme: C
     )
 }
 
-// MARK: - Daily Timeline Modal
-struct SimpleDayTimelineView: View {
-    let date: Date
-    @Query(sort: \Footprint.startTime, order: .reverse) private var allFootprints: [Footprint]
-    @Query private var allManualSelections: [TransportManualSelection]
-    @Query(sort: \Place.name) private var allPlaces: [Place]
-    @Environment(LocationManager.self) private var locationManager
-    @Environment(\.dismiss) private var dismiss
-    
-    var body: some View {
-        NavigationStack {
-            TimelinePageView(
-                date: date,
-                footprints: allFootprints.filter { $0.status != .ignored && Calendar.current.isDate($0.startTime, inSameDayAs: date) },
-                manualSelections: allManualSelections.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) },
-                allPlaces: allPlaces,
-                offset: Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: Date()), to: date).day ?? 0,
-                locationManager: locationManager,
-                pastLimitOffset: -3650,
-                isFromHistory: true
-            )
-            .navigationTitle(date.formatted(.dateTime.year().month().day()))
-            .navigationBarTitleDisplayMode(.inline)
-            .background(
-                LinearGradient(
-                    colors: [.dfkBackground, .dfkAccent.opacity(0.1)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea()
-            )
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                    }
-                }
-            }
-        }
-    }
-}
+
 
 struct IdentifiableDate: Identifiable {
     var id: Date { date }
@@ -223,7 +181,7 @@ struct HistoryListView: View {
         .onChange(of: allTransportRecords) { rebuildIndex() }
         .onChange(of: allActivityTypes) { rebuildIndex() }
         .sheet(item: $showingDate) { item in
-            SimpleDayTimelineView(date: item.date)
+            DFKTimelineView(initialDate: item.date)
                 .environment(locationManager)
                 .onDisappear { rebuildIndex() }
         }

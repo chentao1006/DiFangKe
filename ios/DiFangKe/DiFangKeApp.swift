@@ -184,7 +184,7 @@ struct DiFangKeApp: App {
                             OnboardingView(isFirstLaunch: $isFirstLaunch, locationManager: locationManager)
                                 .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
                         } else {
-                            ContentView()
+                            DFKTimelineView()
                                 .environment(locationManager)
                                 .onAppear {
                                     CloudSettingsManager.shared.startSyncing()

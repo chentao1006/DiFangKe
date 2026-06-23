@@ -5,43 +5,16 @@ import Photos
 import UIKit
 import Aptabase
 
-enum TimelineViewMode: String, CaseIterable, Identifiable {
-    case continuousTimeline
-    case dateCards
-
-    static let userDefaultsKey = "timelineViewMode"
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .continuousTimeline:
-            "连续时间线"
-        case .dateCards:
-            "日期卡片"
-        }
-    }
-}
-
-struct ContentView: View {
-    @AppStorage(TimelineViewMode.userDefaultsKey) private var timelineViewModeRaw = TimelineViewMode.dateCards.rawValue
-
-    private var timelineViewMode: TimelineViewMode {
-        TimelineViewMode(rawValue: timelineViewModeRaw) ?? .dateCards
-    }
+struct DFKTimelineView: View {
+    var initialDate: Date?
 
     var body: some View {
-        switch timelineViewMode {
-        case .continuousTimeline:
-            ContinuousTimelineView()
-        case .dateCards:
-            DayTimelineView()
-        }
+        ContinuousTimelineView(initialDate: initialDate)
     }
 }
 
 #Preview {
-    ContentView()
+    DFKTimelineView()
 }
 
 extension CodableCoordinate: @unchecked Sendable {}
@@ -128,6 +101,8 @@ private final class ContinuousTimelineCache {
 }
 
 private struct ContinuousTimelineView: View {
+    var initialDate: Date?
+
     nonisolated private static let initialTimelineVisibleDateBatchSize = 30
     nonisolated private static let timelineVisibleDateBatchSize = 30
     nonisolated private static let calendarBackfillDateBatchSize = 30
@@ -270,21 +245,21 @@ private struct ContinuousTimelineView: View {
         guard !didRequestInitialTimeline else { return }
         didRequestInitialTimeline = true
 
-        let today = Calendar.current.startOfDay(for: Date())
-        activeTimelineDate = today
-        updateVisibleTimelineDates([today])
+        let targetDate = initialDate ?? Calendar.current.startOfDay(for: Date())
+        activeTimelineDate = targetDate
+        updateVisibleTimelineDates([targetDate])
 
         var initialDates = await refreshAvailableTimelineDateCache()
-            .filter { $0 <= today }
-        if !initialDates.contains(today) {
-            initialDates.append(today)
+            .filter { $0 <= targetDate }
+        if !initialDates.contains(targetDate) {
+            initialDates.append(targetDate)
         }
         initialDates = Array(initialDates.sorted().suffix(Self.initialTimelineVisibleDateBatchSize))
 
         _ = await loadVisibleTimelineDates(initialDates.reversed(), visibleDateLimit: initialDates.count, defersMapUpdates: false, reloadLoadedDates: true)
         guard !Task.isCancelled else { return }
 
-        refreshVisibleTimelineMap(for: [today], delayNanoseconds: 120_000_000)
+        refreshVisibleTimelineMap(for: [targetDate], delayNanoseconds: 120_000_000)
     }
 
     private func publishTimelineDatePlaceholders(for dates: [Date], including dateToInclude: Date? = nil) {
