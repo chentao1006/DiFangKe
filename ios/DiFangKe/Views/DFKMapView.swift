@@ -197,6 +197,7 @@ struct DFKMapView: View {
     var showsStandalonePhotos: Bool = false
     var prefersActivityIcons: Bool = false
     var isMiniTimelineMode: Bool = false
+    var selectedFootprintID: UUID? = nil
     var selectedTimeCoordinate: CLLocationCoordinate2D? = nil
     var timelineUpdateIdentifier: Int? = nil
     var onMapInteraction: ((MapInteractionType) -> Void)? = nil
@@ -236,6 +237,7 @@ struct DFKMapView: View {
 
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
     var onPhotoTap: ((PHAsset) -> Void)? = nil
+    var onUserLocationTap: (() -> Void)? = nil
 
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
@@ -255,12 +257,14 @@ struct DFKMapView: View {
         showsStandalonePhotos: Bool = false,
         prefersActivityIcons: Bool = false,
         isMiniTimelineMode: Bool = false,
+        selectedFootprintID: UUID? = nil,
         selectedTimeCoordinate: CLLocationCoordinate2D? = nil,
         timelineUpdateIdentifier: Int? = nil,
         onMapInteraction: ((MapInteractionType) -> Void)? = nil,
         showsMapControls: Bool = true,
         onTimelineItemTap: ((TimelineItem) -> Void)? = nil,
-        onPhotoTap: ((PHAsset) -> Void)? = nil
+        onPhotoTap: ((PHAsset) -> Void)? = nil,
+        onUserLocationTap: (() -> Void)? = nil
     ) {
         self._cameraPosition = cameraPosition
         self.rendersLiveMap = rendersLiveMap
@@ -276,12 +280,14 @@ struct DFKMapView: View {
         self.showsStandalonePhotos = showsStandalonePhotos
         self.prefersActivityIcons = prefersActivityIcons
         self.isMiniTimelineMode = isMiniTimelineMode
+        self.selectedFootprintID = selectedFootprintID
         self.selectedTimeCoordinate = selectedTimeCoordinate
         self.timelineUpdateIdentifier = timelineUpdateIdentifier
         self.onMapInteraction = onMapInteraction
         self.showsMapControls = showsMapControls
         self.onTimelineItemTap = onTimelineItemTap
         self.onPhotoTap = onPhotoTap
+        self.onUserLocationTap = onUserLocationTap
     }
 
     @State private var snapshotImage: UIImage?
@@ -314,6 +320,16 @@ struct DFKMapView: View {
             $0.radius.isFinite &&
             $0.radius > 1
         }
+    }
+
+    private var currentTopSafeAreaInset: CGFloat {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            if let keyWindow = windowScene.windows.first(where: { $0.isKeyWindow }) {
+                return keyWindow.safeAreaInsets.top
+            }
+        }
+        return 0
     }
 
     private var transportItems: [Transport] {
@@ -495,7 +511,8 @@ struct DFKMapView: View {
                                 },
                                 onPhotoTap: { asset in
                                     onPhotoTap?(asset)
-                                }
+                                },
+                                onUserLocationTap: onUserLocationTap
                             )
                         } else {
                             Map(position: $cameraPosition) {
@@ -519,8 +536,13 @@ struct DFKMapView: View {
 
                                 ForEach(validPhotoAnnotations, id: \.asset.localIdentifier) { entry in
                                     Annotation("", coordinate: entry.coordinate) {
-                                        photoAnnotationContent(for: entry.asset)
-                                            .zIndex(100)
+                                        Button {
+                                            onPhotoTap?(entry.asset)
+                                        } label: {
+                                            photoAnnotationContent(for: entry.asset)
+                                                .zIndex(100)
+                                        }
+                                        .buttonStyle(.plain)
                                     }
                                 }
 
@@ -552,17 +574,17 @@ struct DFKMapView: View {
                                     UserAnnotation()
                                 }
                             }
-                            .mapStyle(.standard(elevation: .automatic, emphasis: .muted, pointsOfInterest: .excludingAll))
+                            .mapStyle(.standard(elevation: .automatic, emphasis: .muted))
                             .simultaneousGesture(TapGesture().onEnded { onMapInteraction?(.tap) })
                             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in onMapInteraction?(.pan) })
                             .simultaneousGesture(MagnificationGesture().onChanged { _ in onMapInteraction?(.zoom) })
                             .mapControls {
                                 if showsMapControls {
-                                    MapUserLocationButton()
                                     MapCompass()
                                     MapScaleView()
                                 }
                             }
+                            .safeAreaPadding(.top, currentTopSafeAreaInset)
                         }
                     } else {
                         snapshotContent(for: geometry.size)
@@ -720,16 +742,17 @@ struct DFKMapView: View {
 
     private func aggregatedAnnotationContent(for aggregated: AggregatedFootprint) -> some View {
         let fp = aggregated.representative
-        let scale: CGFloat = 1.32
+        let isSelected = aggregated.footprints.contains { $0.footprintID == selectedFootprintID }
+        let constantScale: CGFloat = 1.32
         let baseSize: CGFloat = isInteractive ? 25 : 20
-        let size = isMiniTimelineMode ? 11 : baseSize * scale
+        let size = isMiniTimelineMode ? 11 : baseSize * constantScale
         let activity = fp.getActivityType(from: allActivities)
         let activityColor = activity?.color ?? Color.gray
         let iconColor: Color = colorScheme == .dark ? .black : .white
         let iconName = activity?.icon ?? FootprintIconDefaults.card
-        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (activity?.icon == nil ? 18 : 13) * scale
+        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (activity?.icon == nil ? 18 : 13) * constantScale
         let durationTuple = formatDuration(aggregated.totalDuration)
-        let fontSize = isInteractive ? 6.5 * scale : 5.5 * scale
+        let fontSize = isInteractive ? 6.5 * constantScale : 5.5 * constantScale
 
         return ZStack(alignment: .top) {
             MapPinTeardropShape()
@@ -780,12 +803,14 @@ struct DFKMapView: View {
                     RoundedRectangle(cornerRadius: 3)
                         .stroke(activityColor, lineWidth: 0.5)
                 )
-                .offset(y: size - 10 * scale)
+                .offset(y: size - 10 * constantScale)
             }
         }
-        .padding(2 * scale)
-        .frame(width: size + 4 * scale, height: size * 1.2 + 4 * scale)
+        .padding(2 * constantScale)
+        .frame(width: size + 4 * constantScale, height: size * 1.2 + 4 * constantScale)
+        .scaleEffect(isSelected ? 1.35 : 1.0, anchor: .bottom)
         .contentShape(Rectangle())
+        .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFootprintID)
     }
 
     @ViewBuilder
@@ -1544,6 +1569,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
     let onFootprintTap: (DFKMapView.AggregatedFootprint) -> Void
     let onTransportTap: (Transport) -> Void
     let onPhotoTap: (PHAsset) -> Void
+    let onUserLocationTap: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -1555,7 +1581,6 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         mapView.mapType = .standard
         mapView.showsCompass = false
         mapView.showsScale = false
-        mapView.pointOfInterestFilter = .excludingAll
         mapView.isRotateEnabled = true
         mapView.isPitchEnabled = true
         mapView.register(MKAnnotationView.self, forAnnotationViewWithReuseIdentifier: Coordinator.annotationReuseIdentifier)
@@ -1567,10 +1592,14 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         controlsStack.spacing = 12
         controlsStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let trackingButton = MKUserTrackingButton(mapView: mapView)
-        trackingButton.tag = Self.userTrackingButtonTag
-        trackingButton.translatesAutoresizingMaskIntoConstraints = false
-        controlsStack.addArrangedSubview(Self.makeCircularControlContainer(for: trackingButton))
+        // Custom location button (replaces MKUserTrackingButton so we can intercept taps)
+        let locationButton = UIButton(type: .system)
+        locationButton.tag = Self.userTrackingButtonTag
+        locationButton.setImage(UIImage(systemName: "location.fill"), for: .normal)
+        locationButton.tintColor = UIColor.systemBlue
+        locationButton.translatesAutoresizingMaskIntoConstraints = false
+        locationButton.addTarget(context.coordinator, action: #selector(Coordinator.didTapLocationButton), for: .touchUpInside)
+        controlsStack.addArrangedSubview(Self.makeCircularControlContainer(for: locationButton))
 
         let compassButton = MKCompassButton(mapView: mapView)
         compassButton.tag = Self.compassButtonTag
@@ -1589,7 +1618,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
 
         NSLayoutConstraint.activate([
             controlsStack.trailingAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            controlsStack.topAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.topAnchor, constant: 16),
+            controlsStack.topAnchor.constraint(equalTo: mapView.topAnchor, constant: topSafeAreaInset + 16),
             scaleView.trailingAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.trailingAnchor, constant: -16),
             scaleView.bottomAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.bottomAnchor, constant: -16)
         ])
@@ -1599,6 +1628,16 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         }
 
         return mapView
+    }
+
+    private var topSafeAreaInset: CGFloat {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            if let keyWindow = windowScene.windows.first(where: { $0.isKeyWindow }) {
+                return keyWindow.safeAreaInsets.top
+            }
+        }
+        return 0
     }
 
     static func dismantleUIView(_ mapView: MKMapView, coordinator: Coordinator) {
@@ -1763,6 +1802,11 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         init(_ parent: StableInteractiveMapView) {
             self.parent = parent
         }
+
+        @objc func didTapLocationButton() {
+            parent.onUserLocationTap?()
+        }
+
 
         func shouldApply(region: MKCoordinateRegion, to current: MKCoordinateRegion) -> Bool {
             let latDiff = abs(region.center.latitude - current.center.latitude)
@@ -2121,4 +2165,16 @@ fileprivate extension Color {
         return Color(hue: Double(h), saturation: Double(s), brightness: Double(max(b - percentage, 0.0)), opacity: Double(a))
     }
 
+}
+
+private extension View {
+    @ViewBuilder
+    func mapLocationButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+        }
+    }
 }

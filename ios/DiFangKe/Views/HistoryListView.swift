@@ -153,10 +153,13 @@ struct HistoryListView: View {
 
     @State private var hasScrolledMonth = false
     
-    init(initialDate: Date = Date(), showImportOnAppear: Bool = false) {
+    var onDateSelected: ((Date) -> Void)? = nil
+    
+    init(initialDate: Date = Date(), showImportOnAppear: Bool = false, onDateSelected: ((Date) -> Void)? = nil) {
         let normalizedDate = Calendar.current.startOfDay(for: initialDate)
         self.initialDate = normalizedDate
         self.showImportOnAppear = showImportOnAppear
+        self.onDateSelected = onDateSelected
         _selectedDate = State(initialValue: normalizedDate)
     }
     
@@ -181,7 +184,7 @@ struct HistoryListView: View {
         .onChange(of: allTransportRecords) { rebuildIndex() }
         .onChange(of: allActivityTypes) { rebuildIndex() }
         .sheet(item: $showingDate) { item in
-            DFKTimelineView(initialDate: item.date)
+            TimelineView(initialDate: item.date)
                 .environment(locationManager)
                 .onDisappear { rebuildIndex() }
         }
@@ -275,7 +278,11 @@ struct HistoryListView: View {
     private var contentArea: some View {
         TabView(selection: $viewMode) {
             HistoryMonthView(footprintsByDay: footprintsByDay, transportsByDay: transportsByDay, allActivityTypes: allActivityTypes, targetDate: selectedDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledMonth, showingRawPointsDate: $showingRawPointsDate) { date in
-                showingDate = IdentifiableDate(date: date)
+                if let onDateSelected = onDateSelected {
+                    onDateSelected(date)
+                } else {
+                    showingDate = IdentifiableDate(date: date)
+                }
             }
             .tag(ViewMode.month)
             
@@ -521,7 +528,6 @@ struct HistoryMonthView: View {
     @Binding var showingRawPointsDate: IdentifiableDate?
     let onDayTap: (Date) -> Void
     
-    @State private var monthsLimit: Int = 12 // 每页预加载多一些月
     @State private var rawPointsDialogDate: IdentifiableDate?
     
     var monthsCount: Int {
@@ -534,8 +540,8 @@ struct HistoryMonthView: View {
     var months: [Date] {
         let calendar = Calendar.current
         let today = Date().startOfMonth ?? Date()
-        let count = min(monthsLimit, monthsCount)
-        return (0...count).compactMap { calendar.date(byAdding: .month, value: -$0, to: today) }
+        let startOfEarliestMonth = earliestDate.startOfMonth ?? earliestDate
+        return (0...monthsCount).compactMap { calendar.date(byAdding: .month, value: $0, to: startOfEarliestMonth) }
     }
     
     var body: some View {
@@ -550,15 +556,6 @@ struct HistoryMonthView: View {
                             .id("month-" + month.dayID)
                         }
 
-                        if monthsLimit < monthsCount {
-                            ProgressView()
-                                .padding()
-                                .onAppear {
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                        monthsLimit += 12
-                                    }
-                                }
-                        }
                     }
                     .padding(.bottom, 30)
                 }
@@ -568,25 +565,12 @@ struct HistoryMonthView: View {
                 }
             }
             .background(Color.dfkBackground)
-            .onAppear {
-                adjustLimitForTarget()
-            }
             .task(id: targetDate) {
                 if !hasScrolled {
-                    adjustLimitForTarget()
                     try? await Task.sleep(nanoseconds: 100_000_000)
                     scrollToTarget(proxy: proxy)
                 }
             }
-        }
-    }
-    
-    private func adjustLimitForTarget() {
-        let calendar = Calendar.current
-        let today = Date().startOfMonth ?? Date()
-        let monthsToTarget = calendar.dateComponents([.month], from: targetDate.startOfMonth ?? targetDate, to: today).month ?? 0
-        if monthsToTarget >= monthsLimit {
-            monthsLimit = monthsToTarget + 3
         }
     }
     

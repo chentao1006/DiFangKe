@@ -5,7 +5,7 @@ import Photos
 import UIKit
 import Aptabase
 
-struct DFKTimelineView: View {
+struct TimelineView: View {
     var initialDate: Date?
 
     var body: some View {
@@ -14,7 +14,7 @@ struct DFKTimelineView: View {
 }
 
 #Preview {
-    DFKTimelineView()
+    TimelineView()
 }
 
 extension CodableCoordinate: @unchecked Sendable {}
@@ -123,6 +123,7 @@ private struct ContinuousTimelineView: View {
     @State private var visibleTimelineDates = Set<Date>()
     @State private var renderedMapItemIDs = Set<String>()
     @State private var renderedMapDetentKey = ""
+    @State private var renderedSelectedFootprintID: UUID? = nil
     @State private var renderedMapRegion: MKCoordinateRegion?
     @State private var mapInteractionLockedVisibleDates: Set<Date>?
     @State private var visibleMapUpdateTask: Task<Void, Never>?
@@ -136,25 +137,145 @@ private struct ContinuousTimelineView: View {
     @State private var availableTimelineDateSet = Set<Date>()
     @State private var hiddenTimelineDateSet = Set<Date>()
     @State private var visibleTimelineFillTask: Task<Void, Never>?
+    @State private var selectedFootprint: Footprint?
+    @State private var selectedTransport: Transport?
+    @State private var selectedFootprintPhotos: [PHAsset] = []
+    @State private var selectedMapPhotoAssetID: String? = nil
+    @State private var isFollowingUserLocation = false
+
+    private var mapTimelineItems: [TimelineItem] {
+        visibleTimelineItems
+    }
+    
+    private var mapPoints: [CLLocationCoordinate2D] {
+        selectedFootprint?.coordinates ?? []
+    }
+    
+    private var mapPhotoAssets: [PHAsset] {
+        selectedFootprint != nil ? selectedFootprintPhotos : []
+    }
+    
+    private var mapShowsStandalonePhotos: Bool {
+        selectedFootprint != nil
+    }
+    
+    private var mapPrefersActivityIcons: Bool {
+        false
+    }
+
+
+    private var mapContent: some View {
+        DFKMapView(
+            cameraPosition: $cameraPosition,
+            isInteractive: true,
+            showsUserLocation: selectedFootprint == nil,
+            points: mapPoints,
+            timelineItems: mapTimelineItems,
+            photoAssets: mapPhotoAssets,
+            showsStandalonePhotos: mapShowsStandalonePhotos,
+            prefersActivityIcons: mapPrefersActivityIcons,
+            selectedFootprintID: selectedFootprint?.footprintID,
+            onMapInteraction: handleMapInteraction,
+            onTimelineItemTap: { item in
+                withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
+                    switch item {
+                    case .footprint(let footprint): selectedFootprint = storedFootprint(matching: footprint)
+                    case .transport(let transport): selectedTransport = transport
+                    }
+                }
+            },
+            onPhotoTap: { asset in
+                selectedMapPhotoAssetID = asset.localIdentifier
+            },
+            onUserLocationTap: focusMapOnCurrentLocation
+        )
+    }
+
+    private func focusMapOnCurrentLocation() {
+        guard let region = currentLocationMapRegion() else { return }
+        isFollowingUserLocation = true
+        withAnimation(.easeInOut(duration: 0.5)) {
+            cameraPosition = .region(region)
+        }
+    }
+
+    private func sheetHeight(in mapHeight: CGFloat) -> CGFloat {
+        if timelineDetent == .height(88) { return 88 }
+        if timelineDetent == .medium { return mapHeight * 0.5 }
+        return mapHeight
+    }
+
+    private var mapLocationSheetClearance: CGFloat {
+        timelineDetent == .medium ? 32 : 16
+    }
+
+    @ViewBuilder
+    private func mapLocationButton(mapHeight: CGFloat) -> some View {
+        if timelineDetent != .large {
+            Button(action: focusMapOnCurrentLocation) {
+                Image(systemName: isFollowingUserLocation ? "location.fill" : "location")
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 32, height: 32)
+            }
+            .mapLocationButtonStyle()
+            .controlSize(.small)
+            .accessibilityLabel("定位到当前位置")
+            .padding(.trailing, 16)
+            .padding(.bottom, sheetHeight(in: mapHeight) + mapLocationSheetClearance)
+        }
+    }
+
+    private func handleMapInteraction(_ interactionType: DFKMapView.MapInteractionType) {
+        switch interactionType {
+        case .pan, .zoom:
+            isFollowingUserLocation = false
+        case .tap:
+            break
+        }
+        guard allowsMapInteractionCollapse else { return }
+        lockVisibleTimelineMapForInteraction()
+        guard timelineDetent != .height(88) else { return }
+        skipsNextMapExpansionCameraReset = interactionType != .tap
+        withAnimation(.easeOut(duration: 0.2)) {
+            timelineDetent = .height(88)
+        }
+    }
+
+    private var timelineSheet: some View {
+        ContinuousTimelineSheet(
+            dates: loadedDates,
+            timelinesByDate: timelinesByDate,
+            locationManager: locationManager,
+            activeTimelineDate: $activeTimelineDate,
+            todayScrollRequest: $todayScrollRequest,
+            timelineDetent: $timelineDetent,
+            selectedFootprint: $selectedFootprint,
+            selectedTransport: $selectedTransport,
+            loadEarlierDates: loadEarlierTimeline,
+            loadLaterDates: loadLaterTimeline,
+            loadLaterDatesAfter: { date in await loadLaterTimeline(from: date) },
+            loadDate: loadTimelineDate,
+            loadBackfillDates: loadTimelineDatesForBackfill,
+            calendarBackfillBatchSize: Self.calendarBackfillDateBatchSize,
+            availableDates: loadableTimelineDateSet,
+            visibleDatesChanged: updateVisibleTimelineDates,
+            isShowingSettings: $isShowingSettings,
+            selectedMapPhotoAssetID: $selectedMapPhotoAssetID
+        )
+        .presentationDetents([.height(88), .medium, .large], selection: $timelineDetent)
+        .presentationDragIndicator(.visible)
+        .presentationContentInteraction(selectedFootprint != nil ? .resizes : .scrolls)
+        .interactiveDismissDisabled()
+        .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+    }
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .topTrailing) {
-                DFKMapView(
-                    cameraPosition: $cameraPosition,
-                    isInteractive: true,
-                    timelineItems: visibleTimelineItems,
-                    onMapInteraction: { interactionType in
-                        guard allowsMapInteractionCollapse else { return }
-                        lockVisibleTimelineMapForInteraction()
-                        guard timelineDetent != .height(88) else { return }
-                        skipsNextMapExpansionCameraReset = interactionType != .tap
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            timelineDetent = .height(88)
-                        }
-                    },
-                    showsMapControls: false
-                )
+            GeometryReader { geometry in
+                ZStack(alignment: .bottomTrailing) {
+                    mapContent
+                    mapLocationButton(mapHeight: geometry.size.height)
+                }
             }
             .ignoresSafeArea()
             .toolbar(.hidden, for: .navigationBar)
@@ -168,56 +289,73 @@ private struct ContinuousTimelineView: View {
                 reloadLoadedTimeline()
                 Task { await refreshAvailableTimelineDateCache() }
             }
+            .onChange(of: selectedFootprint) { newFootprint in
+                handleSelectedFootprintChange(newFootprint)
+            }
             .onChange(of: allPlaces) { _, newValue in
                 locationManager.allPlaces = newValue
                 locationManager.forceRefreshOngoingAnalysis()
             }
             .onChange(of: timelineDetent) { oldValue, newValue in
-                if oldValue == .height(88), newValue != .height(88) {
-                    unlockVisibleTimelineMapAfterInteraction()
-                    return
-                }
-                if isMapExpansion(from: oldValue, to: newValue) {
-                    lockVisibleTimelineMapForInteraction()
-                    guard !skipsNextMapExpansionCameraReset else {
-                        skipsNextMapExpansionCameraReset = false
-                        return
-                    }
-                    resetLockedMapCamera(animated: true)
-                    return
-                }
-                guard mapInteractionLockedVisibleDates == nil else { return }
-                refreshVisibleTimelineMap()
+                handleTimelineDetentChange(oldValue: oldValue, newValue: newValue)
             }
             .onChange(of: locationManager.lastLocation?.timestamp) { _, _ in
                 guard visibleTimelineItems.isEmpty else { return }
                 refreshVisibleTimelineMap(delayNanoseconds: 0)
             }
             .sheet(isPresented: $isTimelinePresented) {
-                ContinuousTimelineSheet(
-                    dates: loadedDates,
-                    timelinesByDate: timelinesByDate,
-                    locationManager: locationManager,
-                    activeTimelineDate: $activeTimelineDate,
-                    todayScrollRequest: $todayScrollRequest,
-                    timelineDetent: $timelineDetent,
-                    loadEarlierDates: loadEarlierTimeline,
-                    loadLaterDates: loadLaterTimeline,
-                    loadLaterDatesAfter: { date in await loadLaterTimeline(from: date) },
-                    loadDate: loadTimelineDate,
-                    loadBackfillDates: loadTimelineDatesForBackfill,
-                    calendarBackfillBatchSize: Self.calendarBackfillDateBatchSize,
-                    availableDates: loadableTimelineDateSet,
-                    visibleDatesChanged: updateVisibleTimelineDates,
-                    isShowingSettings: $isShowingSettings
-                )
-                .presentationDetents([.height(88), .medium, .large], selection: $timelineDetent)
-                .presentationDragIndicator(.visible)
-                .presentationContentInteraction(.scrolls)
-                .interactiveDismissDisabled()
-                .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+                timelineSheet
             }
         }
+    }
+
+    private func handleSelectedFootprintChange(_ newFootprint: Footprint?) {
+        refreshVisibleTimelineMap(delayNanoseconds: 0)
+        if let footprint = newFootprint {
+            timelineDetent = .medium
+            Task {
+                let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: footprint.photoAssetIDs, options: nil)
+                var assets: [PHAsset] = []
+                fetchResult.enumerateObjects { asset, _, _ in
+                    if asset.location != nil {
+                        assets.append(asset)
+                    }
+                }
+                await MainActor.run {
+                    selectedFootprintPhotos = assets
+                }
+            }
+        } else {
+            selectedFootprintPhotos = []
+            timelineDetent = .medium
+        }
+    }
+
+    private func storedFootprint(matching footprint: Footprint) -> Footprint {
+        let footprintID = footprint.footprintID
+        let fetchDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+        if let stored = try? modelContext.fetch(fetchDescriptor).first {
+            return stored
+        }
+        return footprint
+    }
+
+    private func handleTimelineDetentChange(oldValue: PresentationDetent, newValue: PresentationDetent) {
+        if oldValue == .height(88), newValue != .height(88) {
+            unlockVisibleTimelineMapAfterInteraction()
+            return
+        }
+        if newValue == .height(88) {
+            lockVisibleTimelineMapForInteraction()
+            guard !skipsNextMapExpansionCameraReset else {
+                skipsNextMapExpansionCameraReset = false
+                return
+            }
+            resetLockedMapCamera(animated: true)
+            return
+        }
+        guard mapInteractionLockedVisibleDates == nil else { return }
+        refreshVisibleTimelineMap()
     }
 
     private var loadableTimelineDateSet: Set<Date> {
@@ -821,12 +959,21 @@ private struct ContinuousTimelineView: View {
     private func resetLockedMapCamera(animated: Bool) {
         let lockedDates = mapInteractionLockedVisibleDates ?? (visibleTimelineDates.isEmpty ? [activeTimelineDate] : visibleTimelineDates)
         let items = timelineItemsForVisibleDates(visibleDates: lockedDates)
+        
         visibleTimelineItems = items
+        
         renderedMapItemIDs = Set(items.map(\.id))
         renderedMapDetentKey = currentMapDetentKey
+        renderedSelectedFootprintID = selectedFootprint?.footprintID
 
         let region: MKCoordinateRegion?
-        if items.isEmpty {
+        if let footprint = selectedFootprint {
+            var coordinates = footprint.coordinates
+            if coordinates.isEmpty {
+                coordinates = [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
+            }
+            region = adjustedMapRegion(for: coordinates)
+        } else if items.isEmpty {
             region = currentLocationMapRegion()
         } else {
             region = adjustedMapRegion(for: mapCameraCoordinates(for: items))
@@ -854,16 +1001,6 @@ private struct ContinuousTimelineView: View {
         }
         mapInteractionLockedVisibleDates = nil
         refreshVisibleTimelineMap(delayNanoseconds: 120_000_000)
-    }
-
-    private func isMapExpansion(from oldDetent: PresentationDetent, to newDetent: PresentationDetent) -> Bool {
-        mapVisibilityRank(for: newDetent) > mapVisibilityRank(for: oldDetent)
-    }
-
-    private func mapVisibilityRank(for detent: PresentationDetent) -> Int {
-        if detent == .height(88) { return 2 }
-        if detent == .medium { return 1 }
-        return 0
     }
 
     private func refreshVisibleTimelineMap(for visibleDates: Set<Date>? = nil, delayNanoseconds: UInt64 = 360_000_000) {
@@ -895,12 +1032,23 @@ private struct ContinuousTimelineView: View {
 
             let mapItemIDs = Set(items.map(\.id))
             let detentKey = currentMapDetentKey
-            guard mapItemIDs != renderedMapItemIDs || detentKey != renderedMapDetentKey else { return }
+            let selectedFootprintID = selectedFootprint?.footprintID
+            guard mapItemIDs != renderedMapItemIDs || detentKey != renderedMapDetentKey || selectedFootprintID != renderedSelectedFootprintID else { return }
             renderedMapItemIDs = mapItemIDs
             renderedMapDetentKey = detentKey
+            renderedSelectedFootprintID = selectedFootprintID
 
             visibleTimelineItems = items
-            let coordinates = mapCameraCoordinates(for: items)
+            
+            var coordinates: [CLLocationCoordinate2D] = []
+            if let footprint = selectedFootprint {
+                coordinates = footprint.coordinates
+                if coordinates.isEmpty {
+                    coordinates = [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
+                }
+            } else {
+                coordinates = mapCameraCoordinates(for: items)
+            }
 
             if let region = adjustedMapRegion(for: coordinates) {
                 if shouldUpdateMapRegion(to: region) {
@@ -975,16 +1123,13 @@ private struct ContinuousTimelineView: View {
         guard var region = coordinates.boundingRegion(paddingFactor: 1.4) else { return nil }
         guard timelineDetent == .medium else { return region }
 
-        let visibleFraction = 0.48
-        let screenHeight = max(1, UIScreen.main.bounds.height)
-        let topInsetFraction = min(max(0, currentTopSafeAreaInset / screenHeight), max(0, visibleFraction - 0.25))
-        let usableVisibleFraction = max(0.25, visibleFraction - topInsetFraction)
-        let adjustedLatitudeDelta = region.span.latitudeDelta / usableVisibleFraction
-        let centerShift = adjustedLatitudeDelta * (0.5 - topInsetFraction - usableVisibleFraction / 2)
-
-        region.center.latitude -= centerShift
-        region.span.latitudeDelta = adjustedLatitudeDelta
-        region.span.longitudeDelta *= 1.18
+        // Only the top half of the screen is visible due to the sheet.
+        // Double the span so the same content fits in the top half,
+        // and shift center south so content is centered in the top half.
+        let originalLatDelta = region.span.latitudeDelta
+        region.span.latitudeDelta *= 2.0
+        region.span.longitudeDelta *= 1.5
+        region.center.latitude -= originalLatDelta / 2
         return region
     }
 
@@ -1011,13 +1156,12 @@ private struct ContinuousTimelineSheet: View {
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var activityTypes: [ActivityType]
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @State private var lastPrefetchOldestDate: Date?
-    @State private var selectedFootprint: Footprint?
-    @State private var selectedTransport: Transport?
     @State private var allowsEarlierDatePrefetch = false
     @State private var latestScrollOffsetY: CGFloat = .infinity
     @State private var didReachEarliestAvailableDate = false
     @State private var lastEarlierDatePrefetchTime: Date?
     @State private var isShowingCalendar = false
+    @State private var isShowingHistory = false
     @State private var earlierDatePrefetchTask: Task<Void, Never>?
     @State private var scrollMetrics = ContinuousTimelineScrollMetrics()
     @State private var scrollRestorer = ContinuousTimelineScrollRestorer()
@@ -1040,6 +1184,7 @@ private struct ContinuousTimelineSheet: View {
     @State private var showingResetAlert = false
     @State private var showingRawPointsDate: IdentifiableDate?
     @State private var footprintPendingDeletion: Footprint?
+    @State private var footprintPendingIgnore: Footprint?
     @State private var transportPendingDeletion: Transport?
     @State private var footprintPendingSplit: Footprint?
     @State private var pendingMergeCandidate: ContinuousAdjacentFootprintMergeCandidate?
@@ -1051,6 +1196,8 @@ private struct ContinuousTimelineSheet: View {
     @Binding var activeTimelineDate: Date
     @Binding var todayScrollRequest: Int
     @Binding var timelineDetent: PresentationDetent
+    @Binding var selectedFootprint: Footprint?
+    @Binding var selectedTransport: Transport?
     let loadEarlierDates: () async -> Bool
     let loadLaterDates: () async -> Bool
     let loadLaterDatesAfter: (Date) async -> Bool
@@ -1061,6 +1208,7 @@ private struct ContinuousTimelineSheet: View {
     let availableDates: Set<Date>
     let visibleDatesChanged: (Set<Date>) -> Void
     @Binding var isShowingSettings: Bool
+    @Binding var selectedMapPhotoAssetID: String?
 
     private var isCollapsed: Bool {
         timelineDetent == .height(88)
@@ -1098,20 +1246,21 @@ private struct ContinuousTimelineSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollViewReader { proxy in
-                GeometryReader { viewport in
-                    ScrollView {
-                        ScrollOffsetObserver(restorer: scrollRestorer) { metrics in
-                            scrollMetrics = metrics
-                            latestScrollOffsetY = metrics.topOffsetY
-                            if scrollRestorer.isUserInteracting {
-                                lastUserInteractionTime = Date()
+        ZStack {
+            NavigationStack {
+                ScrollViewReader { proxy in
+                    GeometryReader { viewport in
+                        ScrollView {
+                            ScrollOffsetObserver(restorer: scrollRestorer) { metrics in
+                                scrollMetrics = metrics
+                                latestScrollOffsetY = metrics.topOffsetY
+                                if scrollRestorer.isUserInteracting {
+                                    lastUserInteractionTime = Date()
+                                }
                             }
-                        }
-                        .frame(width: 0, height: 0)
-
-                        LazyVStack(alignment: .leading, spacing: 0) {
+                            .frame(width: 0, height: 0)
+    
+                            LazyVStack(alignment: .leading, spacing: 0) {
                             if canLoadEarlierDates {
                                 TimelineLoadMoreButton(
                                     title: "查看更早的足迹",
@@ -1218,14 +1367,6 @@ private struct ContinuousTimelineSheet: View {
                         calendarBackfillPinTask?.cancel()
                         calendarBackfillTask?.cancel()
                     }
-                    .sheet(item: $selectedFootprint) { footprint in
-                        FootprintModalView(footprint: footprint, autoFocus: false) { didChange in
-                            guard didChange else { return }
-                            invalidateAndRefreshTimeline(containing: footprint.startTime)
-                            CloudSettingsManager.shared.triggerDataSyncPulse()
-                        }
-                            .environment(locationManager)
-                    }
                     .sheet(item: $footprintPendingSplit, onDismiss: {
                         if let date = footprintPendingSplit?.startTime {
                             invalidateAndRefreshTimeline(containing: date)
@@ -1259,6 +1400,23 @@ private struct ContinuousTimelineSheet: View {
                                 }
                         }
                     }
+                    .sheet(isPresented: $isShowingHistory) {
+                        NavigationStack {
+                            HistoryListView(onDateSelected: { selectedDate in
+                                isShowingHistory = false
+                                scrollToDate(selectedDate, using: proxy)
+                            })
+                            .toolbar {
+                                ToolbarItem(placement: .topBarTrailing) {
+                                    Button {
+                                        isShowingHistory = false
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
                         .sheet(item: $showingRawPointsDate) { item in
                             RawPointsListView(date: item.date)
                                 .environment(locationManager)
@@ -1284,6 +1442,22 @@ private struct ContinuousTimelineSheet: View {
                             Button("取消", role: .cancel) { footprintPendingDeletion = nil }
                         } message: {
                             Text("删除后，该足迹将不再出现在时间轴上。")
+                        }
+                        .alert("忽略并删除在此地点的足迹？", isPresented: Binding(
+                            get: { footprintPendingIgnore != nil },
+                            set: { if !$0 { footprintPendingIgnore = nil } }
+                        )) {
+                            Button("忽略并删除", role: .destructive) {
+                                if let footprintPendingIgnore {
+                                    let time = footprintPendingIgnore.startTime
+                                    locationManager.ignoreLocation(for: footprintPendingIgnore)
+                                    invalidateAndRefreshTimeline(containing: time)
+                                }
+                                footprintPendingIgnore = nil
+                            }
+                            Button("取消", role: .cancel) { footprintPendingIgnore = nil }
+                        } message: {
+                            Text("添加为忽略地点后，以后将不再记录此处的足迹，且现有的同地点足迹也将被隐藏。")
                         }
                         .alert("确认删除此交通记录？", isPresented: Binding(
                             get: { transportPendingDeletion != nil },
@@ -1329,22 +1503,48 @@ private struct ContinuousTimelineSheet: View {
                         }
                     .toolbar { headerToolbar(proxy: proxy) }
                     .navigationBarTitleDisplayMode(.inline)
+                    }
+                } // ScrollViewReader
+            } // NavigationStack
+            .opacity(selectedFootprint != nil ? 0 : 1)
+            .animation(.default, value: selectedFootprint == nil)
+            .allowsHitTesting(selectedFootprint == nil)
+
+            if let footprint = selectedFootprint {
+                FootprintModalView(
+                    footprint: footprint,
+                    autoFocus: false,
+                    isInline: true,
+                    presentationDetent: $timelineDetent
+                ) { didChange in
+                    withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
+                        selectedFootprint = nil
+                    }
+                    guard didChange else { return }
+                    invalidateAndRefreshTimeline(containing: footprint.startTime)
+                    CloudSettingsManager.shared.triggerDataSyncPulse()
                 }
+                .environment(locationManager)
+                .transition(.move(edge: .bottom))
             }
+        } // ZStack
+        .sheet(item: Binding(
+            get: { selectedMapPhotoAssetID.map { IdentifiableString(value: $0) } },
+            set: { selectedMapPhotoAssetID = $0?.value }
+        )) { item in
+            let assetIDs = selectedFootprint?.photoAssetIDs ?? [item.value]
+            let currentIndex = assetIDs.firstIndex(of: item.value) ?? 0
+            PhotoFullscreenView(assetIDs: assetIDs, currentIndex: currentIndex)
         }
-    }
+    } // body
 
     @ToolbarContentBuilder
     private func headerToolbar(proxy: ScrollViewProxy) -> some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            if timelineDetent == .large {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        timelineDetent = .medium
-                    }
-                } label: {
-                    Image(systemName: "map")
-                }
+            Button {
+                isShowingHistory = true
+            } label: {
+                Image(systemName: "calendar.badge.clock")
             }
         }
 
@@ -1599,9 +1799,11 @@ private struct ContinuousTimelineSheet: View {
                     usesMinimumBottomSpacing: shouldUseMinimumSpacingBeforeCurrentStay(item, at: index, in: items, date: date),
                     canMergeItem: mergeCandidate != nil || transportMergeCandidate != nil,
                     onTap: {
-                        switch item {
-                        case .footprint(let footprint): selectedFootprint = storedFootprint(matching: footprint)
-                        case .transport(let transport): selectedTransport = transport
+                        withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
+                            switch item {
+                            case .footprint(let footprint): selectedFootprint = storedFootprint(matching: footprint)
+                            case .transport(let transport): selectedTransport = transport
+                            }
                         }
                     },
                     onMerge: {
@@ -1619,6 +1821,10 @@ private struct ContinuousTimelineSheet: View {
                     onToggleFavorite: {
                         guard case .footprint(let footprint) = item else { return }
                         toggleFavorite(for: footprint)
+                    },
+                    onIgnore: {
+                        guard case .footprint(let footprint) = item else { return }
+                        footprintPendingIgnore = footprint
                     },
                     onDelete: {
                         switch item {
@@ -2784,6 +2990,7 @@ private struct ContinuousTimelineRow: View {
     let onMerge: () -> Void
     let onSplit: () -> Void
     let onToggleFavorite: () -> Void
+    let onIgnore: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -2911,6 +3118,12 @@ private struct ContinuousTimelineRow: View {
                     onToggleFavorite()
                 } label: {
                     Label(footprint.isHighlight == true ? "取消收藏" : "收藏", systemImage: footprint.isHighlight == true ? "star.slash" : "star.fill")
+                }
+                
+                Button {
+                    onIgnore()
+                } label: {
+                    Label("忽略地点", systemImage: "mappin.slash")
                 }
             }
 
@@ -3117,7 +3330,7 @@ private struct CurrentStayTimelineCard: View {
     let locationManager: LocationManager
 
     var body: some View {
-        TimelineView(.periodic(from: Date(), by: 1)) { context in
+        SwiftUI.TimelineView(.periodic(from: Date(), by: 1)) { context in
             if let timestamp = statusTimestamp {
                 statusRow(startTimestamp: timestamp, now: context.date)
             }
@@ -3206,7 +3419,7 @@ private struct CurrentTimelineBreathingMarker: View {
     let locationManager: LocationManager
 
     var body: some View {
-        TimelineView(.animation) { timeline in
+        SwiftUI.TimelineView(.animation) { timeline in
             let now = timeline.date.timeIntervalSinceReferenceDate
             let duration = max(0.1, locationManager.pulseDuration)
             let progress = now.truncatingRemainder(dividingBy: duration) / duration
@@ -3237,6 +3450,16 @@ private extension View {
             self.buttonStyle(.bordered)
                 .buttonBorderShape(.capsule)
                 .controlSize(.large)
+        }
+    }
+
+    @ViewBuilder
+    func mapLocationButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
         }
     }
 }

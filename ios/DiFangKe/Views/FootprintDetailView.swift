@@ -63,12 +63,16 @@ struct FootprintModalView: View {
     @State private var showingTimeAdjustment = false
     
     var isDraft: Bool = false
+    var isInline: Bool = false
+    @Binding private var presentationDetent: PresentationDetent
     
-    init(footprint: Footprint, allPlaces: [Place] = [], autoFocus: Bool = false, isDraft: Bool = false, onDismiss: ((Bool) -> Void)? = nil) {
+    init(footprint: Footprint, allPlaces: [Place] = [], autoFocus: Bool = false, isDraft: Bool = false, isInline: Bool = false, presentationDetent: Binding<PresentationDetent> = .constant(.large), onDismiss: ((Bool) -> Void)? = nil) {
         self._footprint = Bindable(footprint)
         self.allPlaces = allPlaces
         self.autoFocus = autoFocus
         self.isDraft = isDraft
+        self.isInline = isInline
+        self._presentationDetent = presentationDetent
         self.onDismiss = onDismiss
     }
     
@@ -78,6 +82,10 @@ struct FootprintModalView: View {
     @State private var showingAIErrorAlert = false
     @State private var aiErrorMessage = ""
     @State private var isAIPerformingUpdate = false
+
+    private var isMinimized: Bool {
+        isInline && presentationDetent == .height(88)
+    }
     
     private func ensureFootprintManaged() {
         if isDraft { return }
@@ -108,14 +116,6 @@ struct FootprintModalView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     headerContent
                     
-                    if showMap {
-                        mapContent
-                    } else {
-                        mapSkeleton
-                            .padding(.horizontal, 24)
-                            .padding(.top, 16)
-                    }
-                    
                     footerContent
                     
                     Spacer().frame(height: 30)
@@ -127,9 +127,32 @@ struct FootprintModalView: View {
                 }
             }
             .scrollDismissesKeyboard(.interactively)
-            .navigationTitle("足迹详情")
+            .navigationTitle(isMinimized ? "" : "足迹详情")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if isMinimized {
+                    ToolbarItem(placement: .principal) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                presentationDetent = .medium
+                            }
+                        } label: {
+                            VStack(spacing: 2) {
+                                Text(displayPlaceText)
+                                    .font(.headline)
+                                    .lineLimit(1)
+                                Text("\(selectedActivityName) · \(timeRangeString)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            .frame(minWidth: 132, minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("展开足迹详情")
+                    }
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     Button { 
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -148,11 +171,10 @@ struct FootprintModalView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { 
-                        // checkAndGenerateAIContent() // Removed AI generation for titles/remarks
                         saveDraftReasonIfNeeded()
                         if !isDraft { try? modelContext.save() }
                         onDismiss?(hasChanged)
-                        dismiss() 
+                        if !isInline { dismiss() }
                     } label: {
                         Image(systemName: "xmark")
                     }
@@ -828,36 +850,12 @@ extension FootprintModalView {
         }
     }
     
-    private var mapContent: some View {
-        mapSection
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
-            .transition(.opacity.combined(with: .scale(scale: 0.97)))
-    }
-    
-    private var mapSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("位置轨迹").font(.system(size: 13, weight: .semibold)).foregroundColor(.secondary).padding(.leading, 8)
-            Button {
-                showFullscreenMap = true
-            } label: {
-                FootprintDetailMapView(footprint: footprint, photoAssets: mapPhotos, isInteractive: false, showsStandalonePhotos: true)
-                    .frame(height: 220)
-                    .cornerRadius(16)
-                    .shadow(color: .black.opacity(0.06), radius: 10, x: 0, y: 4)
-            }
-            .buttonStyle(SpringButtonStyle())
-        }
-    }
-    
     private var aiContent: some View {
         aiSection
             .padding(.horizontal, 24)
             .padding(.top, 20)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
-    
-    private var mapSkeleton: some View { RoundedRectangle(cornerRadius: 16).fill(Color(uiColor: .tertiarySystemGroupedBackground)).frame(height: 220).overlay(ProgressView().scaleEffect(1.2)) }
     
     private var aiSection: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2967,6 +2965,7 @@ struct ZoomableImageView: UIViewRepresentable {
                 scrollView.zoom(to: rect, animated: true)
             }
         }
+
     }
 }
 

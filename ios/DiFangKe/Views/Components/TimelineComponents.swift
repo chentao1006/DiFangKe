@@ -399,7 +399,7 @@ struct RecordingStatusCard: View {
                 Spacer().frame(height: 22)
                 
                 // 呼吸圆点 (采用 TimelineView 彻底解决重绘导致的动画跳变)
-                TimelineView(.animation) { timeline in
+                SwiftUI.TimelineView(.animation) { timeline in
                     let now = timeline.date.timeIntervalSinceReferenceDate
                     let duration = locationManager.pulseDuration
                     let progress = (now.truncatingRemainder(dividingBy: duration)) / duration
@@ -462,7 +462,7 @@ struct RecordingStatusCard: View {
                             }
                             .buttonStyle(.plain)
                         } else {
-                            TimelineView(.periodic(from: .now, by: 60)) { _ in
+                            SwiftUI.TimelineView(.periodic(from: .now, by: 60)) { _ in
                                 if shouldShowCurrentSpeed {
                                     Text(currentSpeedText)
                                         .font(.system(size: 14))
@@ -962,11 +962,11 @@ struct FootprintCardView: View {
             Button {
                 showingAddImportantPlace = true
             } label: { Label("添加重要地点", systemImage: "mappin.and.ellipse") }
-
-            Button {
-                showingIgnoreConfirm = true
-            } label: { Label("忽略地点", systemImage: "mappin.slash") }
         }
+
+        Button {
+            showingIgnoreConfirm = true
+        } label: { Label("忽略地点", systemImage: "mappin.slash") }
         
         Button(role: .destructive) { showingDeleteConfirm = true } label: { Label("删除", systemImage: "trash") }
     }
@@ -1225,7 +1225,7 @@ struct PlaceholderFootprintCard: View {
     }
     
     var body: some View {
-        TimelineView(.animation) { timeline in
+        SwiftUI.TimelineView(.animation) { timeline in
             let now = timeline.date.timeIntervalSinceReferenceDate
             let phase = (now.truncatingRemainder(dividingBy: 3.5)) / 3.5
             let sinValue = sin(phase * .pi * 2)

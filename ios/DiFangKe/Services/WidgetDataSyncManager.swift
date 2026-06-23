@@ -479,11 +479,12 @@ final class WidgetDataSyncManager {
                                 }
                             }
                             
-                            // 绘制聚合足迹
-                            for aggregated in aggregatedFootprints {
+                            // 绘制聚合足迹，按纬度从北到南排序，使得靠南的图标盖住靠北的图标
+                            let sortedFootprints = aggregatedFootprints.sorted { $0.coordinate.latitude > $1.coordinate.latitude }
+                            for aggregated in sortedFootprints {
                                 let fp = aggregated.representative
                                 let point = snapshot.point(for: aggregated.coordinate)
-                                let markerSize: CGFloat = 26.4
+                                let markerSize: CGFloat = 18.0
                                 let radius = markerSize / 2
                                 let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
                                 
@@ -515,52 +516,13 @@ final class WidgetDataSyncManager {
                                 } else {
                                     let iconName = activity?.icon ?? FootprintIconDefaults.map
                                     if let iconImage = UIImage(systemName: iconName) {
-                                        let iconSize: CGFloat = 15.7872
+                                        let iconSize: CGFloat = 11.0
                                         let iconRect = CGRect(x: center.x - iconSize/2, y: center.y - iconSize/2, width: iconSize, height: iconSize)
                                         iconImage.withTintColor(iconColor).drawAspectFit(in: iconRect)
                                     }
                                 }
 
-                                if aggregated.totalDuration >= AppConfig.shared.stayDurationThreshold {
-                                    let durationTuple = self.formatDuration(aggregated.totalDuration)
-                                    let numberFont = UIFont.systemFont(ofSize: 7.26, weight: .bold)
-                                    let unitFont = UIFont.systemFont(ofSize: 5.445, weight: .bold)
-                                    
-                                    let darkerActivityColor: UIColor = {
-                                        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-                                        activityColor.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
-                                        return UIColor(hue: h, saturation: min(s * 1.1, 1), brightness: max(b - 0.30, 0), alpha: a)
-                                    }()
-                                    
-                                    let attrStr = NSMutableAttributedString(
-                                        string: durationTuple.number,
-                                        attributes: [.font: numberFont, .foregroundColor: darkerActivityColor]
-                                    )
-                                    attrStr.append(NSAttributedString(
-                                        string: durationTuple.unit,
-                                        attributes: [.font: unitFont, .foregroundColor: darkerActivityColor]
-                                    ))
-                                    
-                                    let textSize = attrStr.size()
-                                    let bannerWidth = textSize.width + 4
-                                    let bannerHeight = textSize.height + 2
-                                    let bannerY = center.y + radius - bannerHeight / 2 - 7.92
-                                    let bannerRect = CGRect(x: center.x - bannerWidth / 2, y: bannerY, width: bannerWidth, height: bannerHeight)
-                                    let bannerPath = UIBezierPath(roundedRect: bannerRect, cornerRadius: 3)
-                                    
-                                    UIColor.systemBackground.setFill()
-                                    bannerPath.fill()
-                                    activityColor.setStroke()
-                                    bannerPath.lineWidth = 0.66
-                                    bannerPath.stroke()
-                                    
-                                    attrStr.draw(in: CGRect(
-                                        x: center.x - textSize.width / 2,
-                                        y: bannerY + (bannerHeight - textSize.height) / 2,
-                                        width: textSize.width,
-                                        height: textSize.height
-                                    ))
-                                }
+
                             }
                         }
                         
