@@ -1311,6 +1311,12 @@ private struct ContinuousTimelineSheet: View {
                     .defaultScrollAnchor(.bottom)
                     .coordinateSpace(name: "continuousTimelineScroll")
                     .onPreferenceChange(ContinuousTimelineDateFramePreferenceKey.self) { frames in
+                        if calendarScrollLockTarget == nil,
+                           calendarBackfillPinnedDate == nil,
+                           !shouldProcessDateFrameUpdate(frames, viewportHeight: viewport.size.height) {
+                            return
+                        }
+
                         latestDateFrames = frames
                         latestViewportHeight = viewport.size.height
                         if let target = calendarScrollLockTarget, frames[target] != nil {
@@ -1751,6 +1757,20 @@ private struct ContinuousTimelineSheet: View {
         visibleDatesChanged(visibleDates)
     }
 
+    private func shouldProcessDateFrameUpdate(_ frames: [Date: CGRect], viewportHeight: CGFloat) -> Bool {
+        guard latestViewportHeight > 0 else { return true }
+        guard abs(latestViewportHeight - viewportHeight) <= 1 else { return true }
+        guard Set(frames.keys) == Set(latestDateFrames.keys) else { return true }
+
+        let oldVisibleDates = significantVisibleDates(in: latestDateFrames, viewportHeight: latestViewportHeight)
+        let newVisibleDates = significantVisibleDates(in: frames, viewportHeight: viewportHeight)
+        if oldVisibleDates != newVisibleDates { return true }
+
+        let oldHeaderDate = bottomVisibleDate(in: latestDateFrames, viewportHeight: latestViewportHeight)
+        let newHeaderDate = bottomVisibleDate(in: frames, viewportHeight: viewportHeight)
+        return oldHeaderDate != newHeaderDate
+    }
+
     private func applySelectedCalendarDate(_ date: Date) {
         let normalizedDate = Calendar.current.startOfDay(for: date)
         activeTimelineDate = normalizedDate
@@ -1789,15 +1809,13 @@ private struct ContinuousTimelineSheet: View {
             let items = (timelinesByDate[date] ?? []).sorted { $0.startTime < $1.startTime }
             ForEach(items.indices, id: \.self) { index in
                 let item = items[index]
-                let mergeCandidate = adjacentMergeCandidate(for: item)
-                let transportMergeCandidate = adjacentTransportMergeCandidate(for: item)
                 ContinuousTimelineRow(
                     item: item,
                     nextStartTime: items.indices.contains(index + 1) ? items[index + 1].startTime : nil,
                     activityTypes: activityTypes,
                     showsContinuation: true,
                     usesMinimumBottomSpacing: shouldUseMinimumSpacingBeforeCurrentStay(item, at: index, in: items, date: date),
-                    canMergeItem: mergeCandidate != nil || transportMergeCandidate != nil,
+                    canMergeItem: canMergeAdjacentTimelineItem(item, at: index, in: items),
                     onTap: {
                         withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
                             switch item {
@@ -1808,10 +1826,10 @@ private struct ContinuousTimelineSheet: View {
                     },
                     onMerge: {
                         switch item {
-                        case .footprint:
-                            pendingMergeCandidate = mergeCandidate
+                        case .footprint(let footprint):
+                            pendingMergeCandidate = adjacentMergeCandidate(for: storedFootprint(matching: footprint))
                         case .transport:
-                            pendingTransportMergeCandidate = transportMergeCandidate
+                            pendingTransportMergeCandidate = adjacentTransportMergeCandidate(for: item)
                         }
                     },
                     onSplit: {
@@ -2193,6 +2211,60 @@ private struct ContinuousTimelineSheet: View {
 
         let footprintLocation = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
         return footprintLocation.distance(from: stopLocation) <= 80
+    }
+
+    private func canMergeAdjacentTimelineItem(_ item: TimelineItem, at index: Int, in items: [TimelineItem]) -> Bool {
+        switch item {
+        case .footprint(let footprint):
+            return adjacentFootprintForMerge(around: footprint, at: index, in: items) != nil
+        case .transport(let transport):
+            return adjacentTransportForMerge(around: transport, at: index, in: items) != nil
+        }
+    }
+
+    private func adjacentFootprintForMerge(around footprint: Footprint, at index: Int, in items: [TimelineItem]) -> Footprint? {
+        if let previousItem = items[safe: index - 1],
+           case .footprint(let previousFootprint) = previousItem,
+           canMergeAdjacentFootprintSnapshots(previousFootprint, footprint) {
+            return previousFootprint
+        }
+
+        if let nextItem = items[safe: index + 1],
+           case .footprint(let nextFootprint) = nextItem,
+           canMergeAdjacentFootprintSnapshots(footprint, nextFootprint) {
+            return nextFootprint
+        }
+
+        return nil
+    }
+
+    private func adjacentTransportForMerge(around transport: Transport, at index: Int, in items: [TimelineItem]) -> Transport? {
+        if let previousItem = items[safe: index - 1],
+           case .transport(let previousTransport) = previousItem,
+           canMergeAdjacentTransportSnapshots(previousTransport, transport) {
+            return previousTransport
+        }
+
+        if let nextItem = items[safe: index + 1],
+           case .transport(let nextTransport) = nextItem,
+           canMergeAdjacentTransportSnapshots(transport, nextTransport) {
+            return nextTransport
+        }
+
+        return nil
+    }
+
+    private func canMergeAdjacentFootprintSnapshots(_ first: Footprint, _ second: Footprint) -> Bool {
+        guard first.status != .ignored, second.status != .ignored else { return false }
+        guard first.footprintID != second.footprintID else { return false }
+        guard Calendar.current.isDate(first.startTime, inSameDayAs: first.endTime.addingTimeInterval(-0.001)) else { return false }
+        guard Calendar.current.isDate(second.startTime, inSameDayAs: second.endTime.addingTimeInterval(-0.001)) else { return false }
+        return Calendar.current.isDate(first.startTime, inSameDayAs: second.startTime)
+    }
+
+    private func canMergeAdjacentTransportSnapshots(_ first: Transport, _ second: Transport) -> Bool {
+        guard first.id != second.id else { return false }
+        return Calendar.current.isDate(first.startTime, inSameDayAs: second.startTime)
     }
 
     private func updateTransport(_ transport: Transport, type: TransportType) {
@@ -2650,6 +2722,7 @@ private struct ContinuousTimelineScrollMetrics: Equatable {
     var viewportHeight: CGFloat = 0
     var adjustedTopInset: CGFloat = 0
     var adjustedBottomInset: CGFloat = 0
+    var isUserInteracting: Bool = false
 
     var bottomDistance: CGFloat {
         max(0, contentHeight + adjustedBottomInset - (contentOffsetY + viewportHeight))
@@ -2696,6 +2769,7 @@ private struct ScrollOffsetObserver: UIViewRepresentable {
         private var contentOffsetObservation: NSKeyValueObservation?
         private var contentSizeObservation: NSKeyValueObservation?
         private var boundsObservation: NSKeyValueObservation?
+        private var lastPublishedMetrics: ContinuousTimelineScrollMetrics?
 
         init(onChange: @escaping (ContinuousTimelineScrollMetrics) -> Void) {
             self.onChange = onChange
@@ -2729,8 +2803,12 @@ private struct ScrollOffsetObserver: UIViewRepresentable {
                 contentHeight: scrollView.contentSize.height,
                 viewportHeight: scrollView.bounds.height,
                 adjustedTopInset: scrollView.adjustedContentInset.top,
-                adjustedBottomInset: scrollView.adjustedContentInset.bottom
+                adjustedBottomInset: scrollView.adjustedContentInset.bottom,
+                isUserInteracting: scrollView.isDragging || scrollView.isDecelerating || scrollView.isTracking
             )
+            guard shouldPublish(metrics) else { return }
+            lastPublishedMetrics = metrics
+
             if Thread.isMainThread {
                 onChange(metrics)
             } else {
@@ -2738,6 +2816,20 @@ private struct ScrollOffsetObserver: UIViewRepresentable {
                     self?.onChange(metrics)
                 }
             }
+        }
+
+        private func shouldPublish(_ metrics: ContinuousTimelineScrollMetrics) -> Bool {
+            guard let lastPublishedMetrics else { return true }
+
+            if metrics.isUserInteracting != lastPublishedMetrics.isUserInteracting { return true }
+            if abs(metrics.contentHeight - lastPublishedMetrics.contentHeight) > 1 { return true }
+            if abs(metrics.viewportHeight - lastPublishedMetrics.viewportHeight) > 1 { return true }
+            if abs(metrics.adjustedTopInset - lastPublishedMetrics.adjustedTopInset) > 1 { return true }
+            if abs(metrics.adjustedBottomInset - lastPublishedMetrics.adjustedBottomInset) > 1 { return true }
+
+            let offsetThreshold: CGFloat = metrics.isUserInteracting ? 24 : 8
+            return abs(metrics.contentOffsetY - lastPublishedMetrics.contentOffsetY) >= offsetThreshold ||
+                abs(metrics.topOffsetY - lastPublishedMetrics.topOffsetY) >= offsetThreshold
         }
     }
 }
@@ -2757,7 +2849,8 @@ private final class ContinuousTimelineScrollRestorer {
             contentHeight: scrollView.contentSize.height,
             viewportHeight: scrollView.bounds.height,
             adjustedTopInset: scrollView.adjustedContentInset.top,
-            adjustedBottomInset: scrollView.adjustedContentInset.bottom
+            adjustedBottomInset: scrollView.adjustedContentInset.bottom,
+            isUserInteracting: scrollView.isDragging || scrollView.isDecelerating || scrollView.isTracking
         )
     }
 
@@ -3083,6 +3176,16 @@ private struct ContinuousTimelineRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
         .contextMenu {
+            if case .footprint(let footprint) = item {
+                Button {
+                    onToggleFavorite()
+                } label: {
+                    Label(footprint.isHighlight == true ? "取消收藏" : "收藏", systemImage: footprint.isHighlight == true ? "star.slash" : "star.fill")
+                }
+
+                Divider()
+            }
+
             if case .footprint = item {
                 if canMergeItem {
                     Button {
@@ -3104,7 +3207,6 @@ private struct ContinuousTimelineRow: View {
                 } label: {
                     Label("合并相邻交通", systemImage: "arrow.triangle.merge")
                 }
-                Divider()
             }
 
             Button {
@@ -3113,21 +3215,15 @@ private struct ContinuousTimelineRow: View {
                 Label("编辑", systemImage: "pencil")
             }
 
-            if case .footprint(let footprint) = item {
-                Button {
-                    onToggleFavorite()
-                } label: {
-                    Label(footprint.isHighlight == true ? "取消收藏" : "收藏", systemImage: footprint.isHighlight == true ? "star.slash" : "star.fill")
-                }
-                
+            Divider()
+
+            if case .footprint = item {
                 Button {
                     onIgnore()
                 } label: {
                     Label("忽略地点", systemImage: "mappin.slash")
                 }
             }
-
-            Divider()
 
             Button(role: .destructive) {
                 onDelete()
