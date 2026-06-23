@@ -73,12 +73,11 @@ struct DFKFootprintProvider: TimelineProvider {
     let groupID = "group.com.ct106.difangke"
     // Must match WidgetDataSyncManager.snapshotFileVersion in the main app.
     // A mismatch makes the widget keep reading an old, still-present snapshot.
-    private let snapshotFileVersion = "v10"
+    private let snapshotFileVersion = "v11"
 
     private func loadSnapshotImage(containerURL: URL, sizeName: String, themeName: String, offset: Int) -> UIImage? {
         let candidateNames = [
-            "widget_snapshot_\(sizeName)_\(themeName)_\(offset)_\(snapshotFileVersion).jpg",
-            "widget_snapshot_\(sizeName)_\(themeName)_\(offset).jpg"
+            "widget_snapshot_\(sizeName)_\(themeName)_\(offset)_\(snapshotFileVersion).jpg"
         ]
 
         for fileName in candidateNames {

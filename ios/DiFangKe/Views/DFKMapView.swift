@@ -402,12 +402,6 @@ struct DFKMapView: View {
             .first
     }
 
-    private func markerSize(for duration: TimeInterval) -> CGFloat {
-        if isMiniTimelineMode { return 12 }
-        let baseSize: CGFloat = isInteractive ? 34 : 28
-        return baseSize * calculateScale(for: duration)
-    }
-
     private var aggregatedFootprints: [AggregatedFootprint] {
         struct Bucket {
             var weightedLatitude: Double
@@ -1451,14 +1445,6 @@ struct DFKMapView: View {
         }
     }
 
-    private func calculateScale(for duration: TimeInterval) -> CGFloat {
-        let minutes = duration / 60
-        if minutes < 15 { return 0.8 }
-        if minutes < 60 { return 1.0 }
-        if minutes < 180 { return 1.15 }
-        if minutes < 480 { return 1.25 }
-        return 1.35
-    }
 }
 
 private struct AggregatedFootprintListView: View {
@@ -1724,8 +1710,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 image: Coordinator.footprintImage(
                     symbolName: activity?.icon ?? FootprintIconDefaults.card,
                     color: UIColor(activity?.color ?? Color.secondary.opacity(0.5)),
-                    iconColor: iconColor,
-                    duration: aggregated.totalDuration
+                    iconColor: iconColor
                 )
             ))
         }
@@ -1866,16 +1851,15 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             }
         }
 
-        static func footprintImage(symbolName: String, color: UIColor, iconColor: UIColor, duration: TimeInterval) -> UIImage {
-            let scale = annotationScale(for: duration)
-            let size = CGSize(width: 24 * scale, height: 24 * scale)
+        static func footprintImage(symbolName: String, color: UIColor, iconColor: UIColor) -> UIImage {
+            let size = CGSize(width: 24, height: 24)
             let renderer = UIGraphicsImageRenderer(size: size)
             return renderer.image { context in
                 let rect = CGRect(origin: .zero, size: size)
                 color.setFill()
                 context.cgContext.fillEllipse(in: rect)
 
-                let iconSize = CGSize(width: 28 * scale * 0.55, height: 28 * scale * 0.55)
+                let iconSize = CGSize(width: 28 * 0.55, height: 28 * 0.55)
                 let iconOrigin = CGPoint(x: (size.width - iconSize.width) / 2, y: (size.height - iconSize.height) / 2)
                 UIImage(systemName: symbolName)?
                     .withTintColor(iconColor, renderingMode: .alwaysOriginal)
@@ -1954,15 +1938,6 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 context.cgContext.setFillColor(color.withAlphaComponent(0.45).cgColor)
                 context.cgContext.fillEllipse(in: rect)
             }
-        }
-
-        static func annotationScale(for duration: TimeInterval) -> CGFloat {
-            let minutes = duration / 60
-            if minutes < 15 { return 0.8 }
-            if minutes < 60 { return 1.0 }
-            if minutes < 180 { return 1.15 }
-            if minutes < 480 { return 1.25 }
-            return 1.35
         }
 
         static func selectedTimeImage() -> UIImage {
@@ -2147,4 +2122,3 @@ fileprivate extension Color {
     }
 
 }
-

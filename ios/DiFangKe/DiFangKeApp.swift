@@ -217,10 +217,29 @@ struct DiFangKeApp: App {
                     if isEnabled {
                         locationManager.startTracking()
                     }
+                    
+                    // 前台启动后，延迟同步一下小组件，确保有足够时间生成图片
+                    if modelContainer != nil {
+                        Task {
+                            try? await Task.sleep(nanoseconds: 3_000_000_000)
+                            await WidgetDataSyncManager.shared.syncAll()
+                        }
+                    }
                 } else if newPhase == .background {
                     if modelContainer != nil {
                         Task {
+                            var bgTask: UIBackgroundTaskIdentifier = .invalid
+                            bgTask = UIApplication.shared.beginBackgroundTask {
+                                UIApplication.shared.endBackgroundTask(bgTask)
+                                bgTask = .invalid
+                            }
+                            
                             await WidgetDataSyncManager.shared.syncAll()
+                            
+                            if bgTask != .invalid {
+                                UIApplication.shared.endBackgroundTask(bgTask)
+                                bgTask = .invalid
+                            }
                         }
                     }
                     // 进入后台时重新调度 BGAppRefreshTask

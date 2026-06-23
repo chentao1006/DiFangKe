@@ -8,7 +8,9 @@ import WidgetKit
 @MainActor
 final class WidgetDataSyncManager {
     static let shared = WidgetDataSyncManager()
-    static let snapshotFileVersion = "v10"
+    // Keep this in sync with the widget reader. Bump it whenever the widget
+    // renderer changes so WidgetKit cannot reuse an image drawn with old rules.
+    static let snapshotFileVersion = "v11"
 
     private struct AggregatedFootprintSnapshot {
         let coordinate: CLLocationCoordinate2D
@@ -383,9 +385,19 @@ final class WidgetDataSyncManager {
                 for theme in themes {
                     let themeName = theme == .dark ? "dark" : "light"
                     
-                    // 计算地图区域
+                    // Keep the widget framing consistent with the in-app mini map:
+                    // both footprint and transport coordinates affect the viewport.
                     let region: MKCoordinateRegion
-                    let coords = footprints.map { $0.coordinates }.flatMap { $0 }
+                    let footprintCoordinates = footprints.flatMap(\.coordinates)
+                    let transportCoordinates = transports.flatMap { transport in
+                        (try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData))?
+                            .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) } ?? []
+                    }
+                    let coords = (footprintCoordinates + transportCoordinates).filter {
+                        $0.latitude.isFinite &&
+                        $0.longitude.isFinite &&
+                        CLLocationCoordinate2DIsValid($0)
+                    }
                     
                     if !coords.isEmpty {
                         var minLat = coords[0].latitude; var maxLat = coords[0].latitude
@@ -425,7 +437,6 @@ final class WidgetDataSyncManager {
                             ctx.cgContext.setLineCap(.round)
                             ctx.cgContext.setLineJoin(.round)
                             let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
-                            let transportLineColor = themeColor.withAlphaComponent(0.8)
                             
                             for tr in transports {
                                 if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: tr.pointsData), !decoded.isEmpty {
@@ -439,9 +450,9 @@ final class WidgetDataSyncManager {
                                         ctx.cgContext.move(to: points[0])
                                         for i in 1..<points.count { ctx.cgContext.addLine(to: points[i]) }
                                         ctx.cgContext.setStrokeColor(
-                                            transportLineColor.withAlphaComponent(segment.isDashed ? 0.5 : 0.8).cgColor
+                                            themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
                                         )
-                                        ctx.cgContext.setLineWidth(segment.isDashed ? 1.4 : 4.0)
+                                        ctx.cgContext.setLineWidth(segment.isDashed ? 1.1 : 2.5)
                                         ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
                                         ctx.cgContext.strokePath()
                                     }
@@ -452,8 +463,7 @@ final class WidgetDataSyncManager {
                                         let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
                                         let path = UIBezierPath(ovalIn: rect)
                                         
-                                        let bgColor = theme == .dark ? UIColor.black : UIColor.white
-                                        bgColor.setFill()
+                                        UIColor.systemBackground.setFill()
                                         path.fill()
                                         themeColor.setStroke()
                                         path.lineWidth = 1.2
@@ -473,53 +483,24 @@ final class WidgetDataSyncManager {
                             for aggregated in aggregatedFootprints {
                                 let fp = aggregated.representative
                                 let point = snapshot.point(for: aggregated.coordinate)
-                                let hours = aggregated.totalDuration / 3600.0
-                                let dotScale: CGFloat = 1.0 + (1.45 - 1.0) * min(1.0, max(0.0, (hours - 0.5) / (12.0 - 0.5)))
-                                let markerSize = 24 * dotScale
+                                let markerSize: CGFloat = 26.4
                                 let radius = markerSize / 2
                                 let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
                                 
                                 let activity = allActivities.first { $0.id.uuidString == fp.activityTypeValue || $0.name == fp.activityTypeValue }
                                 let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
-                                let strokeColor = theme == .dark ? UIColor.black : UIColor.white
-
-                                let tailY = center.y + radius * 1.22
-                                let arcEnd = CGPoint(
-                                    x: center.x + cos(55 * .pi / 180) * radius,
-                                    y: center.y + sin(55 * .pi / 180) * radius
-                                )
-                                let arcStart = CGPoint(
-                                    x: center.x + cos(125 * .pi / 180) * radius,
-                                    y: center.y + sin(125 * .pi / 180) * radius
-                                )
+                                let iconColor: UIColor = theme == .dark ? .black : .white
                                 let pinPath = CGMutablePath()
                                 pinPath.addArc(center: center, radius: radius, startAngle: 125 * .pi / 180, endAngle: 55 * .pi / 180, clockwise: false)
-                                pinPath.addCurve(
-                                    to: CGPoint(x: center.x, y: tailY),
-                                    control1: CGPoint(x: arcEnd.x + radius * 0.18, y: arcEnd.y + radius * 0.22),
-                                    control2: CGPoint(x: center.x + radius * 0.18, y: tailY - radius * 0.02)
-                                )
-                                pinPath.addCurve(
-                                    to: arcStart,
-                                    control1: CGPoint(x: center.x - radius * 0.18, y: tailY - radius * 0.02),
-                                    control2: CGPoint(x: arcStart.x - radius * 0.18, y: arcStart.y + radius * 0.22)
-                                )
+                                pinPath.addLine(to: CGPoint(x: center.x, y: center.y + radius * 1.4))
                                 pinPath.closeSubpath()
 
                                 ctx.cgContext.setFillColor(activityColor.cgColor)
                                 ctx.cgContext.addPath(pinPath)
                                 ctx.cgContext.fillPath()
-                                ctx.cgContext.setStrokeColor(strokeColor.cgColor)
-                                ctx.cgContext.setLineWidth(0.5 * dotScale)
-                                ctx.cgContext.setLineJoin(.round)
-                                ctx.cgContext.addPath(pinPath)
-                                ctx.cgContext.strokePath()
 
                                 let rect = CGRect(x: center.x - radius, y: center.y - radius, width: markerSize, height: markerSize)
-                                let innerCircleRect = rect.insetBy(dx: markerSize * 0.1, dy: markerSize * 0.1)
-                                let bgColor = theme == .dark ? UIColor.black : UIColor.white
-                                ctx.cgContext.setFillColor(bgColor.cgColor)
-                                ctx.cgContext.fillEllipse(in: innerCircleRect)
+                                let innerCircleRect = rect.insetBy(dx: markerSize * 0.14, dy: markerSize * 0.14)
 
                                 if let latestPhotoAssetID = aggregated.latestPhotoAssetID,
                                    let photoImage = footprintPhotoImages[latestPhotoAssetID] {
@@ -528,19 +509,22 @@ final class WidgetDataSyncManager {
                                     clipPath.addClip()
                                     photoImage.drawAspectFill(in: innerCircleRect)
                                     ctx.cgContext.restoreGState()
+                                    iconColor.setStroke()
+                                    clipPath.lineWidth = 1
+                                    clipPath.stroke()
                                 } else {
                                     let iconName = activity?.icon ?? FootprintIconDefaults.map
                                     if let iconImage = UIImage(systemName: iconName) {
-                                        let iconSize = markerSize * 0.68
+                                        let iconSize: CGFloat = 15.7872
                                         let iconRect = CGRect(x: center.x - iconSize/2, y: center.y - iconSize/2, width: iconSize, height: iconSize)
-                                        iconImage.withTintColor(activityColor).drawAspectFit(in: iconRect)
+                                        iconImage.withTintColor(iconColor).drawAspectFit(in: iconRect)
                                     }
                                 }
 
                                 if aggregated.totalDuration >= AppConfig.shared.stayDurationThreshold {
                                     let durationTuple = self.formatDuration(aggregated.totalDuration)
-                                    let numberFont = UIFont.systemFont(ofSize: 5.5 * dotScale, weight: .bold)
-                                    let unitFont = UIFont.systemFont(ofSize: 5.5 * dotScale * 0.75, weight: .bold)
+                                    let numberFont = UIFont.systemFont(ofSize: 7.26, weight: .bold)
+                                    let unitFont = UIFont.systemFont(ofSize: 5.445, weight: .bold)
                                     
                                     let darkerActivityColor: UIColor = {
                                         var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
@@ -560,14 +544,14 @@ final class WidgetDataSyncManager {
                                     let textSize = attrStr.size()
                                     let bannerWidth = textSize.width + 4
                                     let bannerHeight = textSize.height + 2
-                                    let bannerY = center.y + radius - bannerHeight / 2 - 6 * dotScale
+                                    let bannerY = center.y + radius - bannerHeight / 2 - 7.92
                                     let bannerRect = CGRect(x: center.x - bannerWidth / 2, y: bannerY, width: bannerWidth, height: bannerHeight)
                                     let bannerPath = UIBezierPath(roundedRect: bannerRect, cornerRadius: 3)
                                     
-                                    bgColor.setFill()
+                                    UIColor.systemBackground.setFill()
                                     bannerPath.fill()
                                     activityColor.setStroke()
-                                    bannerPath.lineWidth = 0.5 * dotScale
+                                    bannerPath.lineWidth = 0.66
                                     bannerPath.stroke()
                                     
                                     attrStr.draw(in: CGRect(
