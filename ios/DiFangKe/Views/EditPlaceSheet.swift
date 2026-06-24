@@ -124,10 +124,10 @@ struct EditPlaceSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") { dismiss() }
+                    Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("保存") {
+                    Button {
                         place.name = placeName.trimmingCharacters(in: .whitespaces)
                         if let coord = selectedCoord {
                             place.latitude = coord.latitude
@@ -137,9 +137,9 @@ struct EditPlaceSheet: View {
                         place.address = currentCenterAddress
                         onSave()
                         dismiss()
+                    } label: {
+                        Image(systemName: "checkmark").dfkToolbarConfirmIcon()
                     }
-                    .fontWeight(.bold)
-                    .foregroundColor(canSave ? .dfkAccent : .gray)
                     .disabled(!canSave)
                 }
             }
@@ -265,6 +265,7 @@ struct EditPlaceSheet: View {
                     .clipShape(Circle())
                     .shadow(radius: 2)
             }
+            .buttonStyle(.plain)
             .padding(12)
         }
     }

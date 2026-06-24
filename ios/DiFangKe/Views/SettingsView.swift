@@ -1,7 +1,9 @@
 import SwiftUI
 import SwiftData
+import StoreKit
 
 struct SettingsView: View {
+    @Environment(\.requestReview) private var requestReview
     @Environment(LocationManager.self) private var locationManager
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
     @Query(sort: \Place.name) private var allPlaces: [Place]
@@ -14,6 +16,7 @@ struct SettingsView: View {
     @AppStorage("isDailyNotificationEnabled") private var isDailyNotificationEnabled = true
     @AppStorage("isHighlightNotificationEnabled") private var isHighlightNotificationEnabled = true
     @AppStorage("isPastMemoriesNotificationEnabled") private var isPastMemoriesNotificationEnabled = true
+    @AppStorage("isFutureTripNotificationEnabled") private var isFutureTripNotificationEnabled = true
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
     @AppStorage("aiServiceType") private var aiServiceType = "public"
     @AppStorage(LocationAccuracyMode.userDefaultsKey) private var locationAccuracyModeRaw = LocationAccuracyMode.automatic.rawValue
@@ -238,6 +241,20 @@ struct SettingsView: View {
                             }
                         }
                     }
+                
+                Toggle("行程计划提醒", isOn: $isFutureTripNotificationEnabled)
+                    .onChange(of: isFutureTripNotificationEnabled) { _, newValue in
+                        if newValue {
+                            NotificationManager.shared.requestAuthorization { granted in
+                                if !granted {
+                                    isFutureTripNotificationEnabled = false
+                                    showingSettingsAlert = true
+                                }
+                            }
+                        } else {
+                            NotificationManager.shared.cancelAllFutureTripNotifications()
+                        }
+                    }
             }
             
             Section(header: Text("系统配置"), footer: Text("智能分析服务将根据您的地点历史自动建议标题。")) {
@@ -260,6 +277,52 @@ struct SettingsView: View {
                     DataManagerView()
                 }
             }
+            
+            Section(header: Text("关于")) {
+                HStack {
+                    Text("版本号")
+                    Spacer()
+                    Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0")
+                        .foregroundColor(.secondary)
+                }
+                
+                Button(action: {
+                    if let url = URL(string: "https://ct106.com") {
+                        UIApplication.shared.open(url)
+                    }
+                }) {
+                    HStack {
+                        Text("作者主页")
+                        Spacer()
+                        Text("ct106.com")
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .foregroundColor(.primary)
+                
+                Button(action: {
+                    let email = "chentao1006@me.com"
+                    let subject = "地方客（DiFangKe）意见反馈"
+                    if let url = URL(string: "mailto:\(email)?subject=\(subject)".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "") {
+                        UIApplication.shared.open(url)
+                    }
+                }) {
+                    HStack {
+                        Text("反馈建议")
+                        Spacer()
+                        Text("chentao1006@me.com")
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .foregroundColor(.primary)
+                
+                Button(action: {
+                    requestReview()
+                }) {
+                    Text("给个好评")
+                }
+                .foregroundColor(.dfkAccent)
+            }
         }
         .navigationTitle("设置")
         .navigationBarTitleDisplayMode(.inline)
@@ -272,6 +335,7 @@ struct SettingsView: View {
                     isDailyNotificationEnabled = false
                     isHighlightNotificationEnabled = false
                     isPastMemoriesNotificationEnabled = false
+                    isFutureTripNotificationEnabled = false
                 }
             }
         }

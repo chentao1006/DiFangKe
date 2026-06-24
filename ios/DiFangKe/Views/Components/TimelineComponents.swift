@@ -260,7 +260,7 @@ struct FullFrameTrajectoryMapView: View {
                     Button {
                         dismiss()
                     } label: {
-                        Image(systemName: "xmark")
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
                     }
                 }
                 
@@ -356,7 +356,7 @@ struct RecordingStatusCard: View {
 
     private var currentSpeedText: String {
         let speedKmh = max(smoothedSpeed, 0) * 3.6
-        return String(format: "当前速度 %.1f km/h", speedKmh)
+        return String(format: "当前速度 %.1f 千米/小时", speedKmh)
     }
 
     private var smoothedSpeed: Double {
@@ -1486,7 +1486,7 @@ struct TrackingGuideView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("关闭") { dismiss() }
+                    Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() }
                 }
             }
         }

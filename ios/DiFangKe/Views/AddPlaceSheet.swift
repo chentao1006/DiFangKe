@@ -130,10 +130,10 @@ struct AddPlaceSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") { dismiss() }
+                    Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("保存") {
+                    Button {
                         guard canSave, let coord = selectedCoord else { return }
                         
                         let place = Place(name: placeName.trimmingCharacters(in: .whitespaces),
@@ -143,9 +143,9 @@ struct AddPlaceSheet: View {
                         place.isIgnored = isIgnored
                         onSave(place)
                         dismiss()
+                    } label: {
+                        Image(systemName: "checkmark").dfkToolbarConfirmIcon()
                     }
-                    .fontWeight(.bold)
-                    .foregroundColor(canSave ? .dfkAccent : .gray)
                     .disabled(!canSave)
                 }
             }
@@ -261,6 +261,7 @@ struct AddPlaceSheet: View {
                     .clipShape(Circle())
                     .shadow(radius: 2)
             }
+            .buttonStyle(.plain)
             .padding(12)
         }
     }

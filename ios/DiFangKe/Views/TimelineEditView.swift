@@ -382,7 +382,7 @@ struct TimelineEditView: View {
                 Button {
                     saveTimelineEdits()
                 } label: {
-                    Image(systemName: "checkmark")
+                    Image(systemName: "checkmark").dfkToolbarConfirmIcon()
                         .font(.system(size: 16, weight: .semibold))
                 }
                 .accessibilityLabel("保存")

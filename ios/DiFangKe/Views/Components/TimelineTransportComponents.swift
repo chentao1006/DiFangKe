@@ -351,7 +351,7 @@ struct TransportModalView: View {
                     Button {
                         dismiss()
                     } label: {
-                        Image(systemName: "xmark")
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
                     }
                 }
             }
@@ -436,7 +436,7 @@ struct TransportModalView: View {
                                 Text(distanceString)
                                     .font(.headline)
                                     .foregroundColor(Color.dfkAccent)
-                                Text(String(format: "平均速度 %.1f km/h", transport.averageSpeed * 3.6))
+                                Text(String(format: "平均速度 %.1f 千米/小时", transport.averageSpeed * 3.6))
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
                                 

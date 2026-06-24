@@ -853,7 +853,7 @@ struct FullHeatmapView: View {
                     Button {
                         dismiss()
                     } label: {
-                        Image(systemName: "xmark")
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
                     }
                 }
             }
@@ -866,4 +866,3 @@ struct HistoryStatisticsView_Previews: PreviewProvider {
         HistoryStatisticsView()
     }
 }
-

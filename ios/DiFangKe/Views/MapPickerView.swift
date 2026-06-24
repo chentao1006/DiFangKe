@@ -5,10 +5,13 @@ struct MapPickerView: View {
     @Binding var selectedCoord: CLLocationCoordinate2D?
     @Binding var radius: Float
     @Binding var address: String
+    var inferredPlaceName: Binding<String?>? = nil
     let centerTrigger: UUID
     @Binding var shouldSnapToUser: Bool
     let userCoord: CLLocationCoordinate2D?
     var radiusTrigger: UUID = UUID()
+    var snapRegionMeters: CLLocationDistance = 600
+    var initialRegionMeters: CLLocationDistance? = nil
 
     var body: some View {
         GeometryReader { proxy in
@@ -16,10 +19,13 @@ struct MapPickerView: View {
                 selectedCoord: $selectedCoord,
                 radius: $radius,
                 address: $address,
+                inferredPlaceName: inferredPlaceName,
                 centerTrigger: centerTrigger,
                 shouldSnapToUser: $shouldSnapToUser,
                 userCoord: userCoord,
-                radiusTrigger: radiusTrigger
+                radiusTrigger: radiusTrigger,
+                snapRegionMeters: snapRegionMeters,
+                initialRegionMeters: initialRegionMeters
             )
             .frame(minWidth: 1, minHeight: 1)
         }
@@ -30,10 +36,13 @@ struct _MapPickerView: UIViewRepresentable {
     @Binding var selectedCoord: CLLocationCoordinate2D?
     @Binding var radius: Float
     @Binding var address: String
+    var inferredPlaceName: Binding<String?>?
     let centerTrigger: UUID
     @Binding var shouldSnapToUser: Bool
     let userCoord: CLLocationCoordinate2D?
     var radiusTrigger: UUID = UUID()
+    var snapRegionMeters: CLLocationDistance = 600
+    var initialRegionMeters: CLLocationDistance? = nil
 
     func makeUIView(context: Context) -> MKMapView {
         let map = SafeMKMapView(frame: .zero)
@@ -47,8 +56,17 @@ struct _MapPickerView: UIViewRepresentable {
         // 1. Initial Position Setup
         let center = selectedCoord ?? userCoord ?? CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
         
+        if let initialRegionMeters {
+            map.setRegion(
+                MKCoordinateRegion(
+                    center: center,
+                    latitudinalMeters: initialRegionMeters,
+                    longitudinalMeters: initialRegionMeters
+                ),
+                animated: false
+            )
         // If we have a radius already (Edit Mode), calculate the initial zoom to fit the circle
-        if let currentRadius = radius > 0 ? radius : nil {
+        } else if let currentRadius = radius > 0 ? radius : nil {
             let screenWidth = UIScreen.main.bounds.width
             let ratio = screenWidth / 120.0 
             let region = MKCoordinateRegion(center: center, 
@@ -83,7 +101,7 @@ struct _MapPickerView: UIViewRepresentable {
             if currentSnap {
                 if let userLoc = safeMap.userLocation.location {
                     safeMap.setCenter(userLoc.coordinate, animated: true)
-                    let region = MKCoordinateRegion(center: userLoc.coordinate, latitudinalMeters: 600, longitudinalMeters: 600)
+                    let region = MKCoordinateRegion(center: userLoc.coordinate, latitudinalMeters: snapRegionMeters, longitudinalMeters: snapRegionMeters)
                     safeMap.setRegion(region, animated: true)
                 }
                 DispatchQueue.main.async { self.shouldSnapToUser = false }
@@ -123,13 +141,14 @@ struct _MapPickerView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(selectedCoord: $selectedCoord, radius: $radius, address: $address, radiusTrigger: radiusTrigger)
+        Coordinator(selectedCoord: $selectedCoord, radius: $radius, address: $address, inferredPlaceName: inferredPlaceName, radiusTrigger: radiusTrigger)
     }
 
     class Coordinator: NSObject, MKMapViewDelegate {
         @Binding var selectedCoord: CLLocationCoordinate2D?
         @Binding var radius: Float
         @Binding var address: String
+        var inferredPlaceName: Binding<String?>?
         var lastTrigger: UUID?
         var lastRadiusTrigger: UUID
         var isUpdatingFromSlider = false
@@ -138,10 +157,11 @@ struct _MapPickerView: UIViewRepresentable {
         private let geocoder = CLGeocoder()
         private var lastSpan: MKCoordinateSpan?
 
-        init(selectedCoord: Binding<CLLocationCoordinate2D?>, radius: Binding<Float>, address: Binding<String>, radiusTrigger: UUID) {
+        init(selectedCoord: Binding<CLLocationCoordinate2D?>, radius: Binding<Float>, address: Binding<String>, inferredPlaceName: Binding<String?>?, radiusTrigger: UUID) {
             _selectedCoord = selectedCoord
             _radius = radius
             _address = address
+            self.inferredPlaceName = inferredPlaceName
             self.lastRadiusTrigger = radiusTrigger
         }
 
@@ -191,6 +211,7 @@ struct _MapPickerView: UIViewRepresentable {
                     let poiName = pm.areasOfInterest?.first
                     let name = [poiName, pm.name, pm.thoroughfare].compactMap { $0 }.first ?? ""
                     self?.address = (pm.locality ?? "") + name
+                    self?.inferredPlaceName?.wrappedValue = poiName ?? pm.name ?? name
                 }
             }
         }

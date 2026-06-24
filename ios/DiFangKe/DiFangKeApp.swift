@@ -262,13 +262,17 @@ struct DiFangKeApp: App {
     }
     
     private func initializeModelContainer() async {
+        // Existing installations were created with an unversioned SwiftData schema.
+        // Keep opening that store directly so SwiftData can perform its normal
+        // lightweight migration when FutureTrip is added.
         let schema = Schema([
             Footprint.self,
             Place.self,
             TransportManualSelection.self,
             ActivityType.self,
             DailyInsight.self,
-            TransportRecord.self
+            TransportRecord.self,
+            FutureTrip.self
         ])
         
         let isFirstLaunch = !UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
@@ -276,7 +280,7 @@ struct DiFangKeApp: App {
         
         let modelConfiguration = ModelConfiguration(
             "dfk_v5_stable",
-            schema: schema, 
+            schema: schema,
             isStoredInMemoryOnly: false,
             groupContainer: AppConfig.shared.appGroupID.isEmpty ? .none : .identifier(AppConfig.shared.appGroupID),
             cloudKitDatabase: shouldEnableCloudKit ? .automatic : .none
@@ -287,7 +291,9 @@ struct DiFangKeApp: App {
             let container = try await Task.detached(priority: .userInitiated) {
                 try ModelContainer(for: schema, configurations: [modelConfiguration])
             }.value
-            
+            await MainActor.run {
+                FutureTripMigrationService.migrateLegacyTripsIfNeeded(context: ModelContext(container))
+            }
             await MainActor.run {
                 self.modelContainer = container
                 UserDefaults.standard.set(shouldEnableCloudKit, forKey: "activeModelContainerUsesCloudKit")
@@ -298,18 +304,9 @@ struct DiFangKeApp: App {
             }
         } catch {
             print("SwiftData CRITICAL ERROR: \(error)")
-            do {
-                let fallbackConfig = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
-                let fallbackContainer = try ModelContainer(for: schema, configurations: [fallbackConfig])
-                await MainActor.run {
-                    self.modelContainer = fallbackContainer
-                    UserDefaults.standard.set(false, forKey: "activeModelContainerUsesCloudKit")
-                }
-            } catch {
-                print("SwiftData FALLBACK CRITICAL ERROR: \(error)")
-                // Prevent crash, but app will likely stay on splash screen
-                // or we could initialize an empty container if possible
-            }
+            // Do not replace a failed persistent store with an empty in-memory
+            // container. That makes all data appear deleted and risks users
+            // creating new data against a non-persistent store.
         }
     }
     

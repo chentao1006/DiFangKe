@@ -55,3 +55,14 @@ final class Place {
         )
     }
 }
+
+extension Place {
+    var cloneKey: String {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedAddress = (address ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let latitudeKey = Int((latitude * 100_000).rounded())
+        let longitudeKey = Int((longitude * 100_000).rounded())
+        let radiusKey = Int(radius.rounded())
+        return "\(normalizedName)|\(normalizedAddress)|\(latitudeKey)|\(longitudeKey)|\(radiusKey)|\(isUserDefined)|\(isIgnored)|\(category ?? "")"
+    }
+}

@@ -15,7 +15,15 @@
 		6C8D388180D8BFA81BBF320B /* RecycleBinView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7537D23096CA61CCC79B0405 /* RecycleBinView.swift */; };
 		71F2E5B397A918D6AD287D07 /* OpenAIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */; };
 		7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FECD1239FE04DF703FFB1E6 /* DataManagerView.swift */; };
+		8D0E1F2A3B4C5D6E7F8091A2 /* DataDeduplicationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */; };
+		8D0E1F2A3B4C5D6E7F8091A4 /* DiFangKeSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */; };
+		8D0E1F2A3B4C5D6E7F8091A6 /* FutureTripMigrationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E1F2A3B4C5D6E7F8091A5 /* FutureTripMigrationService.swift */; };
+		8D0E1F2A3B4C5D6E7F8091A7 /* FutureTrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */; };
+		8D0E1F2A3B4C5D6E7F8091A8 /* DiFangKeSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */; };
 		8EDC80C32DCF8D059D548DB7 /* DiFangKeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C84EEA3EDC02DA770FA555B /* DiFangKeApp.swift */; };
+		8F4D2C9E6A1B43D0A6C7E2B1 /* FutureTrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */; };
+		8F4D2CA16A1B43D0A6C7E2B1 /* FutureTripDraftModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2C9F6A1B43D0A6C7E2B1 /* FutureTripDraftModal.swift */; };
+		8F4D2CA26A1B43D0A6C7E2B1 /* FutureTripTimelineRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2CA06A1B43D0A6C7E2B1 /* FutureTripTimelineRow.swift */; };
 		923B7C1655C4BB80D929DDCF /* Aptabase in Frameworks */ = {isa = PBXBuildFile; productRef = 68EA130148C5349D5CF940EE /* Aptabase */; };
 		93AB9A1A347A786C40F60D26 /* MapPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D750760587987B7CCDAB5FF /* MapPickerView.swift */; };
 		988AA12CFD19A21CA1592A1D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A099643BEA06307F4508FC0 /* SettingsView.swift */; };
@@ -113,6 +121,12 @@
 		77C2C5158B30717A490546E3 /* HistoryListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryListView.swift; sourceTree = "<group>"; };
 		7D750760587987B7CCDAB5FF /* MapPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapPickerView.swift; sourceTree = "<group>"; };
 		8406ACF5012D1DB8F428AB9C /* Config.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Config.plist; sourceTree = "<group>"; };
+		8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataDeduplicationService.swift; sourceTree = "<group>"; };
+		8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiFangKeSchema.swift; sourceTree = "<group>"; };
+		8D0E1F2A3B4C5D6E7F8091A5 /* FutureTripMigrationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTripMigrationService.swift; sourceTree = "<group>"; };
+		8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTrip.swift; sourceTree = "<group>"; };
+		8F4D2C9F6A1B43D0A6C7E2B1 /* FutureTripDraftModal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTripDraftModal.swift; sourceTree = "<group>"; };
+		8F4D2CA06A1B43D0A6C7E2B1 /* FutureTripTimelineRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTripTimelineRow.swift; sourceTree = "<group>"; };
 		8FECD1239FE04DF703FFB1E6 /* DataManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataManagerView.swift; sourceTree = "<group>"; };
 		97D09C072C5681826463BD99 /* PlacesManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesManagerView.swift; sourceTree = "<group>"; };
 		A49FF8D1053B68159E4D2EEC /* Footprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Footprint.swift; sourceTree = "<group>"; };
@@ -232,6 +246,8 @@
 		538DCFE6EA70DBBAA1239C2D /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				8F4D2C9F6A1B43D0A6C7E2B1 /* FutureTripDraftModal.swift */,
+				8F4D2CA06A1B43D0A6C7E2B1 /* FutureTripTimelineRow.swift */,
 				C6ACF7662F95110B006D9536 /* RawPointsListView.swift */,
 				C68544472F86A80500C605E9 /* HistoryStatisticsView.swift */,
 				C68544452F854DB400C605E9 /* ActivityTypeSettingsView.swift */,
@@ -258,6 +274,8 @@
 		6C24D087F1ECA32C5EED5AC4 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */,
+				8D0E1F2A3B4C5D6E7F8091A5 /* FutureTripMigrationService.swift */,
 				C67848572FA3A082002DF823 /* WidgetDataSyncManager.swift */,
 				C6D2DE392F90E39800466878 /* HealthManager.swift */,
 				C68EFC112F8AA05900C1F901 /* AppConfig.swift */,
@@ -275,6 +293,8 @@
 		A0CC0B6B3717D956A36B0F02 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */,
+				8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */,
 				C678483B2FA258DE002DF823 /* MotionType.swift */,
 				C685444B2F86BDFC00C605E9 /* DailyInsight.swift */,
 				C68544432F85457800C605E9 /* ActivityType.swift */,
@@ -432,6 +452,12 @@
 			files = (
 				C64D3DA22F81251E00BB3C3F /* AiSettingsView.swift in Sources */,
 				9F3F925B82CF4EEDED4E3AFF /* AddPlaceSheet.swift in Sources */,
+				8D0E1F2A3B4C5D6E7F8091A2 /* DataDeduplicationService.swift in Sources */,
+				8D0E1F2A3B4C5D6E7F8091A4 /* DiFangKeSchema.swift in Sources */,
+				8D0E1F2A3B4C5D6E7F8091A6 /* FutureTripMigrationService.swift in Sources */,
+				8F4D2C9E6A1B43D0A6C7E2B1 /* FutureTrip.swift in Sources */,
+				8F4D2CA16A1B43D0A6C7E2B1 /* FutureTripDraftModal.swift in Sources */,
+				8F4D2CA26A1B43D0A6C7E2B1 /* FutureTripTimelineRow.swift in Sources */,
 				C67848582FA3A082002DF823 /* WidgetDataSyncManager.swift in Sources */,
 				AC19D6437C18A309FE001E29 /* Views/TimelineView.swift in Sources */,
 				7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */,
@@ -481,6 +507,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8D0E1F2A3B4C5D6E7F8091A7 /* FutureTrip.swift in Sources */,
+				8D0E1F2A3B4C5D6E7F8091A8 /* DiFangKeSchema.swift in Sources */,
 				C67848342FA25677002DF823 /* Transport.swift in Sources */,
 				C67848332FA25672002DF823 /* Place.swift in Sources */,
 				C67848322FA25669002DF823 /* Footprint.swift in Sources */,

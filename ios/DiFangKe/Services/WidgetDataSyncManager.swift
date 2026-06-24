@@ -93,7 +93,7 @@ final class WidgetDataSyncManager {
     
     private func ensureContainer() {
         if container == nil {
-            let schema = Schema([Footprint.self, Place.self, TransportRecord.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self])
+            let schema = Schema(DiFangKeSchemaV2.models)
             
             let config = ModelConfiguration(
                 "dfk_v5_stable", 
@@ -102,7 +102,7 @@ final class WidgetDataSyncManager {
                 cloudKitDatabase: .none // 核心修复：强制禁用小组件同步容器的 CloudKit，防止与主 App 冲突
             )
             do {
-                self.container = try ModelContainer(for: schema, configurations: [config])
+                self.container = try ModelContainer(for: schema, migrationPlan: DiFangKeMigrationPlan.self, configurations: [config])
             } catch {
                 print("[WidgetSync] Failed to create fallback container: \(error)")
             }

@@ -122,6 +122,7 @@ struct HistoryListView: View {
     @Query(sort: \TransportRecord.startTime, order: .reverse) private var allTransportRecords: [TransportRecord]
     @Query private var allInsights: [DailyInsight]
     @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
+    @Query(sort: \FutureTrip.arrivalDate) private var futureTrips: [FutureTrip]
     
     let initialDate: Date
     let showImportOnAppear: Bool
@@ -182,6 +183,7 @@ struct HistoryListView: View {
         }
         .onChange(of: allFootprints) { rebuildIndex() }
         .onChange(of: allTransportRecords) { rebuildIndex() }
+        .onChange(of: futureTrips) { rebuildIndex() }
         .onChange(of: allActivityTypes) { rebuildIndex() }
         .sheet(item: $showingDate) { item in
             TimelineView(initialDate: item.date)
@@ -251,9 +253,9 @@ struct HistoryListView: View {
     
     private var yearJumpOverlay: some View {
         Group {
-            if shouldShowYearJump, !footprintYears.isEmpty {
+            if shouldShowYearJump, !historyYears.isEmpty {
                 Menu {
-                    ForEach(footprintYears, id: \.year) { item in
+                    ForEach(historyYears, id: \.year) { item in
                         Button("\(String(item.year))年") {
                             jumpToYear(item.date)
                         }
@@ -277,7 +279,7 @@ struct HistoryListView: View {
     
     private var contentArea: some View {
         TabView(selection: $viewMode) {
-            HistoryMonthView(footprintsByDay: footprintsByDay, transportsByDay: transportsByDay, allActivityTypes: allActivityTypes, targetDate: selectedDate, earliestDate: earliestFootprintDate, hasScrolled: $hasScrolledMonth, showingRawPointsDate: $showingRawPointsDate) { date in
+            HistoryMonthView(footprintsByDay: footprintsByDay, transportsByDay: transportsByDay, futureTripsByDay: futureTripsByDay, allActivityTypes: allActivityTypes, targetDate: selectedDate, earliestDate: earliestHistoryDate, latestDate: latestHistoryDate, hasScrolled: $hasScrolledMonth, showingRawPointsDate: $showingRawPointsDate) { date in
                 if let onDateSelected = onDateSelected {
                     onDateSelected(date)
                 } else {
@@ -297,23 +299,33 @@ struct HistoryListView: View {
         .tabViewStyle(.page(indexDisplayMode: .never))
     }
     
-    private var earliestFootprintDate: Date {
-        allFootprints.last?.startTime ?? Calendar.current.startOfDay(for: Date())
+    private var earliestHistoryDate: Date {
+        let footprintDate = allFootprints.last?.startTime
+        let futureTripDate = futureTrips.map(\.arrivalDate).min()
+        return [footprintDate, futureTripDate].compactMap { $0 }.min() ?? Calendar.current.startOfDay(for: Date())
+    }
+
+    private var latestHistoryDate: Date {
+        let today = Calendar.current.startOfDay(for: Date())
+        let footprintDate = allFootprints.first?.startTime
+        let futureTripDate = futureTrips.map(\.arrivalDate).max()
+        return [today, footprintDate, futureTripDate].compactMap { $0 }.max() ?? today
     }
     
     private var shouldShowYearJump: Bool {
         viewMode == .month
     }
     
-    private var footprintYears: [(year: Int, date: Date)] {
+    private var historyYears: [(year: Int, date: Date)] {
         let calendar = Calendar.current
-        let grouped = Dictionary(grouping: allFootprints) { footprint in
-            calendar.component(.year, from: footprint.startTime)
+        let dates = allFootprints.map(\.startTime) + futureTrips.map(\.arrivalDate)
+        let grouped = Dictionary(grouping: dates) { date in
+            calendar.component(.year, from: date)
         }
         
-        return grouped.compactMap { year, footprints in
-            let earliestDateInYear = footprints
-                .map { calendar.startOfDay(for: $0.startTime) }
+        return grouped.compactMap { year, dates in
+            let earliestDateInYear = dates
+                .map { calendar.startOfDay(for: $0) }
                 .min()
             return earliestDateInYear.map { (year: year, date: $0) }
         }
@@ -327,11 +339,13 @@ struct HistoryListView: View {
     
     @State private var footprintsByDay: [Date: [Footprint]] = [:]
     @State private var transportsByDay: [Date: [TransportRecord]] = [:]
+    @State private var futureTripsByDay: [Date: [FutureTrip]] = [:]
 
     private func rebuildIndex() {
         let calendar = Calendar.current
         var fpMap: [Date: [Footprint]] = [:]
         var tpMap: [Date: [TransportRecord]] = [:]
+        var tripMap: [Date: [FutureTrip]] = [:]
         
         for fp in allFootprints where fp.statusValue != "ignored" {
             let start = calendar.startOfDay(for: fp.startTime)
@@ -354,9 +368,15 @@ struct HistoryListView: View {
                 current = next
             }
         }
+
+        for trip in futureTrips {
+            let day = calendar.startOfDay(for: trip.arrivalDate)
+            tripMap[day, default: []].append(trip)
+        }
         
         self.footprintsByDay = fpMap
         self.transportsByDay = tpMap
+        self.futureTripsByDay = tripMap
     }
     
     private func checkPhotoPermission() {
@@ -521,9 +541,11 @@ struct DayStatsView: View {
 struct HistoryMonthView: View {
     let footprintsByDay: [Date: [Footprint]]
     let transportsByDay: [Date: [TransportRecord]]
+    let futureTripsByDay: [Date: [FutureTrip]]
     let allActivityTypes: [ActivityType]
     let targetDate: Date
     let earliestDate: Date
+    let latestDate: Date
     @Binding var hasScrolled: Bool
     @Binding var showingRawPointsDate: IdentifiableDate?
     let onDayTap: (Date) -> Void
@@ -532,16 +554,20 @@ struct HistoryMonthView: View {
     
     var monthsCount: Int {
         let calendar = Calendar.current
-        let today = Date().startOfMonth ?? Date()
+        let latestMonth = latestDate.startOfMonth ?? latestDate
         let startOfEarliestMonth = earliestDate.startOfMonth ?? earliestDate
-        return (calendar.dateComponents([.month], from: startOfEarliestMonth, to: today).month ?? 0)
+        return max(0, calendar.dateComponents([.month], from: startOfEarliestMonth, to: latestMonth).month ?? 0)
     }
     
     var months: [Date] {
         let calendar = Calendar.current
-        let today = Date().startOfMonth ?? Date()
         let startOfEarliestMonth = earliestDate.startOfMonth ?? earliestDate
         return (0...monthsCount).compactMap { calendar.date(byAdding: .month, value: $0, to: startOfEarliestMonth) }
+    }
+
+    private var scrollTargetKey: String {
+        let earliestMonthID = (earliestDate.startOfMonth ?? earliestDate).dayID
+        return targetDate.dayID + "-" + earliestMonthID + "-" + String(monthsCount)
     }
     
     var body: some View {
@@ -565,22 +591,25 @@ struct HistoryMonthView: View {
                 }
             }
             .background(Color.dfkBackground)
-            .task(id: targetDate) {
+            .task(id: scrollTargetKey) {
                 if !hasScrolled {
                     try? await Task.sleep(nanoseconds: 100_000_000)
-                    scrollToTarget(proxy: proxy)
+                    await scrollToTarget(proxy: proxy)
                 }
             }
         }
     }
     
-    private func scrollToTarget(proxy: ScrollViewProxy) {
+    private func scrollToTarget(proxy: ScrollViewProxy) async {
+        guard let startOfMonth = targetDate.startOfMonth else { return }
+        guard months.contains(where: { Calendar.current.isDate($0, equalTo: targetDate, toGranularity: .month) }) else { return }
+
+        proxy.scrollTo("month-" + startOfMonth.dayID, anchor: .top)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        proxy.scrollTo("day-" + targetDate.dayID, anchor: .center)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        proxy.scrollTo("day-" + targetDate.dayID, anchor: .center)
         hasScrolled = true
-        if let startOfMonth = targetDate.startOfMonth {
-            withAnimation {
-                proxy.scrollTo("month-" + startOfMonth.dayID, anchor: .top)
-            }
-        }
     }
 
     private func rawPointsActionOverlay(for item: IdentifiableDate) -> some View {
@@ -678,9 +707,11 @@ struct HistoryMonthView: View {
                         targetDate: targetDate,
                         footprints: footprintsByDay[date] ?? [],
                         transports: transportsByDay[date] ?? [],
+                        futureTrips: futureTripsByDay[date] ?? [],
                         activityTypes: allActivityTypes,
                         onTap: { onDayTap(date) }
                     )
+                        .id("day-" + date.dayID)
                         .onLongPressGesture(minimumDuration: 0.45) {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             rawPointsDialogDate = IdentifiableDate(date: date)
@@ -711,12 +742,13 @@ struct MonthDayCell: View {
     let targetDate: Date
     let footprints: [Footprint]
     let transports: [TransportRecord]
+    let futureTrips: [FutureTrip]
     let activityTypes: [ActivityType]
     let onTap: () -> Void
     @Environment(\.colorScheme) private var colorScheme
     
     var allIcons: [DaySummary.TimelineIcon] {
-        if footprints.isEmpty && transports.isEmpty { return [] }
+        if footprints.isEmpty && transports.isEmpty && futureTrips.isEmpty { return [] }
         
         var items: [TimelineItem] = []
         for fp in footprints { items.append(.footprint(fp)) }
@@ -728,14 +760,31 @@ struct MonthDayCell: View {
         }
         items.sort { $0.startTime < $1.startTime }
         
-        return deduplicatedTimelineIcons(items.map { item in
+        var icons = items.map { item in
             DaySummary.TimelineIcon(
                 icon: item.getIcon(allActivityTypes: activityTypes),
                 colorHex: item.getColor(allActivityTypes: activityTypes),
                 isTransport: item.isTransport,
                 isHighlight: item.isHighlight
             )
+        }
+
+        icons.append(contentsOf: futureTrips.map { trip in
+            let activity = activity(for: trip)
+            return DaySummary.TimelineIcon(
+                icon: activity?.icon ?? "calendar",
+                colorHex: activity?.colorHex ?? "#007AFF",
+                isTransport: false,
+                isHighlight: false
+            )
         })
+
+        return deduplicatedTimelineIcons(icons)
+    }
+
+    private func activity(for trip: FutureTrip) -> ActivityType? {
+        guard let activityTypeValue = trip.activityTypeValue else { return nil }
+        return activityTypes.first { $0.id.uuidString == activityTypeValue || $0.name == activityTypeValue }
     }
     
     var body: some View {
@@ -882,7 +931,7 @@ struct ImportOverlaysModifier: ViewModifier {
 struct ImportToolbarModifier: ViewModifier {
     let onTapAction: () -> Void
     func body(content: Content) -> some View {
-        content.toolbar { ToolbarItem(placement: .topBarTrailing) { Button { onTapAction() } label: { Image(systemName: "square.and.arrow.down.badge.clock") } } }
+        content.toolbar { ToolbarItem(placement: .topBarLeading) { Button { onTapAction() } label: { Image(systemName: "square.and.arrow.down.badge.clock") } } }
     }
 }
 
@@ -905,7 +954,7 @@ struct PhotoImportRangePicker: View {
                 }.buttonStyle(.borderedProminent).padding()
             }
             .navigationTitle("寻回那年的记忆")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() } } }
             .onAppear {
                 if let earliestDate = PhotoService.shared.getEarliestAssetDate() {
                     let year = Calendar.current.component(.year, from: earliestDate)
@@ -1025,7 +1074,7 @@ struct PhotoImportResultsView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") { dismiss() }
+                    Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("导入") { 

@@ -9,6 +9,13 @@
 		<string>en</string>
 		<string>zh_CN</string>
 	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>iosamap</string>
+		<string>baidumap</string>
+		<string>qqmap</string>
+		<string>comgooglemaps</string>
+	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>

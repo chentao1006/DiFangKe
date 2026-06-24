@@ -12,6 +12,7 @@ struct SuggestionsMenuContent: View {
     var isDraft: Bool = false
     var onSearchRequested: () -> Void
     var onCustomSelection: ((String) -> Void)? = nil
+    var onSelectionApplied: (() -> Void)? = nil
     
     @State private var suggestions: [LocationSuggestion] = []
     @State private var isLoading = false
@@ -38,6 +39,7 @@ struct SuggestionsMenuContent: View {
                         } else {
                             locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint, isDraft: isDraft)
                         }
+                        onSelectionApplied?()
                     } label: {
                         HStack {
                             Text(suggestion.name)
@@ -69,6 +71,7 @@ struct LocationSearchSheet: View {
     var footprint: Footprint? = nil
     var isDraft: Bool = false
     var onCustomSelection: ((String) -> Void)? = nil
+    var onSelectionApplied: (() -> Void)? = nil
 
     @State private var searchText = ""
     @State private var searchResults: [LocationSuggestion] = []
@@ -114,9 +117,11 @@ struct LocationSearchSheet: View {
                             Button {
                                 if let customSelected = onCustomSelection {
                                     customSelected(suggestion.name)
+                                    onSelectionApplied?()
                                     dismiss()
                                 } else {
                                     locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint, isDraft: isDraft)
+                                    onSelectionApplied?()
                                     dismiss()
                                 }
                             } label: {
@@ -137,7 +142,7 @@ struct LocationSearchSheet: View {
             .navigationTitle("搜索其他地点")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .topBarLeading) { Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() } }
             }
             .overlay {
                 if isSearching {

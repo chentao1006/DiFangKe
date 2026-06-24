@@ -121,4 +121,46 @@ class NotificationManager {
             }
         }
     }
+
+    func scheduleFutureTripNotification(for tripID: UUID, placeName: String, arrivalDate: Date, hasArrivalTime: Bool) {
+        let isEnabled = UserDefaults.standard.object(forKey: "isFutureTripNotificationEnabled") as? Bool ?? true
+        guard isEnabled else { return }
+        
+        let notificationDate: Date
+        if hasArrivalTime {
+            notificationDate = arrivalDate.addingTimeInterval(-3600)
+        } else {
+            notificationDate = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: arrivalDate) ?? arrivalDate
+        }
+        
+        guard notificationDate > Date() else { return }
+        
+        let content = UNMutableNotificationContent()
+        content.title = "行程提醒"
+        content.body = "您计划在 \(hasArrivalTime ? arrivalDate.formatted(date: .omitted, time: .shortened) : "今天") 到达 \(placeName)。"
+        content.sound = .default
+        content.userInfo = ["type": "future_trip", "tripID": tripID.uuidString]
+        
+        let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: notificationDate)
+        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+        
+        let request = UNNotificationRequest(identifier: "trip_\(tripID.uuidString)", content: content, trigger: trigger)
+        
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                print("Failed to schedule trip notification: \(error)")
+            }
+        }
+    }
+    
+    func cancelFutureTripNotification(for tripID: UUID) {
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["trip_\(tripID.uuidString)"])
+    }
+    
+    func cancelAllFutureTripNotifications() {
+        UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
+            let tripIdentifiers = requests.filter { $0.identifier.hasPrefix("trip_") }.map { $0.identifier }
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: tripIdentifiers)
+        }
+    }
 }

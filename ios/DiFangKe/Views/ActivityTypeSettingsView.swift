@@ -254,12 +254,14 @@ struct ActivityTypeEditorView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
+                    Button {
                         save()
                         dismiss()
+                    } label: {
+                        Image(systemName: "checkmark").dfkToolbarConfirmIcon()
                     }
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                 }

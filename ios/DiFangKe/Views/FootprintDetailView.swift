@@ -141,7 +141,7 @@ struct FootprintModalView: View {
                                 Text(displayPlaceText)
                                     .font(.headline)
                                     .lineLimit(1)
-                                Text("\(selectedActivityName) · \(timeRangeString)")
+                                Text(minimizedSubtitle)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -176,7 +176,9 @@ struct FootprintModalView: View {
                         onDismiss?(hasChanged)
                         if !isInline { dismiss() }
                     } label: {
-                        Image(systemName: "xmark")
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(Color.dfkAccent)
                     }
                 }
             }
@@ -280,7 +282,8 @@ struct FootprintModalView: View {
                                     coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), 
                                     forOngoing: false, 
                                     footprint: footprint,
-                                    isDraft: isDraft)
+                                    isDraft: isDraft,
+                                    onSelectionApplied: markFootprintChanged)
             }
             .sheet(item: Binding(get: { selectedPhotoID.map { IdentifiableString(value: $0) } }, set: { selectedPhotoID = $0?.value })) { item in
                 let index = footprint.photoAssetIDs.firstIndex(of: item.value) ?? 0
@@ -439,6 +442,8 @@ extension FootprintModalView {
             Menu {
                 SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint, isDraft: isDraft) {
                     showingSearchSheet = true
+                } onSelectionApplied: {
+                    markFootprintChanged()
                 }
             } label: {
                 detailMenuRow(
@@ -543,7 +548,11 @@ extension FootprintModalView {
     }
 
     private var selectedActivityName: String {
-        footprint.getActivityType(from: allActivities)?.name ?? "活动类型"
+        footprint.getActivityType(from: allActivities)?.name ?? "选择活动类型"
+    }
+
+    private var minimizedSubtitle: String {
+        selectedActivityName.isEmpty ? timeRangeString : "\(selectedActivityName) · \(timeRangeString)"
     }
 
     private var selectedActivityIcon: String {
@@ -686,6 +695,13 @@ extension FootprintModalView {
             if !isDraft { try? modelContext.save() }
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }
+    }
+
+    private func markFootprintChanged() {
+        ensureFootprintManaged()
+        footprint.status = .manual
+        hasChanged = true
+        if !isDraft { try? modelContext.save() }
     }
     
     private var timeSection: some View {
@@ -1022,7 +1038,7 @@ struct FullFrameMapView: View {
                         Button {
                             dismiss()
                         } label: {
-                            Image(systemName: "xmark")
+                            Image(systemName: "xmark").dfkToolbarDismissIcon()
                         }
                     }
                 }
@@ -1129,14 +1145,14 @@ private struct FootprintTimeAdjustmentView: View {
                     Button {
                         dismiss()
                     } label: {
-                        Image(systemName: "xmark")
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         saveAdjustment()
                     } label: {
-                        Image(systemName: "checkmark")
+                        Image(systemName: "checkmark").dfkToolbarConfirmIcon()
                             .fontWeight(.bold)
                     }
                     .disabled(!canSave)
@@ -1503,14 +1519,14 @@ struct FootprintSplitView: View {
                     Button {
                         dismiss()
                     } label: {
-                        Image(systemName: "xmark")
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         saveSplit()
                     } label: {
-                        Image(systemName: "checkmark")
+                        Image(systemName: "checkmark").dfkToolbarConfirmIcon()
                             .fontWeight(.bold)
                     }
                     .disabled(!canSplit)
@@ -2466,14 +2482,14 @@ struct AddToFavoriteModal: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") { dismiss() }
+                    Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("保存") {
+                    Button {
                         savePlace()
+                    } label: {
+                        Image(systemName: "checkmark").dfkToolbarConfirmIcon()
                     }
-                    .fontWeight(.bold)
-                    .foregroundColor(.dfkAccent)
                 }
             }
         }
