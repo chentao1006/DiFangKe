@@ -1462,6 +1462,9 @@ private struct ContinuousTimelineSheet: View {
     @State private var pendingMergeCandidate: ContinuousAdjacentFootprintMergeCandidate?
     @State private var pendingTransportMergeCandidate: ContinuousAdjacentTransportMergeCandidate?
     @State private var hasCompletedInitialTimelinePositioning = false
+    @State private var requestedHistoryImport = false
+    @State private var showingAddPlaceSheet = false
+    @AppStorage("isImportantPlaceGuideDismissed") private var isImportantPlaceGuideDismissed = false
 
     let dates: [Date]
     let timelinesByDate: [Date: [TimelineItem]]
@@ -1573,6 +1576,17 @@ private struct ContinuousTimelineSheet: View {
                                     title: "查看更早的足迹",
                                     isLoading: isLoadingMoreEarlier,
                                     action: requestLoadEarlierDates
+                                )
+                                .opacity(hasCompletedInitialTimelinePositioning ? 1 : 0)
+                                .allowsHitTesting(hasCompletedInitialTimelinePositioning)
+                            } else if initialTimelineLoadCompleted {
+                                TimelineLoadMoreButton(
+                                    title: "从照片导入足迹",
+                                    isLoading: false,
+                                    action: {
+                                        requestedHistoryImport = true
+                                        isShowingHistory = true
+                                    }
                                 )
                                 .opacity(hasCompletedInitialTimelinePositioning ? 1 : 0)
                                 .allowsHitTesting(hasCompletedInitialTimelinePositioning)
@@ -1730,10 +1744,13 @@ private struct ContinuousTimelineSheet: View {
                     )
                     .sheet(isPresented: $isShowingHistory) {
                         NavigationStack {
-                            HistoryListView(onDateSelected: { selectedDate in
+                            HistoryListView(showImportOnAppear: requestedHistoryImport, onDateSelected: { selectedDate in
                                 isShowingHistory = false
                                 scrollToDate(selectedDate, using: proxy)
                             })
+                            .onDisappear {
+                                requestedHistoryImport = false
+                            }
                             .toolbar {
                                 ToolbarItem(placement: .topBarTrailing) {
                                     Button {
@@ -1743,6 +1760,11 @@ private struct ContinuousTimelineSheet: View {
                                     }
                                 }
                             }
+                        }
+                    }
+                    .sheet(isPresented: $showingAddPlaceSheet) {
+                        AddPlaceSheet { _ in
+                            showingAddPlaceSheet = false
                         }
                     }
                         .sheet(item: $showingRawPointsDate) { item in
@@ -2255,6 +2277,20 @@ private struct ContinuousTimelineSheet: View {
                 case .currentStay:
                     CurrentStayTimelineCard(locationManager: locationManager)
                         .id(ScrollTarget.now)
+                        
+                    if !isImportantPlaceGuideDismissed && !allPlaces.contains(where: { $0.isUserDefined }) {
+                        HStack(alignment: .top, spacing: 0) {
+                            VStack(spacing: 0) {
+                                Spacer().frame(height: 18)
+                            }.frame(width: 54)
+                            
+                            ImportantPlaceGuide(isGuideDismissed: $isImportantPlaceGuideDismissed) {
+                                showingAddPlaceSheet = true
+                            }
+                            .padding(.leading, -16)
+                            .padding(.bottom, 14)
+                        }
+                    }
                 case .futureTrip(let trip):
                     FutureTripTimelineRow(trip: trip, activityTypes: activityTypes)
                         .id(ScrollTarget.futureTrip(trip.id))

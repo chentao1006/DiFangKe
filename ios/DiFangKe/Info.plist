@@ -2,33 +2,24 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleDevelopmentRegion</key>
-	<string>zh_CN</string>
-	<key>CFBundleLocalizations</key>
-	<array>
-		<string>en</string>
-		<string>zh_CN</string>
-	</array>
-	<key>LSApplicationQueriesSchemes</key>
-	<array>
-		<string>iosamap</string>
-		<string>baidumap</string>
-		<string>qqmap</string>
-		<string>comgooglemaps</string>
-	</array>
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.ct106.difangke.summary</string>
 		<string>com.ct106.difangke.locationKeepAlive</string>
 	</array>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-	<key>CFBundleDisplayName</key>
-	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh_CN</string>
+	</array>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
@@ -37,8 +28,23 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>iosamap</string>
+		<string>baidumap</string>
+		<string>qqmap</string>
+		<string>comgooglemaps</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>地方客需要访问相机以拍摄并记录旅途中的精彩瞬间。</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>地方客需要读取步数和里程数据，用于辅助区分步行与慢速交通，并为您提供更完整的每日出行统计。</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>地方客需要同步运动统计数据以确保步数记录的准确性。</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>地方客需要后台位置权限以自动记录您的足迹和停留点。</string>
 	<key>NSLocationAlwaysUsageDescription</key>
@@ -47,16 +53,10 @@
 	<string>地方客需要位置权限以在地图上显示您的当前位置并记录足迹。</string>
 	<key>NSMotionUsageDescription</key>
 	<string>地方客通过运动传感器识别您的实时状态（如步行、骑行），由此动态调整 GPS 采集频率，在保证轨迹精度的同时节省电量。</string>
-	<key>NSHealthShareUsageDescription</key>
-	<string>地方客需要读取步数和里程数据，用于辅助区分步行与慢速交通，并为您提供更完整的每日出行统计。</string>
-	<key>NSHealthUpdateUsageDescription</key>
-	<string>地方客需要同步运动统计数据以确保步数记录的准确性。</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>地方客需要访问相册以自动关联您在旅途中拍摄的照片。</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>地方客需要权限以保存旅途精彩瞬间至相册。</string>
-	<key>NSCameraUsageDescription</key>
-	<string>地方客需要访问相机以拍摄并记录旅途中的精彩瞬间。</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>地方客需要访问相册以自动关联您在旅途中拍摄的照片。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -78,6 +78,8 @@
 	</dict>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
 	<key>UISupportedInterfaceOrientations~ipad</key>

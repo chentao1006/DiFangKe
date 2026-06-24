@@ -1299,6 +1299,7 @@ struct PlaceholderFootprintCard: View {
 // MARK: - Guides
 struct ImportantPlaceGuide: View {
     @Binding var isGuideDismissed: Bool
+    var action: (() -> Void)? = nil
     
     var body: some View {
         HStack(spacing: 14) {
@@ -1316,7 +1317,11 @@ struct ImportantPlaceGuide: View {
             
             HStack(spacing: 12) {
                 Button("立即添加") {
-                    NotificationCenter.default.post(name: NSNotification.Name("NavigateToImportantPlaces"), object: nil)
+                    if let action {
+                        action()
+                    } else {
+                        NotificationCenter.default.post(name: NSNotification.Name("NavigateToImportantPlaces"), object: nil)
+                    }
                 }
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.orange)
