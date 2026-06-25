@@ -125,31 +125,46 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let userInfo = response.notification.request.content.userInfo
         
-        if let type = userInfo["type"] as? String, type == "highlight_footprint",
-           let timestamp = userInfo["date"] as? Double {
-            
-            let date = Date(timeIntervalSince1970: timestamp)
-            let idString = userInfo["footprintID"] as? String
-            let footprintID = idString != nil ? UUID(uuidString: idString!) : nil
-            
-            // 核心修复：直接将 deepLinkDate 存入单例，防止冷启动时 NotificationCenter 丢失消息
-            let dayStart = Calendar.current.startOfDay(for: date)
-            LocationManager.shared.deepLinkDate = dayStart
-            if let fid = footprintID {
-                LocationManager.shared.deepLinkFootprintID = fid
+        if let type = userInfo["type"] as? String {
+            if type == "highlight_footprint",
+               let timestamp = userInfo["date"] as? Double {
+                
+                let date = Date(timeIntervalSince1970: timestamp)
+                let idString = userInfo["footprintID"] as? String
+                let footprintID = idString != nil ? UUID(uuidString: idString!) : nil
+                
+                // 核心修复：直接将 deepLinkDate 存入单例，防止冷启动时 NotificationCenter 丢失消息
+                let dayStart = Calendar.current.startOfDay(for: date)
+                LocationManager.shared.deepLinkDate = dayStart
+                if let fid = footprintID {
+                    LocationManager.shared.deepLinkFootprintID = fid
+                }
+                
+                // 使用 NotificationCenter 发送内部跳转通知 (供已在前台的 UI 捕获)
+                var notificationInfo: [String: Any] = ["type": "highlight_footprint", "date": date]
+                if let fid = footprintID {
+                    notificationInfo["footprintID"] = fid
+                }
+                
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("DFKDeepLinkNotification"),
+                    object: nil,
+                    userInfo: notificationInfo
+                )
+                
+            } else if type == "future_trip",
+                      let tripIDString = userInfo["tripID"] as? String,
+                      let tripID = UUID(uuidString: tripIDString) {
+                
+                LocationManager.shared.deepLinkFutureTripID = tripID
+                
+                let notificationInfo: [String: Any] = ["type": "future_trip", "tripID": tripIDString]
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("DFKDeepLinkNotification"),
+                    object: nil,
+                    userInfo: notificationInfo
+                )
             }
-            
-            // 使用 NotificationCenter 发送内部跳转通知 (供已在前台的 UI 捕获)
-            var notificationInfo: [String: Any] = ["date": date]
-            if let fid = footprintID {
-                notificationInfo["footprintID"] = fid
-            }
-            
-            NotificationCenter.default.post(
-                name: NSNotification.Name("DFKDeepLinkNotification"),
-                object: nil,
-                userInfo: notificationInfo
-            )
         }
         
         completionHandler()

@@ -244,7 +244,7 @@ struct FullFrameTrajectoryMapView: View {
                     // Location update handled by parent via callbacks
                 }
             }
-            .sheet(item: $selectedPhotoAsset) { item in
+            .fullScreenCover(item: $selectedPhotoAsset) { item in
                 let assetIDs = photoAssets.map { $0.localIdentifier }
                 let index = assetIDs.firstIndex(of: item.value) ?? 0
                 PhotoFullscreenView(assetIDs: assetIDs, currentIndex: index)

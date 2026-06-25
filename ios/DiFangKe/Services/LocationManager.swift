@@ -953,6 +953,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     // Deep Linking State
     var deepLinkFootprintID: UUID?
+    var deepLinkFutureTripID: UUID?
     var deepLinkDate: Date?
     
     var isTracking: Bool = false

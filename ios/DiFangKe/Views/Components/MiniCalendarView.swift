@@ -100,6 +100,7 @@ struct MiniCalendarView: View {
                 .fill(Color(uiColor: .systemBackground))
         )
         .frame(width: 300)
+        .fixedSize()
         .onDisappear {
             stopRepeat()
         }

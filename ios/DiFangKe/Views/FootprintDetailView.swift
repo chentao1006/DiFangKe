@@ -285,7 +285,7 @@ struct FootprintModalView: View {
                                     isDraft: isDraft,
                                     onSelectionApplied: markFootprintChanged)
             }
-            .sheet(item: Binding(get: { selectedPhotoID.map { IdentifiableString(value: $0) } }, set: { selectedPhotoID = $0?.value })) { item in
+            .fullScreenCover(item: Binding(get: { selectedPhotoID.map { IdentifiableString(value: $0) } }, set: { selectedPhotoID = $0?.value })) { item in
                 let index = footprint.photoAssetIDs.firstIndex(of: item.value) ?? 0
                 PhotoFullscreenView(assetIDs: footprint.photoAssetIDs, currentIndex: index)
             }
@@ -325,7 +325,6 @@ struct FootprintModalView: View {
             if !isDraft {
                 try? modelContext.save()
             }
-            onDismiss?(hasChanged)
         }
     }
 }
@@ -1081,63 +1080,63 @@ private struct FootprintTimeAdjustmentView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 18) {
-                GeometryReader { proxy in
-                    if proxy.size.width > 1 && proxy.size.height > 1 {
-                        FootprintTimeAdjustmentMapView(coordinates: selectedCoordinates)
-                            .frame(minWidth: 1, minHeight: 1)
+            ScrollView {
+                VStack(spacing: 18) {
+                    GeometryReader { proxy in
+                        if proxy.size.width > 1 && proxy.size.height > 1 {
+                            FootprintTimeAdjustmentMapView(coordinates: selectedCoordinates)
+                                .frame(minWidth: 1, minHeight: 1)
+                        }
                     }
-                }
-                .frame(height: 300)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(alignment: .bottomLeading) {
-                    Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
-                        .font(.caption.bold())
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.black.opacity(0.45)))
-                        .padding(12)
-                    }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("调整时间")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Text("\(timeText(hasInitializedRange ? draftStart : footprint.startTime))-\(timeText(hasInitializedRange ? draftEnd : footprint.endTime))")
-                            .font(.system(size: 22, weight: .bold, design: .monospaced))
-                            .foregroundColor(.dfkMainText)
+                    .frame(height: 300)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(alignment: .bottomLeading) {
+                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
+                            .font(.caption.bold())
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(Color.black.opacity(0.45)))
+                            .padding(12)
                     }
 
-                    if hasInitializedRange {
-                        FootprintTimeRangeSlider(
-                            rangeStart: rangeStart,
-                            rangeEnd: rangeEnd,
-                            start: $draftStart,
-                            end: $draftEnd
-                        )
-                        .frame(height: 34)
-                    } else {
-                        Color.clear
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("调整时间")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("\(timeText(hasInitializedRange ? draftStart : footprint.startTime))-\(timeText(hasInitializedRange ? draftEnd : footprint.endTime))")
+                                .font(.system(size: 22, weight: .bold, design: .monospaced))
+                                .foregroundColor(.dfkMainText)
+                        }
+
+                        if hasInitializedRange {
+                            FootprintTimeRangeSlider(
+                                rangeStart: rangeStart,
+                                rangeEnd: rangeEnd,
+                                start: $draftStart,
+                                end: $draftEnd
+                            )
                             .frame(height: 34)
-                    }
+                        } else {
+                            Color.clear
+                                .frame(height: 34)
+                        }
 
-                    HStack {
-                        Text(timeText(hasInitializedRange ? rangeStart : footprint.startTime))
-                        Spacer()
-                        Text(timeText(hasInitializedRange ? rangeEnd : footprint.endTime))
+                        HStack {
+                            Text(timeText(hasInitializedRange ? rangeStart : footprint.startTime))
+                            Spacer()
+                            Text(timeText(hasInitializedRange ? rangeEnd : footprint.endTime))
+                        }
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.secondary)
                     }
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(.secondary)
+                    .padding(16)
+                    .background(RoundedRectangle(cornerRadius: 14).fill(Color.secondary.opacity(0.05)))
                 }
-                .padding(16)
-                .background(RoundedRectangle(cornerRadius: 14).fill(Color.secondary.opacity(0.05)))
-
-                Spacer(minLength: 0)
+                .padding(20)
             }
-            .padding(20)
             .navigationTitle("调整时间")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1434,48 +1433,49 @@ struct FootprintSplitView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
-                GeometryReader { proxy in
-                    if proxy.size.width > 1 && proxy.size.height > 1 {
-                        FootprintTimeAdjustmentMapView(
-                            coordinates: selectedCoordinates,
-                            leadingCoordinates: firstSegmentCoordinates,
-                            trailingCoordinates: secondSegmentCoordinates,
-                            markerCoordinate: splitCoordinate
-                        )
-                        .frame(minWidth: 1, minHeight: 1)
+            ScrollView {
+                VStack(spacing: 16) {
+                    GeometryReader { proxy in
+                        if proxy.size.width > 1 && proxy.size.height > 1 {
+                            FootprintTimeAdjustmentMapView(
+                                coordinates: selectedCoordinates,
+                                leadingCoordinates: firstSegmentCoordinates,
+                                trailingCoordinates: secondSegmentCoordinates,
+                                markerCoordinate: splitCoordinate
+                            )
+                            .frame(minWidth: 1, minHeight: 1)
+                        }
                     }
-                }
-                .frame(height: 300)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(alignment: .bottomLeading) {
-                    Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
-                        .font(.caption.bold())
-                        .foregroundColor(.white)
+                    .frame(height: 300)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(alignment: .bottomLeading) {
+                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
+                            .font(.caption.bold())
+                            .foregroundColor(.white)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             .background(Capsule().fill(Color.black.opacity(0.45)))
                             .padding(12)
                     }
 
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("分割点")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Text(timeText(boundedSplitTime))
-                            .font(.system(size: 22, weight: .bold, design: .monospaced))
-                            .foregroundColor(.dfkMainText)
-                    }
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("分割点")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text(timeText(boundedSplitTime))
+                                .font(.system(size: 22, weight: .bold, design: .monospaced))
+                                .foregroundColor(.dfkMainText)
+                        }
 
-                    FootprintSplitSlider(
-                        rangeStart: footprint.startTime,
-                        rangeEnd: footprint.endTime,
-                        split: $splitTime,
-                        minimumDuration: minimumFootprintDuration
-                    )
-                    .frame(height: 34)
+                        FootprintSplitSlider(
+                            rangeStart: footprint.startTime,
+                            rangeEnd: footprint.endTime,
+                            split: $splitTime,
+                            minimumDuration: minimumFootprintDuration
+                        )
+                        .frame(height: 34)
 
                     HStack {
                         Text(timeText(footprint.startTime))
@@ -1509,9 +1509,9 @@ struct FootprintSplitView: View {
                     )
                 }
 
-                Spacer(minLength: 0)
+                }
+                .padding(20)
             }
-            .padding(20)
             .navigationTitle("拆分足迹")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -2759,15 +2759,34 @@ struct PhotoFullscreenView: View {
     @State var currentIndex: Int
     @Environment(\.dismiss) private var dismiss
     @State private var currentCreationDate: Date?
+    @State private var verticalDismissOffset: CGFloat = 0
+    @State private var dismissActive: Bool = false
+    @State private var dragStartTranslation: CGFloat = 0
+    @State private var edgeStates: [Int: (isTop: Bool, isBottom: Bool)] = [:]
+    
+    var currentEdgeState: (isTop: Bool, isBottom: Bool) {
+        edgeStates[currentIndex] ?? (true, true)
+    }
+
+    private func updateEdgeState(index: Int, isTop: Bool, isBottom: Bool) {
+        let current = edgeStates[index] ?? (true, true)
+        if current.isTop != isTop || current.isBottom != isBottom {
+            edgeStates[index] = (isTop, isBottom)
+        }
+    }
     
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea()
+            Color.black
+                .opacity(max(0, 1 - abs(verticalDismissOffset) / 500))
+                .ignoresSafeArea()
             
             TabView(selection: $currentIndex) {
                 ForEach(0..<assetIDs.count, id: \.self) { index in
-                    FullscreenImageItem(assetID: assetIDs[index])
-                        .tag(index)
+                    FullscreenImageItem(assetID: assetIDs[index], dismissActive: $dismissActive) { isTop, isBottom in
+                        updateEdgeState(index: index, isTop: isTop, isBottom: isBottom)
+                    }
+                    .tag(index)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .always))
@@ -2802,13 +2821,70 @@ struct PhotoFullscreenView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 16)
+            .opacity(max(0, 1 - abs(verticalDismissOffset) / 100))
         }
+        .offset(y: verticalDismissOffset)
+        .simultaneousGesture(verticalDismissGesture)
         .onAppear {
             fetchCurrentDate()
         }
         .onChange(of: currentIndex) { _, _ in
             fetchCurrentDate()
         }
+    }
+
+    private var verticalDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 16)
+            .onChanged { value in
+                guard abs(value.translation.height) > abs(value.translation.width) else { return }
+                
+                if !dismissActive {
+                    let isDraggingDown = value.predictedEndTranslation.height > value.translation.height
+                    let isDraggingUp = value.predictedEndTranslation.height < value.translation.height
+                    let edges = currentEdgeState
+                    
+                    if (isDraggingDown && edges.isTop) || (isDraggingUp && edges.isBottom) || (edges.isTop && edges.isBottom) {
+                        dismissActive = true
+                        dragStartTranslation = value.translation.height
+                    }
+                }
+                
+                if dismissActive {
+                    let offset = value.translation.height - dragStartTranslation
+                    let edges = currentEdgeState
+                    
+                    // Allow canceling the dismiss if the user drags back
+                    if edges.isTop && !edges.isBottom && offset < 0 {
+                        verticalDismissOffset = 0
+                        dismissActive = false
+                    } else if edges.isBottom && !edges.isTop && offset > 0 {
+                        verticalDismissOffset = 0
+                        dismissActive = false
+                    } else {
+                        verticalDismissOffset = offset
+                    }
+                }
+            }
+            .onEnded { value in
+                let active = dismissActive
+                dismissActive = false
+                dragStartTranslation = 0
+                
+                guard active else { return }
+                
+                guard abs(value.translation.height) > abs(value.translation.width),
+                      abs(value.predictedEndTranslation.height) > 120 else {
+                    withAnimation(.spring) {
+                        verticalDismissOffset = 0
+                    }
+                    return
+                }
+                
+                withAnimation(.easeOut(duration: 0.25)) {
+                    verticalDismissOffset = value.translation.height + (value.predictedEndTranslation.height > 0 ? 500 : -500)
+                }
+                dismiss()
+            }
     }
     
     private func fetchCurrentDate() {
@@ -2821,6 +2897,9 @@ struct PhotoFullscreenView: View {
 
 struct FullscreenImageItem: View {
     let assetID: String
+    @Binding var dismissActive: Bool
+    var onEdgeStateChanged: ((Bool, Bool) -> Void)? = nil
+    
     @State private var image: UIImage?
     @State private var downloadProgress: Double = 0
     @State private var isDownloading: Bool = false
@@ -2831,7 +2910,7 @@ struct FullscreenImageItem: View {
     var body: some View {
         ZStack(alignment: .top) {
             if let image = image {
-                ZoomableImageView(image: image)
+                ZoomableImageView(image: image, dismissActive: dismissActive, onEdgeStateChanged: onEdgeStateChanged)
                     .overlay {
                         if isDownloading && isDegraded {
                             ZStack {
@@ -2913,6 +2992,8 @@ struct FullscreenImageItem: View {
 // SwiftUI wrap for UIScrollView to support native zoom & pan
 struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
+    var dismissActive: Bool
+    var onEdgeStateChanged: ((Bool, Bool) -> Void)? = nil
 
     func makeUIView(context: Context) -> UIScrollView {
         let scrollView = UIScrollView()
@@ -2941,11 +3022,21 @@ struct ZoomableImageView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIScrollView, context: Context) {
+        context.coordinator.parent = self
+        
+        if dismissActive && uiView.panGestureRecognizer.isEnabled {
+            uiView.panGestureRecognizer.isEnabled = false
+            uiView.panGestureRecognizer.isEnabled = true
+        }
+        
         if let imageView = uiView.viewWithTag(100) as? UIImageView {
             if imageView.image != image {
                 imageView.image = image
                 // Reset zoom scale when image changes (e.g. from low-res to high-res)
                 uiView.zoomScale = 1.0
+                DispatchQueue.main.async {
+                    self.onEdgeStateChanged?(true, true)
+                }
             }
             // Ensure the image view fills the scroll view bounds initially
             if uiView.zoomScale == 1.0 {
@@ -2955,12 +3046,24 @@ struct ZoomableImageView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(self)
     }
 
     class Coordinator: NSObject, UIScrollViewDelegate {
+        var parent: ZoomableImageView
+        
+        init(_ parent: ZoomableImageView) {
+            self.parent = parent
+        }
+
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
             return scrollView.viewWithTag(100)
+        }
+
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            let isTop = scrollView.contentOffset.y <= 0
+            let isBottom = scrollView.contentOffset.y >= scrollView.contentSize.height - scrollView.bounds.height
+            parent.onEdgeStateChanged?(isTop, isBottom)
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
@@ -2968,6 +3071,10 @@ struct ZoomableImageView: UIViewRepresentable {
             let offsetX = max((scrollView.bounds.width - scrollView.contentSize.width) * 0.5, 0)
             let offsetY = max((scrollView.bounds.height - scrollView.contentSize.height) * 0.5, 0)
             imageView.center = CGPoint(x: scrollView.contentSize.width * 0.5 + offsetX, y: scrollView.contentSize.height * 0.5 + offsetY)
+            
+            let isTop = scrollView.contentOffset.y <= 0
+            let isBottom = scrollView.contentOffset.y >= scrollView.contentSize.height - scrollView.bounds.height
+            parent.onEdgeStateChanged?(isTop, isBottom)
         }
 
         @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
@@ -3021,7 +3128,7 @@ struct FootprintDetailMapView: View {
                 }
             }
         }
-        .sheet(item: $selectedPhotoAsset) { item in
+        .fullScreenCover(item: $selectedPhotoAsset) { item in
             let assetIDs = photoAssets.map { $0.localIdentifier }
             let index = assetIDs.firstIndex(of: item.value) ?? 0
             PhotoFullscreenView(assetIDs: assetIDs, currentIndex: index)

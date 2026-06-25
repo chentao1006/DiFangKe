@@ -878,7 +878,7 @@ struct DFKMapView: View {
         let isSelected = trip.id == selectedFutureTripID
         let activity = activity(for: trip)
         let tint = activity?.color ?? Color.dfkAccent
-        let iconName = activity?.icon ?? "calendar"
+        let iconName = activity?.icon ?? "mappin"
         
         let constantScale: CGFloat = 1.32
         let baseSize: CGFloat = isInteractive ? 25 : 20
@@ -1886,7 +1886,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 coordinate: trip.coordinate,
                 kind: .futureTrip(trip.id.uuidString),
                 image: Coordinator.futureTripImage(
-                    symbolName: activity?.icon ?? "calendar",
+                    symbolName: activity?.icon ?? "mappin",
                     color: UIColor(activity?.color ?? Color.dfkAccent),
                     iconColor: iconColor
                 ),

@@ -109,6 +109,9 @@ private struct ContinuousTimelineView: View {
     nonisolated private static let timelineCommitChunkSize = 24
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(LocationManager.self) private var locationManager
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: \FutureTrip.arrivalDate) private var futureTrips: [FutureTrip]
@@ -144,6 +147,7 @@ private struct ContinuousTimelineView: View {
     @State private var availableTimelineDateSet = Set<Date>()
     @State private var hiddenTimelineDateSet = Set<Date>()
     @State private var visibleTimelineFillTask: Task<Void, Never>?
+    @State private var midnightTimelineRefreshTask: Task<Void, Never>?
     @State private var selectedFootprint: Footprint?
     @State private var selectedFutureTripDetail: FutureTrip?
     @State private var selectedTransport: Transport?
@@ -233,7 +237,12 @@ private struct ContinuousTimelineView: View {
         moveMapCamera(to: region, animated: true)
     }
 
+    private var isSideBySide: Bool {
+        horizontalSizeClass == .regular || verticalSizeClass == .compact
+    }
+
     private func sheetHeight(in mapHeight: CGFloat) -> CGFloat {
+        if isSideBySide { return 0 }
         if timelineDetent == .height(88) { return 88 }
         if timelineDetent == .medium { return mapHeight * 0.5 }
         return mapHeight
@@ -243,30 +252,32 @@ private struct ContinuousTimelineView: View {
         timelineDetent == .medium ? 32 : 16
     }
 
-    @ViewBuilder
     private func mapLocationButton(mapHeight: CGFloat) -> some View {
-        if timelineDetent != .large {
-            Button(action: focusMapOnCurrentLocation) {
-                Image(systemName: isFollowingUserLocation ? "location.fill" : "location")
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(width: 32, height: 32)
-            }
-            .mapLocationButtonStyle()
-            .controlSize(.small)
-            .accessibilityLabel("定位到当前位置")
-            .padding(.trailing, 16)
-            .padding(.bottom, sheetHeight(in: mapHeight) + mapLocationSheetClearance)
+        let desiredPadding: CGFloat
+        if isSideBySide || timelineDetent != .large {
+            desiredPadding = 48 + sheetHeight(in: mapHeight)
+        } else {
+            desiredPadding = 16
         }
+        return Button(action: focusMapOnCurrentLocation) {
+            Image(systemName: isFollowingUserLocation ? "location.fill" : "location")
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: 32, height: 32)
+        }
+        .mapLocationButtonStyle()
+        .controlSize(.small)
+        .accessibilityLabel("定位到当前位置")
+        .padding(.trailing, 16)
+        .padding(.bottom, desiredPadding)
     }
 
     private func handleMapInteraction(_ interactionType: DFKMapView.MapInteractionType) {
-        switch interactionType {
-        case .pan, .zoom:
+        if interactionType == .pan {
             isFollowingUserLocation = false
-        case .tap:
-            break
         }
         guard allowsMapInteractionCollapse else { return }
+        guard !isSideBySide else { return }
+
         lockVisibleTimelineMapForInteraction()
         guard timelineDetent != .height(88) else { return }
         skipsNextMapExpansionCameraReset = interactionType != .tap
@@ -275,7 +286,8 @@ private struct ContinuousTimelineView: View {
         }
     }
 
-    private var timelineSheet: some View {
+    @ViewBuilder
+    private var timelineSidebarContent: some View {
         ContinuousTimelineSheet(
             dates: timelineDates,
             timelinesByDate: timelinesByDate,
@@ -299,66 +311,152 @@ private struct ContinuousTimelineView: View {
             isShowingSettings: $isShowingSettings,
             selectedMapPhotoAssetID: $selectedMapPhotoAssetID
         )
-        .presentationDetents([.height(88), .medium, .large], selection: $timelineDetent)
-        .presentationDragIndicator(.visible)
-        .presentationContentInteraction(selectedFootprint != nil ? .resizes : .scrolls)
-        .interactiveDismissDisabled()
-        .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+    }
+
+    private var timelineSheet: some View {
+        timelineSidebarContent
+            .presentationDetents([.height(88), .medium, .large], selection: $timelineDetent)
+            .presentationDragIndicator(.visible)
+            .presentationContentInteraction(selectedFootprint != nil ? .resizes : .scrolls)
+            .interactiveDismissDisabled()
+            .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+    }
+
+    @ViewBuilder
+    private var timelineMainContent: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .bottomTrailing) {
+                mapContent
+                mapLocationButton(mapHeight: geometry.size.height)
+            }
+            .onAppear {
+                updateMapViewportSize(geometry.size)
+            }
+            .onChange(of: geometry.size) { _, newSize in
+                updateMapViewportSize(newSize)
+            }
+        }
+        .ignoresSafeArea(edges: isSideBySide ? [.top, .bottom, .trailing] : .all)
+    }
+
+    private var sidebarNavigationTitle: String {
+        if selectedFootprint != nil { return "足迹详情" }
+        if selectedFutureTripDetail != nil { return "计划详情" }
+        return "地方客"
     }
 
     var body: some View {
-        NavigationStack {
-            GeometryReader { geometry in
-                ZStack(alignment: .bottomTrailing) {
-                    mapContent
-                    mapLocationButton(mapHeight: geometry.size.height)
+        Group {
+            if horizontalSizeClass == .regular {
+                NavigationSplitView {
+                    timelineSidebarContent
+                        .navigationTitle(sidebarNavigationTitle)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar(removing: .sidebarToggle)
+                        .navigationSplitViewColumnWidth(min: 350, ideal: 420, max: 500)
+                        .sheet(item: $selectedFutureTripFromMap) { trip in
+                            FutureTripDraftModal(editingTrip: trip)
+                        }
+                } detail: {
+                    timelineMainContent
+                        .toolbar(.hidden, for: .navigationBar)
                 }
-                .onAppear {
-                    updateMapViewportSize(geometry.size)
+                .toolbar(removing: .sidebarToggle)
+            } else if verticalSizeClass == .compact {
+                HStack(spacing: 0) {
+                    NavigationStack {
+                        timelineSidebarContent
+                            .navigationTitle(sidebarNavigationTitle)
+                            .navigationBarTitleDisplayMode(.inline)
+                            .sheet(item: $selectedFutureTripFromMap) { trip in
+                                FutureTripDraftModal(editingTrip: trip)
+                            }
+                    }
+                    .frame(width: 340)
+
+                    Divider()
+
+                    timelineMainContent
                 }
-                .onChange(of: geometry.size) { _, newSize in
-                    updateMapViewportSize(newSize)
+            } else {
+                NavigationStack {
+                    timelineMainContent
+                        .toolbar(.hidden, for: .navigationBar)
+                        .sheet(isPresented: $isTimelinePresented) {
+                            timelineSheet
+                        }
+                        .sheet(item: $selectedFutureTripFromMap) { trip in
+                            FutureTripDraftModal(editingTrip: trip)
+                        }
                 }
-            }
-            .ignoresSafeArea()
-            .toolbar(.hidden, for: .navigationBar)
-            .onAppear {
-                setupLocationManager()
-                enableMapInteractionCollapseAfterInitialLayout()
-                Task { await refreshAvailableTimelineDateCache() }
-            }
-            .task { await loadInitialTimeline() }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
-                reloadLoadedTimeline()
-                Task { await refreshAvailableTimelineDateCache() }
-            }
-            .onChange(of: selectedFootprint) { newFootprint in
-                handleSelectedFootprintChange(newFootprint)
-            }
-            .onChange(of: selectedFutureTripDetail) { newTrip in
-                handleSelectedFutureTripChange(newTrip)
-            }
-            .onChange(of: allPlaces) { _, newValue in
-                locationManager.allPlaces = newValue
-                locationManager.forceRefreshOngoingAnalysis()
-            }
-            .onChange(of: timelineDetent) { oldValue, newValue in
-                handleTimelineDetentChange(oldValue: oldValue, newValue: newValue)
-            }
-            .onChange(of: locationManager.lastLocation?.timestamp) { _, _ in
-                guard visibleTimelineItems.isEmpty else { return }
-                refreshVisibleTimelineMap(delayNanoseconds: 0)
-            }
-            .onChange(of: futureTrips) { _, _ in
-                refreshVisibleTimelineMap(delayNanoseconds: 0)
-            }
-            .sheet(isPresented: $isTimelinePresented) {
-                timelineSheet
-            }
-            .sheet(item: $selectedFutureTripFromMap) { trip in
-                FutureTripDraftModal(editingTrip: trip)
             }
         }
+        .onAppear {
+            setupLocationManager()
+            enableMapInteractionCollapseAfterInitialLayout()
+            scheduleMidnightTimelineRefresh()
+            Task { await refreshAvailableTimelineDateCache() }
+        }
+        .onDisappear {
+            midnightTimelineRefreshTask?.cancel()
+        }
+        .task { await loadInitialTimeline() }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
+            reloadLoadedTimeline()
+            Task { await refreshAvailableTimelineDateCache() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DFKDeepLinkNotification"))) { notification in
+            handleDeepLink(userInfo: notification.userInfo)
+        }
+        .onChange(of: selectedFootprint) { newFootprint in
+            handleSelectedFootprintChange(newFootprint)
+        }
+        .onChange(of: selectedFutureTripDetail) { newTrip in
+            handleSelectedFutureTripChange(newTrip)
+        }
+        .onChange(of: allPlaces) { _, newValue in
+            locationManager.allPlaces = newValue
+            locationManager.forceRefreshOngoingAnalysis()
+        }
+        .onChange(of: timelineDetent) { oldValue, newValue in
+            handleTimelineDetentChange(oldValue: oldValue, newValue: newValue)
+        }
+        .onChange(of: locationManager.lastLocation?.timestamp) { _, _ in
+            guard visibleTimelineItems.isEmpty else { return }
+            refreshVisibleTimelineMap(delayNanoseconds: 0)
+        }
+        .onChange(of: futureTrips) { _, _ in
+            refreshVisibleTimelineMap(delayNanoseconds: 0)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await refreshTimelineForCurrentDayIfNeeded() }
+        }
+    }
+
+    private func scheduleMidnightTimelineRefresh() {
+        midnightTimelineRefreshTask?.cancel()
+        let calendar = Calendar.current
+        guard let nextMidnight = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: Date())) else { return }
+
+        midnightTimelineRefreshTask = Task { @MainActor in
+            let delay = max(1, nextMidnight.timeIntervalSinceNow + 0.5)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await refreshTimelineForCurrentDayIfNeeded()
+            scheduleMidnightTimelineRefresh()
+        }
+    }
+
+    private func refreshTimelineForCurrentDayIfNeeded() async {
+        let today = Calendar.current.startOfDay(for: Date())
+        guard !Calendar.current.isDate(activeTimelineDate, inSameDayAs: today) else { return }
+
+        activeTimelineDate = today
+        updateVisibleTimelineDates([today])
+        _ = await refreshAvailableTimelineDateCache()
+        _ = await loadTimelineDate(today)
+        todayScrollRequest += 1
     }
 
     private func updateMapViewportSize(_ size: CGSize) {
@@ -368,6 +466,9 @@ private struct ContinuousTimelineView: View {
     }
 
     private func handleSelectedFootprintChange(_ newFootprint: Footprint?) {
+        if let footprint = newFootprint {
+            focusMap(on: footprint)
+        }
         refreshVisibleTimelineMap(delayNanoseconds: 0)
         if let footprint = newFootprint {
             timelineDetent = .medium
@@ -387,6 +488,14 @@ private struct ContinuousTimelineView: View {
             selectedFootprintPhotos = []
             timelineDetent = .medium
         }
+    }
+
+    private func focusMap(on footprint: Footprint) {
+        let coordinates = footprint.coordinates.isEmpty
+            ? [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
+            : footprint.coordinates
+        guard let region = adjustedMapRegion(for: coordinates) else { return }
+        moveMapCamera(to: region, animated: true)
     }
 
     private func handleSelectedFutureTripChange(_ newTrip: FutureTrip?) {
@@ -422,7 +531,7 @@ private struct ContinuousTimelineView: View {
             resetLockedMapCamera(animated: true)
             return
         }
-        guard mapInteractionLockedVisibleDates == nil else { return }
+        guard mapInteractionLockedVisibleDates == nil || isSideBySide else { return }
         refreshVisibleTimelineMap()
     }
 
@@ -467,6 +576,90 @@ private struct ContinuousTimelineView: View {
         hasCompletedInitialTimelineLoad = true
 
         refreshVisibleTimelineMap(for: [targetDate], delayNanoseconds: 120_000_000)
+        
+        handleColdLaunchDeepLink()
+    }
+    
+    private func handleDeepLink(userInfo: [AnyHashable: Any]?) {
+        guard let userInfo = userInfo else { return }
+        
+        if let type = userInfo["type"] as? String {
+            if type == "future_trip",
+               let tripIDStr = userInfo["tripID"] as? String,
+               let tripID = UUID(uuidString: tripIDStr) {
+                
+                if let trip = futureTrips.first(where: { $0.id == tripID }) {
+                    let tripDate = Calendar.current.startOfDay(for: trip.arrivalDate)
+                    
+                    Task {
+                        activeTimelineDate = tripDate
+                        updateVisibleTimelineDates([tripDate])
+                        _ = await refreshAvailableTimelineDateCache()
+                        _ = await loadTimelineDate(tripDate)
+                        todayScrollRequest += 1
+                        selectedFutureTripDetail = trip
+                    }
+                }
+            } else if type == "highlight_footprint",
+                      let date = userInfo["date"] as? Date {
+                
+                let footprintID = userInfo["footprintID"] as? UUID
+                
+                Task {
+                    let dayStart = Calendar.current.startOfDay(for: date)
+                    activeTimelineDate = dayStart
+                    updateVisibleTimelineDates([dayStart])
+                    _ = await refreshAvailableTimelineDateCache()
+                    _ = await loadTimelineDate(dayStart)
+                    todayScrollRequest += 1
+                    
+                    if let fid = footprintID {
+                        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == fid })
+                        if let fetched = try? modelContext.fetch(descriptor).first {
+                            selectedFootprint = fetched
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func handleColdLaunchDeepLink() {
+        if let tripID = locationManager.deepLinkFutureTripID {
+            locationManager.deepLinkFutureTripID = nil
+            
+            if let trip = futureTrips.first(where: { $0.id == tripID }) {
+                let tripDate = Calendar.current.startOfDay(for: trip.arrivalDate)
+                Task {
+                    activeTimelineDate = tripDate
+                    updateVisibleTimelineDates([tripDate])
+                    _ = await refreshAvailableTimelineDateCache()
+                    _ = await loadTimelineDate(tripDate)
+                    todayScrollRequest += 1
+                    selectedFutureTripDetail = trip
+                }
+            }
+        } else if let date = locationManager.deepLinkDate {
+            locationManager.deepLinkDate = nil
+            let footprintID = locationManager.deepLinkFootprintID
+            locationManager.deepLinkFootprintID = nil
+            
+            Task {
+                let dayStart = Calendar.current.startOfDay(for: date)
+                activeTimelineDate = dayStart
+                updateVisibleTimelineDates([dayStart])
+                _ = await refreshAvailableTimelineDateCache()
+                _ = await loadTimelineDate(dayStart)
+                todayScrollRequest += 1
+                
+                if let fid = footprintID {
+                    let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == fid })
+                    if let fetched = try? modelContext.fetch(descriptor).first {
+                        selectedFootprint = fetched
+                    }
+                }
+            }
+        }
     }
 
     private func publishTimelineDatePlaceholders(for dates: [Date], including dateToInclude: Date? = nil) {
@@ -866,6 +1059,14 @@ private struct ContinuousTimelineView: View {
             nextLoadedDates.formUnion(visibleDates)
             loadedDates = nextLoadedDates.sorted()
         }
+
+        let changedDates = Set(fetchedTimelines.keys).union(visibleDates).union(hiddenDates)
+        guard !changedDates.isDisjoint(with: visibleTimelineDates) else { return }
+        if deferredTimelineWorkCount > 0 {
+            deferredVisibleTimelineDates = visibleTimelineDates
+        } else {
+            refreshVisibleTimelineMap(for: visibleTimelineDates, delayNanoseconds: 0)
+        }
     }
 
     private func loadTimelineIncrementally(for dates: [Date], batchSize: Int, defersMapUpdates: Bool) async -> [Date] {
@@ -999,7 +1200,7 @@ private struct ContinuousTimelineView: View {
             return
         }
         visibleTimelineDates = dates
-        guard mapInteractionLockedVisibleDates == nil else { return }
+        guard mapInteractionLockedVisibleDates == nil || isSideBySide else { return }
         if deferredTimelineWorkCount > 0 {
             deferredVisibleTimelineDates = dates
             return
@@ -1073,23 +1274,32 @@ private struct ContinuousTimelineView: View {
     }
 
     private func refreshVisibleTimelineMap(for visibleDates: Set<Date>? = nil, delayNanoseconds: UInt64 = 360_000_000) {
-        guard mapInteractionLockedVisibleDates == nil else { return }
-        let visibleDates = visibleDates ?? visibleTimelineDates
+        guard isSideBySide || mapInteractionLockedVisibleDates == nil else { return }
+        let targetVisibleDates = visibleDates
         visibleMapUpdateTask?.cancel()
-        visibleMapUpdateTask = Task { @MainActor [visibleDates] in
-            try? await Task.sleep(nanoseconds: delayNanoseconds)
+        visibleMapUpdateTask = Task { @MainActor in
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
             guard !Task.isCancelled else { return }
 
-            let items = timelineItemsForVisibleDates(visibleDates: visibleDates)
-            let visibleFutureTrips = futureTrips(for: visibleDates)
+            let mapDates = targetVisibleDates ?? ((isSideBySide || timelineDetent == .large) ? visibleTimelineDates : (mapInteractionLockedVisibleDates ?? visibleTimelineDates))
+            let items = timelineItemsForVisibleDates(visibleDates: mapDates)
+            let visibleFutureTrips = futureTrips(for: mapDates)
             guard !items.isEmpty else {
                 visibleTimelineItems = []
                 renderedFutureTrips = visibleFutureTrips
                 renderedMapItemIDs = mapContentIDs(for: [], futureTrips: visibleFutureTrips)
                 renderedMapDetentKey = currentMapDetentKey
+                renderedSelectedFootprintID = selectedFootprint?.footprintID
+                renderedSelectedFutureTripID = selectedFutureTripDetail?.id
 
                 let futureTripCoordinates: [CLLocationCoordinate2D]
-                if let trip = selectedFutureTripDetail {
+                if let footprint = selectedFootprint {
+                    futureTripCoordinates = footprint.coordinates.isEmpty
+                        ? [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
+                        : footprint.coordinates
+                } else if let trip = selectedFutureTripDetail {
                     futureTripCoordinates = [CLLocationCoordinate2D(latitude: trip.latitude, longitude: trip.longitude)]
                 } else {
                     futureTripCoordinates = visibleFutureTrips.map(\.coordinate).filter(\.isRenderableMapCoordinate)
@@ -1109,7 +1319,7 @@ private struct ContinuousTimelineView: View {
             let detentKey = currentMapDetentKey
             let selectedFootprintID = selectedFootprint?.footprintID
             let selectedTripID = selectedFutureTripDetail?.id
-            guard mapItemIDs != renderedMapItemIDs || detentKey != renderedMapDetentKey || selectedFootprintID != renderedSelectedFootprintID || selectedTripID != renderedSelectedFutureTripID else { return }
+            let mapStateChanged = mapItemIDs != renderedMapItemIDs || detentKey != renderedMapDetentKey || selectedFootprintID != renderedSelectedFootprintID || selectedTripID != renderedSelectedFutureTripID
             renderedMapItemIDs = mapItemIDs
             renderedMapDetentKey = detentKey
             renderedSelectedFootprintID = selectedFootprintID
@@ -1117,6 +1327,7 @@ private struct ContinuousTimelineView: View {
 
             visibleTimelineItems = items
             renderedFutureTrips = visibleFutureTrips
+            guard mapStateChanged else { return }
             
             var coordinates: [CLLocationCoordinate2D] = []
             if let footprint = selectedFootprint {
@@ -1252,7 +1463,7 @@ private struct ContinuousTimelineView: View {
 
     private func mapCameraCoordinates(for items: [TimelineItem], futureTrips: [FutureTrip]) -> [CLLocationCoordinate2D] {
         let itemCoordinates: [CLLocationCoordinate2D]
-        if timelineDetent == .medium {
+        if !isSideBySide && timelineDetent == .medium {
             itemCoordinates = mediumDetentAnnotationCoordinates(for: items)
         } else {
             itemCoordinates = items.flatMap { item -> [CLLocationCoordinate2D] in
@@ -1369,6 +1580,7 @@ private struct ContinuousTimelineView: View {
 
     private func adjustedMapRegion(for coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion? {
         guard var region = coordinates.boundingRegion(paddingFactor: 1.4) else { return nil }
+        if isSideBySide { return isRenderableMapRegion(region) ? region : nil }
         guard timelineDetent == .medium else { return isRenderableMapRegion(region) ? region : nil }
 
         region = mediumDetentMapRegion(fitting: region)
@@ -1562,10 +1774,8 @@ private struct ContinuousTimelineSheet: View {
                     GeometryReader { viewport in
                         ScrollView {
                             ScrollOffsetObserver(restorer: scrollRestorer) { metrics in
-                                scrollMetrics = metrics
-                                latestScrollOffsetY = metrics.topOffsetY
-                                if scrollRestorer.isUserInteracting {
-                                    lastUserInteractionTime = Date()
+                                Task { @MainActor in
+                                    applyScrollMetrics(metrics)
                                 }
                             }
                             .frame(width: 0, height: 0)
@@ -1633,24 +1843,11 @@ private struct ContinuousTimelineSheet: View {
                     .scrollDisabled(isCollapsed)
                     .coordinateSpace(name: "continuousTimelineScroll")
                     .onPreferenceChange(ContinuousTimelineDateFramePreferenceKey.self) { frames in
-                        if calendarScrollLockTarget == nil,
-                           calendarBackfillPinnedDate == nil,
-                           !shouldProcessDateFrameUpdate(frames, viewportHeight: viewport.size.height) {
-                            return
+                        let viewportHeight = viewport.size.height
+                        Task { @MainActor in
+                            await Task.yield()
+                            applyDateFrameUpdate(frames, viewportHeight: viewportHeight, using: proxy)
                         }
-
-                        latestDateFrames = frames
-                        latestViewportHeight = viewport.size.height
-                        if let target = calendarScrollLockTarget, frames[target] != nil {
-                            scheduleLockedCalendarScroll(using: proxy)
-                            return
-                        }
-                        if let pinnedDate = calendarBackfillPinnedDate, frames[pinnedDate] != nil {
-                            scheduleCalendarBackfillPin(to: pinnedDate, using: proxy)
-                            return
-                        }
-                        guard !isFreezingViewportDrivenUpdates else { return }
-                        applyViewportDates(from: frames, viewportHeight: viewport.size.height)
                     }
                     .overlay(alignment: .bottom) {
                         if isCollapsed {
@@ -1763,8 +1960,10 @@ private struct ContinuousTimelineSheet: View {
                         }
                     }
                     .sheet(isPresented: $showingAddPlaceSheet) {
-                        AddPlaceSheet { _ in
-                            showingAddPlaceSheet = false
+                        AddPlaceSheet { newPlace in
+                            modelContext.insert(newPlace)
+                            try? modelContext.save()
+                            CloudSettingsManager.shared.triggerDataSyncPulse()
                         }
                     }
                         .sheet(item: $showingRawPointsDate) { item in
@@ -1892,7 +2091,7 @@ private struct ContinuousTimelineSheet: View {
                 .transition(.move(edge: .bottom))
             }
         } // ZStack
-        .sheet(item: Binding(
+        .fullScreenCover(item: Binding(
             get: { selectedMapPhotoAssetID.map { IdentifiableString(value: $0) } },
             set: { selectedMapPhotoAssetID = $0?.value }
         )) { item in
@@ -2056,6 +2255,40 @@ private struct ContinuousTimelineSheet: View {
         if calendarBackfillPinnedDate != nil { return true }
         guard let freezesViewportDrivenUpdatesUntil else { return false }
         return Date() < freezesViewportDrivenUpdatesUntil
+    }
+
+    private func applyScrollMetrics(_ metrics: ContinuousTimelineScrollMetrics) {
+        guard metrics != scrollMetrics else { return }
+        scrollMetrics = metrics
+        latestScrollOffsetY = metrics.topOffsetY
+        if scrollRestorer.isUserInteracting {
+            lastUserInteractionTime = Date()
+        }
+    }
+
+    private func applyDateFrameUpdate(
+        _ frames: [Date: CGRect],
+        viewportHeight: CGFloat,
+        using proxy: ScrollViewProxy
+    ) {
+        if calendarScrollLockTarget == nil,
+           calendarBackfillPinnedDate == nil,
+           !shouldProcessDateFrameUpdate(frames, viewportHeight: viewportHeight) {
+            return
+        }
+
+        latestDateFrames = frames
+        latestViewportHeight = viewportHeight
+        if let target = calendarScrollLockTarget, frames[target] != nil {
+            scheduleLockedCalendarScroll(using: proxy)
+            return
+        }
+        if let pinnedDate = calendarBackfillPinnedDate, frames[pinnedDate] != nil {
+            scheduleCalendarBackfillPin(to: pinnedDate, using: proxy)
+            return
+        }
+        guard !isFreezingViewportDrivenUpdates else { return }
+        applyViewportDates(from: frames, viewportHeight: viewportHeight)
     }
 
     private func significantVisibleDates(in frames: [Date: CGRect], viewportHeight: CGFloat) -> Set<Date> {
@@ -2455,9 +2688,8 @@ private struct ContinuousTimelineSheet: View {
             }
 
             applySelectedCalendarDate(normalizedDate)
-            if dates.contains(normalizedDate) || latestDateFrames[normalizedDate] != nil {
-                scheduleLockedCalendarScroll(using: proxy)
-            }
+            calendarScrollLockTarget = normalizedDate
+            scheduleLockedCalendarScroll(using: proxy)
         }
     }
 
@@ -2513,7 +2745,7 @@ private struct ContinuousTimelineSheet: View {
 
     private func isCalendarScrollTargetVisible(_ date: Date) -> Bool {
         guard latestViewportHeight > 0, let frame = latestDateFrames[date] else { return false }
-        return frame.maxY > 52 && frame.minY < latestViewportHeight - 72
+        return frame.minY >= -20 && frame.minY <= 150
     }
 
     private func timelineDatesToBackfill(afterSelecting selectedDate: Date) -> [Date] {

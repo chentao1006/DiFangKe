@@ -487,7 +487,7 @@ struct TransportModalView: View {
                 await loadMapPhotoImages()
             }
 
-            .sheet(item: $selectedPhotoAsset) { item in
+            .fullScreenCover(item: $selectedPhotoAsset) { item in
                 let assetIDs = mapPhotos.map { $0.localIdentifier }
                 let index = assetIDs.firstIndex(of: item.value) ?? 0
                 PhotoFullscreenView(assetIDs: assetIDs, currentIndex: index)

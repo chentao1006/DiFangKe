@@ -220,6 +220,7 @@ struct HistoryListView: View {
                         self.successCount = selectedFootprints.count
                         self.isImporting = false
                         self.showingImportSuccessAlert = true
+                        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
                     }
                 }
             }
@@ -329,7 +330,7 @@ struct HistoryListView: View {
                 .min()
             return earliestDateInYear.map { (year: year, date: $0) }
         }
-        .sorted { $0.year > $1.year }
+        .sorted { $0.year < $1.year }
     }
     
     private func jumpToYear(_ date: Date) {

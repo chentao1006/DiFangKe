@@ -15,7 +15,7 @@ struct FutureTripTimelineRow: View {
     }
 
     private var icon: String {
-        activity?.icon ?? "calendar"
+        activity?.icon ?? "mappin"
     }
 
     private var tint: Color {
@@ -144,6 +144,8 @@ struct FutureTripDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Environment(LocationManager.self) private var locationManager
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
 
     let trip: FutureTrip
@@ -155,8 +157,12 @@ struct FutureTripDetailView: View {
     @State private var showingAbandonAlert = false
     @State private var showingNavigationOptions = false
     
+    private var isSideBySide: Bool {
+        horizontalSizeClass == .regular || verticalSizeClass == .compact
+    }
+
     private var isMinimized: Bool {
-        isInline && presentationDetent == .height(88)
+        isInline && presentationDetent == .height(88) && !isSideBySide
     }
 
     private var selectedActivityName: String {
@@ -174,7 +180,7 @@ struct FutureTripDetailView: View {
            let activity = allActivities.first(where: { $0.id == id }) {
             return activity.icon
         }
-        return "questionmark.circle.dashed"
+        return "mappin"
     }
 
     private var selectedActivityColor: Color {
@@ -236,7 +242,7 @@ struct FutureTripDetailView: View {
                 }
                 .contentShape(Rectangle())
             }
-            .scrollDisabled(isInline && presentationDetent != .large)
+            .scrollDisabled(isInline && presentationDetent != .large && !isSideBySide)
             .navigationTitle(isMinimized ? "" : "行程计划")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -599,8 +605,8 @@ struct FutureTripDetailView: View {
     private var delayButton: some View {
         Menu {
             let intervals: [(String, TimeInterval)] = [
-                ("推迟5分钟", 5 * 60),
-                ("推迟15分钟", 15 * 60),
+                ("推迟5分钟", 6 * 60),
+                ("推迟15分钟", 16 * 60),
                 ("推迟1小时", 3600),
                 ("推迟6小时", 6 * 3600),
                 ("推迟1天", 24 * 3600)
