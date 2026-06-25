@@ -8,7 +8,7 @@ struct SettingsView: View {
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder)]) private var allActivities: [ActivityType]
-    @AppStorage("isICloudSyncEnabled") private var isICloudSyncEnabled = true
+    @AppStorage("isICloudSyncEnabled") private var isICloudSyncEnabled = false
     @AppStorage("raw_recording_source_device_id") private var rawRecordingSourceDeviceID = ""
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @AppStorage("dailyNotificationHour") private var notificationHour: Int = 21

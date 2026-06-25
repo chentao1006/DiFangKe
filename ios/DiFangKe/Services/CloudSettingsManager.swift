@@ -186,7 +186,7 @@ class CloudSettingsManager: ObservableObject {
 #if targetEnvironment(simulator)
         return false
 #else
-        let isICloudSyncEnabled = UserDefaults.standard.object(forKey: "isICloudSyncEnabled") as? Bool ?? true
+        let isICloudSyncEnabled = UserDefaults.standard.object(forKey: "isICloudSyncEnabled") as? Bool ?? false
         return isICloudSyncEnabled
 #endif
     }

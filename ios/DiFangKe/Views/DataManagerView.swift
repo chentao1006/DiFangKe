@@ -101,8 +101,9 @@ struct DataManagerView: View {
                     Label("导入数据", systemImage: "square.and.arrow.down")
                 }
             }
+
             
-            Section(header: Text("数据轨迹 (Raw)"), footer: Text("所有经过脱敏处理的原始 GPS 坐标流，永久保存在本地。")) {
+            Section(header: Text("原始轨迹"), footer: Text("所有经过脱敏处理的原始 GPS 坐标流，永久保存在本地。")) {
                 let count = locationManager.allTodayPoints.count
                 HStack {
                     Label("今日记录点数", systemImage: "location.circle")
@@ -112,7 +113,7 @@ struct DataManagerView: View {
                 }
                 
                 NavigationLink(destination: RawLogsManagerView()) {
-                    Label("查看/导出轨迹原始日志", systemImage: "doc.text.magnifyingglass")
+                    Label("查看/导出原始轨迹", systemImage: "doc.text.magnifyingglass")
                 }
             }
 
@@ -260,6 +261,7 @@ struct DataManagerView: View {
             self.showAlert = true
         }
     }
+
     
     private func deleteAllData() {
         Aptabase.shared.trackEvent("data_cleared")

@@ -578,6 +578,7 @@ private struct ContinuousTimelineView: View {
         refreshVisibleTimelineMap(for: [targetDate], delayNanoseconds: 120_000_000)
         
         handleColdLaunchDeepLink()
+        NotificationCenter.default.post(name: NSNotification.Name("TimelineInitialLoadCompleted"), object: nil)
     }
     
     private func handleDeepLink(userInfo: [AnyHashable: Any]?) {
@@ -1200,7 +1201,11 @@ private struct ContinuousTimelineView: View {
             return
         }
         visibleTimelineDates = dates
-        guard mapInteractionLockedVisibleDates == nil || isSideBySide else { return }
+        guard mapInteractionLockedVisibleDates == nil || isSideBySide else {
+            mapInteractionLockedVisibleDates = dates
+            resetLockedMapCamera(animated: true)
+            return
+        }
         if deferredTimelineWorkCount > 0 {
             deferredVisibleTimelineDates = dates
             return
@@ -1941,7 +1946,7 @@ private struct ContinuousTimelineSheet: View {
                     )
                     .sheet(isPresented: $isShowingHistory) {
                         NavigationStack {
-                            HistoryListView(showImportOnAppear: requestedHistoryImport, onDateSelected: { selectedDate in
+                            HistoryListView(initialDate: activeTimelineDate, showImportOnAppear: requestedHistoryImport, onDateSelected: { selectedDate in
                                 isShowingHistory = false
                                 scrollToDate(selectedDate, using: proxy)
                             })
@@ -2186,11 +2191,7 @@ private struct ContinuousTimelineSheet: View {
     }
 
     private func handleDateHeaderTap() {
-        if isCollapsed {
-            expandTimelineIfCollapsed()
-        } else {
-            isShowingCalendar = true
-        }
+        isShowingCalendar = true
     }
 
     private var dateHeader: String {
@@ -2859,6 +2860,7 @@ private struct ContinuousTimelineSheet: View {
             freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.45)
             let anchorBeforeLoading = scrollRestorer.captureAnchor()
             let bottomDistanceBeforeLoading = anchorBeforeLoading?.bottomDistance ?? scrollMetrics.bottomDistance
+            scrollRestorer.restore(anchorBeforeLoading, fallbackBottomDistance: bottomDistanceBeforeLoading)
             let didLoad = await loadEarlierDates()
             isLoadingMoreEarlier = false
 
