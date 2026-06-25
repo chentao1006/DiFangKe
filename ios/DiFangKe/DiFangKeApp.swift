@@ -17,6 +17,17 @@ extension Color {
     static let dfkBackground = Color(uiColor: .systemBackground)
     static let dfkMainText = Color(uiColor: .label)
     static let dfkSecondaryText = Color(uiColor: .secondaryLabel)
+    
+    func lighter(by percentage: CGFloat = 0.15) -> Color {
+        var h: CGFloat = 0
+        var s: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
+        guard UIColor(self).getHue(&h, saturation: &s, brightness: &b, alpha: &a) else {
+            return self
+        }
+        return Color(hue: Double(h), saturation: Double(max(s - percentage, 0.0)), brightness: Double(min(b + percentage, 1.0)), opacity: Double(a))
+    }
 }
 
 class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
@@ -196,7 +207,9 @@ struct DiFangKeApp: App {
                             SplashScreenView()
                                 .transition(.opacity)
                         } else if isFirstLaunch {
-                            OnboardingView(isFirstLaunch: $isFirstLaunch, locationManager: locationManager)
+                            OnboardingView(isFirstLaunch: $isFirstLaunch, locationManager: locationManager) {
+                                await initializeModelContainer()
+                            }
                                 .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
                         } else {
                             TimelineView()
@@ -250,6 +263,11 @@ struct DiFangKeApp: App {
                             }
                             
                             await WidgetDataSyncManager.shared.syncAll()
+                            
+                            // Perform background data deduplication
+                            if let context = modelContainer?.mainContext {
+                                let _ = DataDeduplicationService.run(context: context)
+                            }
                             
                             if bgTask != .invalid {
                                 UIApplication.shared.endBackgroundTask(bgTask)
@@ -329,7 +347,11 @@ struct DiFangKeApp: App {
 #if targetEnvironment(simulator)
         return false
 #else
-        let isICloudSyncEnabled = UserDefaults.standard.object(forKey: "isICloudSyncEnabled") as? Bool ?? true
+        if UserDefaults.standard.object(forKey: "isICloudSyncEnabled") == nil {
+            // Default to false during onboarding to keep the initial DB local
+            return false
+        }
+        let isICloudSyncEnabled = UserDefaults.standard.bool(forKey: "isICloudSyncEnabled")
         return isICloudSyncEnabled
 #endif
     }
@@ -364,7 +386,9 @@ struct DiFangKeApp: App {
 struct OnboardingView: View {
     @Binding var isFirstLaunch: Bool
     let locationManager: LocationManager
+    var onRebuildContainer: () async -> Void
     @State private var step = 0
+    @State private var isRestoringData = false
     
     var body: some View {
         VStack {
@@ -373,7 +397,7 @@ struct OnboardingView: View {
             if step == 0 {
                 onboardingStep(
                     title: "记录走过的足迹",
-                    description: "地方客需要后台位置权限以自动记录您的足迹，我们将为您在本地生成精美的足迹卡片。",
+                    description: "为了能在后台自动为您记录走过的足迹，地方客需要获取完整的位置权限。\n\n接下来的授权分为两步：请您在此次弹窗中选择「使用 App 时允许」。在之后的使用中，如果系统再次弹窗询问，请务必选择「更改为始终允许」，以确保后台记录不会中断。",
                     image: "location.circle.fill",
                     color: Color.dfkAccent,
                     buttonText: "继续"
@@ -405,6 +429,52 @@ struct OnboardingView: View {
                 
             } else if step == 1 {
                 onboardingStep(
+                    title: "更精准的足迹判定",
+                    description: "结合您的运动状态（步行、骑行等），地方客可以更准确地判断您何时停留或离开，极大节省电量并提高记录准确度。",
+                    image: "figure.walk",
+                    color: .orange,
+                    buttonText: "授权运动与健康"
+                ) {
+                    HealthManager.shared.requestAuthorization { _ in
+                        withAnimation {
+                            step = 2
+                        }
+                    }
+                }
+                
+                Button("跳过") {
+                    withAnimation {
+                        step = 2
+                    }
+                }
+                .padding(.top, 10)
+                .foregroundColor(.secondary)
+                
+            } else if step == 2 {
+                onboardingStep(
+                    title: "及时回顾每一天",
+                    description: "开启通知，我们会在每天结束时为您推送今天的足迹汇总，绝不发送无用垃圾信息。",
+                    image: "bell.badge.fill",
+                    color: .red,
+                    buttonText: "开启通知"
+                ) {
+                    NotificationManager.shared.requestAuthorization { _ in
+                        withAnimation {
+                            step = 3
+                        }
+                    }
+                }
+                
+                Button("暂不开启") {
+                    withAnimation {
+                        step = 3
+                    }
+                }
+                .padding(.top, 10)
+                .foregroundColor(.secondary)
+                
+            } else if step == 3 {
+                onboardingStep(
                     title: "AI 智能分析",
                     description: "开启 AI 助手为您自动总结地点特色，让足迹更有个性和温度。此功能可随时在设置中关闭。",
                     image: "sparkles",
@@ -412,16 +482,12 @@ struct OnboardingView: View {
                     buttonText: "开启 AI 智能分析"
                 ) {
                     UserDefaults.standard.set(true, forKey: "isAiAssistantEnabled")
-                    withAnimation {
-                        isFirstLaunch = false
-                    }
+                    checkCloudDataAndProceed()
                 }
                 
                 Button("暂不开启") {
                     UserDefaults.standard.set(false, forKey: "isAiAssistantEnabled")
-                    withAnimation {
-                        isFirstLaunch = false
-                    }
+                    checkCloudDataAndProceed()
                 }
                 .padding(.top, 10)
                 .foregroundColor(.secondary)
@@ -432,12 +498,98 @@ struct OnboardingView: View {
                     .multilineTextAlignment(.center)
                     .padding(.top, 20)
                     .padding(.horizontal, 20)
+            } else if step == 4 {
+                if isRestoringData {
+                    VStack(spacing: 30) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                        
+                        VStack(spacing: 12) {
+                            Text("正在初始化同步并恢复数据...")
+                                .font(.headline)
+                            
+                            Text("这可能需要几分钟，数据将在后台持续下载。")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal)
+                        }
+                    }
+                } else {
+                    onboardingStep(
+                        title: "发现云端同步记录",
+                        description: "在 iCloud 中发现了您之前的记录。是否要开启 iCloud 同步并恢复数据？",
+                        image: "icloud.and.arrow.down",
+                        color: .blue,
+                        buttonText: "开启同步并恢复数据"
+                    ) {
+                        UserDefaults.standard.set(true, forKey: "isICloudSyncEnabled")
+                        withAnimation {
+                            isRestoringData = true
+                        }
+                        
+                        Task {
+                            await onRebuildContainer()
+                            // Show loading for a few seconds for visual feedback
+                            try? await Task.sleep(nanoseconds: 3_000_000_000)
+                            await MainActor.run {
+                                withAnimation {
+                                    isFirstLaunch = false
+                                }
+                            }
+                        }
+                    }
+                    
+                    Button(action: {
+                        UserDefaults.standard.set(false, forKey: "isICloudSyncEnabled")
+                        withAnimation {
+                            isFirstLaunch = false
+                        }
+                    }) {
+                        Text("不，作为新设备使用")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                            .frame(maxWidth: UIDevice.current.userInterfaceIdiom == .pad ? 350 : .infinity)
+                            .padding()
+                            .background(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .fill(Color(UIColor.secondarySystemBackground).opacity(0.5))
+                                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                            )
+                    }
+                    .padding(.top, 10)
+                }
             }
             
             Spacer()
         }
         .padding(30)
         .background(Color.dfkBackground)
+    }
+    
+    private func checkCloudDataAndProceed() {
+        NSUbiquitousKeyValueStore.default.synchronize()
+        
+        let hasCloudData = NSUbiquitousKeyValueStore.default.object(forKey: "hasSeededDefaultData") != nil 
+                           || NSUbiquitousKeyValueStore.default.object(forKey: "isICloudSyncEnabled") != nil
+                           || NSUbiquitousKeyValueStore.default.object(forKey: "dataSyncPulse") != nil
+        
+        if hasCloudData {
+            withAnimation {
+                step = 4
+            }
+        } else {
+            // New user, enable sync by default
+            UserDefaults.standard.set(true, forKey: "isICloudSyncEnabled")
+            Task {
+                await onRebuildContainer()
+                await MainActor.run {
+                    withAnimation {
+                        isFirstLaunch = false
+                    }
+                }
+            }
+        }
     }
     
     func onboardingStep(title: String, description: String, image: String, color: Color, buttonText: String, action: @escaping () -> Void) -> some View {
@@ -460,10 +612,14 @@ struct OnboardingView: View {
                 Text(buttonText)
                     .font(.headline)
                     .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: UIDevice.current.userInterfaceIdiom == .pad ? 350 : .infinity)
                     .padding()
-                    .background(color)
-                    .cornerRadius(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(color.opacity(0.8))
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    )
+                    .shadow(color: color.opacity(0.3), radius: 10, x: 0, y: 5)
             }
         }
     }

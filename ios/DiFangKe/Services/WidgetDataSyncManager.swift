@@ -484,45 +484,62 @@ final class WidgetDataSyncManager {
                             for aggregated in sortedFootprints {
                                 let fp = aggregated.representative
                                 let point = snapshot.point(for: aggregated.coordinate)
-                                let markerSize: CGFloat = 18.0
-                                let radius = markerSize / 2
+                                let radius: CGFloat = 9.0
                                 let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
                                 
                                 let activity = allActivities.first { $0.id.uuidString == fp.activityTypeValue || $0.name == fp.activityTypeValue }
                                 let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
-                                let iconColor: UIColor = theme == .dark ? .black : .white
+                                let iconColor: UIColor = .white
+                                
                                 let pinPath = CGMutablePath()
-                                pinPath.addArc(center: center, radius: radius, startAngle: 125 * .pi / 180, endAngle: 55 * .pi / 180, clockwise: false)
-                                pinPath.addLine(to: CGPoint(x: center.x, y: center.y + radius * 1.4))
+                                pinPath.addArc(center: center, radius: radius, startAngle: 140 * .pi / 180, endAngle: 40 * .pi / 180, clockwise: false)
+                                let bottomY = point.y - 1.5
+                                pinPath.addLine(to: CGPoint(x: center.x + 1.5, y: bottomY))
+                                pinPath.addArc(center: CGPoint(x: center.x, y: bottomY), radius: 1.5, startAngle: 0, endAngle: .pi, clockwise: false)
                                 pinPath.closeSubpath()
 
-                                ctx.cgContext.setFillColor(activityColor.cgColor)
+                                ctx.cgContext.saveGState()
+                                ctx.cgContext.setShadow(offset: CGSize(width: 0, height: 1.5), blur: 1.5, color: UIColor.black.withAlphaComponent(0.15).cgColor)
+                                ctx.cgContext.setFillColor(UIColor.systemBackground.cgColor)
                                 ctx.cgContext.addPath(pinPath)
                                 ctx.cgContext.fillPath()
+                                ctx.cgContext.restoreGState()
 
-                                let rect = CGRect(x: center.x - radius, y: center.y - radius, width: markerSize, height: markerSize)
-                                let innerCircleRect = rect.insetBy(dx: markerSize * 0.14, dy: markerSize * 0.14)
+                                let innerRadius = radius - 1.5
+                                let innerCenter = CGPoint(x: center.x, y: center.y + 0.5)
+                                let innerCirclePath = UIBezierPath(arcCenter: innerCenter, radius: innerRadius, startAngle: 0, endAngle: 2 * .pi, clockwise: true)
+                                
+                                ctx.cgContext.saveGState()
+                                innerCirclePath.addClip()
+                                let colors = [activityColor.withAlphaComponent(0.7).cgColor, activityColor.cgColor] as CFArray
+                                if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0.0, 1.0]) {
+                                    ctx.cgContext.drawLinearGradient(gradient, start: CGPoint(x: innerCenter.x, y: innerCenter.y - innerRadius), end: CGPoint(x: innerCenter.x, y: innerCenter.y + innerRadius), options: [])
+                                } else {
+                                    activityColor.setFill()
+                                    innerCirclePath.fill()
+                                }
+                                ctx.cgContext.restoreGState()
 
                                 if let latestPhotoAssetID = aggregated.latestPhotoAssetID,
                                    let photoImage = footprintPhotoImages[latestPhotoAssetID] {
-                                    let clipPath = UIBezierPath(ovalIn: innerCircleRect)
+                                    let photoRadius = innerRadius + 0.5
+                                    let photoRect = CGRect(x: innerCenter.x - photoRadius, y: innerCenter.y - photoRadius, width: photoRadius * 2, height: photoRadius * 2)
+                                    let clipPath = UIBezierPath(ovalIn: photoRect)
                                     ctx.cgContext.saveGState()
                                     clipPath.addClip()
-                                    photoImage.drawAspectFill(in: innerCircleRect)
+                                    photoImage.drawAspectFill(in: photoRect)
                                     ctx.cgContext.restoreGState()
-                                    iconColor.setStroke()
-                                    clipPath.lineWidth = 1
+                                    activityColor.setStroke()
+                                    clipPath.lineWidth = 1.0
                                     clipPath.stroke()
                                 } else {
                                     let iconName = activity?.icon ?? FootprintIconDefaults.map
                                     if let iconImage = UIImage(systemName: iconName) {
                                         let iconSize: CGFloat = 11.0
-                                        let iconRect = CGRect(x: center.x - iconSize/2, y: center.y - iconSize/2, width: iconSize, height: iconSize)
-                                        iconImage.withTintColor(iconColor).drawAspectFit(in: iconRect)
+                                        let iconRect = CGRect(x: innerCenter.x - iconSize/2, y: innerCenter.y - iconSize/2, width: iconSize, height: iconSize)
+                                        iconImage.withTintColor(iconColor, renderingMode: .alwaysTemplate).draw(in: iconRect)
                                     }
                                 }
-
-
                             }
                         }
                         

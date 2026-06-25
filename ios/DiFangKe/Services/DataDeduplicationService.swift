@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import CoreLocation
 
 @MainActor
 enum DataDeduplicationService {
@@ -8,9 +9,10 @@ enum DataDeduplicationService {
         var footprintReferencesRewritten = 0
         var footprintsDeleted = 0
         var transportsDeleted = 0
+        var activityTypesDeleted = 0
 
         var didChange: Bool {
-            placesDeleted > 0 || footprintReferencesRewritten > 0 || footprintsDeleted > 0 || transportsDeleted > 0
+            placesDeleted > 0 || footprintReferencesRewritten > 0 || footprintsDeleted > 0 || transportsDeleted > 0 || activityTypesDeleted > 0
         }
     }
 
@@ -20,13 +22,16 @@ enum DataDeduplicationService {
         let places = (try? context.fetch(FetchDescriptor<Place>())) ?? []
         let footprints = (try? context.fetch(FetchDescriptor<Footprint>())) ?? []
         let transports = (try? context.fetch(FetchDescriptor<TransportRecord>())) ?? []
+        let activityTypes = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+        let futureTrips = (try? context.fetch(FetchDescriptor<FutureTrip>())) ?? []
 
-        print("[DataDeduplication] before places=\(places.count), footprints=\(footprints.count), transports=\(transports.count)")
+        print("[DataDeduplication] before places=\(places.count), footprints=\(footprints.count), transports=\(transports.count), activityTypes=\(activityTypes.count)")
 
         let placeRewriteMap = deduplicatePlaces(places, footprints: footprints, context: context, report: &report)
         let normalizedFootprints = rewriteFootprintPlaceReferences(footprints, placeRewriteMap: placeRewriteMap, report: &report)
         deduplicateFootprints(normalizedFootprints, context: context, report: &report)
         deduplicateTransports(transports, context: context, report: &report)
+        deduplicateActivityTypes(activityTypes, footprints: normalizedFootprints, futureTrips: futureTrips, context: context, report: &report)
 
         if report.didChange {
             do {
@@ -39,31 +44,48 @@ enum DataDeduplicationService {
         let remainingPlaces = (try? context.fetchCount(FetchDescriptor<Place>())) ?? -1
         let remainingFootprints = (try? context.fetchCount(FetchDescriptor<Footprint>())) ?? -1
         let remainingTransports = (try? context.fetchCount(FetchDescriptor<TransportRecord>())) ?? -1
-        print("[DataDeduplication] deleted places=\(report.placesDeleted), rewrittenFootprints=\(report.footprintReferencesRewritten), deletedFootprints=\(report.footprintsDeleted), deletedTransports=\(report.transportsDeleted)")
-        print("[DataDeduplication] after places=\(remainingPlaces), footprints=\(remainingFootprints), transports=\(remainingTransports)")
+        let remainingActivityTypes = (try? context.fetchCount(FetchDescriptor<ActivityType>())) ?? -1
+        print("[DataDeduplication] deleted places=\(report.placesDeleted), rewrittenFootprints=\(report.footprintReferencesRewritten), deletedFootprints=\(report.footprintsDeleted), deletedTransports=\(report.transportsDeleted), deletedActivityTypes=\(report.activityTypesDeleted)")
+        print("[DataDeduplication] after places=\(remainingPlaces), footprints=\(remainingFootprints), transports=\(remainingTransports), activityTypes=\(remainingActivityTypes)")
 
         return report
     }
 
     private static func deduplicatePlaces(_ places: [Place], footprints: [Footprint], context: ModelContext, report: inout Report) -> [UUID: UUID] {
-        let groups = Dictionary(grouping: places, by: { $0.cloneKey })
-        let referencedPlaceIDs = Set(footprints.compactMap(\.placeID))
         var rewriteMap: [UUID: UUID] = [:]
-
-        for group in groups.values where group.count > 1 {
-            let sortedGroup = group.sorted { first, second in
-                placeKeepScore(first, referencedPlaceIDs: referencedPlaceIDs) > placeKeepScore(second, referencedPlaceIDs: referencedPlaceIDs)
+        var remainingPlaces = places
+        let referencedPlaceIDs = Set(footprints.compactMap(\.placeID))
+        
+        while !remainingPlaces.isEmpty {
+            let keeper = remainingPlaces.removeFirst()
+            var duplicates: [Place] = []
+            
+            remainingPlaces.removeAll { candidate in
+                let sameName = keeper.name == candidate.name
+                let loc1 = CLLocation(latitude: keeper.latitude, longitude: keeper.longitude)
+                let loc2 = CLLocation(latitude: candidate.latitude, longitude: candidate.longitude)
+                // Same name and within 50 meters, or completely identical UUID
+                if candidate.placeID == keeper.placeID || (sameName && loc1.distance(from: loc2) < 50) {
+                    duplicates.append(candidate)
+                    return true
+                }
+                return false
             }
-            guard let keeper = sortedGroup.first else { continue }
-
-            for duplicate in sortedGroup.dropFirst() {
-                mergePlace(duplicate, into: keeper)
-                rewriteMap[duplicate.placeID] = keeper.placeID
-                context.delete(duplicate)
-                report.placesDeleted += 1
+            
+            if !duplicates.isEmpty {
+                var allVersions = [keeper] + duplicates
+                allVersions.sort { placeKeepScore($0, referencedPlaceIDs: referencedPlaceIDs) > placeKeepScore($1, referencedPlaceIDs: referencedPlaceIDs) }
+                
+                let best = allVersions.first!
+                
+                for duplicate in allVersions.dropFirst() {
+                    mergePlace(duplicate, into: best)
+                    rewriteMap[duplicate.placeID] = best.placeID
+                    context.delete(duplicate)
+                    report.placesDeleted += 1
+                }
             }
         }
-
         return rewriteMap
     }
 
@@ -80,33 +102,103 @@ enum DataDeduplicationService {
     }
 
     private static func deduplicateFootprints(_ footprints: [Footprint], context: ModelContext, report: inout Report) {
-        let groups = Dictionary(grouping: footprints, by: footprintCloneKey)
-        for group in groups.values where group.count > 1 {
-            let sortedGroup = group.sorted { first, second in
-                footprintKeepScore(first) > footprintKeepScore(second)
-            }
-            guard let keeper = sortedGroup.first else { continue }
-
-            for duplicate in sortedGroup.dropFirst() {
-                mergeFootprint(duplicate, into: keeper)
-                context.delete(duplicate)
-                report.footprintsDeleted += 1
+        let groupedByDay = Dictionary(grouping: footprints) { Calendar.current.startOfDay(for: $0.date) }
+        
+        for (_, dayFootprints) in groupedByDay {
+            var sorted = dayFootprints.sorted { $0.startTime < $1.startTime }
+            while !sorted.isEmpty {
+                let keeper = sorted.removeFirst()
+                var duplicates: [Footprint] = []
+                
+                sorted.removeAll { candidate in
+                    let startDiff = abs(candidate.startTime.timeIntervalSince(keeper.startTime))
+                    let endDiff = abs(candidate.endTime.timeIntervalSince(keeper.endTime))
+                    // Start and end within 5 minutes of each other
+                    if startDiff <= 300 && endDiff <= 300 {
+                        duplicates.append(candidate)
+                        return true
+                    }
+                    return false
+                }
+                
+                if !duplicates.isEmpty {
+                    var allVersions = [keeper] + duplicates
+                    allVersions.sort { footprintKeepScore($0) > footprintKeepScore($1) }
+                    
+                    let best = allVersions.first!
+                    
+                    for duplicate in allVersions.dropFirst() {
+                        mergeFootprint(duplicate, into: best)
+                        context.delete(duplicate)
+                        report.footprintsDeleted += 1
+                    }
+                }
             }
         }
     }
 
     private static func deduplicateTransports(_ transports: [TransportRecord], context: ModelContext, report: inout Report) {
-        let groups = Dictionary(grouping: transports, by: transportCloneKey)
-        for group in groups.values where group.count > 1 {
-            let sortedGroup = group.sorted { first, second in
-                transportKeepScore(first) > transportKeepScore(second)
+        let groupedByDay = Dictionary(grouping: transports) { Calendar.current.startOfDay(for: $0.day) }
+        
+        for (_, dayTransports) in groupedByDay {
+            var sorted = dayTransports.sorted { $0.startTime < $1.startTime }
+            while !sorted.isEmpty {
+                let keeper = sorted.removeFirst()
+                var duplicates: [TransportRecord] = []
+                
+                sorted.removeAll { candidate in
+                    let startDiff = abs(candidate.startTime.timeIntervalSince(keeper.startTime))
+                    let endDiff = abs(candidate.endTime.timeIntervalSince(keeper.endTime))
+                    // Start and end within 5 minutes of each other
+                    if startDiff <= 300 && endDiff <= 300 {
+                        duplicates.append(candidate)
+                        return true
+                    }
+                    return false
+                }
+                
+                if !duplicates.isEmpty {
+                    var allVersions = [keeper] + duplicates
+                    allVersions.sort { transportKeepScore($0) > transportKeepScore($1) }
+                    
+                    let best = allVersions.first!
+                    
+                    for duplicate in allVersions.dropFirst() {
+                        mergeTransport(duplicate, into: best)
+                        context.delete(duplicate)
+                        report.transportsDeleted += 1
+                    }
+                }
             }
-            guard let keeper = sortedGroup.first else { continue }
+        }
+    }
 
-            for duplicate in sortedGroup.dropFirst() {
-                mergeTransport(duplicate, into: keeper)
+    private static func deduplicateActivityTypes(_ activityTypes: [ActivityType], footprints: [Footprint], futureTrips: [FutureTrip], context: ModelContext, report: inout Report) {
+        let groupedByName = Dictionary(grouping: activityTypes) { $0.name }
+        
+        for (_, group) in groupedByName where group.count > 1 {
+            let sorted = group.sorted { first, second in
+                if first.isSystem != second.isSystem { return first.isSystem }
+                return first.sortOrder < second.sortOrder
+            }
+            
+            let keeper = sorted.first!
+            
+            for duplicate in sorted.dropFirst() {
+                let duplicateIDString = duplicate.id.uuidString
+                let keeperIDString = keeper.id.uuidString
+                
+                for footprint in footprints where footprint.activityTypeValue == duplicateIDString {
+                    footprint.activityTypeValue = keeperIDString
+                    report.footprintReferencesRewritten += 1
+                }
+                
+                for trip in futureTrips where trip.activityTypeValue == duplicateIDString {
+                    trip.activityTypeValue = keeperIDString
+                }
+                
                 context.delete(duplicate)
-                report.transportsDeleted += 1
+                report.activityTypesDeleted += 1
             }
         }
     }

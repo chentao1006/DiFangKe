@@ -7,7 +7,7 @@ import Photos
 enum FootprintIconDefaults {
     static let map = "mappin"
     static let card = "questionmark.circle.dashed"
-    static let mapSnapshotVersion = "footprint-map-pin-v11"
+    static let mapSnapshotVersion = "footprint-map-pin-v12"
 }
 
 // Add TimelineItem enum

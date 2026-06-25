@@ -134,11 +134,13 @@ struct DataManagerView: View {
                 }
             }
 
-            // Section(header: Text("回收站")) {
-            //     NavigationLink(destination: RecycleBinView()) {
-            //         Label("足迹回收站", systemImage: "trash.circle")
-            //     }
-            // }
+            Section(header: Text("数据维护"), footer: Text("如果从 iCloud 恢复了曾经手动导入过的数据，可能会出现重复的足迹。您可以使用此功能一键合并去重。该过程也会在后台自动执行。")) {
+                Button(action: {
+                    runDeduplication()
+                }) {
+                    Label("清理重复数据", systemImage: "sparkles.rectangle.stack")
+                }
+            }
             
             Section(header: Text("危险操作")) {
                 Button(role: .destructive, action: {
@@ -260,6 +262,19 @@ struct DataManagerView: View {
             self.alertMessage = error.localizedDescription
             self.showAlert = true
         }
+    }
+    
+    private func runDeduplication() {
+        Aptabase.shared.trackEvent("data_deduplication_started")
+        let report = DataDeduplicationService.run(context: modelContext)
+        if report.didChange {
+            self.alertTitle = "清理完成"
+            self.alertMessage = "成功合并或清理了 \(report.footprintsDeleted + report.transportsDeleted + report.placesDeleted + report.activityTypesDeleted) 条重复数据。"
+        } else {
+            self.alertTitle = "无需清理"
+            self.alertMessage = "当前数据库中未发现重复数据。"
+        }
+        self.showAlert = true
     }
 
     

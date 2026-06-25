@@ -224,7 +224,7 @@ struct RawLogsManagerView: View {
         syncStatus = "正在同步文件..."
         
         do {
-            let count = try await RawLocationStore.shared.syncToiCloud()
+            let count = try await RawLocationStore.shared.syncToiCloud(onlyRecent: false)
             syncStatus = "同步成功：共同步 \(count) 个文件"
             loadFiles()
             locationManager.refreshAvailableRawDates()

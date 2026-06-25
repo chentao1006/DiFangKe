@@ -42,6 +42,8 @@ class HealthManager: ObservableObject {
             
             DispatchQueue.main.async {
                 self.isAuthorized = success
+                UserDefaults.standard.set(true, forKey: "hasRequestedHealthAuth")
+                self.startActivityTracking()
                 completion(success)
             }
         }

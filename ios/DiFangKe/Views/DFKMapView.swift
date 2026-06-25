@@ -557,7 +557,7 @@ struct DFKMapView: View {
                                 }
 
                                 ForEach(validPhotoAnnotations, id: \.asset.localIdentifier) { entry in
-                                    Annotation("", coordinate: entry.coordinate) {
+                                    Annotation("", coordinate: entry.coordinate, anchor: .bottom) {
                                         Button {
                                             onPhotoTap?(entry.asset)
                                         } label: {
@@ -781,28 +781,40 @@ struct DFKMapView: View {
         let size = isMiniTimelineMode ? 11 : baseSize * constantScale
         let activity = fp.getActivityType(from: allActivities)
         let activityColor = activity?.color ?? Color.gray
-        let iconColor: Color = colorScheme == .dark ? .black : .white
+        let iconColor: Color = .white
         let iconName = activity?.icon ?? FootprintIconDefaults.card
-        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (activity?.icon == nil ? 18 : 13) * constantScale
+        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (activity?.icon == nil ? 18 : 10) * constantScale
         let durationTuple = formatDuration(aggregated.totalDuration)
         let fontSize = isInteractive ? 6.5 * constantScale : 5.5 * constantScale
 
         return ZStack(alignment: .top) {
             MapPinTeardropShape()
-                .fill(activityColor)
+                .fill(Color(uiColor: .systemBackground))
+                .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
                 .frame(width: size, height: size * 1.2)
+
+            Circle()
+                .fill(
+                    LinearGradient(
+                        gradient: Gradient(colors: [activityColor, activityColor.darker(by: 0.20)]),
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: size - 5, height: size - 5)
+                .offset(y: 2.5)
 
             // 根据 prefersActivityIcons 决定显示活动图标还是照片封面
             if !prefersActivityIcons, let latestPhotoAssetID = latestPhotoAssetID(for: aggregated) {
-                let photoSize = size * 0.82
+                let photoSize = size - 3
                 if let image = liveMapPhotoImages[latestPhotoAssetID] {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
                         .frame(width: photoSize, height: photoSize)
                         .clipShape(Circle())
-                        .overlay(Circle().stroke(iconColor.opacity(0.75), lineWidth: 1))
-                        .offset(y: size * 0.07)
+                        .overlay(Circle().stroke(activityColor, lineWidth: 1.5))
+                        .offset(y: 1.5)
                 } else {
                     Image(systemName: iconName)
                         .font(.system(size: iconSize, weight: .bold))
@@ -836,12 +848,12 @@ struct DFKMapView: View {
                     RoundedRectangle(cornerRadius: 3)
                         .stroke(activityColor, lineWidth: 0.5)
                 )
-                .offset(y: size - 10 * constantScale)
+                .offset(y: size - 6 * constantScale)
             }
         }
         .padding(2 * constantScale)
         .frame(width: size + 4 * constantScale, height: size * 1.2 + 4 * constantScale)
-        .scaleEffect(isSelected ? 1.35 : 1.0, anchor: .bottom)
+        .scaleEffect(isSelected ? 2.0 : 1.0, anchor: .bottom)
         .contentShape(Rectangle())
         .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFootprintID)
         .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFutureTripID)
@@ -883,14 +895,26 @@ struct DFKMapView: View {
         let constantScale: CGFloat = 1.32
         let baseSize: CGFloat = isInteractive ? 25 : 20
         let size = isMiniTimelineMode ? 11 : baseSize * constantScale
-        let iconColor: Color = colorScheme == .dark ? .black : .white
-        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (activity?.icon == nil ? 18 : 13) * constantScale
+        let iconColor: Color = .white
+        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (activity?.icon == nil ? 18 : 10) * constantScale
         let fontSize = isInteractive ? 6.5 * constantScale : 5.5 * constantScale
 
         return ZStack(alignment: .top) {
             MapPinTeardropShape()
-                .fill(tint)
+                .fill(Color(uiColor: .systemBackground))
+                .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
                 .frame(width: size, height: size * 1.2)
+
+            Circle()
+                .fill(
+                    LinearGradient(
+                        gradient: Gradient(colors: [tint.lighter(by: 0.25), tint]),
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: size - 5, height: size - 5)
+                .offset(y: 2.5)
 
             Image(systemName: iconName)
                 .font(.system(size: iconSize, weight: .bold))
@@ -899,7 +923,7 @@ struct DFKMapView: View {
 
             if !isMiniTimelineMode {
                 HStack(alignment: .lastTextBaseline, spacing: 0) {
-                    Text(trip.hasArrivalTime ? mapCountdownText(for: trip) : "计划")
+                    Text(mapDistanceText(for: trip))
                         .font(.system(size: fontSize, weight: .bold, design: .rounded))
                 }
                 .lineLimit(1)
@@ -915,28 +939,24 @@ struct DFKMapView: View {
                     RoundedRectangle(cornerRadius: 3)
                         .stroke(tint, lineWidth: 0.5)
                 )
-                .offset(y: size - 10 * constantScale)
+                .offset(y: size - 6 * constantScale)
             }
         }
         .opacity(isSelected ? 1.0 : 0.58)
         .padding(2 * constantScale)
         .frame(width: size + 4 * constantScale, height: size * 1.2 + 4 * constantScale)
-        .scaleEffect(isSelected ? 1.35 : 1.0, anchor: .bottom)
+        .scaleEffect(isSelected ? 1.5 : 1.0, anchor: .bottom)
         .contentShape(Rectangle())
         .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFutureTripID)
     }
 
-    private func mapCountdownText(for trip: FutureTrip) -> String {
-        let now = Date()
-        if trip.arrivalDate < now {
-            return "已到时间"
+    private func mapDistanceText(for trip: FutureTrip) -> String {
+        guard let userLocation = LocationManager.shared.lastLocation else {
+            return "--"
         }
-        
-        let diff = Calendar.current.dateComponents([.day, .hour, .minute], from: now, to: trip.arrivalDate)
-        if let d = diff.day, d > 0 { return "\(d)天" }
-        if let h = diff.hour, h > 0 { return "\(h)小时" }
-        if let m = diff.minute, m > 0 { return "\(m)分" }
-        return "即将到时"
+        let tripLocation = CLLocation(latitude: trip.latitude, longitude: trip.longitude)
+        let distance = userLocation.distance(from: tripLocation)
+        return String(format: "%.1fkm", distance / 1000)
     }
 
     private func activity(for trip: FutureTrip) -> ActivityType? {
@@ -991,7 +1011,7 @@ struct DFKMapView: View {
     private func photoAnnotations() -> some MapContent {
         ForEach(photoAssets, id: \.localIdentifier) { asset in
             if let coord = asset.location?.gcj02.coordinate {
-                Annotation("", coordinate: coord) {
+                Annotation("", coordinate: coord, anchor: .bottom) {
                     photoAnnotationContent(for: asset)
                 }
             }
@@ -1034,21 +1054,41 @@ struct DFKMapView: View {
     private func photoAnnotationContent(for asset: PHAsset) -> some View {
         let size: CGFloat = isInteractive ? 60 : 46
         let cornerRadius: CGFloat = isInteractive ? 8 : 6
-        let content = ZStack {
-            Color(uiColor: .systemGray6)
-            if let image = liveMapPhotoImages[asset.localIdentifier] {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Image(systemName: "photo")
-                    .font(.caption)
-                    .foregroundColor(Color(uiColor: .systemGray))
+        let tipHeight: CGFloat = isInteractive ? 10 : 8
+        let contentInset: CGFloat = 4
+        let contentSize = size - contentInset * 2
+        let content = ZStack(alignment: .top) {
+            PhotoMapMarkerShape(cornerRadius: cornerRadius, tipHeight: tipHeight)
+                .fill(Color(uiColor: .systemBackground))
+                .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 2)
+                .frame(width: size, height: size + tipHeight)
+
+            ZStack {
+                Color(uiColor: .systemGray6)
+                if let image = liveMapPhotoImages[asset.localIdentifier] {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "photo")
+                        .font(.caption)
+                        .foregroundColor(Color(uiColor: .systemGray))
+                }
             }
+            .frame(width: contentSize, height: contentSize)
+            .clipShape(RoundedRectangle(cornerRadius: max(2, cornerRadius - 2), style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: max(2, cornerRadius - 2), style: .continuous)
+                    .stroke(Color.secondary.opacity(0.25), lineWidth: 0.8)
+            }
+            .offset(y: contentInset)
         }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        .overlay(RoundedRectangle(cornerRadius: cornerRadius).stroke(Color(uiColor: .systemBackground), lineWidth: 1.5))
+        .overlay {
+            PhotoMapMarkerShape(cornerRadius: cornerRadius, tipHeight: tipHeight)
+                .stroke(Color(uiColor: .systemBackground), lineWidth: 1.5)
+                .frame(width: size, height: size + tipHeight)
+        }
+        .frame(width: size, height: size + tipHeight)
         .contentShape(Rectangle())
 
         if let onPhotoTap {
@@ -1376,18 +1416,31 @@ struct DFKMapView: View {
                 for entry in validPhotoAnnotations {
                     let point = snapshot.point(for: entry.coordinate)
                     let markerSize: CGFloat = 40 // Standalone photos should be larger to be visible
-                    let rect = CGRect(x: point.x - markerSize / 2, y: point.y - markerSize / 2, width: markerSize, height: markerSize)
-                    let path = UIBezierPath(roundedRect: rect, cornerRadius: 6)
+                    let tipHeight: CGFloat = 8
+                    let rect = CGRect(x: point.x - markerSize / 2, y: point.y - markerSize - tipHeight, width: markerSize, height: markerSize)
+                    let markerPath = UIBezierPath.photoMapMarkerPath(in: CGRect(x: rect.minX, y: rect.minY, width: markerSize, height: markerSize + tipHeight), cornerRadius: 6, tipHeight: tipHeight)
+                    let contentRect = rect.insetBy(dx: 4, dy: 4)
+                    let contentPath = UIBezierPath(roundedRect: contentRect, cornerRadius: 4)
 
                     if let photoImage = standalonePhotoImages[entry.asset.localIdentifier] {
                         ctx.cgContext.saveGState()
-                        path.addClip()
-                        drawImageAspectFill(photoImage, in: rect)
+                        ctx.cgContext.setShadow(offset: CGSize(width: 0, height: 2), blur: 4, color: UIColor.black.withAlphaComponent(0.20).cgColor)
+                        UIColor.systemBackground.setFill()
+                        markerPath.fill()
                         ctx.cgContext.restoreGState()
+
+                        ctx.cgContext.saveGState()
+                        contentPath.addClip()
+                        drawImageAspectFill(photoImage, in: contentRect)
+                        ctx.cgContext.restoreGState()
+
+                        UIColor.separator.withAlphaComponent(0.30).setStroke()
+                        contentPath.lineWidth = 0.8
+                        contentPath.stroke()
                         
-                        strokeColor.setStroke()
-                        path.lineWidth = 1.5
-                        path.stroke()
+                        UIColor.systemBackground.setStroke()
+                        markerPath.lineWidth = 1.5
+                        markerPath.stroke()
                     } else {
                         // If image not loaded, just a dot or skip? Skip for now to keep it clean.
                     }
@@ -1865,7 +1918,8 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             mapView.addAnnotation(MapImageAnnotation(
                 coordinate: entry.coordinate,
                 kind: .photo(entry.asset.localIdentifier),
-                image: Coordinator.photoImage()
+                image: Coordinator.photoImage(),
+                centerOffset: Coordinator.photoCenterOffset
             ))
         }
 
@@ -1913,6 +1967,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         static let annotationReuseIdentifier = "StableInteractiveMapAnnotation"
+        static let photoCenterOffset = CGPoint(x: 0, y: -17)
 
         var parent: StableInteractiveMapView
         var overlayStyles: [ObjectIdentifier: OverlayStyle] = [:]
@@ -2081,20 +2136,26 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         }
 
         static func photoImage() -> UIImage {
-            let size = CGSize(width: 24, height: 24)
+            let bodySize: CGFloat = 28
+            let tipHeight: CGFloat = 6
+            let size = CGSize(width: bodySize, height: bodySize + tipHeight)
             let renderer = UIGraphicsImageRenderer(size: size)
             return renderer.image { context in
-                let rect = CGRect(origin: .zero, size: size)
-                let path = UIBezierPath(roundedRect: rect, cornerRadius: 6)
-                UIColor.white.setFill()
+                let markerRect = CGRect(origin: .zero, size: size)
+                let path = UIBezierPath.photoMapMarkerPath(in: markerRect, cornerRadius: 6, tipHeight: tipHeight)
+                context.cgContext.saveGState()
+                context.cgContext.setShadow(offset: CGSize(width: 0, height: 2), blur: 3, color: UIColor.black.withAlphaComponent(0.18).cgColor)
+                UIColor.systemBackground.setFill()
                 path.fill()
-                UIColor.systemGray2.setStroke()
+                context.cgContext.restoreGState()
+
+                UIColor.systemBackground.setStroke()
                 path.lineWidth = 1.2
                 path.stroke()
 
                 UIImage(systemName: "photo.fill")?
                     .withTintColor(UIColor(Color.dfkAccent), renderingMode: .alwaysOriginal)
-                    .draw(in: CGRect(x: 5, y: 5, width: 14, height: 14))
+                    .draw(in: CGRect(x: 7, y: 7, width: 14, height: 14))
             }
         }
 
@@ -2298,9 +2359,76 @@ private struct MapPinTeardropShape: Shape {
 
         let radius = rect.width / 2
         let center = CGPoint(x: rect.midX, y: rect.minY + radius)
-        path.addArc(center: center, radius: radius, startAngle: .degrees(125), endAngle: .degrees(55), clockwise: false)
-        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addArc(center: center, radius: radius, startAngle: .degrees(140), endAngle: .degrees(40), clockwise: false)
+        let bottomY = rect.maxY - 1.5
+        path.addLine(to: CGPoint(x: rect.midX + 1.5, y: bottomY))
+        path.addArc(center: CGPoint(x: rect.midX, y: bottomY), radius: 1.5, startAngle: .degrees(0), endAngle: .degrees(180), clockwise: false)
         path.closeSubpath()
+        return path
+    }
+}
+
+private struct PhotoMapMarkerShape: Shape {
+    let cornerRadius: CGFloat
+    let tipHeight: CGFloat
+    var tipWidth: CGFloat = 14
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard rect.width > 0 && rect.height > 0 else {
+            path.addRect(CGRect(x: 0, y: 0, width: 1, height: 1))
+            return path
+        }
+
+        let bodyHeight = max(0, rect.height - tipHeight)
+        let bodyRect = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: bodyHeight)
+        let radius = min(cornerRadius, bodyRect.width / 2, bodyRect.height / 2)
+        let clampedTipWidth = min(tipWidth, rect.width * 0.5)
+
+        path.move(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY))
+        path.addLine(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.minY))
+        path.addQuadCurve(to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY + radius), control: CGPoint(x: bodyRect.maxX, y: bodyRect.minY))
+        path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY - radius))
+        path.addQuadCurve(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.maxY), control: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY))
+        path.addLine(to: CGPoint(x: rect.midX + clampedTipWidth / 2, y: bodyRect.maxY))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.midX - clampedTipWidth / 2, y: bodyRect.maxY))
+        path.addLine(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.maxY))
+        path.addQuadCurve(to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY - radius), control: CGPoint(x: bodyRect.minX, y: bodyRect.maxY))
+        path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY + radius))
+        path.addQuadCurve(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY), control: CGPoint(x: bodyRect.minX, y: bodyRect.minY))
+        path.closeSubpath()
+
+        return path
+    }
+}
+
+private extension UIBezierPath {
+    static func photoMapMarkerPath(in rect: CGRect, cornerRadius: CGFloat, tipHeight: CGFloat, tipWidth: CGFloat = 14) -> UIBezierPath {
+        let path = UIBezierPath()
+        guard rect.width > 0 && rect.height > 0 else {
+            return UIBezierPath(rect: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+
+        let bodyHeight = max(0, rect.height - tipHeight)
+        let bodyRect = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: bodyHeight)
+        let radius = min(cornerRadius, bodyRect.width / 2, bodyRect.height / 2)
+        let clampedTipWidth = min(tipWidth, rect.width * 0.5)
+
+        path.move(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY))
+        path.addLine(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.minY))
+        path.addQuadCurve(to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY + radius), controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.minY))
+        path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY - radius))
+        path.addQuadCurve(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.maxY), controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY))
+        path.addLine(to: CGPoint(x: rect.midX + clampedTipWidth / 2, y: bodyRect.maxY))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.midX - clampedTipWidth / 2, y: bodyRect.maxY))
+        path.addLine(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.maxY))
+        path.addQuadCurve(to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY - radius), controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.maxY))
+        path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY + radius))
+        path.addQuadCurve(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY), controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.minY))
+        path.close()
+
         return path
     }
 }

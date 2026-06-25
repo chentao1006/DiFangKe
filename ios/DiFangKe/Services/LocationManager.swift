@@ -560,27 +560,43 @@ final class RawLocationStore {
             uploadIndex += batchSize
         }
 
-        // 2. 下载最近 N 天其他设备的文件，和上传窗口保持一致
+        // 2. 下载其他设备的文件
         do {
-            let calendar = Calendar.current
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd"
-            
-            // 计算最近 N 天的所有日期字符串
-            var dateStrings: [String] = []
-            for i in 0..<lookbackDays {
-                if let date = calendar.date(byAdding: .day, value: -i, to: Date()) {
-                    dateStrings.append(formatter.string(from: date))
+            let predicate: NSPredicate
+            if onlyRecent {
+                let calendar = Calendar.current
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy-MM-dd"
+                
+                var dateStrings: [String] = []
+                for i in 0..<lookbackDays {
+                    if let date = calendar.date(byAdding: .day, value: -i, to: Date()) {
+                        dateStrings.append(formatter.string(from: date))
+                    }
                 }
+                predicate = NSPredicate(format: "date IN %@", dateStrings)
+            } else {
+                // Use `date != ""` instead of `value: true` because CloudKit requires `recordName` to be queryable for `value: true`, 
+                // but `date` is already marked queryable since the `IN` query works.
+                predicate = NSPredicate(format: "date != %@", "")
             }
             
-            // 使用 IN 查询，规避 String 不支持范围查询的问题
-            let predicate = NSPredicate(format: "date IN %@", dateStrings)
             let query = CKQuery(recordType: "RawTrajectory", predicate: predicate)
             
-            let (results, _) = try await cloudDatabase.records(matching: query)
+            var matchResults: [(CKRecord.ID, Result<CKRecord, Error>)] = []
+            var currentCursor: CKQueryOperation.Cursor?
             
-            for (_, result) in results {
+            let (initialResults, initialCursor) = try await cloudDatabase.records(matching: query)
+            matchResults.append(contentsOf: initialResults)
+            currentCursor = initialCursor
+            
+            while let cursor = currentCursor {
+                let (nextResults, nextCursor) = try await cloudDatabase.records(continuingMatchFrom: cursor)
+                matchResults.append(contentsOf: nextResults)
+                currentCursor = nextCursor
+            }
+            
+            for (_, result) in matchResults {
                 if let record = try? result.get() {
                     let remoteDeviceID = record["deviceID"] as? String ?? ""
                     let remoteDeviceName = record["deviceName"] as? String ?? ""
@@ -1027,8 +1043,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 Task {
                     await loadPointsFromStore() // 获得数据库后，后台加载点并同步最后处理时间
                 }
+                checkLiveActivity()
             }
         }
+    }
+    
+    func checkLiveActivity() {
+        guard let location = lastLocation, let context = modelContext else { return }
+#if canImport(ActivityKit)
+        if #available(iOS 16.1, *) {
+            TripLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: context)
+        }
+#endif
     }
     
     // 正在记录的临时停留状态
@@ -1078,7 +1104,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         self.locationManager.delegate = self
         self.locationManager.desiredAccuracy = kCLLocationAccuracyBest // 初次启动使用最高精度，确保冷启动位置快速锁定
         self.locationManager.distanceFilter = 5.0 // 初始高频记录 (5米)
-        self.locationManager.allowsBackgroundLocationUpdates = true
+        if isAuthorized {
+            self.locationManager.allowsBackgroundLocationUpdates = true
+        }
         self.locationManager.pausesLocationUpdatesAutomatically = false // 核心修复：禁止自动暂停，防止丢点
         self.locationManager.showsBackgroundLocationIndicator = false // 保持静默记录，不显示蓝色状态栏（响应用户反馈）
         self.locationManager.activityType = .fitness // 默认为健身/步行模式
@@ -1091,8 +1119,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         setupSubscribers()
         setupNetworkMonitoring()
         
-        // Start visit monitoring
-        locationManager.startMonitoringVisits()
+        // Start visit monitoring only if already authorized to avoid premature prompts
+        if isAuthorized {
+            locationManager.startMonitoringVisits()
+        }
         
         // Move heavy disk I/O to background to avoid blocking app launch
         Task(priority: .userInitiated) { [weak self] in
@@ -1115,6 +1145,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
         
+        // Listen for FutureTrip changes to update Live Activities
+        NotificationCenter.default.addObserver(
+            forName: FutureTrip.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkLiveActivity()
+            }
+        }
+        
         // 核心监测：监听运动状态变化，一旦“动起来”，立即强制提升定位频率，不等 GPS 响应
         HealthManager.shared.$isMoving
             .removeDuplicates()
@@ -1128,8 +1169,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             .store(in: &cancellables)
         // 核心修复：在 init() 里就启动运动传感器 + 健康授权
         // 这样即使 App 从后台被系统唤醒（不走 startTracking），运动状态变化也能触发 boost
-        HealthManager.shared.requestAuthorization { _ in }
-        HealthManager.shared.startActivityTracking()
+        if UserDefaults.standard.bool(forKey: "hasRequestedHealthAuth") {
+            HealthManager.shared.startActivityTracking()
+        }
     }
 
     /// 将“移动证据”转成 UI 稳定状态：有移动证据立刻切到 moving；无证据需要保持一段时间才切回 stationary。
@@ -1172,6 +1214,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 // 触动全局 UI 刷新
                 self.lastRawDataUpdateTrigger = Date()
+            }
+            .store(in: &cancellables)
+            
+        // 监听 CloudKit 云端数据同步事件（SwiftData 底层通过 CoreData 发出此通知）
+        NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange)
+            // 节流处理，避免 iCloud 大量拉取时频繁刷新卡死 UI
+            .throttle(for: .seconds(3.0), scheduler: RunLoop.main, latest: true)
+            .sink { _ in
+                print("[LocationManager] ☁️ NSPersistentStoreRemoteChange detected, posting FootprintDataChanged...")
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
             }
             .store(in: &cancellables)
     }
@@ -1526,10 +1578,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // Default to true if not explicitly set
         let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
         
-        let isFirstLaunch = UserDefaults.standard.bool(forKey: "isFirstLaunch") || UserDefaults.standard.object(forKey: "isFirstLaunch") == nil
-        
-        guard isEnabled || isFirstLaunch else {
+        guard isEnabled else {
             stopTracking()
+            return
+        }
+
+        // Prevent automatic system prompt on first launch before user clicks the button
+        if locationManager.authorizationStatus == .notDetermined {
             return
         }
 
@@ -1961,6 +2016,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         lastLocation = location
         lastUpdateTime = Date()
         accuracy = location.horizontalAccuracy
+        
+#if canImport(ActivityKit)
+        if #available(iOS 16.1, *) {
+            TripLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: self.modelContext)
+        }
+#endif
 
         // --- UI 移动状态证据（用于卡片标题稳定显示） ---
         let motion = HealthManager.shared.currentMotionType
@@ -4314,5 +4375,118 @@ extension TimeInterval {
         }
     }
 }
+
+#if canImport(ActivityKit)
+import ActivityKit
+import SwiftData
+
+@available(iOS 16.1, *)
+class TripLiveActivityManager {
+    static let shared = TripLiveActivityManager()
+    private var currentActivity: Activity<TripActivityAttributes>?
+
+    func updateLiveActivity(location: CLLocation, modelContext: ModelContext?) {
+        guard let context = modelContext else { return }
+        
+        if currentActivity == nil {
+            currentActivity = Activity<TripActivityAttributes>.activities.first
+        }
+        
+        let descriptor = FetchDescriptor<FutureTrip>(sortBy: [SortDescriptor(\.arrivalDate)])
+        let trips = (try? context.fetch(descriptor)) ?? []
+        let now = Date()
+        
+        if let upcomingTrip = trips.first(where: { trip in
+            let timeInterval = trip.arrivalDate.timeIntervalSince(now)
+            return timeInterval <= 3600
+        }) {
+            let tripLocation = CLLocation(latitude: upcomingTrip.latitude, longitude: upcomingTrip.longitude)
+            let distance = location.distance(from: tripLocation)
+            let mins = max(0, Int(upcomingTrip.arrivalDate.timeIntervalSince(now) / 60))
+            
+            let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+            let matchedIcon = allActivities.first(where: { $0.id.uuidString == upcomingTrip.activityTypeValue || $0.name == upcomingTrip.activityTypeValue })?.icon ?? "calendar"
+            
+            let state = TripActivityAttributes.ContentState(
+                currentDistance: distance,
+                remainingMinutes: mins,
+                placeName: upcomingTrip.placeName,
+                arrivalDate: upcomingTrip.arrivalDate,
+                latitude: upcomingTrip.latitude,
+                longitude: upcomingTrip.longitude,
+                icon: matchedIcon,
+                hasArrivalTime: upcomingTrip.hasArrivalTime
+            )
+            
+            Task {
+                await self.ensureTripMapSnapshot(latitude: upcomingTrip.latitude, longitude: upcomingTrip.longitude, tripId: upcomingTrip.id.uuidString)
+                let content = ActivityContent(state: state, staleDate: nil)
+                
+                if let activity = self.currentActivity {
+                    if activity.attributes.tripId != upcomingTrip.id.uuidString {
+                        await activity.end(nil, dismissalPolicy: .immediate)
+                        let attributes = TripActivityAttributes(tripId: upcomingTrip.id.uuidString)
+                        self.currentActivity = try? Activity.request(attributes: attributes, content: content, pushType: nil)
+                    } else {
+                        await activity.update(content)
+                    }
+                } else {
+                    let attributes = TripActivityAttributes(tripId: upcomingTrip.id.uuidString)
+                    do {
+                        self.currentActivity = try Activity.request(attributes: attributes, content: content, pushType: nil)
+                    } catch {
+                        print("Failed to start live activity: \(error)")
+                    }
+                }
+            }
+        } else {
+            if let activity = currentActivity {
+                Task {
+                    await activity.end(nil, dismissalPolicy: .default)
+                }
+                currentActivity = nil
+            }
+            for activity in Activity<TripActivityAttributes>.activities {
+                Task {
+                    await activity.end(nil, dismissalPolicy: .default)
+                }
+            }
+        }
+    }
+    
+    private func ensureTripMapSnapshot(latitude: Double, longitude: Double, tripId: String) async {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ct106.difangke") else { return }
+        
+        let latStr = String(format: "%.3f", latitude)
+        let lonStr = String(format: "%.3f", longitude)
+        let hashStr = "\(latStr)_\(lonStr)"
+        
+        let lightUrl = container.appendingPathComponent("trip_\(tripId)_\(hashStr)_light.png")
+        let darkUrl = container.appendingPathComponent("trip_\(tripId)_\(hashStr)_dark.png")
+        
+        if FileManager.default.fileExists(atPath: lightUrl.path) && FileManager.default.fileExists(atPath: darkUrl.path) {
+            return
+        }
+        
+        let options = MKMapSnapshotter.Options()
+        options.region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude), span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02))
+        options.size = CGSize(width: 400, height: 200)
+        options.scale = 2.0
+        options.showsBuildings = true
+        
+        do {
+            options.traitCollection = UITraitCollection(userInterfaceStyle: .light)
+            let snapshotLight = try await MKMapSnapshotter(options: options).start()
+            try snapshotLight.image.pngData()?.write(to: lightUrl)
+            
+            options.traitCollection = UITraitCollection(userInterfaceStyle: .dark)
+            let snapshotDark = try await MKMapSnapshotter(options: options).start()
+            try snapshotDark.image.pngData()?.write(to: darkUrl)
+        } catch {
+            print("Failed to generate map snapshot: \(error)")
+        }
+    }
+}
+#endif
 
 #endif

@@ -897,11 +897,26 @@ struct FootprintCardView: View {
                     }
                 }
             } label: {
-                Image(systemName: iconName)
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(iconColor)
-                    .frame(width: 32, height: 32)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground))
+                ZStack {
+                    Circle()
+                        .fill(Color(uiColor: .systemBackground))
+                        .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
+                        .frame(width: 32, height: 32)
+                        
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                gradient: Gradient(colors: [iconColor.opacity(0.7), iconColor]),
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .frame(width: 27, height: 27)
+                        
+                    Image(systemName: iconName)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white)
+                }
             }
             .buttonStyle(.plain)
             

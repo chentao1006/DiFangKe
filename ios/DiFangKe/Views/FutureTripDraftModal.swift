@@ -65,7 +65,7 @@ struct FutureTripDraftModal: View {
                     searchResultsOverlay
                 }
             }
-            .navigationTitle(editingTrip == nil ? "行程计划" : "编辑行程")
+            .navigationTitle(editingTrip == nil ? "行程计划" : "修改行程")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {

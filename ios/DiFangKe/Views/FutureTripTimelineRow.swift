@@ -77,12 +77,27 @@ struct FutureTripTimelineRow: View {
                 .padding(.top, 4)
 
             VStack(spacing: 0) {
-                Image(systemName: icon)
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(colorScheme == .dark ? .black : .white)
-                    .frame(width: ContinuousTimelineLayout.markerSize, height: ContinuousTimelineLayout.markerSize)
-                    .background(tint, in: Circle())
-                    .opacity(0.58)
+                ZStack {
+                    Circle()
+                        .fill(Color(uiColor: .systemBackground))
+                        .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
+                        .frame(width: ContinuousTimelineLayout.markerSize, height: ContinuousTimelineLayout.markerSize)
+
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                gradient: Gradient(colors: [tint.lighter(by: 0.25), tint]),
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .frame(width: ContinuousTimelineLayout.markerSize - 5, height: ContinuousTimelineLayout.markerSize - 5)
+
+                    Image(systemName: icon)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+                .opacity(0.58)
 
                 Rectangle()
                     .fill(ContinuousTimelineLayout.lineColor.opacity(0.45))
@@ -117,19 +132,12 @@ struct FutureTripTimelineRow: View {
             Spacer(minLength: 0)
             
             VStack(alignment: .trailing, spacing: 4) {
-                HStack(spacing: 4) {
-                    Image(systemName: "timer")
-                    Text(countdownText)
-                }
-                .font(.caption)
-                .foregroundStyle(countdownColor)
-                
                 if let distance = distanceText {
                     HStack(spacing: 4) {
                         Image(systemName: "point.topleft.down.to.point.bottomright.curvepath.fill")
                         Text(distance)
                     }
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                 }
             }
@@ -151,11 +159,16 @@ struct FutureTripDetailView: View {
     let trip: FutureTrip
     var isInline: Bool = false
     @Binding var presentationDetent: PresentationDetent
+    var showDelayOptionsOnAppear: Bool = false
+    var onDelayOptionsPresented: (() -> Void)? = nil
+    var showAbandonAlertOnAppear: Bool = false
+    var onAbandonAlertPresented: (() -> Void)? = nil
     var onDismiss: (() -> Void)? = nil
     var onEdit: (() -> Void)? = nil
     
     @State private var showingAbandonAlert = false
     @State private var showingNavigationOptions = false
+    @State private var showingDelayOptions = false
     
     private var isSideBySide: Bool {
         horizontalSizeClass == .regular || verticalSizeClass == .compact
@@ -226,7 +239,9 @@ struct FutureTripDetailView: View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
-                    headerContent
+                    addressSection
+                        .padding(.horizontal, 24)
+                        .padding(.top, 16)
                     
                     if let notes = trip.notes, !notes.isEmpty {
                         notesSection(notes)
@@ -234,9 +249,13 @@ struct FutureTripDetailView: View {
                             .padding(.top, 16)
                     }
                     
+                    topStatusSection
+                        .padding(.horizontal, 24)
+                        .padding(.top, 20)
+                    
                     editButton
                         .padding(.horizontal, 24)
-                        .padding(.top, 24)
+                        .padding(.top, 12)
                     
                     Spacer().frame(height: 30)
                 }
@@ -292,6 +311,14 @@ struct FutureTripDetailView: View {
             } message: {
                 Text("删除后，该计划将不再出现。")
             }
+            .confirmationDialog("选择推迟时间", isPresented: $showingDelayOptions, titleVisibility: .visible) {
+                ForEach(delayOptions, id: \.1) { option in
+                    Button(option.title) {
+                        applyDelay(option.interval)
+                    }
+                }
+                Button("取消", role: .cancel) { }
+            }
             .confirmationDialog("选择导航应用", isPresented: $showingNavigationOptions, titleVisibility: .visible) {
                 Button("苹果地图") {
                     let coordinate = CLLocationCoordinate2D(latitude: trip.latitude, longitude: trip.longitude)
@@ -338,16 +365,19 @@ struct FutureTripDetailView: View {
                 
                 Button("取消", role: .cancel) { }
             }
+            .onAppear {
+                presentDelayOptionsIfNeeded()
+                presentAbandonAlertIfNeeded()
+            }
+            .onChange(of: showDelayOptionsOnAppear) { _, _ in
+                presentDelayOptionsIfNeeded()
+            }
+            .onChange(of: showAbandonAlertOnAppear) { _, _ in
+                presentAbandonAlertIfNeeded()
+            }
         }
     }
     
-    private var headerContent: some View {
-        Group {
-            topStatusSection.padding(.horizontal, 24).padding(.top, 16)
-            addressSection.padding(.horizontal, 24).padding(.top, 16)
-            timeSection.padding(.horizontal, 24).padding(.top, 12)
-        }
-    }
 
     private var editButton: some View {
         Button {
@@ -355,7 +385,7 @@ struct FutureTripDetailView: View {
         } label: {
             HStack {
                 Image(systemName: "pencil")
-                Text("编辑计划")
+                Text("修改行程")
             }
             .font(.headline)
             .frame(maxWidth: .infinity)
@@ -453,108 +483,71 @@ struct FutureTripDetailView: View {
                 }
                 .padding(.bottom, 8)
             } else {
-                HStack(spacing: 8) {
-                    navigateButton
-                    if trip.arrivalDate < Date() {
+                navigateButton
+                    .padding(.bottom, 8)
+                if trip.arrivalDate < Date() {
+                    HStack(spacing: 8) {
                         delayButton
                         abandonButton
                     }
-                }
-                .padding(.bottom, 8)
-            }
-            
-            HStack(alignment: .firstTextBaseline) {
-                HStack(spacing: 6) {
-                    Image(systemName: "timer")
-                    Text(fullCountdownText)
-                }
-                .font(.system(.title2, design: .rounded).bold())
-                .foregroundStyle(countdownColor)
-                
-                Spacer()
-                
-                if let dist = distanceText {
-                    HStack(spacing: 4) {
-                        Image(systemName: "point.topleft.down.to.point.bottomright.curvepath.fill")
-                        Text(dist)
-                    }
-                    .font(.title3.bold())
-                    .foregroundStyle(.secondary)
+                    .padding(.bottom, 8)
                 }
             }
         }
     }
     
     private var addressSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            detailMenuRow(
-                title: nil,
-                value: trip.placeName,
-                valueColor: .primary,
-                valueFont: .system(.title3, design: .rounded).bold(),
-                textColor: .primary,
-                textLineLimit: 2,
-                leadingIcon: "mappin.and.ellipse"
-            )
-            
-            if trip.activityTypeValue != nil {
-                detailMenuRow(
-                    title: nil,
-                    value: selectedActivityName,
-                    valueColor: selectedActivityColor,
-                    valueFont: .system(size: 16, weight: .semibold, design: .rounded),
-                    textColor: .primary,
-                    iconFont: .system(size: 16, weight: .semibold),
-                    leadingIcon: selectedActivityIcon
-                )
-            }
+        VStack(alignment: .center, spacing: 10) {
+            Image(systemName: selectedActivityIcon)
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundColor(selectedActivityColor)
+
+            Text(trip.placeName)
+                .font(.system(.title2, design: .rounded).bold())
+                .foregroundColor(.primary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+
+            Text(arrivalDateTimeString)
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
         }
+        .frame(maxWidth: .infinity)
     }
     
-    private var timeSection: some View {
-        HStack(alignment: .top, spacing: 8) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Image(systemName: "calendar")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.secondary)
-                    Text(trip.arrivalDate.formatted(.dateTime.year().month().day().weekday()))
-                        .font(.system(size: 14, design: .rounded))
-                        .foregroundColor(Color.secondary)
-                }
-                if trip.hasArrivalTime {
-                    HStack(spacing: 6) {
-                        Image(systemName: "clock")
-                            .font(.system(size: 12))
-                            .foregroundColor(Color.secondary)
-                        Text(trip.arrivalDate.formatted(date: .omitted, time: .shortened))
-                            .font(.system(size: 14, design: .monospaced))
-                            .foregroundColor(Color.secondary)
-                    }
-                }
-            }
-            Spacer(minLength: 8)
+    private var arrivalDateTimeString: String {
+        let calendar = Calendar.current
+        let arrival = trip.arrivalDate
+        
+        let dateString: String
+        if calendar.isDateInToday(arrival) {
+            dateString = "今天"
+        } else if calendar.isDateInTomorrow(arrival) {
+            dateString = "明天"
+        } else {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "zh_CN")
+            formatter.dateFormat = "M月d日"
+            dateString = formatter.string(from: arrival)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.04)))
+        
+        if trip.hasArrivalTime {
+            let timeFormatter = DateFormatter()
+            timeFormatter.locale = Locale(identifier: "zh_CN")
+            timeFormatter.dateFormat = "HH:mm"
+            return "\(dateString) \(timeFormatter.string(from: arrival))"
+        } else {
+            return dateString
+        }
     }
     
     private func notesSection(_ notes: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("备注").font(.system(size: 13, weight: .semibold)).foregroundColor(.secondary).padding(.leading, 8)
-            
-            Text(notes)
-                .font(.body)
-                .foregroundColor(.primary)
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color.secondary.opacity(0.05))
-                )
-        }
+        Text(notes)
+            .font(.system(size: 17))
+            .foregroundColor(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
@@ -604,20 +597,9 @@ struct FutureTripDetailView: View {
     
     private var delayButton: some View {
         Menu {
-            let intervals: [(String, TimeInterval)] = [
-                ("推迟5分钟", 6 * 60),
-                ("推迟15分钟", 16 * 60),
-                ("推迟1小时", 3600),
-                ("推迟6小时", 6 * 3600),
-                ("推迟1天", 24 * 3600)
-            ]
-            ForEach(intervals, id: \.1) { (label, amt) in
-                Button(label) {
-                    let base = max(Date(), trip.arrivalDate)
-                    trip.arrivalDate = base.addingTimeInterval(amt)
-                    NotificationManager.shared.scheduleFutureTripNotification(for: trip.id, placeName: trip.placeName, arrivalDate: trip.arrivalDate, hasArrivalTime: trip.hasArrivalTime)
-                    try? modelContext.save()
-                    FutureTrip.postDidChangeNotification()
+            ForEach(delayOptions, id: \.1) { option in
+                Button(option.title) {
+                    applyDelay(option.interval)
                 }
             }
         } label: {
@@ -627,6 +609,7 @@ struct FutureTripDetailView: View {
                     .font(.subheadline.weight(.medium))
             }
             .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity)
             .frame(height: 50)
             .background(.ultraThinMaterial)
             .background(Color.orange.opacity(0.1))
@@ -634,6 +617,36 @@ struct FutureTripDetailView: View {
             .cornerRadius(12)
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.2), lineWidth: 1))
         }
+    }
+
+    private var delayOptions: [(title: String, interval: TimeInterval)] {
+        [
+            ("推迟5分钟", 6 * 60),
+            ("推迟15分钟", 16 * 60),
+            ("推迟1小时", 3600),
+            ("推迟6小时", 6 * 3600),
+            ("推迟1天", 24 * 3600)
+        ]
+    }
+
+    private func applyDelay(_ interval: TimeInterval) {
+        let base = max(Date(), trip.arrivalDate)
+        trip.arrivalDate = base.addingTimeInterval(interval)
+        NotificationManager.shared.scheduleFutureTripNotification(for: trip.id, placeName: trip.placeName, arrivalDate: trip.arrivalDate, hasArrivalTime: trip.hasArrivalTime)
+        try? modelContext.save()
+        FutureTrip.postDidChangeNotification()
+    }
+
+    private func presentDelayOptionsIfNeeded() {
+        guard showDelayOptionsOnAppear else { return }
+        showingDelayOptions = true
+        onDelayOptionsPresented?()
+    }
+    
+    private func presentAbandonAlertIfNeeded() {
+        guard showAbandonAlertOnAppear else { return }
+        showingAbandonAlert = true
+        onAbandonAlertPresented?()
     }
     
     private var abandonButton: some View {
@@ -646,6 +659,7 @@ struct FutureTripDetailView: View {
                     .font(.subheadline.weight(.medium))
             }
             .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity)
             .frame(height: 50)
             .background(.ultraThinMaterial)
             .background(Color.red.opacity(0.08))
@@ -661,7 +675,11 @@ struct FutureTripDetailView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "location.fill")
-                Text("导航")
+                if let dist = distanceText {
+                    Text("导航 · \(dist)")
+                } else {
+                    Text("导航")
+                }
             }
             .font(.headline)
             .frame(maxWidth: .infinity)

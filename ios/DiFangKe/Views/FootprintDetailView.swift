@@ -20,6 +20,8 @@ struct IsolatedReasonField: View {
         TextField("输入感悟...", text: $reasonState.text, axis: .vertical)
             .font(.body)
             .foregroundColor(Color.dfkMainText.opacity(0.85))
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
             .focused($isFocused)
     }
 }
@@ -176,9 +178,9 @@ struct FootprintModalView: View {
                         onDismiss?(hasChanged)
                         if !isInline { dismiss() }
                     } label: {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(Color.dfkAccent)
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -437,27 +439,7 @@ extension FootprintModalView {
     
     
     private var addressSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Menu {
-                SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint, isDraft: isDraft) {
-                    showingSearchSheet = true
-                } onSelectionApplied: {
-                    markFootprintChanged()
-                }
-            } label: {
-                detailMenuRow(
-                    title: nil,
-                    value: isUpdatingAddress ? "正在重新获取地址..." : displayPlaceText,
-                    valueColor: isUpdatingAddress ? Color.dfkMainText.opacity(0.5) : (matchedPlaceByAddress != nil ? .orange : Color.dfkMainText),
-                    valueFont: placeValueFont,
-                    textLineLimit: 1,
-                    textMinimumScaleFactor: 0.72,
-                    iconFont: .system(size: 18, weight: .semibold),
-                    leadingIcon: "mappin.and.ellipse"
-                )
-            }
-            .buttonStyle(.plain)
-
+        VStack(alignment: .center, spacing: 10) {
             Menu {
                 Button {
                     clearActivityType()
@@ -496,23 +478,53 @@ extension FootprintModalView {
                     Label("添加活动类型", systemImage: "plus")
                 }
             } label: {
-                detailMenuRow(
-                    title: nil,
-                    value: selectedActivityName,
-                    valueColor: selectedActivityColor,
-                    valueFont: .system(size: 16, weight: .semibold, design: .rounded),
-                    textColor: .primary,
-                    iconFont: .system(size: 16, weight: .semibold),
-                    leadingIcon: selectedActivityIcon
-                )
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: selectedActivityIcon)
+                        .font(.system(size: 42, weight: .semibold))
+                        .foregroundColor(selectedActivityColor)
+                }
+                .frame(maxWidth: .infinity)
             }
             .buttonStyle(.plain)
 
-            if footprint.activityTypeValue == nil {
-                activitySuggestionsRow
-                    .padding(.top, -2)
+            Menu {
+                SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint, isDraft: isDraft) {
+                    showingSearchSheet = true
+                } onSelectionApplied: {
+                    markFootprintChanged()
+                }
+            } label: {
+                Text(isUpdatingAddress ? "正在重新获取地址..." : displayPlaceText)
+                    .font(placeValueFont)
+                    .foregroundColor(isUpdatingAddress ? Color.dfkMainText.opacity(0.5) : (matchedPlaceByAddress != nil ? .orange : Color.dfkMainText))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.72)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.plain)
+
+            Button {
+                showingTimeAdjustment = true
+            } label: {
+                VStack(alignment: .center, spacing: 4) {
+                    Text(footprint.date.formatted(.dateTime.year().month().day().weekday()))
+                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                    
+                    Text(timeRangeString)
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                    
+                    Text("停留 \(durationString)")
+                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                }
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
+        .frame(maxWidth: .infinity)
     }
 
     private var matchedPlaceByAddress: Place? {
@@ -598,10 +610,6 @@ extension FootprintModalView {
                 }
 
                 Spacer(minLength: 8)
-
-                Image(systemName: "pencil")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary.opacity(0.6))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -735,9 +743,6 @@ extension FootprintModalView {
                     }
                 }
                 Spacer(minLength: 8)
-                Image(systemName: "pencil")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary.opacity(0.6))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
@@ -853,7 +858,6 @@ extension FootprintModalView {
     private var headerContent: some View {
         Group {
             addressSection.padding(.horizontal, 24).padding(.top, 16)
-            timeSection.padding(.horizontal, 24).padding(.top, 12)
         }
     }
     
@@ -873,19 +877,13 @@ extension FootprintModalView {
     }
     
     private var aiSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("足迹感悟与备注").font(.system(size: 13, weight: .semibold)).foregroundColor(.secondary).padding(.leading, 8)
+        VStack(alignment: .center, spacing: 10) {
+            Text("足迹感悟与备注")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity)
             
-            HStack(alignment: .top, spacing: 6) {
-                IsolatedReasonField(reasonState: reasonState, isFocused: $reasonFocused)
-                
-                if !reasonFocused {
-                    Image(systemName: "pencil")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary.opacity(0.6))
-                        .padding(.top, 6)
-                }
-            }
+            IsolatedReasonField(reasonState: reasonState, isFocused: $reasonFocused)
             .padding(14)
             .background(
                 RoundedRectangle(cornerRadius: 12)

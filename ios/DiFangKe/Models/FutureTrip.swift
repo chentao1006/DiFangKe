@@ -79,3 +79,37 @@ struct LegacyFutureTrip: Codable {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 }
+
+#if canImport(ActivityKit)
+import ActivityKit
+
+public struct TripActivityAttributes: ActivityAttributes {
+    public struct ContentState: Codable, Hashable {
+        public var currentDistance: Double // in meters
+        public var remainingMinutes: Int
+        public var placeName: String
+        public var arrivalDate: Date
+        public var latitude: Double
+        public var longitude: Double
+        public var icon: String
+        public var hasArrivalTime: Bool
+        
+        public init(currentDistance: Double, remainingMinutes: Int, placeName: String, arrivalDate: Date, latitude: Double, longitude: Double, icon: String, hasArrivalTime: Bool) {
+            self.currentDistance = currentDistance
+            self.remainingMinutes = remainingMinutes
+            self.placeName = placeName
+            self.arrivalDate = arrivalDate
+            self.latitude = latitude
+            self.longitude = longitude
+            self.icon = icon
+            self.hasArrivalTime = hasArrivalTime
+        }
+    }
+    
+    public var tripId: String
+    
+    public init(tripId: String) {
+        self.tripId = tripId
+    }
+}
+#endif
