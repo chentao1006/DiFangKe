@@ -157,7 +157,6 @@ struct FutureTripTimelineRow: View {
     }
 
     private var timeLabel: String {
-        if trip.isOrdered { return "顺序" }
         return trip.hasArrivalTime ? trip.arrivalDate.formatted(date: .omitted, time: .shortened) : "计划"
     }
 }
@@ -514,8 +513,6 @@ struct FutureTripDetailView: View {
             timeFormatter.locale = Locale(identifier: "zh_CN")
             timeFormatter.dateFormat = "HH:mm"
             return "\(dateString) \(timeFormatter.string(from: arrival))"
-        } else if trip.isOrdered {
-            return "\(dateString) 按顺序"
         } else {
             return dateString
         }

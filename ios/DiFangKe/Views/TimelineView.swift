@@ -550,34 +550,10 @@ private struct ContinuousTimelineView: View {
         guard let trip = activeFutureTrips.first(where: { $0.id == tripId }) else { return }
         
         if actionType == "arrive" {
-            let now = Date()
-            let startTime = min(trip.arrivalDate, now)
-            let newFootprint = Footprint(
-                date: Calendar.current.startOfDay(for: startTime),
-                startTime: startTime,
-                endTime: now,
-                footprintLocations: [CLLocationCoordinate2D(latitude: trip.latitude, longitude: trip.longitude)],
-                locationHash: "",
-                duration: now.timeIntervalSince(startTime),
-                reason: trip.notes,
-                status: .manual,
-                placeID: trip.placeID,
-                address: trip.placeName,
-                activityTypeValue: trip.activityTypeValue
-            )
-            modelContext.insert(newFootprint)
-            NotificationManager.shared.cancelFutureTripNotification(for: trip.id)
-            modelContext.delete(trip)
-            try? modelContext.save()
-            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
-            FutureTrip.postDidChangeNotification()
+            completeFutureTrip(trip)
 
         } else if actionType == "complete" {
-            NotificationManager.shared.cancelFutureTripNotification(for: trip.id)
-            trip.markCompleted()
-            try? modelContext.save()
-            selectedFutureTripDetail = nil
-            FutureTrip.postDidChangeNotification()
+            completeFutureTrip(trip)
             
         } else if actionType == "abandon" {
             selectedFutureTripDetail = trip
@@ -588,6 +564,19 @@ private struct ContinuousTimelineView: View {
             selectedFutureTripDetail = trip
             pendingFutureTripDelayOptionsID = trip.id
         }
+    }
+
+    private func completeFutureTrip(_ trip: FutureTrip) {
+        NotificationManager.shared.cancelFutureTripNotification(for: trip.id)
+        trip.markCompleted()
+        try? modelContext.save()
+        selectedFutureTripDetail = nil
+#if canImport(ActivityKit)
+        if #available(iOS 16.1, *) {
+            TripLiveActivityManager.shared.endActivity(for: trip.id)
+        }
+#endif
+        FutureTrip.postDidChangeNotification()
     }
 
     private func scheduleMidnightTimelineRefresh() {
@@ -2905,14 +2894,17 @@ private struct ContinuousTimelineSheet: View {
         var sortTimes: [UUID: Date] = [:]
         var anchorTime = Calendar.current.startOfDay(for: date)
         var orderedOffset = 1
+        let now = Date()
 
         for trip in trips {
             if trip.isOrdered {
-                sortTimes[trip.id] = anchorTime.addingTimeInterval(TimeInterval(orderedOffset))
+                let orderedTime = anchorTime.addingTimeInterval(TimeInterval(orderedOffset))
+                sortTimes[trip.id] = max(orderedTime, now.addingTimeInterval(TimeInterval(orderedOffset)))
                 orderedOffset += 1
             } else {
-                sortTimes[trip.id] = trip.arrivalDate
-                anchorTime = trip.arrivalDate
+                let effectiveArrivalDate = trip.effectiveArrivalDate(now: now)
+                sortTimes[trip.id] = effectiveArrivalDate
+                anchorTime = effectiveArrivalDate
                 orderedOffset = 1
             }
         }
@@ -4598,12 +4590,20 @@ private struct ContinuousTimelinePhotoThumbnail: View {
 
 private struct CurrentStayTimelineCard: View {
     let locationManager: LocationManager
+    @State private var showingOngoingLocationSearch = false
 
     var body: some View {
         SwiftUI.TimelineView(.periodic(from: Date(), by: 1)) { context in
             if let timestamp = statusTimestamp {
                 statusRow(startTimestamp: timestamp, now: context.date)
             }
+        }
+        .sheet(isPresented: $showingOngoingLocationSearch) {
+            LocationSearchSheet(
+                locationManager: locationManager,
+                coordinate: ongoingSelectionCoordinate,
+                forOngoing: true
+            )
         }
     }
 
@@ -4627,8 +4627,25 @@ private struct CurrentStayTimelineCard: View {
                     .frame(maxHeight: .infinity)
             }
             VStack(alignment: .leading, spacing: 6) {
-                Text(resolvedTitle)
-                    .font(.title3.weight(.bold))
+                if canSelectOngoingPlace {
+                    Menu {
+                        SuggestionsMenuContent(
+                            locationManager: locationManager,
+                            coordinate: ongoingSelectionCoordinate,
+                            forOngoing: true
+                        ) {
+                            showingOngoingLocationSearch = true
+                        }
+                    } label: {
+                        Text(resolvedTitle)
+                            .font(.title3.weight(.bold))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("选择当前停留地点")
+                } else {
+                    Text(resolvedTitle)
+                        .font(.title3.weight(.bold))
+                }
                 Text(detailText(for: startTimestamp, now: now))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -4649,6 +4666,14 @@ private struct CurrentStayTimelineCard: View {
             return locationManager.lastLocation?.timestamp ?? Date()
         }
         return nil
+    }
+
+    private var canSelectOngoingPlace: Bool {
+        locationManager.potentialStopStartLocation != nil
+    }
+
+    private var ongoingSelectionCoordinate: CLLocationCoordinate2D? {
+        locationManager.lastLocation?.coordinate ?? locationManager.potentialStopStartLocation?.coordinate
     }
 
     private var resolvedTitle: String {

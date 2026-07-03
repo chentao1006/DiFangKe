@@ -4095,8 +4095,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             self.ongoingPlaceOverrideID = targetPlace.placeID
             self.ongoingPlaceOverrideAddress = displayValue
             self.currentAddress = displayValue
-            // 强制重新进行分析以更新 UI
-            ongoingTitle = nil
+            ongoingTitle = displayValue
+            saveOngoingTitle()
+            triggerNotificationSummaryRefresh()
             if let loc = lastLocation ?? potentialStopStartLocation {
                 analyzeOngoingStay(at: loc)
             }
@@ -4395,22 +4396,27 @@ class TripLiveActivityManager {
         let descriptor = FetchDescriptor<FutureTrip>(sortBy: [SortDescriptor(\.arrivalDate)])
         let trips = (try? context.fetch(descriptor)) ?? []
         let now = Date()
-        
         let calendar = Calendar.current
+
+        if completeArrivedTrips(location: location, trips: trips, context: context, calendar: calendar) {
+            FutureTrip.postDidChangeNotification()
+        }
+
         let candidateTrips = FutureTrip.dayOrdered(trips).filter { trip in
             guard !trip.isCompleted else { return false }
             if trip.isOrdered {
                 return calendar.isDateInToday(trip.arrivalDate)
             }
 
-            let timeInterval = trip.arrivalDate.timeIntervalSince(now)
+            let timeInterval = trip.effectiveArrivalDate(now: now, calendar: calendar).timeIntervalSince(now)
             return timeInterval <= 3600
         }
 
         if let upcomingTrip = candidateTrips.first {
             let tripLocation = CLLocation(latitude: upcomingTrip.latitude, longitude: upcomingTrip.longitude)
             let distance = location.distance(from: tripLocation)
-            let mins = upcomingTrip.isOrdered ? 0 : max(0, Int(upcomingTrip.arrivalDate.timeIntervalSince(now) / 60))
+            let effectiveArrivalDate = upcomingTrip.effectiveArrivalDate(now: now, calendar: calendar)
+            let mins = upcomingTrip.isOrdered ? 0 : max(0, Int(effectiveArrivalDate.timeIntervalSince(now) / 60))
             
             let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
             let matchedIcon = allActivities.first(where: { $0.id.uuidString == upcomingTrip.activityTypeValue || $0.name == upcomingTrip.activityTypeValue })?.icon ?? "calendar"
@@ -4419,7 +4425,7 @@ class TripLiveActivityManager {
                 currentDistance: distance,
                 remainingMinutes: mins,
                 placeName: upcomingTrip.placeName,
-                arrivalDate: upcomingTrip.arrivalDate,
+                arrivalDate: effectiveArrivalDate,
                 latitude: upcomingTrip.latitude,
                 longitude: upcomingTrip.longitude,
                 icon: matchedIcon,
@@ -4462,6 +4468,45 @@ class TripLiveActivityManager {
                 }
             }
         }
+    }
+
+    func endActivity(for tripID: UUID) {
+        let tripIDString = tripID.uuidString
+
+        if currentActivity?.attributes.tripId == tripIDString {
+            let activity = currentActivity
+            currentActivity = nil
+            Task {
+                await activity?.end(nil, dismissalPolicy: .immediate)
+            }
+        }
+
+        for activity in Activity<TripActivityAttributes>.activities where activity.attributes.tripId == tripIDString {
+            Task {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+        }
+    }
+
+    @discardableResult
+    private func completeArrivedTrips(location: CLLocation, trips: [FutureTrip], context: ModelContext, calendar: Calendar) -> Bool {
+        var didComplete = false
+
+        for trip in trips where !trip.isCompleted && calendar.isDateInToday(trip.arrivalDate) {
+            let tripLocation = CLLocation(latitude: trip.latitude, longitude: trip.longitude)
+            guard location.distance(from: tripLocation) < 200 else { continue }
+
+            NotificationManager.shared.cancelFutureTripNotification(for: trip.id)
+            trip.markCompleted()
+            endActivity(for: trip.id)
+            didComplete = true
+        }
+
+        if didComplete {
+            try? context.save()
+        }
+
+        return didComplete
     }
     
     private func ensureTripMapSnapshot(latitude: Double, longitude: Double, tripId: String) async {

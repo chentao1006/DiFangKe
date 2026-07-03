@@ -184,34 +184,24 @@ struct FutureTripDraftModal: View {
     }
 
     private var arrivalSection: some View {
-        Section("时间方式") {
-            Picker("时间方式", selection: $scheduleMode) {
-                Text("指定时间").tag(FutureTripScheduleMode.timed)
-                Text("按顺序").tag(FutureTripScheduleMode.ordered)
-            }
-            .pickerStyle(.segmented)
-
+        Section("计划时间") {
             DatePicker("日期", selection: $arrivalDate, in: Date()..., displayedComponents: .date)
                 .datePickerStyle(.compact)
 
-            if scheduleMode == .timed {
-                Toggle("设置具体时间", isOn: $hasArrivalTime)
-                    .tint(Color.dfkAccent)
+            Toggle("设置具体时间", isOn: $hasArrivalTime)
+                .tint(Color.dfkAccent)
 
-                if hasArrivalTime {
-                    DatePicker("时间", selection: $arrivalDate, in: Date()..., displayedComponents: .hourAndMinute)
-                        .datePickerStyle(.compact)
-                }
+            if hasArrivalTime {
+                DatePicker("时间", selection: $arrivalDate, in: Date()..., displayedComponents: .hourAndMinute)
+                    .datePickerStyle(.compact)
             } else {
                 orderedInsertionMenu
             }
         }
-        .onChange(of: scheduleMode) { _, newMode in
-            if newMode == .ordered {
-                hasArrivalTime = false
-                if !orderedInsertionPosition.isAvailable(in: insertionCandidateTripsForSelectedDay) {
-                    orderedInsertionPosition = .end
-                }
+        .onChange(of: hasArrivalTime) { _, hasTime in
+            scheduleMode = hasTime ? .timed : .ordered
+            if !hasTime && !orderedInsertionPosition.isAvailable(in: insertionCandidateTripsForSelectedDay) {
+                orderedInsertionPosition = .end
             }
         }
         .onChange(of: arrivalDate) { _, _ in
@@ -226,21 +216,21 @@ struct FutureTripDraftModal: View {
             Button {
                 orderedInsertionPosition = .first
             } label: {
-                Label("放在最前", systemImage: orderedInsertionPosition == .first ? "checkmark" : "arrow.up.to.line")
+                Label("安排在最前", systemImage: orderedInsertionPosition == .first ? "checkmark" : "arrow.up.to.line")
             }
 
             ForEach(insertionCandidateTripsForSelectedDay) { trip in
                 Button {
                     orderedInsertionPosition = .after(trip.id)
                 } label: {
-                    Label("放在“\(insertionCandidateTitle(for: trip))”之后", systemImage: orderedInsertionPosition == .after(trip.id) ? "checkmark" : "arrow.down")
+                    Label("安排在“\(insertionCandidateTitle(for: trip))”之后", systemImage: orderedInsertionPosition == .after(trip.id) ? "checkmark" : insertionCandidateIcon(for: trip))
                 }
             }
 
             Button {
                 orderedInsertionPosition = .end
             } label: {
-                Label("插入到最后", systemImage: orderedInsertionPosition == .end ? "checkmark" : "arrow.down.to.line")
+                Label("安排在最后", systemImage: orderedInsertionPosition == .end ? "checkmark" : "arrow.down.to.line")
             }
         } label: {
             HStack(spacing: 12) {
@@ -248,12 +238,7 @@ struct FutureTripDraftModal: View {
                     .foregroundStyle(Color.dfkAccent)
                     .frame(width: 24)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("顺序位置")
-                    Text(orderedInsertionTitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text(orderedInsertionTitle)
 
                 Spacer()
 
@@ -332,14 +317,14 @@ struct FutureTripDraftModal: View {
 
         switch orderedInsertionPosition {
         case .first:
-            return "放在最前"
+            return "安排在最前"
         case .after(let id):
             if let trip = insertionCandidateTripsForSelectedDay.first(where: { $0.id == id }) {
-                return "在“\(insertionCandidateTitle(for: trip))”之后"
+                return "安排在“\(insertionCandidateTitle(for: trip))”之后"
             }
-            return "插入到最后"
+            return "安排在最后"
         case .end:
-            return "插入到最后"
+            return "安排在最后"
         }
     }
 
@@ -358,6 +343,15 @@ struct FutureTripDraftModal: View {
         }
 
         return trip.placeName
+    }
+
+    private func insertionCandidateIcon(for trip: FutureTrip) -> String {
+        guard let activityTypeValue = trip.activityTypeValue,
+              let activity = allActivities.first(where: { $0.id.uuidString == activityTypeValue || $0.name == activityTypeValue }) else {
+            return trip.hasArrivalTime ? "clock" : "calendar"
+        }
+
+        return activity.icon
     }
 
     private func orderedDayTrips(for day: Date) -> [FutureTrip] {
@@ -498,7 +492,7 @@ struct FutureTripDraftModal: View {
     private func saveTrip() {
         guard canSave, let coordinate = selectedCoordinate else { return }
         let previousDay = editingTrip.map { Calendar.current.startOfDay(for: $0.arrivalDate) }
-        let isOrderedTrip = scheduleMode == .ordered
+        let isOrderedTrip = !hasArrivalTime
 
         var matchingPlaceID: UUID?
         if let places = try? modelContext.fetch(FetchDescriptor<Place>()) {
@@ -514,7 +508,7 @@ struct FutureTripDraftModal: View {
             editingTrip.coordinate = coordinate
             editingTrip.arrivalDate = normalizedArrivalDate
             editingTrip.hasArrivalTime = isOrderedTrip ? false : hasArrivalTime
-            editingTrip.scheduleMode = scheduleMode
+            editingTrip.scheduleMode = isOrderedTrip ? .ordered : .timed
             editingTrip.activityTypeValue = selectedActivityTypeValue
             editingTrip.notes = normalizedNotes
             if matchingPlaceID != nil {
@@ -536,7 +530,7 @@ struct FutureTripDraftModal: View {
                 coordinate: coordinate,
                 arrivalDate: normalizedArrivalDate,
                 hasArrivalTime: isOrderedTrip ? false : hasArrivalTime,
-                scheduleMode: scheduleMode,
+                scheduleMode: isOrderedTrip ? .ordered : .timed,
                 activityTypeValue: selectedActivityTypeValue
             )
             modelContext.insert(trip)
@@ -568,7 +562,7 @@ struct FutureTripDraftModal: View {
             currentCenterAddress = trip.address ?? trip.placeName
             arrivalDate = trip.arrivalDate
             hasArrivalTime = trip.hasArrivalTime
-            scheduleMode = trip.scheduleMode
+            scheduleMode = trip.hasArrivalTime ? .timed : .ordered
             orderedInsertionPosition = insertionPositionForExistingTrip(trip)
             selectedActivityTypeValue = trip.activityTypeValue
             notes = trip.notes ?? ""
@@ -586,9 +580,14 @@ struct FutureTripDraftModal: View {
 
     private var normalizedArrivalDate: Date {
         let calendar = Calendar.current
-        if scheduleMode == .ordered { return calendar.startOfDay(for: arrivalDate) }
         if hasArrivalTime { return arrivalDate }
-        return calendar.startOfDay(for: arrivalDate)
+        return endOfSelectedDay(using: calendar)
+    }
+
+    private func endOfSelectedDay(using calendar: Calendar) -> Date {
+        let startOfDay = calendar.startOfDay(for: arrivalDate)
+        let nextDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) ?? startOfDay.addingTimeInterval(24 * 3600)
+        return nextDay.addingTimeInterval(-1)
     }
 
     private var normalizedNotes: String? {

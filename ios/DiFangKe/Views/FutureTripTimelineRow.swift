@@ -36,8 +36,9 @@ struct FutureTripTimelineRow: View {
     
     private var countdownText: String {
         let now = Date()
-        if trip.arrivalDate > now {
-            let components = Calendar.current.dateComponents([.day, .hour, .minute], from: now, to: trip.arrivalDate)
+        let arrivalDate = trip.effectiveArrivalDate(now: now)
+        if arrivalDate > now {
+            let components = Calendar.current.dateComponents([.day, .hour, .minute], from: now, to: arrivalDate)
             let d = components.day ?? 0
             let h = components.hour ?? 0
             let m = components.minute ?? 0
@@ -62,9 +63,10 @@ struct FutureTripTimelineRow: View {
         }
 
         let now = Date()
-        if trip.arrivalDate < now {
+        let arrivalDate = trip.effectiveArrivalDate(now: now)
+        if arrivalDate < now {
             return .red
-        } else if Calendar.current.isDateInToday(trip.arrivalDate) {
+        } else if Calendar.current.isDateInToday(arrivalDate) {
             return .orange
         } else {
             return .secondary
@@ -157,7 +159,6 @@ struct FutureTripTimelineRow: View {
     }
 
     private var timeLabel: String {
-        if trip.isOrdered { return "顺序" }
         return trip.hasArrivalTime ? trip.arrivalDate.formatted(date: .omitted, time: .shortened) : "计划"
     }
 }
@@ -238,11 +239,12 @@ struct FutureTripDetailView: View {
 
     private var fullCountdownText: String {
         let now = Date()
-        if trip.arrivalDate < now {
+        let arrivalDate = trip.effectiveArrivalDate(now: now)
+        if arrivalDate < now {
             return "已到时间"
         }
         
-        let diff = Calendar.current.dateComponents([.day, .hour, .minute], from: now, to: trip.arrivalDate)
+        let diff = Calendar.current.dateComponents([.day, .hour, .minute], from: now, to: arrivalDate)
         if let d = diff.day, d > 0 { return "\(d)天" }
         if let h = diff.hour, h > 0 { return "\(h)小时" }
         
@@ -419,9 +421,10 @@ struct FutureTripDetailView: View {
     
     private var countdownColor: Color {
         let now = Date()
-        if trip.arrivalDate < now {
+        let arrivalDate = trip.effectiveArrivalDate(now: now)
+        if arrivalDate < now {
             return .red
-        } else if Calendar.current.isDateInToday(trip.arrivalDate) {
+        } else if Calendar.current.isDateInToday(arrivalDate) {
             return .orange
         } else {
             return .primary
@@ -433,29 +436,7 @@ struct FutureTripDetailView: View {
             if let d = distanceInMeters, d < 500 {
                 HStack(spacing: 8) {
                     Button {
-                        let now = Date()
-                        let startTime = min(trip.arrivalDate, now)
-                        let newFootprint = Footprint(
-                            date: Calendar.current.startOfDay(for: startTime),
-                            startTime: startTime,
-                            endTime: now,
-                            footprintLocations: [CLLocationCoordinate2D(latitude: trip.latitude, longitude: trip.longitude)],
-                            locationHash: "",
-                            duration: now.timeIntervalSince(startTime),
-                            reason: trip.notes,
-                            status: .manual,
-                            placeID: trip.placeID,
-                            address: trip.placeName,
-                            activityTypeValue: trip.activityTypeValue
-                        )
-                        modelContext.insert(newFootprint)
-                        NotificationManager.shared.cancelFutureTripNotification(for: trip.id)
-                        modelContext.delete(trip)
-                        try? modelContext.save()
-                        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
-                        FutureTrip.postDidChangeNotification()
-                        onDismiss?()
-                        if !isInline { dismiss() }
+                        completeTrip()
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark")
@@ -471,7 +452,7 @@ struct FutureTripDetailView: View {
                         .cornerRadius(12)
                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.dfkAccent.opacity(0.3), lineWidth: 1))
                     }
-                    if trip.arrivalDate < Date() {
+                    if trip.effectiveArrivalDate() < Date() {
                         delayButton
                     }
                     abandonButton
@@ -486,7 +467,7 @@ struct FutureTripDetailView: View {
                     }
                 }
                 .padding(.bottom, 8)
-                if trip.arrivalDate < Date() {
+                if trip.effectiveArrivalDate() < Date() {
                     HStack(spacing: 8) {
                         delayButton
                         abandonButton
@@ -538,8 +519,6 @@ struct FutureTripDetailView: View {
             timeFormatter.locale = Locale(identifier: "zh_CN")
             timeFormatter.dateFormat = "HH:mm"
             return "\(dateString) \(timeFormatter.string(from: arrival))"
-        } else if trip.isOrdered {
-            return "\(dateString) 按顺序"
         } else {
             return dateString
         }
@@ -724,6 +703,11 @@ struct FutureTripDetailView: View {
         NotificationManager.shared.cancelFutureTripNotification(for: trip.id)
         trip.markCompleted()
         try? modelContext.save()
+#if canImport(ActivityKit)
+        if #available(iOS 16.1, *) {
+            TripLiveActivityManager.shared.endActivity(for: trip.id)
+        }
+#endif
         FutureTrip.postDidChangeNotification()
         onDismiss?()
         if !isInline { dismiss() }

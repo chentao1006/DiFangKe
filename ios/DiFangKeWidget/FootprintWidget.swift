@@ -325,16 +325,11 @@ struct TripLiveActivityWidget: Widget {
                     }
                     Spacer()
                     VStack(alignment: .trailing) {
-                        Text(context.state.isOrdered ? "顺序计划" : "计划到达")
+                        Text("计划到达")
                             .font(.caption)
                             .foregroundColor(.secondary)
                         if context.state.hasArrivalTime {
                             Text(context.state.arrivalDate, style: .time)
-                                .font(.title3)
-                                .bold()
-                                .multilineTextAlignment(.trailing)
-                        } else if context.state.isOrdered {
-                            Text("按顺序")
                                 .font(.title3)
                                 .bold()
                                 .multilineTextAlignment(.trailing)
@@ -454,14 +449,11 @@ struct TripLiveActivityWidget: Widget {
 
                             Spacer()
 
-                            Text(context.state.isOrdered ? "顺序计划" : "计划到达")
+                            Text("计划到达")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             if context.state.hasArrivalTime {
                                 Text(context.state.arrivalDate, style: .time)
-                                    .font(.subheadline.bold())
-                            } else if context.state.isOrdered {
-                                Text("按顺序")
                                     .font(.subheadline.bold())
                             } else {
                                 Text("今天")

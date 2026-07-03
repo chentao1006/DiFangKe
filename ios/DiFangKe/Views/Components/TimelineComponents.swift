@@ -316,6 +316,7 @@ struct RecordingStatusCard: View {
     @State private var showFullscreenMap = false
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var showingGuide = false
+    @State private var showingOngoingLocationSearch = false
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
     
     private var displayTitle: String {
@@ -391,6 +392,38 @@ struct RecordingStatusCard: View {
     private var shouldShowCurrentSpeed: Bool {
         locationManager.uiIsMoving && locationManager.potentialStopStartLocation == nil
     }
+
+    private var canSelectOngoingPlace: Bool {
+        locationManager.isTracking && locationManager.potentialStopStartLocation != nil
+    }
+
+    private var ongoingSelectionCoordinate: CLLocationCoordinate2D? {
+        locationManager.lastLocation?.coordinate ?? locationManager.potentialStopStartLocation?.coordinate
+    }
+
+    @ViewBuilder
+    private var titleLabel: some View {
+        Group {
+            if !locationManager.isTracking {
+                Text(displayTitle)
+                    .foregroundColor(.secondary)
+            } else if let place = locationManager.matchedPlace, place.isUserDefined, locationManager.potentialStopStartLocation != nil {
+                Text("正在")
+                    .foregroundColor(Color.dfkMainText) +
+                Text(place.name)
+                    .foregroundColor(.orange) +
+                Text("停留")
+                    .foregroundColor(Color.dfkMainText)
+            } else {
+                Text(displayTitle)
+                    .foregroundColor(Color.dfkMainText)
+            }
+        }
+        .font(.system(.headline, design: .rounded))
+        .lineLimit(2)
+        .fixedSize(horizontal: false, vertical: true)
+        .breathing(isActive: OpenAIService.shared.currentlyProcessingDate != nil && Calendar.current.isDate(OpenAIService.shared.currentlyProcessingDate!, inSameDayAs: Date()))
+    }
     
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -426,25 +459,24 @@ struct RecordingStatusCard: View {
                 VStack(alignment: .leading, spacing: 6) {
                     // Title Section
                     Group {
-                        if !locationManager.isTracking {
-                            Text(displayTitle)
-                                .foregroundColor(.secondary)
-                        } else if let place = locationManager.matchedPlace, place.isUserDefined, locationManager.potentialStopStartLocation != nil {
-                            Text("正在")
-                                .foregroundColor(Color.dfkMainText) +
-                            Text(place.name)
-                                .foregroundColor(.orange) +
-                            Text("停留")
-                                .foregroundColor(Color.dfkMainText)
+                        if canSelectOngoingPlace {
+                            Menu {
+                                SuggestionsMenuContent(
+                                    locationManager: locationManager,
+                                    coordinate: ongoingSelectionCoordinate,
+                                    forOngoing: true
+                                ) {
+                                    showingOngoingLocationSearch = true
+                                }
+                            } label: {
+                                titleLabel
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityHint("选择当前停留地点")
                         } else {
-                            Text(displayTitle)
-                                .foregroundColor(Color.dfkMainText)
+                            titleLabel
                         }
                     }
-                    .font(.system(.headline, design: .rounded))
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .breathing(isActive: OpenAIService.shared.currentlyProcessingDate != nil && Calendar.current.isDate(OpenAIService.shared.currentlyProcessingDate!, inSameDayAs: Date()))
 
                     // Duration/Status Section
                     HStack(spacing: 4) {
@@ -527,9 +559,6 @@ struct RecordingStatusCard: View {
                 .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: 4)
         )
         .padding(.bottom, 14)
-        .onTapGesture {
-            showFullscreenMap = true
-        }
         .sheet(isPresented: $showFullscreenMap) {
             FullFrameTrajectoryMapView(
                 title: "今日轨迹",
@@ -542,6 +571,13 @@ struct RecordingStatusCard: View {
         }
         .sheet(isPresented: $showingGuide) {
             TrackingGuideView()
+        }
+        .sheet(isPresented: $showingOngoingLocationSearch) {
+            LocationSearchSheet(
+                locationManager: locationManager,
+                coordinate: ongoingSelectionCoordinate,
+                forOngoing: true
+            )
         }
     }
     

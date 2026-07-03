@@ -88,6 +88,15 @@ final class FutureTrip {
         return now >= nextDay
     }
 
+    func effectiveArrivalDate(now: Date = Date(), calendar: Calendar = .current) -> Date {
+        if hasArrivalTime {
+            return arrivalDate
+        } else {
+            let startOfDay = calendar.startOfDay(for: arrivalDate)
+            return calendar.date(bySettingHour: 23, minute: 59, second: 59, of: startOfDay) ?? arrivalDate.addingTimeInterval(24 * 3600 - 1)
+        }
+    }
+
     func markCompleted(at date: Date = Date()) {
         isCompleted = true
         completedAt = date

@@ -465,6 +465,13 @@ private fun TimelineMapPane(
     }
     val isDark = isSystemInDarkTheme()
 
+    val today = remember {
+        Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }.time
+    }
+    val isToday = selectedDate.time == today.time
+
     Box(
         modifier = modifier
             .background(if (isDark) Color.Black else Color(0xFFE7EEF0))
@@ -484,7 +491,7 @@ private fun TimelineMapPane(
         )
 
         MapEmptyHint(
-            isVisible = footprintMarkers.isEmpty() && (dailyPoints ?: dailyInsight?.rawPointsJson).isNullOrBlank(),
+            isVisible = !isToday && footprintMarkers.isEmpty() && (dailyPoints ?: dailyInsight?.rawPointsJson).isNullOrBlank(),
             date = selectedDate
         )
 
@@ -575,6 +582,18 @@ private fun ContinuousTimelineList(
     val listBackground = if (isDark) Color.Black else Color(0xFFF2F2F7)
     val listState = rememberLazyListState()
 
+    LaunchedEffect(selectedDate.time, timelineDates) {
+        val index = timelineDates.indexOfFirst { isSameDay(it, selectedDate) }
+        if (index != -1) {
+            val visibleDate = visibleTimelineDate(listState)
+            if (visibleDate == null) {
+                listState.scrollToItem(index)
+            } else if (!isSameDay(visibleDate, selectedDate)) {
+                listState.animateScrollToItem(index)
+            }
+        }
+    }
+
     LaunchedEffect(listState, selectedDate.time, timelineDates) {
         snapshotFlow { listState.isScrollInProgress }
             .distinctUntilChanged()
@@ -592,17 +611,9 @@ private fun ContinuousTimelineList(
     LazyColumn(
         state = listState,
         modifier = modifier.background(listBackground),
-        contentPadding = PaddingValues(bottom = 88.dp)
+        contentPadding = PaddingValues(top = 16.dp, bottom = 88.dp),
+        reverseLayout = true
     ) {
-        item(key = "timeline_header") {
-            ContinuousTimelineHeader(
-                selectedDate = selectedDate,
-                onShowCalendar = onShowCalendar,
-                onViewRawPoints = { onViewRawPoints(selectedDate) },
-                onRebuild = { onRebuildDate(selectedDate) }
-            )
-        }
-
         itemsIndexed(
             items = timelineDates,
             key = { _, date -> timelineDateItemKey(date) }
@@ -627,6 +638,15 @@ private fun ContinuousTimelineList(
                 onEnableTracking = onEnableTracking
             )
         }
+
+        item(key = "timeline_header") {
+            ContinuousTimelineHeader(
+                selectedDate = selectedDate,
+                onShowCalendar = onShowCalendar,
+                onViewRawPoints = { onViewRawPoints(selectedDate) },
+                onRebuild = { onRebuildDate(selectedDate) }
+            )
+        }
     }
 }
 
@@ -637,8 +657,19 @@ private fun visibleTimelineDate(listState: LazyListState): Date? {
     val visibleItems = layoutInfo.visibleItemsInfo
     if (visibleItems.isEmpty()) return null
 
+    if (!listState.canScrollBackward) {
+        val firstItem = visibleItems.first()
+        val key = firstItem.key as? String
+        if (key != null) {
+            val timestamp = key.removePrefix("day_").takeIf { it != key }?.toLongOrNull()
+            if (timestamp != null) {
+                return Date(timestamp)
+            }
+        }
+    }
+
     val targetY = layoutInfo.viewportStartOffset +
-        ((layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset) * 0.38f)
+        ((layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset) * 0.62f)
 
     return visibleItems
         .asSequence()
@@ -1445,7 +1476,7 @@ fun TodayFloatingButton(isVisible: Boolean, onClick: () -> Unit) {
             ) {
                 Icon(Icons.Default.Today, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("回到今天", fontWeight = FontWeight.Bold)
+                Text("回到当下", fontWeight = FontWeight.Bold)
             }
         }
     }
