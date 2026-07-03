@@ -673,7 +673,7 @@ struct FootprintCardView: View {
                             Color.clear // Expand to fill parent
                             
                             ZStack(alignment: .topTrailing) {
-                                AssetThumbnailView(assetID: firstID, showsTime: false)
+                                AssetThumbnailView(assetID: firstID, showsTime: false, targetSize: CGSize(width: 120, height: 120))
                                     .id(firstID)
                                     .frame(width: 60, height: 60)
                                     .clipShape(RoundedRectangle(cornerRadius: 8))

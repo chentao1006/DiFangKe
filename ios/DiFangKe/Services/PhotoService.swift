@@ -171,42 +171,41 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }.value
     }
     
-    func loadImage(for assetID: String, targetSize: CGSize, contentMode: PHImageContentMode = .aspectFill, progressHandler: ((Double) -> Void)? = nil, completion: @escaping (UIImage?, Bool, PHAuthorizationStatus, Bool) -> Void) {
+    @discardableResult
+    func loadImage(for assetID: String, targetSize: CGSize, contentMode: PHImageContentMode = .aspectFill, progressHandler: ((Double) -> Void)? = nil, completion: @escaping (UIImage?, Bool, PHAuthorizationStatus, Bool) -> Void) -> PHImageRequestID? {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else {
             DispatchQueue.main.async { completion(nil, true, status, false) }
-            return
+            return nil
         }
         
-        DispatchQueue.global(qos: .userInitiated).async {
-            let fetchOptions = PHFetchOptions()
-            fetchOptions.includeHiddenAssets = true
-            fetchOptions.includeAllBurstAssets = true
-            
-            let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: fetchOptions)
+        let fetchOptions = PHFetchOptions()
+        fetchOptions.includeHiddenAssets = true
+        fetchOptions.includeAllBurstAssets = true
+        
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: fetchOptions)
 
-            guard let asset = assets.firstObject else {
-                DispatchQueue.main.async {
-                    let exists = (status == .limited)
-                    completion(nil, exists, status, false)
-                }
-                return
+        guard let asset = assets.firstObject else {
+            DispatchQueue.main.async {
+                let exists = (status == .limited)
+                completion(nil, exists, status, false)
             }
-            
-            let options = PHImageRequestOptions()
-            options.isNetworkAccessAllowed = true
-            options.deliveryMode = .opportunistic
-            options.progressHandler = { progress, _, _, _ in
-                DispatchQueue.main.async {
-                    progressHandler?(progress)
-                }
+            return nil
+        }
+        
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .opportunistic
+        options.progressHandler = { progress, _, _, _ in
+            DispatchQueue.main.async {
+                progressHandler?(progress)
             }
-            
-            PHImageManager.default().requestImage(for: asset, targetSize: targetSize, contentMode: contentMode, options: options) { image, info in
-                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                DispatchQueue.main.async {
-                    completion(image, true, status, isDegraded)
-                }
+        }
+        
+        return PHImageManager.default().requestImage(for: asset, targetSize: targetSize, contentMode: contentMode, options: options) { image, info in
+            let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            DispatchQueue.main.async {
+                completion(image, true, status, isDegraded)
             }
         }
     }

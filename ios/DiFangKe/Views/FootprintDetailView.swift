@@ -2643,11 +2643,13 @@ struct AssetThumbnailView: View {
     let assetID: String
     var showsTime: Bool = true
     var onAssetMissing: (() -> Void)? = nil
+    var targetSize: CGSize = CGSize(width: 300, height: 300)
     @State private var image: UIImage?
     @State private var authStatus: PHAuthorizationStatus = .notDetermined
     @State private var isLoading = true
     @State private var isMissing = false
     @State private var creationDate: Date?
+    @State private var requestID: PHImageRequestID?
     
     var body: some View {
         ZStack {
@@ -2699,8 +2701,18 @@ struct AssetThumbnailView: View {
         .onAppear {
             loadImage()
         }
-        .task(id: assetID) {
+        .onChange(of: assetID) { _, _ in
             loadImage()
+        }
+        .onDisappear {
+            cancelRequest()
+        }
+    }
+    
+    private func cancelRequest() {
+        if let id = requestID {
+            PHImageManager.default().cancelImageRequest(id)
+            requestID = nil
         }
     }
     
@@ -2717,11 +2729,12 @@ struct AssetThumbnailView: View {
     }
     
     private func loadImage() {
+        cancelRequest()
         self.image = nil
         self.isLoading = true
         self.isMissing = false
         
-        PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 400, height: 400)) { img, exists, status, isDegraded in
+        self.requestID = PhotoService.shared.loadImage(for: assetID, targetSize: targetSize) { img, exists, status, isDegraded in
             self.authStatus = status
             
             if exists {
