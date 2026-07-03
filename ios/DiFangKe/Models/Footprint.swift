@@ -211,4 +211,32 @@ final class Footprint {
         self.longitudeArray = footprintLocations.map { $0.longitude }
         self.photoAssetIDs = photoAssetIDs
     }
+    
+    func updateActivityType(to newValue: String?, in context: ModelContext) {
+        // 自动把当天相同地点且无活动类型的足迹都改成同样活动
+        let currentAddress = self.address ?? ""
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: self.startTime)
+        if let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) {
+            let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
+                $0.startTime >= startOfDay && $0.startTime < endOfDay
+            })
+            
+            if let footprints = try? context.fetch(descriptor) {
+                let myID = self.footprintID
+                for fp in footprints {
+                    if fp.footprintID == myID {
+                        // 实际在 ModelContext 中被管理的“自己”
+                        fp.activityTypeValue = newValue
+                    } else if !currentAddress.isEmpty, fp.activityTypeValue == nil, fp.address == currentAddress {
+                        // 自动更新同地点且无活动类型的其他足迹
+                        fp.activityTypeValue = newValue
+                    }
+                }
+            }
+        }
+        
+        // 最后修改自己的值，防止 UI 绑定的（可能是未被 Context 管理的快照对象）未能及时刷新
+        self.activityTypeValue = newValue
+    }
 }

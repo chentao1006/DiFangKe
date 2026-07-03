@@ -171,7 +171,7 @@ private struct ContinuousTimelineView: View {
         dates.insert(activeTimelineDate)
 
         if hasCompletedInitialTimelineLoad {
-            let futureDates = activeFutureTrips.map { calendar.startOfDay(for: $0.arrivalDate) }
+            let futureDates = futureTrips.map { calendar.startOfDay(for: $0.arrivalDate) }
             dates.formUnion(futureDates)
         }
 
@@ -285,9 +285,6 @@ private struct ContinuousTimelineView: View {
         if interactionType == .pan {
             isFollowingUserLocation = false
         }
-        
-        renderedMapRegion = nil
-        displayedMapRegion = nil
         guard allowsMapInteractionCollapse else { return }
         guard !isSideBySide else { return }
 
@@ -550,26 +547,10 @@ private struct ContinuousTimelineView: View {
         guard let trip = activeFutureTrips.first(where: { $0.id == tripId }) else { return }
         
         if actionType == "arrive" {
-            let now = Date()
-            let startTime = min(trip.arrivalDate, now)
-            let newFootprint = Footprint(
-                date: Calendar.current.startOfDay(for: startTime),
-                startTime: startTime,
-                endTime: now,
-                footprintLocations: [CLLocationCoordinate2D(latitude: trip.latitude, longitude: trip.longitude)],
-                locationHash: "",
-                duration: now.timeIntervalSince(startTime),
-                reason: trip.notes,
-                status: .manual,
-                placeID: trip.placeID,
-                address: trip.placeName,
-                activityTypeValue: trip.activityTypeValue
-            )
-            modelContext.insert(newFootprint)
             NotificationManager.shared.cancelFutureTripNotification(for: trip.id)
-            modelContext.delete(trip)
+            trip.markCompleted()
             try? modelContext.save()
-            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            selectedFutureTripDetail = nil
             FutureTrip.postDidChangeNotification()
 
         } else if actionType == "complete" {
@@ -1561,13 +1542,7 @@ private struct ContinuousTimelineView: View {
 
         guard animated, let source else {
             displayedMapRegion = target
-            if animated {
-                withAnimation(.easeInOut(duration: 0.5)) {
-                    cameraPosition = .region(target)
-                }
-            } else {
-                cameraPosition = .region(target)
-            }
+            cameraPosition = .region(target)
             return
         }
 
@@ -1623,7 +1598,7 @@ private struct ContinuousTimelineView: View {
               region.span.longitudeDelta.isFinite,
               region.span.latitudeDelta > 0,
               region.span.longitudeDelta > 0 else { return false }
-        return region.span.latitudeDelta <= 180 && region.span.longitudeDelta <= 360
+        return region.span.latitudeDelta < 20 && region.span.longitudeDelta < 20
     }
 
     private func mapCameraCoordinates(for items: [TimelineItem], futureTrips: [FutureTrip]) -> [CLLocationCoordinate2D] {
@@ -1808,7 +1783,7 @@ private struct ContinuousTimelineSheet: View {
     @State private var scrollMetrics = ContinuousTimelineScrollMetrics()
     @State private var scrollRestorer = ContinuousTimelineScrollRestorer()
     @State private var headerVisibleDates: [Date] = []
-    @State private var freezesViewportDrivenUpdatesUntil: Date? = Date.distantFuture
+    @State private var freezesViewportDrivenUpdatesUntil: Date?
     @State private var calendarScrollLockTarget: Date?
     @State private var pendingCalendarBackfillDates: [Date] = []
     @State private var calendarScrollRetryTask: Task<Void, Never>?
@@ -1947,7 +1922,151 @@ private struct ContinuousTimelineSheet: View {
             NavigationStack {
                 ScrollViewReader { proxy in
                     GeometryReader { viewport in
-                        mainScrollView(proxy: proxy, viewport: viewport)
+                        ScrollView {
+                            ScrollOffsetObserver(restorer: scrollRestorer) { metrics in
+                                Task { @MainActor in
+                                    applyScrollMetrics(metrics)
+                                }
+                            }
+                            .frame(width: 0, height: 0)
+    
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                            if canLoadEarlierDates {
+                                TimelineLoadMoreButton(
+                                    title: "查看更早的足迹",
+                                    isLoading: isLoadingMoreEarlier,
+                                    action: requestLoadEarlierDates
+                                )
+                                .opacity(hasCompletedInitialTimelinePositioning ? 1 : 0)
+                                .allowsHitTesting(hasCompletedInitialTimelinePositioning)
+                            } else if initialTimelineLoadCompleted {
+                                TimelineLoadMoreButton(
+                                    title: "从照片导入足迹",
+                                    isLoading: false,
+                                    action: {
+                                        requestedHistoryImport = true
+                                        isShowingHistory = true
+                                    }
+                                )
+                                .opacity(hasCompletedInitialTimelinePositioning ? 1 : 0)
+                                .allowsHitTesting(hasCompletedInitialTimelinePositioning)
+                            }
+
+                            ForEach(Array(dates.enumerated()), id: \.element) { index, date in
+                                if let previousDate = dates[safe: index - 1] {
+                                    let loadableGapDates = loadableTimelineDates(between: previousDate, and: date)
+                                    if !loadableGapDates.isEmpty {
+                                        TimelineLoadMoreButton(
+                                            title: "查看更多足迹",
+                                            isLoading: loadingGapAfterDates.contains(previousDate),
+                                            action: { requestLoadDates(after: previousDate, before: date) }
+                                        )
+                                        .padding(.bottom, 6)
+                                    }
+
+                                    if let gapDays = Calendar.current.dateComponents([.day], from: previousDate, to: date).day,
+                                       gapDays > 1 {
+                                        TimelineDateGapConnector(skippedDays: gapDays - 1)
+                                    }
+
+                                    if !loadableGapDates.isEmpty {
+                                        TimelineLoadMoreButton(
+                                            title: "查看更早的足迹",
+                                            isLoading: loadingGapBeforeDates.contains(date),
+                                            action: { requestLoadDates(before: date, after: previousDate) }
+                                        )
+                                        .padding(.top, 6)
+                                    }
+                                }
+
+                                timelineDay(for: date)
+                                    .id(ScrollTarget.date(date))
+                                    .background {
+                                        GeometryReader { geometry in
+                                            Color.clear.preference(
+                                                key: ContinuousTimelineDateFramePreferenceKey.self,
+                                                value: [date: geometry.frame(in: .named("continuousTimelineScroll"))]
+                                            )
+                                        }
+                                    }
+                            }
+
+                            if canLoadLaterDates {
+                                TimelineLoadMoreButton(
+                                    title: "查看更多足迹",
+                                    isLoading: isLoadingMoreLater,
+                                    action: { requestLoadLaterDates() }
+                                )
+                            }
+                        }
+                        .padding(.top, 30)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 128)
+                    }
+                    .scrollDisabled(isCollapsed)
+                    .coordinateSpace(name: "continuousTimelineScroll")
+                    .onPreferenceChange(ContinuousTimelineDateFramePreferenceKey.self) { frames in
+                        let viewportHeight = viewport.size.height
+                        Task { @MainActor in
+                            await Task.yield()
+                            applyDateFrameUpdate(frames, viewportHeight: viewportHeight, using: proxy)
+                        }
+                    }
+                    .overlay(alignment: .bottom) {
+                        if isCollapsed {
+                            EmptyView()
+                        } else if showsReturnToTodayButton {
+                            Button {
+                                requestScrollToToday(using: proxy)
+                            } label: {
+                                Label("回到当下", systemImage: "location.fill")
+                            }
+                            .returnToTodayButtonStyle()
+                            .accessibilityLabel("回到当下")
+                        } else {
+                            Button {
+                                futureTripTimelineAnchorDate = Calendar.current.startOfDay(for: activeTimelineDate)
+                                isShowingFutureTripModal = true
+                            } label: {
+                                Label("行程计划", systemImage: "plus")
+                            }
+                            .returnToTodayButtonStyle()
+                            .accessibilityLabel("行程计划")
+                        }
+                    }
+                    .onChange(of: dates) { oldDates, newDates in
+                        if let requestedOldestDate = lastPrefetchOldestDate,
+                           newDates.first == requestedOldestDate {
+                            didReachEarliestAvailableDate = true
+                        } else if newDates.first != oldDates.first {
+                            didReachEarliestAvailableDate = false
+                        }
+
+                        if let target = calendarScrollLockTarget, newDates.contains(target) {
+                            scheduleLockedCalendarScroll(using: proxy)
+                        }
+                        if let pinnedDate = calendarBackfillPinnedDate, newDates.contains(pinnedDate) {
+                            scheduleCalendarBackfillPin(to: pinnedDate, using: proxy)
+                        }
+                    }
+                    .onAppear {
+                        scheduleInitialScrollToTodayIfNeeded(using: proxy)
+                    }
+                    .onChange(of: initialTimelineLoadCompleted) { _, _ in
+                        scheduleInitialScrollToTodayIfNeeded(using: proxy)
+                    }
+                    .onChange(of: todayScrollRequest) { _, _ in
+                        requestScrollToToday(using: proxy)
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: FutureTrip.didChangeNotification)) { _ in
+                        restoreFutureTripTimelinePosition(using: proxy)
+                    }
+                    .onDisappear {
+                        initialTodayScrollTask?.cancel()
+                        calendarScrollRetryTask?.cancel()
+                        calendarBackfillPinTask?.cancel()
+                        calendarBackfillTask?.cancel()
+                    }
                     .sheet(item: $footprintPendingSplit, onDismiss: handleFootprintSplitDismissal) { footprint in
                         FootprintSplitView(footprint: footprint)
                             .environment(locationManager)
@@ -2090,20 +2209,9 @@ private struct ContinuousTimelineSheet: View {
                         } message: {
                             Text(transportMergeConfirmationMessage)
                         }
-                        .onChange(of: locationManager.isResettingData) { oldValue, newValue in
-                            if oldValue && !newValue {
-                                let targetDate = Calendar.current.startOfDay(for: activeTimelineDate)
-                                Task { @MainActor in
-                                    try? await Task.sleep(nanoseconds: 100_000_000)
-                                    withAnimation {
-                                        proxy.scrollTo(ScrollTarget.date(targetDate), anchor: .bottom)
-                                    }
-                                }
-                            }
-                        }
                     .toolbar { headerToolbar(proxy: proxy) }
                     .navigationBarTitleDisplayMode(.inline)
-                    } // GeometryReader
+                    }
                 } // ScrollViewReader
             } // NavigationStack
             .opacity((selectedFootprint != nil || selectedFutureTripDetail != nil) ? 0 : 1)
@@ -2117,8 +2225,6 @@ private struct ContinuousTimelineSheet: View {
             if let trip = selectedFutureTripDetail {
                 buildFutureTripDetailView(for: trip)
             }
-            
-            resettingIndicator
         } // ZStack
         .fullScreenCover(item: Binding(
             get: { selectedMapPhotoAssetID.map { IdentifiableString(value: $0) } },
@@ -2130,177 +2236,6 @@ private struct ContinuousTimelineSheet: View {
         }
     } // body
     
-    @ViewBuilder
-    private func mainScrollView(proxy: ScrollViewProxy, viewport: GeometryProxy) -> some View {
-                        ScrollView {
-                            ScrollOffsetObserver(restorer: scrollRestorer) { metrics in
-                                Task { @MainActor in
-                                    applyScrollMetrics(metrics)
-                                }
-                            }
-                            .frame(width: 0, height: 0)
-
-                            LazyVStack(alignment: .leading, spacing: 0) {
-                                if canLoadEarlierDates {
-                                    TimelineLoadMoreButton(
-                                        title: "查看更早的足迹",
-                                        isLoading: isLoadingMoreEarlier,
-                                        action: requestLoadEarlierDates
-                                    )
-                                    .opacity(hasCompletedInitialTimelinePositioning ? 1 : 0)
-                                    .allowsHitTesting(hasCompletedInitialTimelinePositioning)
-                                } else if initialTimelineLoadCompleted {
-                                    TimelineLoadMoreButton(
-                                        title: "从照片导入足迹",
-                                        isLoading: false,
-                                        action: {
-                                            requestedHistoryImport = true
-                                            isShowingHistory = true
-                                        }
-                                    )
-                                    .opacity(hasCompletedInitialTimelinePositioning ? 1 : 0)
-                                    .allowsHitTesting(hasCompletedInitialTimelinePositioning)
-                                }
-
-                                ForEach(Array(dates.enumerated()), id: \.element) { index, date in
-                                    VStack(spacing: 0) {
-                                        if let previousDate = dates[safe: index - 1] {
-                                            let loadableGapDates = loadableTimelineDates(between: previousDate, and: date)
-                                            if !loadableGapDates.isEmpty {
-                                                TimelineLoadMoreButton(
-                                                    title: "查看更多足迹",
-                                                    isLoading: loadingGapAfterDates.contains(previousDate),
-                                                    action: { requestLoadDates(after: previousDate, before: date) }
-                                                )
-                                                .padding(.bottom, 6)
-                                            }
-
-                                            if let gapDays = Calendar.current.dateComponents([.day], from: previousDate, to: date).day,
-                                               gapDays > 1 {
-                                                TimelineDateGapConnector(skippedDays: gapDays - 1)
-                                            }
-
-                                            if !loadableGapDates.isEmpty {
-                                                TimelineLoadMoreButton(
-                                                    title: "查看更早的足迹",
-                                                    isLoading: loadingGapBeforeDates.contains(date),
-                                                    action: { requestLoadDates(before: date, after: previousDate) }
-                                                )
-                                                .padding(.top, 6)
-                                            }
-                                        }
-
-                                        timelineDay(for: date)
-                                            .background {
-                                                GeometryReader { geometry in
-                                                    Color.clear.preference(
-                                                        key: ContinuousTimelineDateFramePreferenceKey.self,
-                                                        value: [date: geometry.frame(in: .named("continuousTimelineScroll"))]
-                                                    )
-                                                }
-                                            }
-                                    }
-                                    .id(ScrollTarget.date(date))
-                                }
-
-                                if canLoadLaterDates {
-                                    TimelineLoadMoreButton(
-                                        title: "查看更多足迹",
-                                        isLoading: isLoadingMoreLater,
-                                        action: { requestLoadLaterDates() }
-                                    )
-                                }
-                            }
-                            .padding(.top, 30)
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 128)
-                        }
-                        .defaultScrollAnchor(.bottom)
-                        .scrollDisabled(isCollapsed)
-                        .coordinateSpace(name: "continuousTimelineScroll")
-                        .onPreferenceChange(ContinuousTimelineDateFramePreferenceKey.self) { frames in
-                            let viewportHeight = viewport.size.height
-                            Task { @MainActor in
-                                await Task.yield()
-                                applyDateFrameUpdate(frames, viewportHeight: viewportHeight, using: proxy)
-                            }
-                        }
-                        .overlay(alignment: .bottom) {
-                            if isCollapsed {
-                                EmptyView()
-                            } else if showsReturnToTodayButton {
-                                Button {
-                                    requestScrollToToday(using: proxy)
-                                } label: {
-                                    Label("回到当下", systemImage: "location.fill")
-                                }
-                                .returnToTodayButtonStyle()
-                                .accessibilityLabel("回到当下")
-                            } else {
-                                Button {
-                                    futureTripTimelineAnchorDate = Calendar.current.startOfDay(for: activeTimelineDate)
-                                    isShowingFutureTripModal = true
-                                } label: {
-                                    Label("行程计划", systemImage: "plus")
-                                }
-                                .returnToTodayButtonStyle()
-                                .accessibilityLabel("行程计划")
-                            }
-                        }
-                    .onChange(of: dates) { oldDates, newDates in
-                        if let requestedOldestDate = lastPrefetchOldestDate,
-                           newDates.first == requestedOldestDate {
-                            didReachEarliestAvailableDate = true
-                        } else if newDates.first != oldDates.first {
-                            didReachEarliestAvailableDate = false
-                        }
-
-                        if let target = calendarScrollLockTarget, newDates.contains(target) {
-                            scheduleLockedCalendarScroll(using: proxy)
-                        }
-                        if let pinnedDate = calendarBackfillPinnedDate, newDates.contains(pinnedDate) {
-                            scheduleCalendarBackfillPin(to: pinnedDate, using: proxy)
-                        }
-                    }
-                    .onAppear {
-                        scheduleInitialScrollToTodayIfNeeded(using: proxy)
-                    }
-                    .onChange(of: initialTimelineLoadCompleted) { _, _ in
-                        scheduleInitialScrollToTodayIfNeeded(using: proxy)
-                    }
-                    .onChange(of: todayScrollRequest) { _, _ in
-                        requestScrollToToday(using: proxy)
-                    }
-                    .onReceive(NotificationCenter.default.publisher(for: FutureTrip.didChangeNotification)) { _ in
-                        restoreFutureTripTimelinePosition(using: proxy)
-                    }
-                    .onDisappear {
-                        initialTodayScrollTask?.cancel()
-                        calendarScrollRetryTask?.cancel()
-                        calendarBackfillPinTask?.cancel()
-                        calendarBackfillTask?.cancel()
-                    }
-    }
-
-    @ViewBuilder
-    private var resettingIndicator: some View {
-        if locationManager.isResettingData {
-            ZStack {
-                Color.black.opacity(0.3).ignoresSafeArea()
-                VStack(spacing: 16) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                        .tint(.white)
-                    Text("正在重新生成...")
-                        .foregroundColor(.white)
-                        .font(.headline)
-                }
-                .padding(30)
-                .background(.ultraThinMaterial)
-                .cornerRadius(16)
-            }
-        }
-    }
     @ViewBuilder
     private func buildFootprintModalView(for footprint: Footprint) -> some View {
         FootprintModalView(
@@ -2890,13 +2825,9 @@ private struct ContinuousTimelineSheet: View {
         footprintPendingSplit = nil
     }
 
-    private var activeFutureTrips: [FutureTrip] {
-        futureTrips.filter { !$0.isCompleted }
-    }
-
     private func futureTrips(for date: Date) -> [FutureTrip] {
         let calendar = Calendar.current
-        return FutureTrip.dayOrdered(activeFutureTrips
+        return FutureTrip.dayOrdered(futureTrips
             .filter { calendar.isDate($0.arrivalDate, inSameDayAs: date) }
         )
     }
@@ -4213,7 +4144,7 @@ private struct ContinuousTimelineRow: View {
                 Menu {
                     if case .footprint(let footprint) = item {
                         Button {
-                            footprint.updateActivityType(to: nil, in: modelContext)
+                            footprint.activityTypeValue = nil
                             try? modelContext.save()
                         } label: {
                             Label("无", systemImage: "circle.slash")
@@ -4223,7 +4154,7 @@ private struct ContinuousTimelineRow: View {
                         
                         ForEach(activityTypes) { type in
                             Button {
-                                footprint.updateActivityType(to: type.id.uuidString, in: modelContext)
+                                footprint.activityTypeValue = type.id.uuidString
                                 try? modelContext.save()
                             } label: {
                                 Label(type.name, systemImage: type.icon)

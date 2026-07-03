@@ -492,8 +492,12 @@ struct BackupDTO: Codable {
         let lon: Double
         let arrivalDate: Date
         let hasArrivalTime: Bool
+        let scheduleMode: String?
+        let orderIndex: Int?
         let activityType: String?
         let createdAt: Date
+        let isCompleted: Bool?
+        let completedAt: Date?
     }
 }
 
@@ -549,8 +553,12 @@ final class BackupService {
                     lon: trip.longitude,
                     arrivalDate: trip.arrivalDate,
                     hasArrivalTime: trip.hasArrivalTime,
+                    scheduleMode: trip.scheduleModeValue,
+                    orderIndex: trip.orderIndex,
                     activityType: trip.activityTypeValue,
-                    createdAt: trip.createdAt
+                    createdAt: trip.createdAt,
+                    isCompleted: trip.isCompleted,
+                    completedAt: trip.completedAt
                 )
             }
         )
@@ -707,8 +715,12 @@ final class BackupService {
                             coordinate: CLLocationCoordinate2D(latitude: t.lat, longitude: t.lon),
                             arrivalDate: t.arrivalDate,
                             hasArrivalTime: t.hasArrivalTime,
+                            scheduleMode: FutureTripScheduleMode(rawValue: t.scheduleMode ?? "") ?? .timed,
+                            orderIndex: t.orderIndex ?? 0,
                             activityTypeValue: t.activityType,
-                            createdAt: t.createdAt
+                            createdAt: t.createdAt,
+                            isCompleted: t.isCompleted ?? false,
+                            completedAt: t.completedAt
                         )
                         context.insert(trip)
                         newFutureTrips += 1

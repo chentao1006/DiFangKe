@@ -64,6 +64,7 @@ enum class TransportType(val raw: String) {
             stepCount: Int = 0,
             durationSec: Long = 0,
             distanceMeters: Double = 0.0,
+            pointCount: Int = 0,
             preferredAuto: TransportType = CAR,
             preferredCycling: TransportType = BICYCLE
         ): TransportType {
@@ -98,6 +99,13 @@ enum class TransportType(val raw: String) {
             if (maxAllowedTypeCategory < 3 && getCategory(safePreferredAuto) >= 3) {
                 safePreferredAuto = preferredCycling
             }
+
+            inferLongPublicTransitType(
+                kmh = kmh,
+                distanceMeters = effectiveDistance,
+                durationSec = durationSec,
+                pointCount = pointCount
+            )?.let { return it }
 
             // 1. 优先使用传感器数据 (Google Play Services Activity Recognition)
             when (effectiveMotion) {
@@ -137,6 +145,26 @@ enum class TransportType(val raw: String) {
                 effectiveKmh < 350.0 -> TRAIN
                 else -> AIRPLANE
             }
+        }
+
+        private fun inferLongPublicTransitType(
+            kmh: Double,
+            distanceMeters: Double,
+            durationSec: Long,
+            pointCount: Int
+        ): TransportType? {
+            if (distanceMeters < 10_000.0 || durationSec < 20 * 60) return null
+
+            val segmentCount = maxOf(pointCount - 1, 1)
+            val metersPerSegment = distanceMeters / segmentCount
+            val isSparseLongTrip = pointCount > 0 && (pointCount <= 4 || metersPerSegment >= 15_000.0)
+            val isMixedPublicTransitPace = distanceMeters >= 15_000.0 && kmh >= 8.0 && kmh < 45.0
+
+            if (distanceMeters >= 600_000.0 && (isSparseLongTrip || kmh >= 180.0)) return AIRPLANE
+            if (distanceMeters >= 80_000.0 && (isSparseLongTrip || kmh >= 90.0)) return TRAIN
+            if (isSparseLongTrip && distanceMeters >= 30_000.0) return SUBWAY
+            if (isMixedPublicTransitPace) return if (distanceMeters >= 20_000.0) SUBWAY else BUS
+            return null
         }
 
         fun from(raw: String) = entries.firstOrNull { it.raw == raw } ?: CAR

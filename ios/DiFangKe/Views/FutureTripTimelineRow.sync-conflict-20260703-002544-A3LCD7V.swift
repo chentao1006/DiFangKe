@@ -233,7 +233,7 @@ struct FutureTripDetailView: View {
 
     private var shouldOfferCompletion: Bool {
         if trip.isOrdered { return false }
-        return trip.shouldOfferCompletion(currentDistance: distanceInMeters)
+        trip.shouldOfferCompletion(currentDistance: distanceInMeters)
     }
 
     private var fullCountdownText: String {
@@ -433,29 +433,7 @@ struct FutureTripDetailView: View {
             if let d = distanceInMeters, d < 500 {
                 HStack(spacing: 8) {
                     Button {
-                        let now = Date()
-                        let startTime = min(trip.arrivalDate, now)
-                        let newFootprint = Footprint(
-                            date: Calendar.current.startOfDay(for: startTime),
-                            startTime: startTime,
-                            endTime: now,
-                            footprintLocations: [CLLocationCoordinate2D(latitude: trip.latitude, longitude: trip.longitude)],
-                            locationHash: "",
-                            duration: now.timeIntervalSince(startTime),
-                            reason: trip.notes,
-                            status: .manual,
-                            placeID: trip.placeID,
-                            address: trip.placeName,
-                            activityTypeValue: trip.activityTypeValue
-                        )
-                        modelContext.insert(newFootprint)
-                        NotificationManager.shared.cancelFutureTripNotification(for: trip.id)
-                        modelContext.delete(trip)
-                        try? modelContext.save()
-                        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
-                        FutureTrip.postDidChangeNotification()
-                        onDismiss?()
-                        if !isInline { dismiss() }
+                        completeTrip()
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark")
@@ -478,14 +456,12 @@ struct FutureTripDetailView: View {
                 }
                 .padding(.bottom, 8)
             } else {
-                Group {
-                    if shouldOfferCompletion {
-                        completeButton
-                    } else {
-                        navigateButton
-                    }
+                if shouldOfferCompletion {
+                    completeButton
+                } else {
+                    navigateButton
                 }
-                .padding(.bottom, 8)
+                    .padding(.bottom, 8)
                 if trip.arrivalDate < Date() {
                     HStack(spacing: 8) {
                         delayButton

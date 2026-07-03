@@ -191,6 +191,8 @@ struct DiFangKeApp: App {
     @State private var showSplash = true
     
     @State private var modelContainer: ModelContainer?
+    @State private var foregroundWidgetSyncTask: Task<Void, Never>?
+    @State private var backgroundWidgetSyncTask: Task<Void, Never>?
     
     init() {
         // We move the heavy ModelContainer initialization to a background task
@@ -241,33 +243,37 @@ struct DiFangKeApp: App {
             .animation(.easeInOut(duration: 0.8), value: showSplash)
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
+                    backgroundWidgetSyncTask?.cancel()
+                    backgroundWidgetSyncTask = nil
+
                     let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
                     if isEnabled {
                         locationManager.startTracking()
                     }
                     
-                    // 前台启动后，延迟同步一下小组件，确保有足够时间生成图片
+                    // 前台恢复只做轻量同步，避免切回 App 时生成 7 天地图快照抢占主线程。
                     if modelContainer != nil {
-                        Task {
+                        foregroundWidgetSyncTask?.cancel()
+                        foregroundWidgetSyncTask = Task {
                             try? await Task.sleep(nanoseconds: 3_000_000_000)
-                            await WidgetDataSyncManager.shared.syncAll()
+                            guard !Task.isCancelled else { return }
+                            await WidgetDataSyncManager.shared.syncTodayOnly()
                         }
                     }
                 } else if newPhase == .background {
+                    foregroundWidgetSyncTask?.cancel()
+                    foregroundWidgetSyncTask = nil
+
                     if modelContainer != nil {
-                        Task {
+                        backgroundWidgetSyncTask?.cancel()
+                        backgroundWidgetSyncTask = Task {
                             var bgTask: UIBackgroundTaskIdentifier = .invalid
                             bgTask = UIApplication.shared.beginBackgroundTask {
                                 UIApplication.shared.endBackgroundTask(bgTask)
                                 bgTask = .invalid
                             }
                             
-                            await WidgetDataSyncManager.shared.syncAll()
-                            
-                            // Perform background data deduplication
-                            if let context = modelContainer?.mainContext {
-                                let _ = DataDeduplicationService.run(context: context)
-                            }
+                            await WidgetDataSyncManager.shared.syncTodayOnly()
                             
                             if bgTask != .invalid {
                                 UIApplication.shared.endBackgroundTask(bgTask)

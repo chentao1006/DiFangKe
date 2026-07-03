@@ -248,13 +248,14 @@ class LocationTrackingService : Service() {
         }
 
         private fun getShortAddress(location: com.amap.api.location.AMapLocation): String? {
-                // 优先顺序：AOI(兴趣区域) > POI(点) > 区+街道
-                return when {
-                        !location.aoiName.isNullOrBlank() -> location.aoiName
-                        !location.poiName.isNullOrBlank() -> location.poiName
-                        !location.street.isNullOrBlank() -> "${location.district}${location.street}"
-                        else -> location.address
-                }
+                return geocoder.coarseAutomaticPlaceName(
+                        listOf(
+                                location.aoiName,
+                                location.poiName,
+                                listOfNotNull(location.district, location.street)
+                                        .joinToString("")
+                        )
+                )
         }
 
         override fun onCreate() {
@@ -1167,7 +1168,8 @@ class LocationTrackingService : Service() {
                         TransportType.from(
                                 speedMs = avgSpeed,
                                 durationSec = gapSec.toLong(),
-                                distanceMeters = totalDist
+                                distanceMeters = totalDist,
+                                pointCount = pts.size
                         )
 
                 val record =

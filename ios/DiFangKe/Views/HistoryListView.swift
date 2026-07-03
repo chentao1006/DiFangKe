@@ -143,7 +143,7 @@ struct HistoryListView: View {
     @State private var scanProgress = 0
     @State private var scanTotal = 0
     @ObservedObject private var photoService = PhotoService.shared
-    
+
     @Query(sort: \Place.name) private var allPlacesForScan: [Place]
     
     enum ViewMode: String, CaseIterable {

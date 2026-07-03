@@ -12,12 +12,12 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -29,29 +29,25 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.ct106.difangke.AppConfig
 import com.ct106.difangke.data.model.TimelineItem
 import com.ct106.difangke.service.LocationTrackingService
 import com.ct106.difangke.ui.components.*
 import com.ct106.difangke.viewmodel.MainViewModel
-import com.ct106.difangke.service.OpenAIService
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import java.text.SimpleDateFormat
 import java.util.*
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
-import androidx.compose.foundation.pager.PagerState
 import androidx.compose.ui.text.style.TextAlign
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -67,7 +63,6 @@ fun MainScreen(
     onNavigateToRawPoints: (Date) -> Unit
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     
     var showCalendar by remember { mutableStateOf(false) }
     val availableDates by viewModel.availableDates.collectAsState()
@@ -77,33 +72,10 @@ fun MainScreen(
     val trackingState by viewModel.trackingState.collectAsState()
     val isTrackingEnabled by viewModel.isTrackingEnabled.collectAsState()
     
-    val pagerState = rememberPagerState(
-        initialPage = 0, 
-        pageCount = { availableDates.size }
-    )
-    
-    // 初始化 Pager 到特定日期 (如果是从历史跳转过来的)
+    // 初始化到特定日期 (如果是从历史跳转过来的)
     LaunchedEffect(initialDate) {
         if (initialDate != null) {
             viewModel.setDate(initialDate)
-        }
-    }
-    
-    // 同步 Pager 到当前日期 (Date -> Pager)
-    LaunchedEffect(currentDate, availableDates) {
-        val index = availableDates.indexOfFirst { it.time == currentDate.time }
-        if (index >= 0 && index != pagerState.currentPage && !pagerState.isScrollInProgress) {
-            pagerState.scrollToPage(index)
-        }
-    }
-    
-    // 同步 Pager 到时间 (Pager -> Date)
-    LaunchedEffect(pagerState.currentPage) {
-        if (availableDates.isNotEmpty()) {
-            val dateAtPage = availableDates[pagerState.currentPage.coerceIn(availableDates.indices)]
-            if (dateAtPage.time != currentDate.time) {
-                viewModel.setDate(dateAtPage)
-            }
         }
     }
 
@@ -245,183 +217,638 @@ fun MainScreen(
         )
     }
 
-    Scaffold(
-        containerColor = Color.Transparent,
-        topBar = {
-            TopAppBar(
-                title = { 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("地方客", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.headlineMedium)
-                        if (OpenAIService.shared.isNetworkRequesting) {
-                            Spacer(Modifier.width(12.dp))
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                strokeWidth = 2.5.dp,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(bgColor)
+    ) {
+        ContinuousTimelineScaffold(
+            selectedDate = currentDate,
+            availableDates = availableDates,
+            viewModel = viewModel,
+            trackingState = trackingState,
+            isTrackingEnabled = isTrackingEnabled,
+            activityTypes = activityTypes,
+            allPlaces = allPlaces,
+            hasLocationPermission = hasPermissionState,
+            hasNotificationPermission = hasNotificationPermission,
+            isNotificationGuideDismissed = isNotificationGuideDismissed,
+            onSelectDate = { viewModel.setDate(it) },
+            onShowCalendar = { showCalendar = true },
+            onRebuildDate = { showRebuildConfirm = it },
+            onViewRawPoints = onNavigateToRawPoints,
+            onNavigateToMap = onNavigateToMap,
+            onNavigateToDetail = onNavigateToDetail,
+            onNavigateToHistory = onNavigateToHistory,
+            onNavigateToStatistics = onNavigateToStatistics,
+            onNavigateToSettings = onNavigateToSettings,
+            onRequestPermission = { launcher.launch(permissionsToRequest) },
+            onRequestNotification = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+                dismissGuide()
+            },
+            onDismissNotificationGuide = { dismissGuide() },
+            onEnableTracking = { viewModel.setTrackingEnabled(true) }
+        )
+
+        TodayFloatingButton(
+            isVisible = currentDate.time != today.time,
+            onClick = { viewModel.setDate(today) }
+        )
+
+        if (showCalendar) {
+            CalendarSelectionDialog(
+                selectedDate = currentDate,
+                availableDates = availableDates,
+                onDateSelected = { date ->
+                    viewModel.setDate(date)
+                    showCalendar = false
                 },
-                actions = {
-                    IconButton(onClick = onNavigateToHistory) {
-                        Icon(Icons.Default.History, contentDescription = "历史")
-                    }
-                    IconButton(onClick = onNavigateToStatistics) {
-                        Icon(Icons.Default.BarChart, contentDescription = "统计")
-                    }
-                    IconButton(onClick = onNavigateToSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "设置")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.Transparent,
-                    scrolledContainerColor = Color.Transparent
-                )
+                onDismiss = { showCalendar = false }
             )
         }
-    ) { padding ->
-        Box(modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        bgColor,
-                        com.ct106.difangke.ui.theme.DfkAccent.copy(alpha = 0.1f)
-                    )
-                )
-            )
-            .padding(padding)
-        ) {
-            Column {
-                DateNavigator(
-                    currentDate = currentDate,
-                    canGoBack = pagerState.currentPage > 0,
-                    canGoForward = pagerState.currentPage < availableDates.size - 1,
-                    onPrevClick = {
-                        if (pagerState.currentPage > 0) {
-                            scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) }
-                        }
-                    },
-                    onNextClick = {
-                        if (pagerState.currentPage < availableDates.size - 1) {
-                            scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) }
-                        }
-                    },
-                    onCalendarClick = { showCalendar = true },
-                    onRebuildClick = { showRebuildConfirm = currentDate },
-                    onViewRawPointsClick = { onNavigateToRawPoints(currentDate) }
-                )
 
-                HorizontalPager(
-                    state = pagerState,
-                    modifier = Modifier.weight(1f),
-                    beyondBoundsPageCount = 1,
-                ) { pageIndex ->
-                    val dateAtPage = availableDates[pageIndex]
-                    
-                    // 每个页面管理自己的数据观察，确保滑动时数据互不干扰
-                    TimelinePage(
-                        date = dateAtPage,
-                        viewModel = viewModel,
-                        trackingState = trackingState,
-                        isTrackingEnabled = isTrackingEnabled,
-                        activityTypes = activityTypes,
-                        allPlaces = allPlaces,
-                        isFirstPage = pageIndex == 0,
-                        isLastPage = pageIndex == availableDates.size - 1,
-                        hasLocationPermission = hasPermissionState,
-                        hasNotificationPermission = hasNotificationPermission,
-                        isNotificationGuideDismissed = isNotificationGuideDismissed,
-                        onRequestPermission = { launcher.launch(permissionsToRequest) },
-                        onRequestNotification = { 
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        if (showBackgroundRationale) {
+            AlertDialog(
+                onDismissRequest = { showBackgroundRationale = false },
+                title = { Text("需要后台定位权限") },
+                text = { Text("为了在您关闭屏幕或使用其他应用时持续记录足迹，请在随后的系统中选择“始终允许”定位权限。") },
+                confirmButton = {
+                    Button(onClick = {
+                        showBackgroundRationale = false
+                        backgroundLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                    }) {
+                        Text("去设置")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showBackgroundRationale = false }) {
+                        Text("取消")
+                    }
+                }
+            )
+        }
+
+        if (showBatteryRationale) {
+            AlertDialog(
+                onDismissRequest = { showBatteryRationale = false },
+                title = { Text("允许始终在后台运行") },
+                text = { Text("为了保证您在锁屏或使用其他应用时，足迹依然能被持续、完整地记录，我们需要您允许本应用始终在后台运行（忽略电池优化）。") },
+                confirmButton = {
+                    Button(onClick = {
+                        showBatteryRationale = false
+                        try {
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                data = android.net.Uri.parse("package:${context.packageName}")
                             }
-                            dismissGuide() 
-                        },
-                        onDismissNotificationGuide = { dismissGuide() },
-                        onItemClick = onNavigateToDetail,
-                        onMapClick = { onNavigateToMap(dateAtPage) }
-                    )
-                }
-            }
-
-            // 返回今天按钮 (浮动)
-            TodayFloatingButton(
-                isVisible = currentDate.time != today.time,
-                onClick = { 
-                    val todayIndex = availableDates.indexOfFirst { it.time == today.time }
-                    if (todayIndex >= 0) {
-                        scope.launch { pagerState.animateScrollToPage(todayIndex) }
-                    }
-                }
-            )
-            
-            if (showCalendar) {
-                CalendarSelectionDialog(
-                    selectedDate = currentDate,
-                    availableDates = availableDates,
-                    onDateSelected = { date ->
-                        viewModel.setDate(date)
-                        showCalendar = false
-                    },
-                    onDismiss = { showCalendar = false }
-                )
-            }
-
-            if (showBackgroundRationale) {
-                AlertDialog(
-                    onDismissRequest = { showBackgroundRationale = false },
-                    title = { Text("需要后台定位权限") },
-                    text = { Text("为了在您关闭屏幕或使用其他应用时持续记录足迹，请在随后的系统中选择“始终允许”定位权限。") },
-                    confirmButton = {
-                        Button(onClick = {
-                            showBackgroundRationale = false
-                            backgroundLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                        }) {
-                            Text("去设置")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showBackgroundRationale = false }) {
-                            Text("取消")
-                        }
-                    }
-                )
-            }
-
-            if (showBatteryRationale) {
-                AlertDialog(
-                    onDismissRequest = { showBatteryRationale = false },
-                    title = { Text("允许始终在后台运行") },
-                    text = { Text("为了保证您在锁屏或使用其他应用时，足迹依然能被持续、完整地记录，我们需要您允许本应用始终在后台运行（忽略电池优化）。") },
-                    confirmButton = {
-                        Button(onClick = {
-                            showBatteryRationale = false
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
                             try {
-                                val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                                    data = android.net.Uri.parse("package:${context.packageName}")
-                                }
+                                val intent = android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
                                 context.startActivity(intent)
-                            } catch (e: Exception) {
-                                try {
-                                    val intent = android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                                    context.startActivity(intent)
-                                } catch (e2: Exception) {}
-                            }
-                        }) {
-                            Text("去设置")
+                            } catch (e2: Exception) {}
                         }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showBatteryRationale = false }) {
-                            Text("取消")
-                        }
+                    }) {
+                        Text("去设置")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showBatteryRationale = false }) {
+                        Text("取消")
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ContinuousTimelineScaffold(
+    selectedDate: Date,
+    availableDates: List<Date>,
+    viewModel: MainViewModel,
+    trackingState: LocationTrackingService.TrackingState,
+    isTrackingEnabled: Boolean,
+    activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
+    allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
+    hasLocationPermission: Boolean,
+    hasNotificationPermission: Boolean,
+    isNotificationGuideDismissed: Boolean,
+    onSelectDate: (Date) -> Unit,
+    onShowCalendar: () -> Unit,
+    onRebuildDate: (Date) -> Unit,
+    onViewRawPoints: (Date) -> Unit,
+    onNavigateToMap: (Date?) -> Unit,
+    onNavigateToDetail: (String) -> Unit,
+    onNavigateToHistory: () -> Unit,
+    onNavigateToStatistics: () -> Unit,
+    onNavigateToSettings: () -> Unit,
+    onRequestPermission: () -> Unit,
+    onRequestNotification: () -> Unit,
+    onDismissNotificationGuide: () -> Unit,
+    onEnableTracking: () -> Unit
+) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val isLandscape = maxWidth > maxHeight
+        if (isLandscape) {
+            Row(modifier = Modifier.fillMaxSize()) {
+                ContinuousTimelineList(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    selectedDate = selectedDate,
+                    availableDates = availableDates,
+                    viewModel = viewModel,
+                    trackingState = trackingState,
+                    isTrackingEnabled = isTrackingEnabled,
+                    activityTypes = activityTypes,
+                    allPlaces = allPlaces,
+                    hasLocationPermission = hasLocationPermission,
+                    hasNotificationPermission = hasNotificationPermission,
+                    isNotificationGuideDismissed = isNotificationGuideDismissed,
+                    onSelectDate = onSelectDate,
+                    onShowCalendar = onShowCalendar,
+                    onRebuildDate = onRebuildDate,
+                    onViewRawPoints = onViewRawPoints,
+                    onNavigateToDetail = onNavigateToDetail,
+                    onRequestPermission = onRequestPermission,
+                    onRequestNotification = onRequestNotification,
+                    onDismissNotificationGuide = onDismissNotificationGuide,
+                    onEnableTracking = onEnableTracking
+                )
+                TimelineMapPane(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    selectedDate = selectedDate,
+                    viewModel = viewModel,
+                    activityTypes = activityTypes,
+                    allPlaces = allPlaces,
+                    onNavigateToMap = { onNavigateToMap(selectedDate) },
+                    onNavigateToHistory = onNavigateToHistory,
+                    onNavigateToStatistics = onNavigateToStatistics,
+                    onNavigateToSettings = onNavigateToSettings
+                )
+            }
+        } else {
+            Column(modifier = Modifier.fillMaxSize()) {
+                TimelineMapPane(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    selectedDate = selectedDate,
+                    viewModel = viewModel,
+                    activityTypes = activityTypes,
+                    allPlaces = allPlaces,
+                    onNavigateToMap = { onNavigateToMap(selectedDate) },
+                    onNavigateToHistory = onNavigateToHistory,
+                    onNavigateToStatistics = onNavigateToStatistics,
+                    onNavigateToSettings = onNavigateToSettings
+                )
+                ContinuousTimelineList(
+                    modifier = Modifier
+                        .weight(2f)
+                        .fillMaxWidth(),
+                    selectedDate = selectedDate,
+                    availableDates = availableDates,
+                    viewModel = viewModel,
+                    trackingState = trackingState,
+                    isTrackingEnabled = isTrackingEnabled,
+                    activityTypes = activityTypes,
+                    allPlaces = allPlaces,
+                    hasLocationPermission = hasLocationPermission,
+                    hasNotificationPermission = hasNotificationPermission,
+                    isNotificationGuideDismissed = isNotificationGuideDismissed,
+                    onSelectDate = onSelectDate,
+                    onShowCalendar = onShowCalendar,
+                    onRebuildDate = onRebuildDate,
+                    onViewRawPoints = onViewRawPoints,
+                    onNavigateToDetail = onNavigateToDetail,
+                    onRequestPermission = onRequestPermission,
+                    onRequestNotification = onRequestNotification,
+                    onDismissNotificationGuide = onDismissNotificationGuide,
+                    onEnableTracking = onEnableTracking
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TimelineMapPane(
+    modifier: Modifier,
+    selectedDate: Date,
+    viewModel: MainViewModel,
+    activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
+    allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
+    onNavigateToMap: () -> Unit,
+    onNavigateToHistory: () -> Unit,
+    onNavigateToStatistics: () -> Unit,
+    onNavigateToSettings: () -> Unit
+) {
+    val items by viewModel.getTimelineItems(selectedDate).collectAsState(initial = emptyList())
+    val dailyInsight by viewModel.getDailyInsight(selectedDate).collectAsState(initial = null)
+    val dailyPoints by viewModel.getDailyTrajectory(selectedDate).collectAsState(initial = null)
+    val dailyMarkers by viewModel.getDailyMarkers(selectedDate).collectAsState(initial = null)
+    val footprintMarkers = remember(items, activityTypes) {
+        buildFootprintMapMarkers(
+            items.filterIsInstance<TimelineItem.FootprintItem>().map { it.footprint },
+            activityTypes
+        )
+    }
+    val centerPoint = remember(items) {
+        items.filterIsInstance<TimelineItem.FootprintItem>()
+            .firstOrNull { it.latitude.isFinite() && it.longitude.isFinite() && it.latitude != 0.0 && it.longitude != 0.0 }
+            ?.let { it.latitude to it.longitude }
+    }
+    val isDark = isSystemInDarkTheme()
+
+    Box(
+        modifier = modifier
+            .background(if (isDark) Color.Black else Color(0xFFE7EEF0))
+    ) {
+        MiniMapView(
+            lat = centerPoint?.first,
+            lon = centerPoint?.second,
+            pointsJson = dailyPoints ?: dailyInsight?.rawPointsJson,
+            markersJson = dailyMarkers ?: dailyInsight?.markersJson,
+            footprintMarkers = footprintMarkers,
+            allPlaces = allPlaces,
+            modifier = Modifier.fillMaxSize(),
+            cornerRadius = 0.dp,
+            gesturesEnabled = true,
+            showClickOverlay = false,
+            onClick = onNavigateToMap
+        )
+
+        MapEmptyHint(
+            isVisible = footprintMarkers.isEmpty() && (dailyPoints ?: dailyInsight?.rawPointsJson).isNullOrBlank(),
+            date = selectedDate
+        )
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            MapIconButton(icon = Icons.Default.History, label = "历史", onClick = onNavigateToHistory)
+            MapIconButton(icon = Icons.Default.BarChart, label = "统计", onClick = onNavigateToStatistics)
+            MapIconButton(icon = Icons.Default.Settings, label = "设置", onClick = onNavigateToSettings)
+            MapIconButton(icon = Icons.Default.OpenInFull, label = "全屏地图", onClick = onNavigateToMap)
+        }
+    }
+}
+
+@Composable
+private fun MapEmptyHint(isVisible: Boolean, date: Date) {
+    if (!isVisible) return
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(Icons.Default.Map, contentDescription = null, tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f), modifier = Modifier.size(42.dp))
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = "${timelineDateTitle(date)}暂无地图轨迹",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+        )
+    }
+}
+
+@Composable
+private fun MapIconButton(icon: ImageVector, label: String, onClick: () -> Unit) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.82f))
+    ) {
+        Icon(icon, contentDescription = label, modifier = Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurface)
+    }
+}
+
+@Composable
+private fun ContinuousTimelineList(
+    modifier: Modifier,
+    selectedDate: Date,
+    availableDates: List<Date>,
+    viewModel: MainViewModel,
+    trackingState: LocationTrackingService.TrackingState,
+    isTrackingEnabled: Boolean,
+    activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
+    allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
+    hasLocationPermission: Boolean,
+    hasNotificationPermission: Boolean,
+    isNotificationGuideDismissed: Boolean,
+    onSelectDate: (Date) -> Unit,
+    onShowCalendar: () -> Unit,
+    onRebuildDate: (Date) -> Unit,
+    onViewRawPoints: (Date) -> Unit,
+    onNavigateToDetail: (String) -> Unit,
+    onRequestPermission: () -> Unit,
+    onRequestNotification: () -> Unit,
+    onDismissNotificationGuide: () -> Unit,
+    onEnableTracking: () -> Unit
+) {
+    val today = remember {
+        Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }.time
+    }
+    val timelineDates = remember(availableDates, selectedDate, today) {
+        (availableDates + selectedDate + today)
+            .distinctBy { it.time }
+            .filter { it.time <= today.time }
+            .sortedByDescending { it.time }
+    }
+    val isDark = isSystemInDarkTheme()
+    val listBackground = if (isDark) Color.Black else Color(0xFFF2F2F7)
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(listState, selectedDate.time, timelineDates) {
+        snapshotFlow { listState.isScrollInProgress }
+            .distinctUntilChanged()
+            .collectLatest { isScrolling ->
+                if (!isScrolling) {
+                    delay(160)
+                    val visibleDate = visibleTimelineDate(listState) ?: return@collectLatest
+                    if (!isSameDay(visibleDate, selectedDate)) {
+                        onSelectDate(visibleDate)
+                    }
+                }
+            }
+    }
+
+    LazyColumn(
+        state = listState,
+        modifier = modifier.background(listBackground),
+        contentPadding = PaddingValues(bottom = 88.dp)
+    ) {
+        item(key = "timeline_header") {
+            ContinuousTimelineHeader(
+                selectedDate = selectedDate,
+                onShowCalendar = onShowCalendar,
+                onViewRawPoints = { onViewRawPoints(selectedDate) },
+                onRebuild = { onRebuildDate(selectedDate) }
+            )
+        }
+
+        itemsIndexed(
+            items = timelineDates,
+            key = { _, date -> timelineDateItemKey(date) }
+        ) { index, date ->
+            DateTimelineSection(
+                date = date,
+                isSelected = isSameDay(date, selectedDate),
+                isFirstAvailableDate = index == timelineDates.lastIndex,
+                viewModel = viewModel,
+                trackingState = trackingState,
+                isTrackingEnabled = isTrackingEnabled,
+                activityTypes = activityTypes,
+                allPlaces = allPlaces,
+                hasLocationPermission = hasLocationPermission,
+                hasNotificationPermission = hasNotificationPermission,
+                isNotificationGuideDismissed = isNotificationGuideDismissed,
+                onSelectDate = onSelectDate,
+                onNavigateToDetail = onNavigateToDetail,
+                onRequestPermission = onRequestPermission,
+                onRequestNotification = onRequestNotification,
+                onDismissNotificationGuide = onDismissNotificationGuide,
+                onEnableTracking = onEnableTracking
+            )
+        }
+    }
+}
+
+private fun timelineDateItemKey(date: Date): String = "day_${date.time}"
+
+private fun visibleTimelineDate(listState: LazyListState): Date? {
+    val layoutInfo = listState.layoutInfo
+    val visibleItems = layoutInfo.visibleItemsInfo
+    if (visibleItems.isEmpty()) return null
+
+    val targetY = layoutInfo.viewportStartOffset +
+        ((layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset) * 0.38f)
+
+    return visibleItems
+        .asSequence()
+        .mapNotNull { item ->
+            val key = item.key as? String ?: return@mapNotNull null
+            val timestamp = key.removePrefix("day_").takeIf { it != key }?.toLongOrNull()
+                ?: return@mapNotNull null
+            val itemCenter = item.offset + item.size / 2f
+            Date(timestamp) to kotlin.math.abs(itemCenter - targetY)
+        }
+        .minByOrNull { it.second }
+        ?.first
+}
+
+@Composable
+private fun ContinuousTimelineHeader(
+    selectedDate: Date,
+    onShowCalendar: () -> Unit,
+    onViewRawPoints: () -> Unit,
+    onRebuild: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .clickable { onShowCalendar() }
+        ) {
+            Text("地方客", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+            Text(timelineDateSubtitle(selectedDate), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        IconButton(onClick = onShowCalendar) {
+            Icon(Icons.Default.CalendarMonth, contentDescription = "选择日期")
+        }
+        IconButton(onClick = onViewRawPoints) {
+            Icon(Icons.AutoMirrored.Filled.List, contentDescription = "查看轨迹点")
+        }
+        IconButton(onClick = onRebuild) {
+            Icon(Icons.Default.Refresh, contentDescription = "重新生成")
+        }
+    }
+}
+
+@Composable
+private fun DateTimelineSection(
+    date: Date,
+    isSelected: Boolean,
+    isFirstAvailableDate: Boolean,
+    viewModel: MainViewModel,
+    trackingState: LocationTrackingService.TrackingState,
+    isTrackingEnabled: Boolean,
+    activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
+    allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
+    hasLocationPermission: Boolean,
+    hasNotificationPermission: Boolean,
+    isNotificationGuideDismissed: Boolean,
+    onSelectDate: (Date) -> Unit,
+    onNavigateToDetail: (String) -> Unit,
+    onRequestPermission: () -> Unit,
+    onRequestNotification: () -> Unit,
+    onDismissNotificationGuide: () -> Unit,
+    onEnableTracking: () -> Unit
+) {
+    val items by viewModel.getTimelineItems(date).collectAsState(initial = emptyList())
+    val points by viewModel.getPointsCount(date).collectAsState(initial = 0)
+    val today = remember {
+        Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }.time
+    }
+    val isToday = date.time == today.time
+
+    LaunchedEffect(date.time, items.isEmpty(), points) {
+        if (!isToday && items.isEmpty() && points > 0) {
+            delay(1000)
+            viewModel.ensureTimelineForDate(date)
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        DateSectionHeader(
+            date = date,
+            isSelected = isSelected,
+            onClick = { onSelectDate(date) }
+        )
+
+        if (isToday && !isTrackingEnabled) {
+            TrackingInlinePrompt(
+                hasLocationPermission = hasLocationPermission,
+                onEnableTracking = onEnableTracking,
+                onRequestPermission = onRequestPermission
+            )
+        }
+
+        if (isToday && !hasNotificationPermission && !isNotificationGuideDismissed) {
+            NotificationGuideCard(
+                onDismiss = onDismissNotificationGuide,
+                onRequest = onRequestNotification
+            )
+        }
+
+        if (items.isEmpty()) {
+            if (isFirstAvailableDate) {
+                PastPlaceholderView()
+            } else if (isToday) {
+                PlaceholderFootprintCard(trackingState = trackingState)
+            }
+        } else {
+            items.forEachIndexed { index, item ->
+                TimelineRow(
+                    item = item,
+                    isFirst = index == 0,
+                    isLast = index == items.lastIndex,
+                    activityTypes = activityTypes,
+                    allPlaces = allPlaces,
+                    onClick = {
+                        onSelectDate(date)
+                        onNavigateToDetail(item.id)
                     }
                 )
             }
         }
     }
+}
+
+@Composable
+private fun DateSectionHeader(date: Date, isSelected: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(horizontal = 20.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = timelineDateTitle(date),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = timelineDateSubtitle(date),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (isSelected) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(MaterialTheme.colorScheme.primary, CircleShape)
+            )
+        }
+    }
+}
+
+@Composable
+private fun TrackingInlinePrompt(
+    hasLocationPermission: Boolean,
+    onEnableTracking: () -> Unit,
+    onRequestPermission: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.MyLocation, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = "开启记录后会自动生成今天的足迹",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            TextButton(onClick = if (hasLocationPermission) onEnableTracking else onRequestPermission) {
+                Text("开启")
+            }
+        }
+    }
+}
+
+private fun timelineDateTitle(date: Date): String {
+    return when {
+        isToday(date) -> "今天"
+        isYesterday(date) -> "昨天"
+        isDayBeforeYesterday(date) -> "前天"
+        else -> {
+            val currentYear = Calendar.getInstance().get(Calendar.YEAR)
+            val displayYear = Calendar.getInstance().apply { time = date }.get(Calendar.YEAR)
+            if (currentYear == displayYear) SimpleDateFormat("M月d日", Locale.CHINA).format(date)
+            else SimpleDateFormat("yyyy年M月d日", Locale.CHINA).format(date)
+        }
+    }
+}
+
+private fun timelineDateSubtitle(date: Date): String {
+    return SimpleDateFormat("M月d日 EEEE", Locale.CHINA).format(date)
 }
 
 @Composable

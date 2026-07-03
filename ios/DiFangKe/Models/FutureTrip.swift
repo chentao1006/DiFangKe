@@ -17,8 +17,12 @@ final class FutureTrip {
     var longitude: Double = 0
     var arrivalDate: Date = Date()
     var hasArrivalTime: Bool = false
+    var scheduleModeValue: String = FutureTripScheduleMode.timed.rawValue
+    var orderIndex: Int = 0
     var activityTypeValue: String?
     var createdAt: Date = Date()
+    var isCompleted: Bool = false
+    var completedAt: Date?
 
     var coordinate: CLLocationCoordinate2D {
         get { CLLocationCoordinate2D(latitude: latitude, longitude: longitude) }
@@ -26,6 +30,15 @@ final class FutureTrip {
             latitude = newValue.latitude
             longitude = newValue.longitude
         }
+    }
+
+    var scheduleMode: FutureTripScheduleMode {
+        get { FutureTripScheduleMode(rawValue: scheduleModeValue) ?? .timed }
+        set { scheduleModeValue = newValue.rawValue }
+    }
+
+    var isOrdered: Bool {
+        scheduleMode == .ordered
     }
 
     init(
@@ -37,8 +50,12 @@ final class FutureTrip {
         coordinate: CLLocationCoordinate2D,
         arrivalDate: Date,
         hasArrivalTime: Bool,
+        scheduleMode: FutureTripScheduleMode = .timed,
+        orderIndex: Int = 0,
         activityTypeValue: String? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        isCompleted: Bool = false,
+        completedAt: Date? = nil
     ) {
         self.id = id
         self.placeID = placeID
@@ -49,8 +66,52 @@ final class FutureTrip {
         self.longitude = coordinate.longitude
         self.arrivalDate = arrivalDate
         self.hasArrivalTime = hasArrivalTime
+        self.scheduleModeValue = scheduleMode.rawValue
+        self.orderIndex = orderIndex
         self.activityTypeValue = activityTypeValue
         self.createdAt = createdAt
+        self.isCompleted = isCompleted
+        self.completedAt = completedAt
+    }
+
+    func shouldOfferCompletion(currentDistance: CLLocationDistance?, now: Date = Date()) -> Bool {
+        guard !isOrdered else { return false }
+        guard let currentDistance, currentDistance >= Self.completionDistanceThreshold else { return false }
+
+        if hasArrivalTime {
+            return now.timeIntervalSince(arrivalDate) >= Self.timedCompletionGrace
+        }
+
+        let calendar = Calendar.current
+        let arrivalDay = calendar.startOfDay(for: arrivalDate)
+        let nextDay = calendar.date(byAdding: .day, value: 1, to: arrivalDay) ?? arrivalDay.addingTimeInterval(Self.untimedCompletionGrace)
+        return now >= nextDay
+    }
+
+    func markCompleted(at date: Date = Date()) {
+        isCompleted = true
+        completedAt = date
+    }
+
+    static let completionDistanceThreshold: CLLocationDistance = 500
+    static let timedCompletionGrace: TimeInterval = 6 * 3600
+    static let untimedCompletionGrace: TimeInterval = 24 * 3600
+
+    static func dayOrdered(_ trips: [FutureTrip]) -> [FutureTrip] {
+        let hasExplicitOrder = trips.contains { $0.orderIndex > 0 }
+        return trips.sorted { lhs, rhs in
+            if hasExplicitOrder {
+                let leftOrder = lhs.orderIndex > 0 ? lhs.orderIndex : Int.max
+                let rightOrder = rhs.orderIndex > 0 ? rhs.orderIndex : Int.max
+                if leftOrder != rightOrder { return leftOrder < rightOrder }
+            }
+
+            if lhs.arrivalDate != rhs.arrivalDate {
+                return lhs.arrivalDate < rhs.arrivalDate
+            }
+
+            return lhs.createdAt < rhs.createdAt
+        }
     }
 
     static func loadLegacyTrips() -> [LegacyFutureTrip] {
@@ -61,6 +122,13 @@ final class FutureTrip {
     static func postDidChangeNotification() {
         NotificationCenter.default.post(name: didChangeNotification, object: nil)
     }
+}
+
+enum FutureTripScheduleMode: String, Codable, CaseIterable, Identifiable {
+    case timed
+    case ordered
+
+    var id: String { rawValue }
 }
 
 struct LegacyFutureTrip: Codable {
@@ -93,8 +161,10 @@ public struct TripActivityAttributes: ActivityAttributes {
         public var longitude: Double
         public var icon: String
         public var hasArrivalTime: Bool
+        public var isOrdered: Bool
+        public var shouldOfferCompletion: Bool
         
-        public init(currentDistance: Double, remainingMinutes: Int, placeName: String, arrivalDate: Date, latitude: Double, longitude: Double, icon: String, hasArrivalTime: Bool) {
+        public init(currentDistance: Double, remainingMinutes: Int, placeName: String, arrivalDate: Date, latitude: Double, longitude: Double, icon: String, hasArrivalTime: Bool, isOrdered: Bool, shouldOfferCompletion: Bool) {
             self.currentDistance = currentDistance
             self.remainingMinutes = remainingMinutes
             self.placeName = placeName
@@ -103,6 +173,8 @@ public struct TripActivityAttributes: ActivityAttributes {
             self.longitude = longitude
             self.icon = icon
             self.hasArrivalTime = hasArrivalTime
+            self.isOrdered = isOrdered
+            self.shouldOfferCompletion = shouldOfferCompletion
         }
     }
     

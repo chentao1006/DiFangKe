@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
@@ -748,6 +749,12 @@ fun MiniMapView(
     footprintMarkers: List<FootprintMapMarker> = emptyList(),
     isCurrentLocation: Boolean = false,
     allPlaces: List<PlaceEntity> = emptyList(),
+    modifier: Modifier = Modifier
+        .fillMaxWidth()
+        .height(160.dp),
+    cornerRadius: Dp = 16.dp,
+    gesturesEnabled: Boolean = false,
+    showClickOverlay: Boolean = true,
     onClick: () -> Unit
 ) {
     val mapMarkers = remember(footprintMarkers, markersJson) {
@@ -762,13 +769,12 @@ fun MiniMapView(
     val context = LocalContext.current
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-    var hasCentred by remember { mutableStateOf(false) }
+    var hasCentred by remember(lat, lon, pointsJson, markersJson, footprintMarkers) { mutableStateOf(false) }
     
     Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .height(160.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .then(modifier)
+            .clip(RoundedCornerShape(cornerRadius))
     ) {
         androidx.compose.ui.viewinterop.AndroidView(
             factory = { ctx ->
@@ -791,8 +797,8 @@ fun MiniMapView(
                 isMyLocationButtonEnabled = false
                 isRotateGesturesEnabled = false
                 isTiltGesturesEnabled = false
-                isScrollGesturesEnabled = false
-                isZoomGesturesEnabled = false
+                isScrollGesturesEnabled = gesturesEnabled
+                isZoomGesturesEnabled = gesturesEnabled
             }
             
             amap.clear()
@@ -1080,17 +1086,19 @@ fun MiniMapView(
             }
         }
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Transparent)
-                .clickable(
-                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                    indication = null
-                ) {
-                    onClick()
-                }
-        )
+        if (showClickOverlay) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Transparent)
+                    .clickable(
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        onClick()
+                    }
+            )
+        }
     }
 }
 

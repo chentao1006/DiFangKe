@@ -325,11 +325,16 @@ struct TripLiveActivityWidget: Widget {
                     }
                     Spacer()
                     VStack(alignment: .trailing) {
-                        Text("计划到达")
+                        Text(context.state.isOrdered ? "顺序计划" : "计划到达")
                             .font(.caption)
                             .foregroundColor(.secondary)
                         if context.state.hasArrivalTime {
                             Text(context.state.arrivalDate, style: .time)
+                                .font(.title3)
+                                .bold()
+                                .multilineTextAlignment(.trailing)
+                        } else if context.state.isOrdered {
+                            Text("按顺序")
                                 .font(.title3)
                                 .bold()
                                 .multilineTextAlignment(.trailing)
@@ -346,23 +351,23 @@ struct TripLiveActivityWidget: Widget {
                 HStack(spacing: 12) {
                     if context.state.currentDistance < 500 {
                         Link(destination: URL(string: "difangke://trip/action?type=arrive&id=\(context.attributes.tripId)")!) {
-                            Text("我已到达")
+                            Text("已到达")
                                 .font(.subheadline.bold())
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 8)
-                                .background(Color.green.opacity(0.2))
-                                .foregroundColor(.green)
+                                .background(Color.green)
+                                .foregroundColor(.white)
                                 .cornerRadius(8)
                         }
 
-                        if Date() > context.state.arrivalDate {
+                        if !context.state.isOrdered && Date() > context.state.arrivalDate {
                             Link(destination: URL(string: "difangke://trip/action?type=delay&id=\(context.attributes.tripId)")!) {
                                 Text("推迟")
                                     .font(.subheadline.bold())
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 8)
-                                    .background(Color.orange.opacity(0.2))
-                                    .foregroundColor(.orange)
+                                    .background(Color.orange)
+                                    .foregroundColor(.white)
                                     .cornerRadius(8)
                             }
                         }
@@ -372,29 +377,30 @@ struct TripLiveActivityWidget: Widget {
                                 .font(.subheadline.bold())
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 8)
-                                .background(Color.red.opacity(0.2))
-                                .foregroundColor(.red)
+                                .background(Color.red)
+                                .foregroundColor(.white)
                                 .cornerRadius(8)
                         }
                     } else {
-                        Link(destination: URL(string: "difangke://trip/action?type=navigate&id=\(context.attributes.tripId)")!) {
-                            Text("导航")
+                        let actionType = context.state.shouldOfferCompletion ? "complete" : "navigate"
+                        Link(destination: URL(string: "difangke://trip/action?type=\(actionType)&id=\(context.attributes.tripId)")!) {
+                            Text(context.state.shouldOfferCompletion ? "已完成" : "导航")
                                 .font(.subheadline.bold())
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 8)
-                                .background(Color.green.opacity(0.2))
-                                .foregroundColor(.green)
+                                .background(Color.green)
+                                .foregroundColor(.white)
                                 .cornerRadius(8)
                         }
 
-                        if Date() > context.state.arrivalDate {
+                        if !context.state.isOrdered && Date() > context.state.arrivalDate {
                             Link(destination: URL(string: "difangke://trip/action?type=delay&id=\(context.attributes.tripId)")!) {
                                 Text("推迟")
                                     .font(.subheadline.bold())
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 8)
-                                    .background(Color.orange.opacity(0.2))
-                                    .foregroundColor(.orange)
+                                    .background(Color.orange)
+                                    .foregroundColor(.white)
                                     .cornerRadius(8)
                             }
 
@@ -403,8 +409,8 @@ struct TripLiveActivityWidget: Widget {
                                     .font(.subheadline.bold())
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 8)
-                                    .background(Color.red.opacity(0.2))
-                                    .foregroundColor(.red)
+                                    .background(Color.red)
+                                    .foregroundColor(.white)
                                     .cornerRadius(8)
                             }
                         }
@@ -448,11 +454,14 @@ struct TripLiveActivityWidget: Widget {
 
                             Spacer()
 
-                            Text("计划到达")
+                            Text(context.state.isOrdered ? "顺序计划" : "计划到达")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             if context.state.hasArrivalTime {
                                 Text(context.state.arrivalDate, style: .time)
+                                    .font(.subheadline.bold())
+                            } else if context.state.isOrdered {
+                                Text("按顺序")
                                     .font(.subheadline.bold())
                             } else {
                                 Text("今天")
@@ -464,23 +473,23 @@ struct TripLiveActivityWidget: Widget {
                         HStack(spacing: 12) {
                             if context.state.currentDistance < 500 {
                                 Link(destination: URL(string: "difangke://trip/action?type=arrive&id=\(context.attributes.tripId)")!) {
-                                    Text("我已到达")
+                                    Text("已到达")
                                         .font(.subheadline.bold())
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 6)
-                                        .background(Color.green.opacity(0.2))
-                                        .foregroundColor(.green)
+                                        .background(Color.green)
+                                        .foregroundColor(.white)
                                         .cornerRadius(8)
                                 }
 
-                                if Date() > context.state.arrivalDate {
+                                if !context.state.isOrdered && Date() > context.state.arrivalDate {
                                     Link(destination: URL(string: "difangke://trip/action?type=delay&id=\(context.attributes.tripId)")!) {
                                         Text("推迟")
                                             .font(.subheadline.bold())
                                             .frame(maxWidth: .infinity)
                                             .padding(.vertical, 6)
-                                            .background(Color.orange.opacity(0.2))
-                                            .foregroundColor(.orange)
+                                            .background(Color.orange)
+                                            .foregroundColor(.white)
                                             .cornerRadius(8)
                                     }
                                 }
@@ -490,29 +499,30 @@ struct TripLiveActivityWidget: Widget {
                                         .font(.subheadline.bold())
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 6)
-                                        .background(Color.red.opacity(0.2))
-                                        .foregroundColor(.red)
+                                        .background(Color.red)
+                                        .foregroundColor(.white)
                                         .cornerRadius(8)
                                 }
                             } else {
-                                Link(destination: URL(string: "difangke://trip/action?type=navigate&id=\(context.attributes.tripId)")!) {
-                                    Text("导航")
+                                let actionType = context.state.shouldOfferCompletion ? "complete" : "navigate"
+                                Link(destination: URL(string: "difangke://trip/action?type=\(actionType)&id=\(context.attributes.tripId)")!) {
+                                    Text(context.state.shouldOfferCompletion ? "已完成" : "导航")
                                         .font(.subheadline.bold())
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 6)
-                                        .background(Color.green.opacity(0.2))
-                                        .foregroundColor(.green)
+                                        .background(Color.green)
+                                        .foregroundColor(.white)
                                         .cornerRadius(8)
                                 }
 
-                                if Date() > context.state.arrivalDate {
+                                if !context.state.isOrdered && Date() > context.state.arrivalDate {
                                     Link(destination: URL(string: "difangke://trip/action?type=delay&id=\(context.attributes.tripId)")!) {
                                         Text("推迟")
                                             .font(.subheadline.bold())
                                             .frame(maxWidth: .infinity)
                                             .padding(.vertical, 6)
-                                            .background(Color.orange.opacity(0.2))
-                                            .foregroundColor(.orange)
+                                            .background(Color.orange)
+                                            .foregroundColor(.white)
                                             .cornerRadius(8)
                                     }
 
@@ -521,8 +531,8 @@ struct TripLiveActivityWidget: Widget {
                                             .font(.subheadline.bold())
                                             .frame(maxWidth: .infinity)
                                             .padding(.vertical, 6)
-                                            .background(Color.red.opacity(0.2))
-                                            .foregroundColor(.red)
+                                            .background(Color.red)
+                                            .foregroundColor(.white)
                                             .cornerRadius(8)
                                     }
                                 }

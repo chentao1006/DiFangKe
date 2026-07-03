@@ -270,6 +270,7 @@ class PersistentTimelineBuilder(private val context: Context) {
                             speedMs = newAvgSpeed,
                             durationSec = duration,
                             distanceMeters = merged.distance,
+                            pointCount = try { JSONArray(merged.pointsJson).length() } catch (e: Exception) { 0 },
                             preferredAuto = preferredAuto,
                             preferredCycling = preferredCycling
                         )
@@ -374,6 +375,7 @@ class PersistentTimelineBuilder(private val context: Context) {
             speedMs = avgSpeed,
             durationSec = gapSec,
             distanceMeters = totalDist,
+            pointCount = pts.size,
             preferredAuto = preferredAuto,
             preferredCycling = preferredCycling
         )

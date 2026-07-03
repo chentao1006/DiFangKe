@@ -1098,6 +1098,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var refreshTimer: AnyCancellable?
     private var locationWatchdogTimer: AnyCancellable?
     private var lastStationaryProbeTime: Date = .distantPast
+    private var lastStartTrackingAt: Date = .distantPast
+    private var lastForegroundLocationRequestAt: Date = .distantPast
     
     override init() {
         super.init()
@@ -1588,15 +1590,29 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             return
         }
 
-        locationManager.requestAlwaysAuthorization()
+        let status = locationManager.authorizationStatus
+        if status == .authorizedWhenInUse {
+            locationManager.requestAlwaysAuthorization()
+        }
+
+        let now = Date()
+        let wasTracking = isTracking
+        if wasTracking && now.timeIntervalSince(lastStartTrackingAt) < 30 {
+            return
+        }
+        lastStartTrackingAt = now
         
         // Re-enable updates if they were stopped
         locationManager.startUpdatingLocation()
         locationManager.startMonitoringSignificantLocationChanges()
         isTracking = true
         
-        // On app open, force a fresh high-accuracy location fix
-        locationManager.requestLocation() // This will trigger a one-time precise update
+        // Foregrounding can hit this path from onAppear, scenePhase, auth callbacks, and
+        // background refresh recovery. Keep the fresh fix, but do not stack requests.
+        if !wasTracking || now.timeIntervalSince(lastForegroundLocationRequestAt) > 60 {
+            lastForegroundLocationRequestAt = now
+            locationManager.requestLocation()
+        }
         
         // 启动/回到前台只恢复定位，不重整已保存的时间线。startTracking() 会在
         // 每次启动和 scene active 时调用；在这里清理、合并或回填历史数据会让
@@ -2162,12 +2178,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             lastGeocodedLocation = location
             geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
                 if let placemark = placemarks?.first {
-                    // 优先获取兴趣点（如：某某商场、某某公园）
-                    let poiName = placemark.areasOfInterest?.first
-                    let name = [poiName, placemark.name, placemark.thoroughfare, placemark.subLocality]
-                        .compactMap { $0 }
-                        .first ?? "未知位置"
-                    
+                    let name = self?.coarseAutomaticPlaceName(from: placemark) ?? "未知位置"
+
                     DispatchQueue.main.async {
                         self?.currentAddress = name
                     }
@@ -3164,18 +3176,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
                     guard let self = self, let placemark = placemarks?.first else { return }
+                    let name = self.coarseAutomaticPlaceName(from: placemark) ?? "未知位置"
                     
-                    Task {
-                        let name = await TimelineBuilder.resolveProminentPOI(coordinate: location.coordinate, placemark: placemark)
-                        
-                        await MainActor.run {
-                            // 在主线程重新获取该对象，确保线程安全
-                            if let mainContext = self.modelContext?.container.mainContext {
-                                let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
-                                if let mainFp = try? mainContext.fetch(descriptor).first {
-                                    mainFp.address = name
-                                    try? mainContext.save()
-                                }
+                    Task { @MainActor in
+                        // 在主线程重新获取该对象，确保线程安全
+                        if let mainContext = self.modelContext?.container.mainContext {
+                            let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+                            if let mainFp = try? mainContext.fetch(descriptor).first {
+                                mainFp.address = name
+                                try? mainContext.save()
                             }
                         }
                     }
@@ -4299,6 +4308,58 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             isSyncingInitialData = false
         }
     }
+
+    private func coarseAutomaticPlaceName(from placemark: CLPlacemark) -> String? {
+        let candidates = [
+            placemark.areasOfInterest?.first,
+            placemark.name,
+            placemark.subLocality,
+            placemark.thoroughfare,
+            placemark.locality
+        ]
+
+        if let preferred = candidates.compactMap({ $0 }).first(where: isCoarseAutomaticPlaceName) {
+            return preferred
+        }
+
+        return [placemark.locality, placemark.subLocality]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined()
+            .nilIfEmpty
+    }
+
+    private func isCoarseAutomaticPlaceName(_ rawName: String) -> Bool {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return false }
+
+        let finePatterns = [
+            #"\d+\s*号"#, #"\d+\s*弄"#, #"\d+\s*室"#, #"\d+\s*层"#, #"\d+\s*楼"#,
+            #"[\dA-Za-z一二三四五六七八九十]+号楼"#, #"[\dA-Za-z一二三四五六七八九十]+栋"#,
+            #"单元"#, #"门牌"#, #"入口"#, #"出口"#, #"柜台"#, #"摊"#, #"铺"#, #"档口"#,
+            #"店$"#, #"分店"#, #"便利店"#, #"超市"#, #"餐厅"#, #"饭店"#, #"咖啡"#, #"奶茶"#,
+            #"茶饮"#, #"甜品"#, #"小吃"#, #"烧烤"#, #"火锅"#, #"面馆"#, #"粉店"#, #"酒吧"#,
+            #"药房"#, #"药店"#, #"诊所"#, #"理发"#, #"美甲"#, #"洗衣"#, #"快递"#, #"驿站"#
+        ]
+        if finePatterns.contains(where: { name.range(of: $0, options: .regularExpression) != nil }) {
+            return false
+        }
+
+        let coarseKeywords = [
+            "景区", "景点", "公园", "广场", "博物馆", "美术馆", "图书馆", "体育馆", "展览馆",
+            "商场", "购物中心", "中心", "大厦", "大楼", "写字楼", "园区", "科技园", "产业园",
+            "大学", "学院", "学校", "医院", "酒店", "机场", "火车站", "高铁站", "地铁站",
+            "车站", "码头", "社区", "小区", "花园", "公寓", "住宅", "村", "镇", "街道"
+        ]
+
+        return coarseKeywords.contains { name.contains($0) }
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
 }
 
 // MARK: - 坐标系转换扩展 (WGS-84 -> GCJ-02)
@@ -4324,7 +4385,7 @@ extension CLLocation {
         }
 
         let coord = self.coordinate
-        if coord.longitude < 72.004 || coord.longitude > 137.8347 || coord.latitude < 0.8293 || coord.latitude > 55.8271 {
+        if !coord.requiresMainlandChinaGCJOffset {
             return self
         }
         
@@ -4346,6 +4407,45 @@ extension CLLocation {
             speed: self.speed,
             timestamp: self.timestamp
         )
+    }
+}
+
+private extension CLLocationCoordinate2D {
+    var requiresMainlandChinaGCJOffset: Bool {
+        guard longitude >= 72.004, longitude <= 137.8347,
+              latitude >= 0.8293, latitude <= 55.8271 else {
+            return false
+        }
+
+        return !isInHongKong &&
+            !isInMacau &&
+            !isInTaiwanMainIsland &&
+            !isInTaiwanOutlyingIslands
+    }
+
+    private var isInHongKong: Bool {
+        latitude >= 22.13 && latitude <= 22.57 &&
+            longitude >= 113.80 && longitude <= 114.45
+    }
+
+    private var isInMacau: Bool {
+        latitude >= 22.03 && latitude <= 22.23 &&
+            longitude >= 113.50 && longitude <= 113.65
+    }
+
+    private var isInTaiwanMainIsland: Bool {
+        latitude >= 21.80 && latitude <= 25.40 &&
+            longitude >= 119.30 && longitude <= 122.10
+    }
+
+    private var isInTaiwanOutlyingIslands: Bool {
+        let isInPenghu = latitude >= 23.10 && latitude <= 23.90 &&
+            longitude >= 119.20 && longitude <= 119.90
+        let isInKinmen = latitude >= 24.25 && latitude <= 24.60 &&
+            longitude >= 118.10 && longitude <= 118.60
+        let isInMatsu = latitude >= 25.85 && latitude <= 26.40 &&
+            longitude >= 119.85 && longitude <= 120.60
+        return isInPenghu || isInKinmen || isInMatsu
     }
 }
 
@@ -4395,8 +4495,12 @@ class TripLiveActivityManager {
         let descriptor = FetchDescriptor<FutureTrip>(sortBy: [SortDescriptor(\.arrivalDate)])
         let trips = (try? context.fetch(descriptor)) ?? []
         let now = Date()
-        
         let calendar = Calendar.current
+
+        if completeArrivedTrips(location: location, trips: trips, context: context, calendar: calendar) {
+            FutureTrip.postDidChangeNotification()
+        }
+
         let candidateTrips = FutureTrip.dayOrdered(trips).filter { trip in
             guard !trip.isCompleted else { return false }
             if trip.isOrdered {
@@ -4462,6 +4566,26 @@ class TripLiveActivityManager {
                 }
             }
         }
+    }
+
+    @discardableResult
+    private func completeArrivedTrips(location: CLLocation, trips: [FutureTrip], context: ModelContext, calendar: Calendar) -> Bool {
+        var didComplete = false
+
+        for trip in trips where !trip.isCompleted && calendar.isDateInToday(trip.arrivalDate) {
+            let tripLocation = CLLocation(latitude: trip.latitude, longitude: trip.longitude)
+            guard location.distance(from: tripLocation) < 200 else { continue }
+
+            NotificationManager.shared.cancelFutureTripNotification(for: trip.id)
+            trip.markCompleted()
+            didComplete = true
+        }
+
+        if didComplete {
+            try? context.save()
+        }
+
+        return didComplete
     }
     
     private func ensureTripMapSnapshot(latitude: Double, longitude: Double, tripId: String) async {

@@ -76,6 +76,7 @@ enum TransportType: String, CaseIterable, Codable {
         floorsClimbed: Int = 0,
         duration: TimeInterval = 0,
         distanceMeters: Double = 0,
+        pointCount: Int = 0,
         preferredAutomotive: TransportType = .car,
         preferredCycling: TransportType = .bicycle
     ) -> TransportType {
@@ -124,6 +125,16 @@ enum TransportType: String, CaseIterable, Codable {
         }
         if maxAllowedTypeCategory < 3 && safePreferredAuto.category >= 3 {
             safePreferredAuto = preferredCycling
+        }
+
+        let longPublicTransitType = inferLongPublicTransitType(
+            kmh: kmh,
+            distanceMeters: effectiveDistance,
+            duration: duration,
+            pointCount: pointCount
+        )
+        if let longPublicTransitType, !hasStrongOnFootEvidence {
+            return longPublicTransitType
         }
 
         // 1. 优先使用传感器数据 (Core Motion)
@@ -175,6 +186,34 @@ enum TransportType: String, CaseIterable, Codable {
         if effectiveKmh < 120 { return safePreferredAuto }
         if effectiveKmh < 350 { return .train }
         return .airplane
+    }
+
+    private static func inferLongPublicTransitType(
+        kmh: Double,
+        distanceMeters: Double,
+        duration: TimeInterval,
+        pointCount: Int
+    ) -> TransportType? {
+        guard distanceMeters >= 10_000, duration >= 20 * 60 else { return nil }
+
+        let segmentCount = max(pointCount - 1, 1)
+        let metersPerSegment = distanceMeters / Double(segmentCount)
+        let isSparseLongTrip = pointCount > 0 && (pointCount <= 4 || metersPerSegment >= 15_000)
+        let isMixedPublicTransitPace = distanceMeters >= 15_000 && kmh >= 8 && kmh < 45
+
+        if distanceMeters >= 600_000 && (isSparseLongTrip || kmh >= 180) {
+            return .airplane
+        }
+        if distanceMeters >= 80_000 && (isSparseLongTrip || kmh >= 90) {
+            return .train
+        }
+        if isSparseLongTrip && distanceMeters >= 30_000 {
+            return .subway
+        }
+        if isMixedPublicTransitPace {
+            return distanceMeters >= 20_000 ? .subway : .bus
+        }
+        return nil
     }
 
     
