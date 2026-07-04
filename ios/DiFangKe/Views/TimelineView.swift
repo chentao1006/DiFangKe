@@ -161,9 +161,6 @@ private struct ContinuousTimelineView: View {
     @State private var showingNavigationOptions = false
     @State private var pendingFutureTripAbandonAlertID: UUID? = nil
 
-    private var activeFutureTrips: [FutureTrip] {
-        futureTrips.filter { !$0.isCompleted }
-    }
 
     private var timelineDates: [Date] {
         let calendar = Calendar.current
@@ -171,7 +168,7 @@ private struct ContinuousTimelineView: View {
         dates.insert(activeTimelineDate)
 
         if hasCompletedInitialTimelineLoad {
-            let futureDates = activeFutureTrips.map { calendar.startOfDay(for: $0.arrivalDate) }
+            let futureDates = futureTrips.map { calendar.startOfDay(for: $0.arrivalDate) }
             dates.formUnion(futureDates)
         }
 
@@ -521,7 +518,7 @@ private struct ContinuousTimelineView: View {
             } else if url.host == "trip", url.path == "/detail" {
                 if let tripIdString = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value,
                    let tripId = UUID(uuidString: tripIdString),
-                   let trip = activeFutureTrips.first(where: { $0.id == tripId }) {
+                   let trip = futureTrips.first(where: { $0.id == tripId }) {
                     selectedFutureTripDetail = trip
                 }
             }
@@ -536,7 +533,7 @@ private struct ContinuousTimelineView: View {
         if actionType == "navigate" {
             if let tripIdString = queryItems.first(where: { $0.name == "id" })?.value,
                let tripId = UUID(uuidString: tripIdString),
-               let trip = activeFutureTrips.first(where: { $0.id == tripId }) {
+               let trip = futureTrips.first(where: { $0.id == tripId }) {
                 selectedFutureTripDetail = trip
                 navigatingTrip = trip
                 showingNavigationOptions = true
@@ -547,7 +544,7 @@ private struct ContinuousTimelineView: View {
         guard let tripIdString = queryItems.first(where: { $0.name == "id" })?.value,
               let tripId = UUID(uuidString: tripIdString) else { return }
               
-        guard let trip = activeFutureTrips.first(where: { $0.id == tripId }) else { return }
+        guard let trip = futureTrips.first(where: { $0.id == tripId }) else { return }
         
         if actionType == "arrive" {
             completeFutureTrip(trip)
@@ -732,7 +729,7 @@ private struct ContinuousTimelineView: View {
                let tripIDStr = userInfo["tripID"] as? String,
                let tripID = UUID(uuidString: tripIDStr) {
                 
-                if let trip = activeFutureTrips.first(where: { $0.id == tripID }) {
+                if let trip = futureTrips.first(where: { $0.id == tripID }) {
                     let tripDate = Calendar.current.startOfDay(for: trip.arrivalDate)
                     
                     Task {
@@ -772,7 +769,7 @@ private struct ContinuousTimelineView: View {
         if let tripID = locationManager.deepLinkFutureTripID {
             locationManager.deepLinkFutureTripID = nil
             
-            if let trip = activeFutureTrips.first(where: { $0.id == tripID }) {
+            if let trip = futureTrips.first(where: { $0.id == tripID }) {
                 let tripDate = Calendar.current.startOfDay(for: trip.arrivalDate)
                 Task {
                     activeTimelineDate = tripDate
@@ -1511,7 +1508,7 @@ private struct ContinuousTimelineView: View {
 
     private func futureTrips(for dates: Set<Date>) -> [FutureTrip] {
         let calendar = Calendar.current
-        return activeFutureTrips.filter { trip in
+        return futureTrips.filter { trip in
             dates.contains(calendar.startOfDay(for: trip.arrivalDate))
         }
     }
@@ -2773,12 +2770,14 @@ private struct ContinuousTimelineSheet: View {
                             }
                         }
                         .contextMenu {
-                            Button {
-                                futureTripTimelineAnchorDate = Calendar.current.startOfDay(for: trip.arrivalDate)
-                                futureTripTimelineAnchorID = trip.id
-                                selectedFutureTrip = trip
-                            } label: {
-                                Label("编辑", systemImage: "pencil")
+                            if !trip.isCompleted {
+                                Button {
+                                    futureTripTimelineAnchorDate = Calendar.current.startOfDay(for: trip.arrivalDate)
+                                    futureTripTimelineAnchorID = trip.id
+                                    selectedFutureTrip = trip
+                                } label: {
+                                    Label("编辑", systemImage: "pencil")
+                                }
                             }
 
                             Button(role: .destructive) {
@@ -2879,13 +2878,9 @@ private struct ContinuousTimelineSheet: View {
         footprintPendingSplit = nil
     }
 
-    private var activeFutureTrips: [FutureTrip] {
-        futureTrips.filter { !$0.isCompleted }
-    }
-
     private func futureTrips(for date: Date) -> [FutureTrip] {
         let calendar = Calendar.current
-        return FutureTrip.dayOrdered(activeFutureTrips
+        return FutureTrip.dayOrdered(futureTrips
             .filter { calendar.isDate($0.arrivalDate, inSameDayAs: date) }
         )
     }
@@ -4254,7 +4249,7 @@ private struct ContinuousTimelineRow: View {
                                 .frame(width: markerSize - 5, height: markerSize - 5)
 
                             Image(systemName: icon)
-                                .font(.caption.weight(.bold))
+                                .font(.system(size: 10, weight: .bold))
                                 .foregroundStyle(.white)
                         }
                     } else {
@@ -4559,9 +4554,9 @@ private struct ContinuousTimelinePhotoThumbnail: View {
         let scale = UIScreen.main.scale
         let side = ContinuousTimelineLayout.photoThumbnailSize * scale
         let options = PHImageRequestOptions()
-        options.deliveryMode = .fastFormat
+        options.deliveryMode = .opportunistic
         options.resizeMode = .fast
-        options.isNetworkAccessAllowed = false
+        options.isNetworkAccessAllowed = true
 
         let manager = PHImageManager.default()
         requestID = manager.requestImage(
@@ -4574,8 +4569,13 @@ private struct ContinuousTimelinePhotoThumbnail: View {
             guard !cancelled else { return }
 
             DispatchQueue.main.async {
-                self.image = thumbnail
-                self.requestID = nil
+                if let thumbnail {
+                    self.image = thumbnail
+                }
+                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                if !isDegraded {
+                    self.requestID = nil
+                }
             }
         }
     }

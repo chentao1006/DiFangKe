@@ -72,13 +72,17 @@ struct FutureTripTimelineRow: View {
             return .secondary
         }
     }
+    
+    private var itemOpacity: Double {
+        trip.isCompleted ? 1.0 : 0.58
+    }
 
 
     var body: some View {
         HStack(alignment: .top, spacing: ContinuousTimelineLayout.markerSpacing) {
             Text(timeLabel)
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary.opacity(0.58))
+                .foregroundStyle(.secondary.opacity(itemOpacity))
                 .frame(width: ContinuousTimelineLayout.timeColumnWidth, alignment: .leading)
                 .padding(.top, 4)
 
@@ -103,7 +107,7 @@ struct FutureTripTimelineRow: View {
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.white)
                 }
-                .opacity(0.58)
+                .opacity(itemOpacity)
 
                 Rectangle()
                     .fill(ContinuousTimelineLayout.lineColor.opacity(0.45))
@@ -115,20 +119,20 @@ struct FutureTripTimelineRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(trip.placeName)
                     .font(.body.weight(.bold))
-                    .foregroundStyle(.primary.opacity(0.58))
+                    .foregroundStyle(.primary.opacity(itemOpacity))
                     .lineLimit(1)
 
                 if let activityName = activity?.name {
                     Text(activityName)
                         .font(.caption)
-                        .foregroundStyle(.secondary.opacity(0.58))
+                        .foregroundStyle(.secondary.opacity(itemOpacity))
                         .lineLimit(1)
                 }
 
                 if let notes = trip.notes?.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty {
                     Text(notes)
                         .font(.footnote)
-                        .foregroundStyle(.secondary.opacity(0.76))
+                        .foregroundStyle(.secondary.opacity(trip.isCompleted ? 1.0 : 0.76))
                         .lineLimit(5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -159,6 +163,9 @@ struct FutureTripTimelineRow: View {
     }
 
     private var timeLabel: String {
+        if trip.isCompleted, let completedAt = trip.completedAt {
+            return completedAt.formatted(date: .omitted, time: .shortened)
+        }
         return trip.hasArrivalTime ? trip.arrivalDate.formatted(date: .omitted, time: .shortened) : "计划"
     }
 }
@@ -270,13 +277,30 @@ struct FutureTripDetailView: View {
                             .padding(.top, 16)
                     }
                     
-                    topStatusSection
+                    if !trip.isCompleted {
+                        topStatusSection
+                            .padding(.horizontal, 24)
+                            .padding(.top, 20)
+                        
+                        editButton
+                            .padding(.horizontal, 24)
+                            .padding(.top, 12)
+                    } else {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                            Text("已到达")
+                        }
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 50)
+                        .background(.ultraThinMaterial)
+                        .background(Color.green.opacity(0.15))
+                        .foregroundColor(Color.green)
+                        .cornerRadius(12)
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.green.opacity(0.3), lineWidth: 1))
                         .padding(.horizontal, 24)
                         .padding(.top, 20)
-                    
-                    editButton
-                        .padding(.horizontal, 24)
-                        .padding(.top, 12)
+                    }
                     
                     Spacer().frame(height: 30)
                 }
@@ -500,25 +524,31 @@ struct FutureTripDetailView: View {
     
     private var arrivalDateTimeString: String {
         let calendar = Calendar.current
-        let arrival = trip.arrivalDate
+        let isArrived = trip.isCompleted && trip.completedAt != nil
+        let targetDate = isArrived ? trip.completedAt! : trip.arrivalDate
         
         let dateString: String
-        if calendar.isDateInToday(arrival) {
+        if calendar.isDateInToday(targetDate) {
             dateString = "今天"
-        } else if calendar.isDateInTomorrow(arrival) {
+        } else if calendar.isDateInTomorrow(targetDate) {
             dateString = "明天"
         } else {
             let formatter = DateFormatter()
             formatter.locale = Locale(identifier: "zh_CN")
             formatter.dateFormat = "M月d日"
-            dateString = formatter.string(from: arrival)
+            dateString = formatter.string(from: targetDate)
         }
         
-        if trip.hasArrivalTime {
+        if isArrived {
             let timeFormatter = DateFormatter()
             timeFormatter.locale = Locale(identifier: "zh_CN")
             timeFormatter.dateFormat = "HH:mm"
-            return "\(dateString) \(timeFormatter.string(from: arrival))"
+            return "\(dateString) \(timeFormatter.string(from: targetDate)) 到达"
+        } else if trip.hasArrivalTime {
+            let timeFormatter = DateFormatter()
+            timeFormatter.locale = Locale(identifier: "zh_CN")
+            timeFormatter.dateFormat = "HH:mm"
+            return "\(dateString) \(timeFormatter.string(from: targetDate))"
         } else {
             return dateString
         }

@@ -1908,6 +1908,9 @@ private final class NativeTimeRangeSliderView: UIView {
         endSlider.accessibilityLabel = "结束时间"
         startSlider.addTarget(self, action: #selector(startChanged(_:)), for: .valueChanged)
         endSlider.addTarget(self, action: #selector(endChanged(_:)), for: .valueChanged)
+        
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        addGestureRecognizer(tapGesture)
     }
 
     func configure(
@@ -2010,6 +2013,62 @@ private final class NativeTimeRangeSliderView: UIView {
         sender.setValue(Float(newEnd.timeIntervalSince(rangeStart)), animated: false)
         onEndChange?(newEnd)
         updateTrackLayers()
+    }
+
+    @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+        guard !isConfiguring else { return }
+        let location = gesture.location(in: self)
+        
+        let minX = thumbCenterX(for: startSlider, value: startSlider.minimumValue)
+        let maxX = thumbCenterX(for: startSlider, value: startSlider.maximumValue)
+        
+        let trackRect = startSlider.trackRect(forBounds: startSlider.bounds)
+        let paddedTrackRect = trackRect.insetBy(dx: -30, dy: -30)
+        guard paddedTrackRect.contains(location) else { return }
+        
+        let ratio = max(0, min(1, (location.x - minX) / (maxX - minX)))
+        let value = Float(ratio) * (startSlider.maximumValue - startSlider.minimumValue)
+        let proposed = rangeStart.addingTimeInterval(TimeInterval(value))
+        
+        let startX = thumbCenterX(for: startSlider, value: startSlider.value)
+        let endX = thumbCenterX(for: endSlider, value: endSlider.value)
+        
+        let moveStart: Bool
+        if location.x < startX {
+            moveStart = true
+        } else if location.x > endX {
+            moveStart = false
+        } else {
+            moveStart = abs(location.x - startX) < abs(location.x - endX)
+        }
+        
+        if moveStart {
+            let newStart = clamp(rounded(proposed), minDate: rangeStart, maxDate: end.addingTimeInterval(-minimumDuration))
+            start = newStart
+            startSlider.setValue(Float(newStart.timeIntervalSince(rangeStart)), animated: true)
+            onStartChange?(newStart)
+        } else {
+            let newEnd = clamp(rounded(proposed), minDate: start.addingTimeInterval(minimumDuration), maxDate: rangeEnd)
+            end = newEnd
+            endSlider.setValue(Float(newEnd.timeIntervalSince(rangeStart)), animated: true)
+            onEndChange?(newEnd)
+        }
+        
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.25)
+        updateTrackLayersAnimated()
+        CATransaction.commit()
+    }
+
+    private func updateTrackLayersAnimated() {
+        let minX = thumbCenterX(for: startSlider, value: startSlider.minimumValue)
+        let maxX = thumbCenterX(for: startSlider, value: startSlider.maximumValue)
+        let startX = thumbCenterX(for: startSlider, value: startSlider.value)
+        let endX = thumbCenterX(for: endSlider, value: endSlider.value)
+        let trackY = bounds.midY - 3
+
+        trackLayer.frame = CGRect(x: minX, y: trackY, width: max(0, maxX - minX), height: 6)
+        selectedTrackLayer.frame = CGRect(x: min(startX, endX), y: trackY, width: abs(endX - startX), height: 6)
     }
 
     private func rounded(_ date: Date) -> Date {
