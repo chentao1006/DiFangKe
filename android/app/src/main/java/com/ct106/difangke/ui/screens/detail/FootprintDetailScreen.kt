@@ -180,7 +180,7 @@ fun FootprintDetailScreen(
 
     LaunchedEffect(footprint, matchedPlace) {
         footprint?.let {
-            title = it.title
+            title = it.title ?: ""
             reason = it.reason ?: ""
             selectedPlaceID = it.placeID
             selectedLocationIsSaved = it.placeID != null

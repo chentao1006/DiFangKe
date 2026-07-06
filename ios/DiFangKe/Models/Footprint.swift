@@ -213,7 +213,22 @@ final class Footprint {
     }
     
     func updateActivityType(to newValue: String?, in context: ModelContext) {
-        // 自动把当天相同地点且无活动类型的足迹都改成同样活动
+        let target: Footprint
+        let myID = self.footprintID
+        let selfDescriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate<Footprint> { $0.footprintID == myID }
+        )
+        if let stored = (try? context.fetch(selfDescriptor))?.first {
+            target = stored
+        } else {
+            target = self
+            if target.modelContext == nil {
+                context.insert(target)
+            }
+        }
+
+        // 自动把当天相同地点且无活动类型的足迹都改成同样活动。用户选择“无”时只改当前足迹，
+        // 并标记为 manual，避免后台习惯识别再次补回活动类型。
         let currentAddress = self.address ?? ""
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: self.startTime)
@@ -223,12 +238,12 @@ final class Footprint {
             })
             
             if let footprints = try? context.fetch(descriptor) {
-                let myID = self.footprintID
                 for fp in footprints {
                     if fp.footprintID == myID {
                         // 实际在 ModelContext 中被管理的“自己”
                         fp.activityTypeValue = newValue
-                    } else if !currentAddress.isEmpty, fp.activityTypeValue == nil, fp.address == currentAddress {
+                        fp.status = .manual
+                    } else if newValue != nil, !currentAddress.isEmpty, fp.activityTypeValue == nil, fp.address == currentAddress {
                         // 自动更新同地点且无活动类型的其他足迹
                         fp.activityTypeValue = newValue
                     }
@@ -237,6 +252,9 @@ final class Footprint {
         }
         
         // 最后修改自己的值，防止 UI 绑定的（可能是未被 Context 管理的快照对象）未能及时刷新
+        target.activityTypeValue = newValue
+        target.status = .manual
         self.activityTypeValue = newValue
+        self.status = .manual
     }
 }

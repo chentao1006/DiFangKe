@@ -5,6 +5,7 @@ import android.util.Log
 import com.ct106.difangke.AppConfig
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.data.db.entity.TransportManualSelectionEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.location.RawLocationStore
 import com.ct106.difangke.data.model.FootprintTitles
@@ -47,6 +48,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         // 1. 获取已有的记录，保护手动/已确认的数据不被覆盖
         val existingFps = db.footprintDao().getBetween(startOfDay, endOfDay)
         val existingTps = db.transportRecordDao().getForDay(startOfDay, endOfDay)
+        val deletedTransports = db.transportManualSelectionDao().getDeletedBetween(startOfDay, endOfDay)
         
         // 计算偏好（排除目标日期，保证稳定性）
         val preferredAuto = getPreferredAutomotiveType(startOfDay)
@@ -112,7 +114,7 @@ class PersistentTimelineBuilder(private val context: Context) {
                         // 保存新的
                         db.footprintDao().insert(currentFp)
                         // 生成交通段
-                        generateTransportSegment(lastFp!!, currentFp, points, preferredAuto, preferredCycling)
+                        generateTransportSegment(lastFp!!, currentFp, points, preferredAuto, preferredCycling, deletedTransports)
                         lastFp = currentFp
                         footprints.add(currentFp)
                     }
@@ -120,7 +122,7 @@ class PersistentTimelineBuilder(private val context: Context) {
                     db.footprintDao().insert(currentFp)
                     // 如果 lastFp 非空且不合并（比如 lastFp 是 retained），也要生成交通段
                     if (lastFp != null) {
-                        generateTransportSegment(lastFp!!, currentFp, points, preferredAuto, preferredCycling)
+                        generateTransportSegment(lastFp!!, currentFp, points, preferredAuto, preferredCycling, deletedTransports)
                     }
                     lastFp = currentFp
                     footprints.add(currentFp)
@@ -140,7 +142,7 @@ class PersistentTimelineBuilder(private val context: Context) {
             if (overlap == null) {
                 val finalEntity = createFootprintEntity(lastCandidate)
                 db.footprintDao().insert(finalEntity)
-                lastFp?.let { generateTransportSegment(it, finalEntity, points, preferredAuto, preferredCycling) }
+                lastFp?.let { generateTransportSegment(it, finalEntity, points, preferredAuto, preferredCycling, deletedTransports) }
                 lastFp = finalEntity
             } else {
                 // 如果最后一段也重叠了，直接将 lastFp 指向重叠的足迹，放弃这段候选
@@ -161,12 +163,53 @@ class PersistentTimelineBuilder(private val context: Context) {
             }
         }
 
-        generateMissingTransportSegmentsForFootprints(startOfDay, endOfDay, transportPoints.ifEmpty { points }, preferredAuto, preferredCycling)
+        generateMissingTransportSegmentsForFootprints(startOfDay, endOfDay, transportPoints.ifEmpty { points }, preferredAuto, preferredCycling, deletedTransports)
 
         // 5. 合并连续交通段 (iOS Parity: mergeConsecutiveTransports)
-        mergeConsecutiveTransports(date, preferredAuto, preferredCycling)
+        mergeConsecutiveTransports(date, preferredAuto, preferredCycling, deletedTransports)
 
         Log.i(TAG, "Finished rebuilding timeline for $date. Found ${footprints.size} footprints.")
+    }
+
+    suspend fun repairAffectedTimeline(deletedTimestamps: List<Double>, date: Date) = withContext(Dispatchers.IO) {
+        val startOfDay = getStartOfDay(date)
+        val endOfDay = Calendar.getInstance().apply { time = startOfDay; add(Calendar.DAY_OF_YEAR, 1) }.time
+
+        val tps = db.transportRecordDao().getForDay(startOfDay, endOfDay)
+        var anyDeleted = false
+
+        for (tp in tps) {
+            for (ts in deletedTimestamps) {
+                val pointTime = (ts * 1000).toLong()
+                // If the deleted point falls within this transport segment
+                if (pointTime in tp.startTime.time..tp.endTime.time) {
+                    db.transportRecordDao().delete(tp)
+                    anyDeleted = true
+                    break
+                }
+            }
+        }
+
+        if (anyDeleted) {
+            val preferredAuto = getPreferredAutomotiveType(startOfDay)
+            val preferredCycling = getPreferredCyclingType(startOfDay)
+            val deletedTransports = db.transportManualSelectionDao().getDeletedBetween(startOfDay, endOfDay)
+
+            val filteredRawPoints = rawStore.loadLocations(date, filtered = true)
+            val unfilteredRawPoints = rawStore.loadLocations(date, filtered = false)
+            val transportPoints = removeTinyImpossibleJumps(unfilteredRawPoints.ifEmpty { filteredRawPoints })
+
+            generateMissingTransportSegmentsForFootprints(
+                startOfDay,
+                endOfDay,
+                transportPoints,
+                preferredAuto,
+                preferredCycling,
+                deletedTransports
+            )
+
+            mergeConsecutiveTransports(date, preferredAuto, preferredCycling, deletedTransports)
+        }
     }
 
     private fun removeTinyImpossibleJumps(rawPoints: List<RawLocationStore.RawPoint>): List<RawLocationStore.RawPoint> {
@@ -191,7 +234,8 @@ class PersistentTimelineBuilder(private val context: Context) {
         endOfDay: Date,
         allDayPoints: List<RawLocationStore.RawPoint>,
         preferredAuto: TransportType,
-        preferredCycling: TransportType
+        preferredCycling: TransportType,
+        deletedTransports: List<TransportManualSelectionEntity>
     ) {
         val allFootprints = db.footprintDao().getBetween(startOfDay, endOfDay).sortedBy { it.startTime }
         if (allFootprints.size < 2) return
@@ -204,11 +248,16 @@ class PersistentTimelineBuilder(private val context: Context) {
             val existingTransport = db.transportRecordDao().getActiveBetween(previous.endTime, next.startTime)
             if (existingTransport.isNotEmpty()) continue
 
-            generateTransportSegment(previous, next, allDayPoints, preferredAuto, preferredCycling)
+            generateTransportSegment(previous, next, allDayPoints, preferredAuto, preferredCycling, deletedTransports)
         }
     }
 
-    private suspend fun mergeConsecutiveTransports(date: Date, preferredAuto: TransportType, preferredCycling: TransportType) {
+    private suspend fun mergeConsecutiveTransports(
+        date: Date,
+        preferredAuto: TransportType,
+        preferredCycling: TransportType,
+        deletedTransports: List<TransportManualSelectionEntity>
+    ) {
         val startOfDay = getStartOfDay(date)
         val endOfDay = Calendar.getInstance().apply { time = startOfDay; add(Calendar.DAY_OF_YEAR, 1) }.time
         
@@ -241,7 +290,11 @@ class PersistentTimelineBuilder(private val context: Context) {
             val isCompatible = TransportType.getCategory(currentType) == TransportType.getCategory(nextType)
 
             // 如果间隔小于 15 分钟且类型兼容，则合并
-            if (gap >= -60 && gap <= 900 && isCompatible) {
+            if (gap >= -60 &&
+                gap <= 900 &&
+                isCompatible &&
+                !overlapsDeletedTransport(current.startTime, next.endTime, deletedTransports)
+            ) {
                 val combinedPoints = try {
                     val p1 = JSONArray(current.pointsJson)
                     val p2 = JSONArray(next.pointsJson)
@@ -330,10 +383,12 @@ class PersistentTimelineBuilder(private val context: Context) {
         newFp: FootprintEntity,
         allDayPoints: List<RawLocationStore.RawPoint>,
         preferredAuto: TransportType,
-        preferredCycling: TransportType
+        preferredCycling: TransportType,
+        deletedTransports: List<TransportManualSelectionEntity>
     ) {
         val gapSec = (newFp.startTime.time - prevFp.endTime.time) / 1000L
         if (gapSec < AppConfig.TRANSPORT_MIN_DURATION_THRESHOLD) return
+        if (overlapsDeletedTransport(prevFp.endTime, newFp.startTime, deletedTransports)) return
 
         val segmentPoints = allDayPoints.filter { it.timestamp >= prevFp.endTime && it.timestamp <= newFp.startTime }
         
@@ -394,6 +449,25 @@ class PersistentTimelineBuilder(private val context: Context) {
             statusRaw = "active"
         )
         db.transportRecordDao().insert(record)
+    }
+
+    private fun overlapsDeletedTransport(
+        start: Date,
+        end: Date,
+        deletedTransports: List<TransportManualSelectionEntity>
+    ): Boolean {
+        if (!end.after(start)) return false
+        return deletedTransports.any { deleted ->
+            val overlapStart = if (start.after(deleted.startTime)) start else deleted.startTime
+            val overlapEnd = if (end.before(deleted.endTime)) end else deleted.endTime
+            if (!overlapEnd.after(overlapStart)) return@any false
+
+            val overlapMillis = overlapEnd.time - overlapStart.time
+            val candidateMillis = end.time - start.time
+            val deletedMillis = deleted.endTime.time - deleted.startTime.time
+            val minMillis = maxOf(1L, minOf(candidateMillis, deletedMillis))
+            overlapMillis > 5 * 60 * 1000L || overlapMillis >= minMillis * 0.3
+        }
     }
 
     private suspend fun getPreferredAutomotiveType(excludingDate: Date): TransportType {

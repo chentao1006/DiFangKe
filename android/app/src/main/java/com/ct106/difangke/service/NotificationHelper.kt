@@ -14,10 +14,12 @@ object NotificationHelper {
     const val CHANNEL_TRACKING = "channel_tracking"
     const val CHANNEL_DAILY_SUMMARY = "channel_daily_summary"
     const val CHANNEL_HIGHLIGHT = "channel_highlight"
+    const val CHANNEL_FUTURE_TRIP = "channel_future_trip"
 
     const val TRACKING_NOTIFICATION_ID = 1001
     const val DAILY_SUMMARY_NOTIFICATION_ID = 1002
     private const val HIGHLIGHT_NOTIFICATION_ID_BASE = 2000
+    private const val FUTURE_TRIP_NOTIFICATION_ID_BASE = 4000
 
     fun buildTrackingNotification(context: Context, status: String = "正在记录位置"): Notification {
         val intent = Intent(context, MainActivity::class.java)
@@ -81,5 +83,27 @@ object NotificationHelper {
 
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.notify(HIGHLIGHT_NOTIFICATION_ID_BASE + notifId, notification)
+    }
+
+    fun sendFutureTripReminder(context: Context, tripID: String, title: String, body: String) {
+        val requestCode = tripID.hashCode()
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pi = PendingIntent.getActivity(
+            context, requestCode, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(context, CHANNEL_FUTURE_TRIP)
+            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setAutoCancel(true)
+            .setContentIntent(pi)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.notify(FUTURE_TRIP_NOTIFICATION_ID_BASE + kotlin.math.abs(requestCode % 1000), notification)
     }
 }

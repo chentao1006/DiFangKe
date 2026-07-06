@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- AI 服务相关配置 (私密信息请在 Secrets.plist 中配置) -->
+	<key>SERVICE_SECRET</key>
+	<string></string>
+	<key>PUBLIC_SERVICE_URL</key>
+	<string></string>
+	<key>AI_LIMIT_PER_MINUTE</key>
+	<integer>1</integer>
+	<key>AI_LIMIT_PER_HOUR</key>
+	<integer>30</integer>
+	<key>AI_LIMIT_PER_DAY</key>
+	<integer>100</integer>
+
+	<!-- App Group ID for data sharing between App and Widget -->
+	<key>APP_GROUP_ID</key>
+	<string>group.com.ct106.difangke</string>
+
+	<!-- 统计服务相关配置 (私密信息请在 Secrets.plist 中配置) -->
+	<key>APTABASE_APP_KEY</key>
+	<string></string>
+
+    <!-- 停留识别的距离阈值（米） -->
+    <key>STAY_DISTANCE_THRESHOLD</key>
+    <real>100</real>
+
+    <!-- 两个足迹合并的最大直线距离门槛（米） -->
+    <key>MERGE_DISTANCE_THRESHOLD</key>
+    <real>150</real>
+
+    <!-- 两个足迹合并的最大时间间隔（秒），在防切碎和保留短途交通间取得平衡 -->
+    <key>STAY_MERGE_GAP_THRESHOLD</key>
+    <real>1800</real>
+
+    <!-- 停留识别的最短时间（秒）：调整到 5 分钟，平衡识别率与红灯误判 -->
+    <key>STAY_DURATION_THRESHOLD</key>
+    <real>300</real>
+
+    <!-- 交通生成最低位移（米）：确保穿过过个街区才识交通 -->
+    <key>TRANSPORT_MIN_DISTANCE_THRESHOLD</key>
+    <real>300</real>
+
+    <!-- 交通生成最低时长（秒）：防止短时信号跳变触发交通 -->
+    <key>TRANSPORT_MIN_DURATION_THRESHOLD</key>
+    <real>300</real>
+
+    <!-- 缺口自动填充阈值（秒）：当数据中断时间长于此值时尝试桥接 -->
+    <key>GAP_FILLING_THRESHOLD</key>
+    <real>300</real>
+
+    <!-- 足迹习惯分析的时间窗口（分钟） -->
+    <key>HABIT_TIME_WINDOW_MINUTES</key>
+    <integer>120</integer>
+
+    <!-- 判定为“习惯地点”所需的历史重复次数 -->
+    <key>HABIT_FREQUENCY_THRESHOLD</key>
+    <integer>3</integer>
+    
+    <!-- 实时追踪合并/识别阈值 -->
+    <key>LIVE_STAY_MERGE_TIME_THRESHOLD</key>
+    <real>1200</real>
+    <key>LIVE_STAY_MERGE_DISTANCE_THRESHOLD</key>
+    <real>100</real>
+    <key>LIVE_STAY_MIN_DURATION_THRESHOLD</key>
+    <real>360</real>
+    
+    <!-- 速度门槛：低于此值（km/h）判定为静止 -->
+    <key>SPEED_THRESHOLD_STATIONARY</key>
+    <real>0.5</real>
+    
+    <!-- 判定为室内漂移的路程与直径比值超过此值判定为原地漂移 -->
+    <key>DRIFT_RATIO_THRESHOLD</key>
+    <real>2.5</real>
+
+    <!-- 轨迹提取时的 GPS 精度过滤门槛（米） -->
+    <key>MAX_GPS_ACCURACY_FILTER</key>
+    <real>300</real>
+
+    <!-- 交通段强制打断的时间缺口（秒） -->
+    <key>TRANSPORT_GAP_BREAK_THRESHOLD</key>
+    <real>1800</real>
+
+    <!-- 交通探测段最低时长（秒） -->
+    <key>TRANSPORT_DETECTION_SEGMENT_DURATION</key>
+    <real>60</real>
+
+    <!-- 静止判定直径门槛（米） -->
+    <key>STATIONARY_DIAMETER_THRESHOLD</key>
+    <real>200</real>
+
+    <!-- 静止状态跳出判定的位移门槛（米） -->
+    <key>STAY_EXIT_DISTANCE_THRESHOLD</key>
+    <real>250</real>
+
+    <!-- 静止探测所需最小点数 -->
+    <key>STATIONARY_DETECTION_MIN_POINTS</key>
+    <integer>8</integer>
+
+    <!-- 静止探测采样频率（点数间隔） -->
+    <key>STATIONARY_DETECTION_SAMPLING_INTERVAL</key>
+    <integer>5</integer>
+
+    <!-- 静止探测滑动窗口大小 -->
+    <key>STATIONARY_DETECTION_WINDOW_SIZE</key>
+    <integer>20</integer>
+
+    <!-- 静止探测所需最短时长（秒） -->
+    <key>STATIONARY_DETECTION_DURATION_THRESHOLD</key>
+    <real>480</real>
+
+    <!-- 静止探测最大允许直径（米） -->
+    <key>STATIONARY_DETECTION_MAX_DIAMETER</key>
+    <real>400</real>
+
+    <!-- 交通类型检测所需最小点数 -->
+    <key>TRANSPORT_TYPE_DETECTION_MIN_POINTS</key>
+    <integer>8</integer>
+
+    <!-- 交通类型检测采样频率（点数间隔） -->
+    <key>TRANSPORT_TYPE_DETECTION_SAMPLING_INTERVAL</key>
+    <integer>3</integer>
+
+    <!-- 交通类型滑动窗口大小 -->
+    <key>TRANSPORT_TYPE_WINDOW_SIZE</key>
+    <integer>10</integer>
+
+    <!-- 交通类型窗口最小有效点数 -->
+    <key>TRANSPORT_TYPE_WINDOW_MIN_POINTS</key>
+    <integer>6</integer>
+
+    <!-- 交通类型变更判定最短时长（秒） -->
+    <key>TRANSPORT_TYPE_CHANGE_DURATION_THRESHOLD</key>
+    <real>180</real>
+
+    <!-- 交通结算最小距离（米） -->
+    <key>TRANSPORT_FINALIZE_MIN_DISTANCE</key>
+    <real>150</real>
+
+    <!-- 交通结算最小点数 -->
+    <key>TRANSPORT_FINALIZE_MIN_POINTS</key>
+    <integer>3</integer>
+
+    <!-- 同一重要地点合并的时间间隔上限（秒）：下调至 600 秒（10分钟） -->
+    <key>SAME_PLACE_MERGE_GAP_THRESHOLD</key>
+    <real>3600</real>
+    
+    <!-- 触发缺口填充的最小间隙时间（秒） -->
+    <key>GAP_MIN_DURATION_THRESHOLD</key>
+    <real>30</real>
+
+    <!-- 交通对齐阈值（秒） -->
+    <key>TRANSPORT_ALIGNMENT_THRESHOLD</key>
+    <real>1200</real>
+
+    <!-- 算法微调参数 -->
+    <key>MIN_STAY_DURATION_CORRECTION</key>
+    <real>60</real>
+    <key>TINY_STAY_THRESHOLD</key>
+    <real>5</real>
+    <key>ONGOING_STAY_GRACE_PERIOD</key>
+    <real>120</real>
+    <key>SNAP_TIME_BUFFER</key>
+    <real>60</real>
+    <key>DUPLICATE_POINT_BUFFER</key>
+    <real>1</real>
+    <key>MID_POINT_SAMPLING_OFFSET</key>
+    <real>10</real>
+    <key>HABIT_ANALYSIS_LOOKBACK_DAYS</key>
+    <integer>7</integer>
+
+    <!-- 离谱点过滤阈值 -->
+    <key>RIDICULOUS_ACCURACY_THRESHOLD</key>
+    <real>500</real>
+    <key>RIDICULOUS_DISTANCE_THRESHOLD</key>
+    <real>2000</real>
+    <key>RIDICULOUS_SPEED_THRESHOLD</key>
+    <real>100</real>
+
+    <!-- 定位回溯参数 -->
+    <key>LOCATION_LOOKBACK_HOURS</key>
+    <real>2</real>
+    <key>LOCATION_LOOKBACK_MAX_HOURS</key>
+    <real>24</real>
+
+    <!-- 漂移探测参数 -->
+    <key>DRIFT_SPEED_THRESHOLD</key>
+    <real>45</real>
+    <key>DRIFT_SPEED_MAX_POSSIBLE</key>
+    <real>60</real>
+    <key>DRIFT_ACCURACY_THRESHOLD</key>
+    <real>65</real>
+    <key>DRIFT_DISTANCE_GAP</key>
+    <real>300</real>
+
+    <!-- 同步与业务逻辑参数 -->
+    <key>CLOUD_SYNC_LOOKBACK_DAYS</key>
+    <integer>7</integer>
+    <key>TAG_INHERITANCE_DISTANCE</key>
+    <real>150</real>
+    <key>TIMELINE_OVERLAP_TIME_TOLERANCE</key>
+    <real>60</real>
+    <key>TIMELINE_OVERLAP_DISTANCE_TOLERANCE</key>
+    <real>200</real>
+    <key>UI_DEBOUNCE_INTERVAL_NS</key>
+    <integer>400000000</integer>
+    <key>GAP_FILLING_MAX_DISTANCE</key>
+    <real>300</real>
+    <key>HABIT_ANALYSIS_ACCURACY_THRESHOLD</key>
+    <real>300</real>
+    <key>MAX_SYNTHESIZED_TRANSPORT_DURATION</key>
+    <real>3600</real>
+    <!-- 离谱交通速度阈值（m/s）：超过此值判定为 GPS 跳变而非真实移动。 -->
+    <!-- 100 m/s = 360 km/h (高铁极限)；300 m/s 约为飞机巡航速度。 -->
+    <key>RIDICULOUS_TRANSPORT_SPEED_THRESHOLD</key>
+    <real>350</real>
+
+    <!-- 交通速度合理性校验时长阈值（秒）：在此时间内的极高速度会被判定为离谱数据。 -->
+    <key>TRANSPORT_SPEED_SANITY_CHECK_DURATION</key>
+    <real>120</real>
+
+    <!-- 交通最大合理速度（m/s）：配合校验时长使用。例如 2 分钟内速度超过 150km/h (42m/s) 判定为离谱。 -->
+    <key>TRANSPORT_MAX_REASONABLE_SPEED</key>
+    <real>42</real>
+
+    <!-- 交通最大时间缺口（秒） -->
+    <key>TRANSPORT_MAX_GAP_THRESHOLD</key>
+    <real>1800</real>
+    <key>SAME_PLACE_MERGE_BONUS_THRESHOLD</key>
+    <real>500</real>
+    <key>PHYSICAL_MAX_SPEED_THRESHOLD</key>
+    <real>600</real>
+
+    <!-- syncDay 最短重复执行间隔（秒）：防止今日时间线每次 onAppear 都触发全量重建导致卡顿 -->
+    <key>SYNC_THROTTLE_INTERVAL</key>
+    <real>30</real>
+
+    <!-- 照片关联的最大搜索半径（米） -->
+    <key>PHOTO_LINKING_MAX_DISTANCE</key>
+    <real>1500</real>
+</dict>
+</plist>

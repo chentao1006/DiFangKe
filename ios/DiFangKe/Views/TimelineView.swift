@@ -149,6 +149,8 @@ private struct ContinuousTimelineView: View {
     @State private var hiddenTimelineDateSet = Set<Date>()
     @State private var visibleTimelineFillTask: Task<Void, Never>?
     @State private var midnightTimelineRefreshTask: Task<Void, Never>?
+    @State private var mapInteractionEnableTask: Task<Void, Never>?
+    @State private var selectedFootprintPhotoFetchTask: Task<Void, Never>?
     @State private var selectedFootprint: Footprint?
     @State private var selectedFutureTripDetail: FutureTrip?
     @State private var selectedTransport: Transport?
@@ -461,6 +463,12 @@ private struct ContinuousTimelineView: View {
         }
         .onDisappear {
             midnightTimelineRefreshTask?.cancel()
+            visibleMapUpdateTask?.cancel()
+            visibleTimelineFillTask?.cancel()
+            mapCameraTransitionTask?.cancel()
+            mapInteractionEnableTask?.cancel()
+            selectedFootprintPhotoFetchTask?.cancel()
+            selectedFootprintPhotos = []
         }
         .task { await loadInitialTimeline() }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
@@ -610,9 +618,10 @@ private struct ContinuousTimelineView: View {
             focusMap(on: footprint)
         }
         refreshVisibleTimelineMap(delayNanoseconds: 0)
+        selectedFootprintPhotoFetchTask?.cancel()
         if let footprint = newFootprint {
             timelineDetent = .medium
-            Task {
+            selectedFootprintPhotoFetchTask = Task { @MainActor in
                 let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: footprint.photoAssetIDs, options: nil)
                 var assets: [PHAsset] = []
                 fetchResult.enumerateObjects { asset, _, _ in
@@ -620,9 +629,8 @@ private struct ContinuousTimelineView: View {
                         assets.append(asset)
                     }
                 }
-                await MainActor.run {
-                    selectedFootprintPhotos = assets
-                }
+                guard !Task.isCancelled else { return }
+                selectedFootprintPhotos = assets
             }
         } else {
             selectedFootprintPhotos = []
@@ -690,8 +698,10 @@ private struct ContinuousTimelineView: View {
 
     private func enableMapInteractionCollapseAfterInitialLayout() {
         allowsMapInteractionCollapse = false
-        Task { @MainActor in
+        mapInteractionEnableTask?.cancel()
+        mapInteractionEnableTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard !Task.isCancelled else { return }
             allowsMapInteractionCollapse = true
         }
     }

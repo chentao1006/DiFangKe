@@ -61,9 +61,9 @@ fun HistoryScreen(
     val allPlaces by viewModel.allPlaces.collectAsState()
     
     val scope = rememberCoroutineScope()
-    val pagerState = rememberPagerState(pageCount = { 3 })
+    val pagerState = rememberPagerState(pageCount = { 2 })
     
-    val tabs = listOf("周", "月", "收藏")
+    val tabs = listOf("月", "收藏")
 
     val isDark = isSystemInDarkTheme()
     val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
@@ -121,9 +121,8 @@ fun HistoryScreen(
                 verticalAlignment = Alignment.Top
             ) { page ->
                 when (page) {
-                    0 -> HistoryWeekView(summaries, onDateSelected, { viewModel.rebuildTimeline(it) }, onNavigateToRawPoints)
-                    1 -> HistoryMonthView(summaries, onDateSelected, { viewModel.rebuildTimeline(it) }, onNavigateToRawPoints)
-                    2 -> HistoryFavoritesView(
+                    0 -> HistoryMonthView(summaries, onDateSelected, { viewModel.rebuildTimeline(it) }, onNavigateToRawPoints)
+                    1 -> HistoryFavoritesView(
                         favorites = favoriteFootprints,
                         activityTypes = activityTypes,
                         allPlaces = allPlaces,

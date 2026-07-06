@@ -212,28 +212,34 @@ data class Transport(
 sealed class TimelineItem {
     data class FootprintItem(val footprint: com.ct106.difangke.data.db.entity.FootprintEntity) : TimelineItem()
     data class TransportItem(val transport: com.ct106.difangke.data.db.entity.TransportRecordEntity) : TimelineItem()
+    data class FutureTripItem(val trip: com.ct106.difangke.data.db.entity.FutureTripEntity) : TimelineItem()
 
     val startTime: java.util.Date get() = when (this) {
         is FootprintItem -> footprint.startTime
         is TransportItem -> transport.startTime
+        is FutureTripItem -> trip.effectiveArrivalDate()
     }
     val endTime: java.util.Date get() = when (this) {
         is FootprintItem -> footprint.endTime
         is TransportItem -> transport.endTime
+        is FutureTripItem -> trip.effectiveArrivalDate()
     }
     val id: String get() = when (this) {
         is FootprintItem -> "f_${footprint.footprintID}"
         is TransportItem -> "t_${transport.recordID}"
+        is FutureTripItem -> "trip_${trip.tripID}"
     }
     
     val latitude: Double get() = when (this) {
         is FootprintItem -> footprint.representativeLatitude
         is TransportItem -> transport.startLatitude
+        is FutureTripItem -> trip.latitude
     }
     
     val longitude: Double get() = when (this) {
         is FootprintItem -> footprint.representativeLongitude
         is TransportItem -> transport.startLongitude
+        is FutureTripItem -> trip.longitude
     }
 }
 

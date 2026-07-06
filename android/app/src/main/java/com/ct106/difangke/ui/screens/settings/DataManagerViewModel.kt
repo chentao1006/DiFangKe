@@ -79,6 +79,7 @@ class DataManagerViewModel(application: Application) : AndroidViewModel(applicat
             withContext(Dispatchers.IO) {
                 db.footprintDao().deleteAll()
                 db.placeDao().deleteAll()
+                db.futureTripDao().deleteAll()
             }
             _isProcessing.value = false
         }

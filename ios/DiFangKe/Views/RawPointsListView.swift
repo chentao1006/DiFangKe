@@ -20,6 +20,9 @@ struct RawPointsListView: View {
     @State private var selectedIndex: Int?
     @State private var scrollTargetIndex: Int?
     @State private var positionResetTrigger = 0
+    @State private var dataVersion = 0
+    
+    // 过滤与排序选项
     @State private var exportURL: URL?
     @State private var showingShareSheet = false
     @State private var exportErrorMessage: String?
@@ -52,6 +55,7 @@ struct RawPointsListView: View {
                             RawPointsMapView(
                                 coordinates: mapCoordinates,
                                 driftCoordinates: mapDriftCoordinates,
+                                dataVersion: dataVersion,
                                 selection: mapSelection,
                                 multiSelectedCoordinates: entries.filter { selection.contains($0.originalIndex) }.map { $0.location.coordinate },
                                 recenterTrigger: positionResetTrigger,
@@ -385,6 +389,7 @@ struct RawPointsListView: View {
             suspiciousIndices = loadResult.suspiciousIndices
             mapCoordinates = loadResult.mapCoordinates
             mapDriftCoordinates = loadResult.mapDriftCoordinates
+            dataVersion += 1
         }
     }
 
@@ -406,6 +411,7 @@ struct RawPointsListView: View {
                 self.suspiciousIndices = loadResult.suspiciousIndices
                 self.mapCoordinates = loadResult.mapCoordinates
                 self.mapDriftCoordinates = loadResult.mapDriftCoordinates
+                self.dataVersion += 1
                 
                 self.isSelecting = false
                 self.selection.removeAll()
@@ -650,6 +656,7 @@ private struct RawPointsMapView: UIViewRepresentable {
 
     let coordinates: [CLLocationCoordinate2D]
     let driftCoordinates: [CLLocationCoordinate2D]
+    let dataVersion: Int
     let selection: RawPointsMapSelection
     let multiSelectedCoordinates: [CLLocationCoordinate2D]
     let recenterTrigger: Int
@@ -973,6 +980,9 @@ private struct RawPointsMapView: UIViewRepresentable {
             let first = pathCoordinates.first
             let last = pathCoordinates.last
             return [
+                "\(parent.dataVersion)",
+                "\(parent.coordinates.count)",
+                "\(parent.driftCoordinates.count)",
                 "\(pathCoordinates.count)",
                 "\(driftCoordinates.count)",
                 first.map { "\($0.latitude),\($0.longitude)" } ?? "",

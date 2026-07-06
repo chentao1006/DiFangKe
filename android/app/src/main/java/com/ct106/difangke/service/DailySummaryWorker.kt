@@ -102,7 +102,7 @@ class DailySummaryWorker(
                 return Result.success()
             }
 
-            val footprintCount = todayFootprints.map { it.title.ifEmpty { it.locationHash } }.distinct().size
+            val footprintCount = todayFootprints.map { (it.title ?: "").ifEmpty { it.locationHash } }.distinct().size
             val totalDurationMin = todayFootprints.sumOf { 
                 (it.endTime.time - it.startTime.time) 
             } / 60000

@@ -98,7 +98,7 @@ android {
     compileSdk = 36
     ndkVersion = requiredNdkVersion
 
-    // 从源码 AppConfig.kt 中动态读取配置的函数
+    // 从源码 AppConfig.kt 中动态读取配置的函数 (保留用于其它配置如果需要)
     fun readConfigValue(key: String): String {
         val configFile = file("src/main/java/com/ct106/difangke/AppConfig.kt")
         if (!configFile.exists()) return ""
@@ -133,8 +133,13 @@ android {
             abiFilters.add("arm64-v8a")
         }
 
-        // 地图 Key 配置：直接从 AppConfig.kt 源码中读取，确保单一事实来源
-        manifestPlaceholders["AMAP_KEY"] = readConfigValue("AMAP_REST_KEY")
+        // 地图 Key 配置：直接从 local.properties 读取，避免泄露
+        manifestPlaceholders["AMAP_KEY"] = localProperties.getProperty("AMAP_REST_KEY") ?: ""
+        
+        buildConfigField("String", "SERVICE_SECRET", "\"${localProperties.getProperty("SERVICE_SECRET") ?: ""}\"")
+        buildConfigField("String", "PUBLIC_SERVICE_URL", "\"${localProperties.getProperty("PUBLIC_SERVICE_URL") ?: ""}\"")
+        buildConfigField("String", "AMAP_REST_KEY", "\"${localProperties.getProperty("AMAP_REST_KEY") ?: ""}\"")
+        buildConfigField("String", "APTABASE_APP_KEY", "\"${localProperties.getProperty("APTABASE_APP_KEY") ?: ""}\"")
     }
 
     signingConfigs {
@@ -178,7 +183,7 @@ android {
 
     buildFeatures {
         compose = true
-        buildConfig = false
+        buildConfig = true
     }
 
     packaging {

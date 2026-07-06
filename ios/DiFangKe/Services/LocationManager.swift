@@ -392,7 +392,7 @@ final class RawLocationStore {
             
             // 异步回主线程通知更新
             DispatchQueue.main.async {
-                NotificationCenter.default.post(name: NSNotification.Name("RawLocationDataDeleted"), object: nil, userInfo: ["date": date])
+                NotificationCenter.default.post(name: NSNotification.Name("RawLocationDataDeleted"), object: nil, userInfo: ["date": date, "deletedTimestamps": [timestamp]])
             }
         }
     }
@@ -433,7 +433,7 @@ final class RawLocationStore {
             }
             
             DispatchQueue.main.async {
-                NotificationCenter.default.post(name: NSNotification.Name("RawLocationDataDeleted"), object: nil, userInfo: ["date": date])
+                NotificationCenter.default.post(name: NSNotification.Name("RawLocationDataDeleted"), object: nil, userInfo: ["date": date, "deletedTimestamps": Array(timestamps)])
             }
         }
     }
@@ -986,15 +986,30 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var lastMovingEvidenceTime: Date = .distantPast
     
     var trackingPoints: [CLLocation] = [] // 用于足迹识别的内存滑动窗口
+    private var allTodayCoordinatesUpdateTask: Task<Void, Never>?
+    private var lastAllTodayCoordinatesUpdateAt: Date = .distantPast
     var allTodayPoints: [CLLocation] = [] { // 本日流水缓存，从 RawLocationStore 加载
         didSet {
-            // 当流水更新时，异步计算缓存坐标系，并进行抽稀以保证 UI 流畅
             let points = allTodayPoints
-            Task.detached(priority: .background) {
+            allTodayCoordinatesUpdateTask?.cancel()
+            let now = Date()
+            let delay: UInt64 = now.timeIntervalSince(lastAllTodayCoordinatesUpdateAt) < 10
+                ? 2_000_000_000
+                : 200_000_000
+
+            allTodayCoordinatesUpdateTask = Task { [weak self, points] in
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+                guard !Task.isCancelled else { return }
                 let coords = points.map { $0.coordinate }
-                let simplified = LocationManager.simplifyCoordinates(coords, tolerance: 0.00005) // 约 5 米精度抽稀
+                let simplified = await Task.detached(priority: .utility) {
+                    LocationManager.simplifyCoordinates(coords, tolerance: 0.00005)
+                }.value
                 await MainActor.run {
-                    self.allTodayCoordinates = simplified
+                    guard !Task.isCancelled, self?.allTodayPoints.count == points.count else { return }
+                    self?.allTodayCoordinates = simplified
+                    self?.lastAllTodayCoordinatesUpdateAt = Date()
                 }
             }
         }
@@ -1098,6 +1113,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var refreshTimer: AnyCancellable?
     private var locationWatchdogTimer: AnyCancellable?
     private var lastStationaryProbeTime: Date = .distantPast
+    private var lastStartTrackingAt: Date = .distantPast
+    private var lastStartTrackingLocationRequestAt: Date = .distantPast
     
     override init() {
         super.init()
@@ -1212,8 +1229,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     }
                 }
                 
-                // 触动全局 UI 刷新
-                self.lastRawDataUpdateTrigger = Date()
+                let timestamps = notification.userInfo?["deletedTimestamps"] as? [Double] ?? []
+                
+                // 触发后台智能重建这天受影响的交通
+                self.rebuildAffectedTimeline(for: date, deletedTimestamps: timestamps)
             }
             .store(in: &cancellables)
             
@@ -1588,15 +1607,28 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             return
         }
 
-        locationManager.requestAlwaysAuthorization()
-        
-        // Re-enable updates if they were stopped
-        locationManager.startUpdatingLocation()
-        locationManager.startMonitoringSignificantLocationChanges()
+        if locationManager.authorizationStatus != .authorizedAlways {
+            locationManager.requestAlwaysAuthorization()
+        }
+
+        let now = Date()
+        let shouldRestartUpdates = !isTracking || now.timeIntervalSince(lastStartTrackingAt) > 30
+        if shouldRestartUpdates {
+            locationManager.startUpdatingLocation()
+            locationManager.startMonitoringSignificantLocationChanges()
+            locationManager.startMonitoringVisits()
+            lastStartTrackingAt = now
+        } else {
+            locationManager.startMonitoringSignificantLocationChanges()
+        }
         isTracking = true
         
-        // On app open, force a fresh high-accuracy location fix
-        locationManager.requestLocation() // This will trigger a one-time precise update
+        // On app open, ask for a fresh fix, but do not let repeated lifecycle hooks
+        // keep waking the GPS chip and heating the device.
+        if now.timeIntervalSince(lastStartTrackingLocationRequestAt) > 60 {
+            locationManager.requestLocation()
+            lastStartTrackingLocationRequestAt = now
+        }
         
         // 启动/回到前台只恢复定位，不重整已保存的时间线。startTracking() 会在
         // 每次启动和 scene active 时调用；在这里清理、合并或回填历史数据会让
@@ -3868,6 +3900,51 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         try? context.save()
     }
     
+    /// 智能重构：仅删除受影响（包含被删时间戳）的交通记录，并重新填补空缺，不影响当天的其他足迹和交通。
+    @MainActor
+    func rebuildAffectedTimeline(for date: Date, deletedTimestamps: [Double]) {
+        guard let context = modelContext, !deletedTimestamps.isEmpty else { return }
+
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+
+        Task {
+            // 找出所有在范围内的 TransportRecord
+            let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                $0.startTime < endOfDay && $0.endTime > startOfDay
+            })
+            
+            var anyDeleted = false
+            if let tps = try? context.fetch(tpDesc) {
+                for tp in tps {
+                    for ts in deletedTimestamps {
+                        let pointDate = Date(timeIntervalSince1970: ts)
+                        // 如果删除的原始点时间落在该交通段内
+                        if pointDate >= tp.startTime && pointDate <= tp.endTime {
+                            tp.statusRaw = "ignored"
+                            anyDeleted = true
+                            break
+                        }
+                    }
+                }
+            }
+            
+            if anyDeleted {
+                try? context.save()
+                
+                // 仅填补被删除交通段产生的空白（同步当天的其余轨迹，并保留原有不变的）
+                await PersistentTimelineBuilder.syncDay(date: date, in: context)
+                
+                await MainActor.run {
+                    self.lastRawDataUpdateTrigger = Date()
+                    NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                    Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
+                }
+            }
+        }
+    }
+
     /// 重置并重新生成指定日期的足迹数据
     @MainActor
     func resetData(for date: Date) {

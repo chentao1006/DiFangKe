@@ -162,7 +162,7 @@ class OpenAIService private constructor() {
         placeName: String? = null,
         activityName: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
-        if (fp.aiAnalyzed || FootprintTitles.isGeneric(fp.title)) return@withContext false
+        if (fp.aiAnalyzed || FootprintTitles.isGeneric(fp.title ?: "")) return@withContext false
 
         val startStr = TIME_FMT.format(fp.startTime)
         val endStr = TIME_FMT.format(fp.endTime)

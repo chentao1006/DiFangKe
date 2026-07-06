@@ -1372,6 +1372,30 @@ class PersistentTimelineBuilder {
         return bikeCount >= ebikeCount ? .bicycle : .ebike
     }
 
+    private static func fetchDeletedTransportRanges(from start: Date, to end: Date, in context: ModelContext) -> [(start: Date, end: Date)] {
+        let descriptor = FetchDescriptor<TransportManualSelection>(
+            predicate: #Predicate<TransportManualSelection> {
+                $0.isDeleted && $0.startTime < end && $0.endTime > start
+            }
+        )
+        return ((try? context.fetch(descriptor)) ?? []).map { ($0.startTime, $0.endTime) }
+    }
+
+    private static func overlapsDeletedTransportOverride(start: Date, end: Date, deletedRanges: [(start: Date, end: Date)]) -> Bool {
+        guard end > start else { return false }
+        return deletedRanges.contains { range in
+            let overlapStart = max(start, range.start)
+            let overlapEnd = min(end, range.end)
+            guard overlapEnd > overlapStart else { return false }
+
+            let overlapDuration = overlapEnd.timeIntervalSince(overlapStart)
+            let candidateDuration = end.timeIntervalSince(start)
+            let deletedDuration = range.end.timeIntervalSince(range.start)
+            let minDuration = max(1, min(candidateDuration, deletedDuration))
+            return overlapDuration > 300 || overlapDuration >= minDuration * 0.3
+        }
+    }
+
     @MainActor
     static func syncDay(date: Date, in context: ModelContext, runConsolidation: Bool = true) async {
         let calendar = Calendar.current
@@ -1462,6 +1486,7 @@ class PersistentTimelineBuilder {
             $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue == "ignored"
         })
         let ignoredFps = (try? context.fetch(ignoredFpDesc)) ?? []
+        let deletedTransportRanges = fetchDeletedTransportRanges(from: startOfDay, to: endOfDay, in: context)
         
         let filteredGaps = gaps.filter { gap in
             let overlapsIgnored = ignoredFps.contains { ignored in
@@ -1474,7 +1499,7 @@ class PersistentTimelineBuilder {
                 }
                 return false
             }
-            return !overlapsIgnored
+            return !overlapsIgnored && !overlapsDeletedTransportOverride(start: gap.start, end: gap.end, deletedRanges: deletedTransportRanges)
         }
 
         for gap in filteredGaps {
@@ -1489,7 +1514,14 @@ class PersistentTimelineBuilder {
             }
             
             if gapPoints.count >= 2 {
-                await processPoints(points: gapPoints.sorted(by: { $0.timestamp < $1.timestamp }), date: date, context: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
+                await processPoints(
+                    points: gapPoints.sorted(by: { $0.timestamp < $1.timestamp }),
+                    date: date,
+                    context: context,
+                    preferredAuto: preferredAuto,
+                    preferredCycling: preferredCycling,
+                    deletedTransportRanges: deletedTransportRanges
+                )
             }
         }
         
@@ -1600,6 +1632,7 @@ class PersistentTimelineBuilder {
         
         let tps = (try? context.fetch(descriptor)) ?? []
         guard tps.count >= 2 else { return }
+        let deletedTransportRanges = fetchDeletedTransportRanges(from: startOfDay, to: endOfDay, in: context)
         
         var i = 0
         while i < tps.count - 1 {
@@ -1640,7 +1673,12 @@ class PersistentTimelineBuilder {
             let isCompatible = getCategory(currentType) == getCategory(nextType)
             
             // If they are less than 15 minutes apart and no footprint in between, merge them!
-            if gap >= -60 && gap <= 900 && !hasFpBetween && isCompatible {
+            let crossesDeletedTransport = overlapsDeletedTransportOverride(
+                start: min(current.startTime, next.startTime),
+                end: max(current.endTime, next.endTime),
+                deletedRanges: deletedTransportRanges
+            )
+            if gap >= -60 && gap <= 900 && !hasFpBetween && isCompatible && !crossesDeletedTransport {
                 current.endTime = max(current.endTime, next.endTime)
                 current.distance += next.distance
                 let duration = current.endTime.timeIntervalSince(current.startTime)
@@ -1753,6 +1791,7 @@ class PersistentTimelineBuilder {
         let tps = (try? context.fetch(tpDesc)) ?? []
         
         guard !fps.isEmpty || !tps.isEmpty else { return }
+        let deletedTransportRanges = fetchDeletedTransportRanges(from: startOfDay, to: endOfDay, in: context)
         
         struct OccupiedRange {
             let start: Date
@@ -1807,6 +1846,10 @@ class PersistentTimelineBuilder {
             let duration = gapEnd.timeIntervalSince(gapStart)
             
             if duration > 120 { // More than 2 minutes gap
+                if overlapsDeletedTransportOverride(start: gapStart, end: gapEnd, deletedRanges: deletedTransportRanges) {
+                    continue
+                }
+
                 let loc1 = CLLocation(latitude: current.endLoc.latitude, longitude: current.endLoc.longitude)
                 let loc2 = CLLocation(latitude: next.startLoc.latitude, longitude: next.startLoc.longitude)
                 let straightDist = loc1.distance(from: loc2)
@@ -1851,7 +1894,9 @@ class PersistentTimelineBuilder {
 
                 // 使用配置中的阈值。核心修复：桥接缝隙优先依靠轨迹点，但对于飞机/高铁等长距离跨度，允许凭空合成交通
                 let isLongDistance = pathDist > 50_000 // 50公里以上允许无点合成
-                if (!gapPoints.isEmpty || isLongDistance) && pathDist > AppConfig.shared.transportMinDistanceThreshold {
+                if (!gapPoints.isEmpty || isLongDistance)
+                    && pathDist > AppConfig.shared.transportMinDistanceThreshold
+                    && !overlapsDeletedTransportOverride(start: actualStartTime, end: actualEndTime, deletedRanges: deletedTransportRanges) {
                     let ptsData = (try? JSONEncoder().encode(pts)) ?? Data()
                     let speed = pathDist / duration
                     let currentLocName = current.endName
@@ -2355,7 +2400,14 @@ class PersistentTimelineBuilder {
     }
     
     @MainActor
-    private static func processPoints(points: [CLLocation], date: Date, context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle) async {
+    private static func processPoints(
+        points: [CLLocation],
+        date: Date,
+        context: ModelContext,
+        preferredAuto: TransportType = .car,
+        preferredCycling: TransportType = .bicycle,
+        deletedTransportRanges: [(start: Date, end: Date)] = []
+    ) async {
         guard points.count >= 2 else { return }
         
         let startOfDay = Calendar.current.startOfDay(for: date)
@@ -2506,6 +2558,10 @@ class PersistentTimelineBuilder {
                 if transportPoints.count >= 2 {
                     let tStart = transportPoints.first!.timestamp
                     let tEnd = transportPoints.last!.timestamp
+                    if overlapsDeletedTransportOverride(start: tStart, end: tEnd, deletedRanges: deletedTransportRanges) {
+                        i = k
+                        continue
+                    }
                     let coords = transportPoints.map { $0.coordinate }
                     let codableCoords = transportPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) }
                     let diameter = TimelineBuilder.calculateMaxDiameter(coords)
@@ -2636,7 +2692,10 @@ class PersistentTimelineBuilder {
         guard !isResolving else { return }
         isResolving = true
         
-        Task {
+        let container = context.container
+        
+        Task.detached {
+            let bgContext = ModelContext(container)
             let lookback = Double(AppConfig.shared.habitAnalysisLookbackDays)
             let sevenDaysAgo = Date().addingTimeInterval(-lookback * 24 * 3600)
             
@@ -2644,7 +2703,7 @@ class PersistentTimelineBuilder {
             let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
                 $0.startTime > sevenDaysAgo
             })
-            let recentFps = (try? context.fetch(fpDesc)) ?? []
+            let recentFps = (try? bgContext.fetch(fpDesc)) ?? []
             let pendingFps = recentFps.filter { 
                 $0.address == nil || $0.address == ""
             }.sorted { $0.startTime > $1.startTime }
@@ -2653,7 +2712,7 @@ class PersistentTimelineBuilder {
             let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
                 $0.startTime > sevenDaysAgo
             })
-            let recentTps = (try? context.fetch(tpDesc)) ?? []
+            let recentTps = (try? bgContext.fetch(tpDesc)) ?? []
             let pendingTps = recentTps.filter {
                 $0.startLocation == "起点" || $0.endLocation == "终点" || $0.startLocation == "正在获取位置..."
             }
@@ -2664,7 +2723,7 @@ class PersistentTimelineBuilder {
                 let addr = await resolveSingleAddress(coordinate: coord)
                 if !addr.isEmpty {
                     fp.address = addr
-                    try? context.save()
+                    try? bgContext.save()
                 }
                 try? await Task.sleep(nanoseconds: 500_000_000) // 每 0.5 秒查一个
             }
@@ -2684,14 +2743,17 @@ class PersistentTimelineBuilder {
                         tp.endLocation = await resolveSingleAddress(coordinate: coord)
                     }
                 }
-                try? context.save()
+                try? bgContext.save()
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
             
-            isResolving = false
+            await MainActor.run {
+                isResolving = false
+            }
         }
     }
 
+    @MainActor
     private static func resolveAddresses(for date: Date, in context: ModelContext) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -2707,7 +2769,7 @@ class PersistentTimelineBuilder {
             let coord = CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
             let addr = await resolveSingleAddress(coordinate: coord)
             if !addr.isEmpty {
-                await MainActor.run { fp.address = addr }
+                fp.address = addr
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
@@ -2724,7 +2786,7 @@ class PersistentTimelineBuilder {
                     let coord = CLLocationCoordinate2D(latitude: first.lat, longitude: first.lon)
                     let addr = await resolveSingleAddress(coordinate: coord)
                     if !addr.isEmpty {
-                        await MainActor.run { tp.startLocation = addr }
+                        tp.startLocation = addr
                     }
                 }
                 try? await Task.sleep(nanoseconds: 500_000_000)
@@ -2734,16 +2796,14 @@ class PersistentTimelineBuilder {
                     let coord = CLLocationCoordinate2D(latitude: last.lat, longitude: last.lon)
                     let addr = await resolveSingleAddress(coordinate: coord)
                     if !addr.isEmpty {
-                        await MainActor.run { tp.endLocation = addr }
+                        tp.endLocation = addr
                     }
                 }
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
         }
         
-        await MainActor.run {
-            try? context.save()
-        }
+        try? context.save()
     }
 
     private static func resolveSingleAddress(coordinate: CLLocationCoordinate2D) async -> String {

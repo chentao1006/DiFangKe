@@ -117,6 +117,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 
                 // 请求一次精确定位，让系统知道我们仍需要位置服务
                 LocationManager.shared.requestSingleLocation()
+                await WidgetDataSyncManager.shared.syncTodayOnly()
+                await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded()
                 
                 task.setTaskCompleted(success: true)
             }
@@ -230,6 +232,10 @@ struct DiFangKeApp: App {
                                     
                                     setupDefaultData(context: context)
                                     WidgetDataSyncManager.shared.updateContainer(container)
+                                    Task {
+                                        try? await Task.sleep(nanoseconds: 8_000_000_000)
+                                        await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded()
+                                    }
                                 }
                                 .transition(.opacity)
                         }
@@ -274,6 +280,7 @@ struct DiFangKeApp: App {
                             }
                             
                             await WidgetDataSyncManager.shared.syncTodayOnly()
+                            await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded(force: true)
                             
                             if bgTask != .invalid {
                                 UIApplication.shared.endBackgroundTask(bgTask)

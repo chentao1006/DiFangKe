@@ -43,7 +43,7 @@ struct FootprintModalView: View {
     @State private var showAI = false
     @FocusState private var addressFocused: Bool
     @FocusState private var reasonFocused: Bool
-    @StateObject private var reasonState = ReasonState()
+    @State private var reasonState = ReasonState()
     var autoFocus: Bool = false
     @State private var showingDeleteAlert = false
     @State private var showAddPhotoDialog = false

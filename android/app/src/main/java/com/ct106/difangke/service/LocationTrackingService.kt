@@ -1183,13 +1183,13 @@ class LocationTrackingService : Service() {
                                                         !FootprintTitles.isGeneric(prevFp.address!!)
                                         )
                                                 prevFp.address!!
-                                        else FootprintTitles.extractLocation(prevFp.title),
+                                        else FootprintTitles.extractLocation(prevFp.title ?: ""),
                                 endLocation =
                                         if (!newFp.address.isNullOrEmpty() &&
                                                         !FootprintTitles.isGeneric(newFp.address!!)
                                         )
                                                 newFp.address!!
-                                        else FootprintTitles.extractLocation(newFp.title),
+                                        else FootprintTitles.extractLocation(newFp.title ?: ""),
                                 typeRaw = transportType.raw,
                                 distance = totalDist,
                                 averageSpeed = avgSpeed,

@@ -90,6 +90,9 @@ interface TransportManualSelectionDao {
     @Query("SELECT * FROM transport_manual_selections WHERE isDeleted = 0 ORDER BY startTime ASC")
     fun observeAll(): Flow<List<TransportManualSelectionEntity>>
 
+    @Query("SELECT * FROM transport_manual_selections WHERE isDeleted = 1 AND startTime < :end AND endTime > :start ORDER BY startTime ASC")
+    suspend fun getDeletedBetween(start: Date, end: Date): List<TransportManualSelectionEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(selection: TransportManualSelectionEntity)
 

@@ -139,7 +139,7 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     end = f.endTime,
                     lats = lats,
                     lngs = lngs,
-                    title = f.title,
+                    title = f.title ?: "",
                     reason = f.reason,
                     status = f.statusValue,
                     score = f.aiScore,

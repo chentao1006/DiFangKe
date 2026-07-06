@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ct106.difangke.DiFangKeApp
+import com.ct106.difangke.data.db.entity.TransportManualSelectionEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.model.TransportType
 import kotlinx.coroutines.flow.*
@@ -43,6 +44,15 @@ class TransportDetailViewModel(application: Application) : AndroidViewModel(appl
     fun deleteTransport() {
         val current = _transport.value ?: return
         viewModelScope.launch {
+            db.transportManualSelectionDao().insert(
+                TransportManualSelectionEntity(
+                    recordID = current.recordID,
+                    startTime = current.startTime,
+                    endTime = current.endTime,
+                    vehicleType = current.manualTypeRaw ?: current.typeRaw,
+                    isDeleted = true
+                )
+            )
             db.transportRecordDao().delete(current)
             _transport.value = null
         }

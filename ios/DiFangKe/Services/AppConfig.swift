@@ -10,12 +10,25 @@ class AppConfig {
     }
     
     private func loadConfig() {
-        guard let path = Bundle.main.path(forResource: "Config", ofType: "plist"),
-              let dict = NSDictionary(contentsOfFile: path) as? [String: Any] else {
+        var mergedConfig: [String: Any] = [:]
+        
+        // 1. 优先加载 Config.plist (公开配置)
+        if let path = Bundle.main.path(forResource: "Config", ofType: "plist"),
+           let dict = NSDictionary(contentsOfFile: path) as? [String: Any] {
+            mergedConfig.merge(dict) { (_, new) in new }
+        } else {
             print("⚠️ AppConfig: Failed to load Config.plist")
-            return
         }
-        self.config = dict
+        
+        // 2. 然后加载 Secrets.plist 并覆盖配置 (私密配置，本地开发用)
+        if let secretPath = Bundle.main.path(forResource: "Secrets", ofType: "plist"),
+           let secretDict = NSDictionary(contentsOfFile: secretPath) as? [String: Any] {
+            mergedConfig.merge(secretDict) { (_, new) in new }
+        } else {
+            print("⚠️ AppConfig: Secrets.plist not found, using Config.plist only")
+        }
+        
+        self.config = mergedConfig
     }
     
     func string(forKey key: String) -> String {

@@ -22,7 +22,7 @@ data class FootprintEntity(
     /** JSON 编码的经度数组，对应 iOS longitudeData */
     val longitudeJson: String = "[]",
     val locationHash: String = "",
-    val title: String = "",
+    val title: String? = null,
     val reason: String? = null,
     val statusValue: String = "candidate",
     val aiScore: Float = 0f,

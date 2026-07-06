@@ -10,7 +10,7 @@ final class WidgetDataSyncManager {
     static let shared = WidgetDataSyncManager()
     // Keep this in sync with the widget reader. Bump it whenever the widget
     // renderer changes so WidgetKit cannot reuse an image drawn with old rules.
-    static let snapshotFileVersion = "v11"
+    static let snapshotFileVersion = "v12"
 
     private struct AggregatedFootprintSnapshot {
         let coordinate: CLLocationCoordinate2D
@@ -18,13 +18,36 @@ final class WidgetDataSyncManager {
         let representative: Footprint
         let latestPhotoAssetID: String?
     }
+
+    private final class WidgetImageContinuation {
+        private let lock = NSLock()
+        private var didResume = false
+        private let continuation: CheckedContinuation<UIImage?, Never>
+
+        init(_ continuation: CheckedContinuation<UIImage?, Never>) {
+            self.continuation = continuation
+        }
+
+        func resume(returning image: UIImage?) {
+            lock.lock()
+            guard !didResume else {
+                lock.unlock()
+                return
+            }
+            didResume = true
+            lock.unlock()
+            continuation.resume(returning: image)
+        }
+    }
     
     private var groupID: String { AppConfig.shared.appGroupID }
     private var container: ModelContainer?
     private let todaySyncMinimumInterval: TimeInterval = 90
+    private let historySyncMinimumInterval: TimeInterval = 20 * 60
     private var lastTodaySyncAt: Date?
     private var isTodaySyncInFlight = false
     private var hasPendingTodaySync = false
+    private var isHistorySyncInFlight = false
     private var onDemandOffsetsInFlight = Set<Int>()
     
     private init() {}
@@ -46,6 +69,44 @@ final class WidgetDataSyncManager {
         
         WidgetCenter.shared.reloadAllTimelines()
         print("[WidgetSync] Sync complete.")
+    }
+
+    /// 同步过去 6 天的快照。今日快照仍走 syncTodayOnly，避免定位高频更新时重画 7 天地图。
+    func syncRecentHistoryIfNeeded(force: Bool = false) async {
+        guard !isHistorySyncInFlight else { return }
+
+        let defaults = sharedDefaults()
+        let now = Date()
+        let lastHistorySyncAt = defaults?.double(forKey: "widgetHistorySyncAt") ?? 0
+        if !force,
+           lastHistorySyncAt > 0,
+           now.timeIntervalSince1970 - lastHistorySyncAt < historySyncMinimumInterval {
+            return
+        }
+
+        isHistorySyncInFlight = true
+        defer {
+            isHistorySyncInFlight = false
+        }
+
+        ensureContainer()
+        guard container != nil else { return }
+
+        let selectedOffset = (defaults?.value(forKey: "widgetDateOffset") as? Int) ?? 0
+        var offsets: [Int] = []
+        if selectedOffset < 0 && selectedOffset >= -6 {
+            offsets.append(selectedOffset)
+        }
+        offsets.append(contentsOf: (-6 ... -1).reversed())
+
+        var seenOffsets = Set<Int>()
+        for offset in offsets where seenOffsets.insert(offset).inserted {
+            await syncData(forOffset: offset)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
+
+        defaults?.set(Date().timeIntervalSince1970, forKey: "widgetHistorySyncAt")
+        WidgetCenter.shared.reloadAllTimelines()
     }
     
     /// 仅同步今日数据 (用于位置更新等高频场景)
@@ -183,9 +244,10 @@ final class WidgetDataSyncManager {
         guard let asset = assets.firstObject else { return nil }
 
         return await withCheckedContinuation { continuation in
+            let continuationBox = WidgetImageContinuation(continuation)
             let options = PHImageRequestOptions()
-            options.isNetworkAccessAllowed = true
-            options.deliveryMode = .highQualityFormat
+            options.isNetworkAccessAllowed = false
+            options.deliveryMode = .fastFormat
             options.resizeMode = .exact
 
             PHImageManager.default().requestImage(
@@ -194,7 +256,7 @@ final class WidgetDataSyncManager {
                 contentMode: .aspectFill,
                 options: options
             ) { image, _ in
-                continuation.resume(returning: image)
+                continuationBox.resume(returning: image)
             }
         }
     }
@@ -215,6 +277,12 @@ final class WidgetDataSyncManager {
     private struct WidgetTransportLineSegment {
         let coordinates: [CLLocationCoordinate2D]
         let isDashed: Bool
+    }
+
+    private struct WidgetDecodedTransport {
+        let record: TransportRecord
+        let coordinates: [CLLocationCoordinate2D]
+        let segments: [WidgetTransportLineSegment]
     }
 
     private func widgetTransportLineSegments(from decoded: [CodableCoordinate]) -> [WidgetTransportLineSegment] {
@@ -368,6 +436,33 @@ final class WidgetDataSyncManager {
             let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
             let aggregatedFootprints = aggregatedFootprints(from: footprints)
             let footprintPhotoImages = await loadAggregatedFootprintPhotoImages(aggregatedFootprints, targetSide: 88)
+            let decodedTransports = transports.compactMap { transport -> WidgetDecodedTransport? in
+                guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
+                      !decoded.isEmpty else {
+                    return nil
+                }
+                let coordinates = decoded
+                    .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                    .filter {
+                        $0.latitude.isFinite &&
+                        $0.longitude.isFinite &&
+                        CLLocationCoordinate2DIsValid($0)
+                    }
+                return WidgetDecodedTransport(
+                    record: transport,
+                    coordinates: coordinates,
+                    segments: widgetTransportLineSegments(from: decoded)
+                )
+            }
+            let footprintCoordinates = footprints.flatMap(\.coordinates)
+            let transportCoordinates = decodedTransports.flatMap(\.coordinates)
+            let allMapCoordinates = (footprintCoordinates + transportCoordinates).filter {
+                $0.latitude.isFinite &&
+                $0.longitude.isFinite &&
+                CLLocationCoordinate2DIsValid($0)
+            }
+            let activitiesByID = Dictionary(allActivities.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { first, _ in first })
+            let activitiesByName = Dictionary(allActivities.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
             
             let defaults = sharedDefaults()
             let lastLat = defaults?.double(forKey: "lastLat") ?? 39.9042
@@ -385,24 +480,11 @@ final class WidgetDataSyncManager {
                 for theme in themes {
                     let themeName = theme == .dark ? "dark" : "light"
                     
-                    // Keep the widget framing consistent with the in-app mini map:
-                    // both footprint and transport coordinates affect the viewport.
                     let region: MKCoordinateRegion
-                    let footprintCoordinates = footprints.flatMap(\.coordinates)
-                    let transportCoordinates = transports.flatMap { transport in
-                        (try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData))?
-                            .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) } ?? []
-                    }
-                    let coords = (footprintCoordinates + transportCoordinates).filter {
-                        $0.latitude.isFinite &&
-                        $0.longitude.isFinite &&
-                        CLLocationCoordinate2DIsValid($0)
-                    }
-                    
-                    if !coords.isEmpty {
-                        var minLat = coords[0].latitude; var maxLat = coords[0].latitude
-                        var minLon = coords[0].longitude; var maxLon = coords[0].longitude
-                        for p in coords {
+                    if !allMapCoordinates.isEmpty {
+                        var minLat = allMapCoordinates[0].latitude; var maxLat = allMapCoordinates[0].latitude
+                        var minLon = allMapCoordinates[0].longitude; var maxLon = allMapCoordinates[0].longitude
+                        for p in allMapCoordinates {
                             minLat = min(minLat, p.latitude); maxLat = max(maxLat, p.latitude)
                             minLon = min(minLon, p.longitude); maxLon = max(maxLon, p.longitude)
                         }
@@ -438,43 +520,41 @@ final class WidgetDataSyncManager {
                             ctx.cgContext.setLineJoin(.round)
                             let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
                             
-                            for tr in transports {
-                                if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: tr.pointsData), !decoded.isEmpty {
-                                    let clCoords = decoded.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                            for transportSnapshot in decodedTransports {
+                                let clCoords = transportSnapshot.coordinates
 
-                                    for segment in widgetTransportLineSegments(from: decoded) {
-                                        let points = segment.coordinates.map { snapshot.point(for: $0) }
-                                        guard points.count >= 2 else { continue }
+                                for segment in transportSnapshot.segments {
+                                    let points = segment.coordinates.map { snapshot.point(for: $0) }
+                                    guard points.count >= 2 else { continue }
 
-                                        ctx.cgContext.beginPath()
-                                        ctx.cgContext.move(to: points[0])
-                                        for i in 1..<points.count { ctx.cgContext.addLine(to: points[i]) }
-                                        ctx.cgContext.setStrokeColor(
-                                            themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
-                                        )
-                                        ctx.cgContext.setLineWidth(segment.isDashed ? 1.1 : 2.5)
-                                        ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
-                                        ctx.cgContext.strokePath()
-                                    }
-                                    ctx.cgContext.setLineDash(phase: 0, lengths: [])
+                                    ctx.cgContext.beginPath()
+                                    ctx.cgContext.move(to: points[0])
+                                    for i in 1..<points.count { ctx.cgContext.addLine(to: points[i]) }
+                                    ctx.cgContext.setStrokeColor(
+                                        themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
+                                    )
+                                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.1 : 2.5)
+                                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
+                                    ctx.cgContext.strokePath()
+                                }
+                                ctx.cgContext.setLineDash(phase: 0, lengths: [])
 
-                                    if clCoords.count >= 2, let midCoord = clCoords.widgetMidpoint {
-                                        let midPoint = snapshot.point(for: midCoord)
-                                        let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
-                                        let path = UIBezierPath(ovalIn: rect)
-                                        
-                                        UIColor.systemBackground.setFill()
-                                        path.fill()
-                                        themeColor.setStroke()
-                                        path.lineWidth = 1.2
-                                        path.stroke()
+                                if clCoords.count >= 2, let midCoord = clCoords.widgetMidpoint {
+                                    let midPoint = snapshot.point(for: midCoord)
+                                    let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
+                                    let path = UIBezierPath(ovalIn: rect)
 
-                                        let transportType = TransportType(rawValue: tr.manualTypeRaw ?? tr.typeRaw) ?? .slow
-                                        if let iconImage = UIImage(systemName: transportType.sfSymbol) {
-                                            let symbolSize: CGFloat = 8
-                                            let symbolRect = CGRect(x: midPoint.x - symbolSize/2, y: midPoint.y - symbolSize/2, width: symbolSize, height: symbolSize)
-                                            iconImage.withTintColor(themeColor).drawAspectFit(in: symbolRect)
-                                        }
+                                    UIColor.systemBackground.setFill()
+                                    path.fill()
+                                    themeColor.setStroke()
+                                    path.lineWidth = 1.2
+                                    path.stroke()
+
+                                    let transportType = TransportType(rawValue: transportSnapshot.record.manualTypeRaw ?? transportSnapshot.record.typeRaw) ?? .slow
+                                    if let iconImage = UIImage(systemName: transportType.sfSymbol) {
+                                        let symbolSize: CGFloat = 8
+                                        let symbolRect = CGRect(x: midPoint.x - symbolSize/2, y: midPoint.y - symbolSize/2, width: symbolSize, height: symbolSize)
+                                        iconImage.withTintColor(themeColor).drawAspectFit(in: symbolRect)
                                     }
                                 }
                             }
@@ -487,7 +567,7 @@ final class WidgetDataSyncManager {
                                 let radius: CGFloat = 9.0
                                 let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
                                 
-                                let activity = allActivities.first { $0.id.uuidString == fp.activityTypeValue || $0.name == fp.activityTypeValue }
+                                let activity = fp.activityTypeValue.flatMap { activitiesByID[$0] ?? activitiesByName[$0] }
                                 let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
                                 let iconColor: UIColor = .white
                                 

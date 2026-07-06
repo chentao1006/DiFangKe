@@ -87,5 +87,15 @@ class DiFangKeApp : Application() {
                 description = "当发现高价值足迹时提醒您"
             }
         )
+
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                NotificationHelper.CHANNEL_FUTURE_TRIP,
+                "行程计划提醒",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "计划行程到达时间提醒"
+            }
+        )
     }
 }

@@ -151,6 +151,7 @@ class RawLocationStore private constructor(context: Context) {
                 val intent =
                         Intent("com.ct106.difangke.RAW_LOCATION_DATA_DELETED").apply {
                             putExtra("date", date.time)
+                            putExtra("deletedTimestamp", timestamp)
                         }
                 context.sendBroadcast(intent)
             }
@@ -177,6 +178,7 @@ class RawLocationStore private constructor(context: Context) {
                 file.writeText(filteredLines.joinToString("\n") + "\n")
                 val intent = Intent("com.ct106.difangke.RAW_LOCATION_DATA_DELETED").apply {
                     putExtra("date", date.time)
+                    putExtra("deletedTimestamps", timestamps.toDoubleArray())
                 }
                 context.sendBroadcast(intent)
             }

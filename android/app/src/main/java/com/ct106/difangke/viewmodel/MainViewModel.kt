@@ -7,12 +7,16 @@ import com.ct106.difangke.AppConfig
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.DailyInsightEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.data.db.entity.FutureTripEntity
+import com.ct106.difangke.data.db.entity.FutureTripScheduleMode
+import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.model.TimelineItem
 import com.ct106.difangke.data.model.representativeLatitude
 import com.ct106.difangke.data.model.representativeLongitude
 import com.ct106.difangke.service.LocationTrackingService
 import com.ct106.difangke.service.OpenAIService
+import com.ct106.difangke.service.FutureTripReminderWorker
 import com.ct106.difangke.ui.components.buildFootprintMapMarkers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -21,7 +25,6 @@ import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withContext
 import com.ct106.difangke.data.location.RawLocationStore
 import com.aptabase.Aptabase
@@ -54,20 +57,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return cal.time
     }
 
-    val availableDates: StateFlow<List<Date>> = db.footprintDao().observeAvailableDates()
-        .map { dateStrings ->
-            val dates: MutableSet<Date> = dateStrings.mapNotNull { 
-                try { sdf.parse(it)?.let { d -> zeroTime(d) } } catch(e: Exception) { null } 
+    val availableDates: StateFlow<List<Date>> = combine(
+        db.footprintDao().observeAvailableDates(),
+        db.futureTripDao().observeAvailableDates()
+    ) { footprintDates, tripDates ->
+            val dates: MutableSet<Date> = (footprintDates + tripDates).mapNotNull {
+                try { sdf.parse(it)?.let { d -> zeroTime(d) } } catch(e: Exception) { null }
             }.toMutableSet()
             
             val today = zeroTime(Date())
-            val tomorrow = Calendar.getInstance().apply {
-                time = today
-                add(Calendar.DAY_OF_YEAR, 1)
-            }.time.let { zeroTime(it) }
-            
             dates.add(today)
-            dates.add(tomorrow)
 
             // 核心修复：始终保证有一个历史前的页，用于引导
             val earliestBase = dates.minByOrNull { it.time } ?: today
@@ -87,8 +86,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
         combine(
             db.footprintDao().observeBetween(start, end),
-            db.transportRecordDao().observeForDay(start, end)
-        ) { fps, tps ->
+            db.transportRecordDao().observeForDay(start, end),
+            db.futureTripDao().observeForDay(start, end)
+        ) { fps, tps, trips ->
             // 足迹的时间范围要限制在0点到次日0点：裁切跨天记录
             val boundedFps = fps.map { fp ->
                 val bStart = if (fp.startTime.before(start)) start else fp.startTime
@@ -105,8 +105,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else tp
             }
 
-            (boundedFps.map { TimelineItem.FootprintItem(it) } + boundedTps.map { TimelineItem.TransportItem(it) })
-                .sortedByDescending { it.startTime }
+            mergeTimelineItems(boundedFps, boundedTps, trips)
         }.flowOn(Dispatchers.Default)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -183,8 +182,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
             combine(
                 db.footprintDao().observeBetween(start, end),
-                db.transportRecordDao().observeForDay(start, end)
-            ) { fps, tps ->
+                db.transportRecordDao().observeForDay(start, end),
+                db.futureTripDao().observeForDay(start, end)
+            ) { fps, tps, trips ->
                 val visibleFps = fps.filter { it.statusValue != "ignored" }
                 
                 // 足迹的时间范围要限制在0点到次日0点：裁切跨天记录
@@ -203,8 +203,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     } else tp
                 }
 
-                val rawItems = (boundedFps.map { TimelineItem.FootprintItem(it) } + boundedTps.map { TimelineItem.TransportItem(it) })
-                    .sortedByDescending { it.startTime }
+                val rawItems = mergeTimelineItems(boundedFps, boundedTps, trips)
                 
                 alignTransportItems(rawItems, boundedFps)
             }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -368,12 +367,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
                 val deletedDateMs = intent?.getLongExtra("date", -1L) ?: -1L
+                val singleTs = intent?.getDoubleExtra("deletedTimestamp", -1.0) ?: -1.0
+                val multiTs = intent?.getDoubleArrayExtra("deletedTimestamps") ?: DoubleArray(0)
+                
+                val timestamps = mutableListOf<Double>()
+                if (singleTs != -1.0) timestamps.add(singleTs)
+                timestamps.addAll(multiTs.toList())
+                
                 if (deletedDateMs != -1L) {
                     val deletedDate = Date(deletedDateMs)
-                    if (zeroTime(deletedDate).time == zeroTime(_currentDate.value).time) {
-                        // 如果删除的是当前页面的点，触发刷新
-                        refresh()
-                        _lastDataSyncTrigger.value = Date()
+                    viewModelScope.launch {
+                        if (timestamps.isNotEmpty()) {
+                            builder.repairAffectedTimeline(timestamps, deletedDate)
+                        }
+                        if (zeroTime(deletedDate).time == zeroTime(_currentDate.value).time) {
+                            // 如果删除的是当前页面的点，触发刷新
+                            refresh()
+                            _lastDataSyncTrigger.value = Date()
+                        }
                     }
                 }
             }
@@ -550,6 +561,199 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             DiFangKeApp.instance.preferences.setHasSwiped(true)
         }
+    }
+
+    val allFutureTripsForEditor: Flow<List<FutureTripEntity>> = db.futureTripDao().observeAll()
+        .map { FutureTripEntity.dayOrdered(it) }
+        .flowOn(Dispatchers.Default)
+
+    fun saveFutureTrip(
+        editingTrip: FutureTripEntity?,
+        place: PlaceEntity,
+        date: Date,
+        hasArrivalTime: Boolean,
+        hour: Int,
+        minute: Int,
+        insertionAnchorTripID: String?,
+        activityTypeValue: String?,
+        notes: String?
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val normalizedDate = normalizedFutureTripDate(date, hasArrivalTime, hour, minute)
+            val previousDay = editingTrip?.let { zeroTime(it.arrivalDate) }
+            val scheduleMode = if (hasArrivalTime) FutureTripScheduleMode.TIMED else FutureTripScheduleMode.ORDERED
+            val trip = editingTrip?.copy(
+                placeID = place.placeID,
+                placeName = place.name,
+                address = place.address,
+                notes = notes?.trim()?.takeIf { it.isNotEmpty() },
+                latitude = place.latitude,
+                longitude = place.longitude,
+                arrivalDate = normalizedDate,
+                hasArrivalTime = hasArrivalTime,
+                scheduleModeValue = scheduleMode.raw,
+                activityTypeValue = activityTypeValue,
+                isCompleted = false,
+                completedAt = null
+            ) ?: FutureTripEntity(
+                placeID = place.placeID,
+                placeName = place.name,
+                address = place.address,
+                notes = notes?.trim()?.takeIf { it.isNotEmpty() },
+                latitude = place.latitude,
+                longitude = place.longitude,
+                arrivalDate = normalizedDate,
+                hasArrivalTime = hasArrivalTime,
+                scheduleModeValue = scheduleMode.raw,
+                activityTypeValue = activityTypeValue
+            )
+
+            db.futureTripDao().insert(trip)
+            val day = zeroTime(normalizedDate)
+            if (hasArrivalTime) {
+                reindexTimedTrip(day, trip)
+                FutureTripReminderWorker.schedule(getApplication(), trip.tripID, trip.arrivalDate)
+            } else {
+                reindexDayTrips(day, trip, insertionAnchorTripID)
+                FutureTripReminderWorker.cancel(getApplication(), trip.tripID)
+            }
+            if (previousDay != null && previousDay.time != day.time) {
+                reindexDayTrips(previousDay, null, null)
+            }
+            _lastDataSyncTrigger.value = Date()
+        }
+    }
+
+    fun completeFutureTrip(trip: FutureTripEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.futureTripDao().update(trip.copy(isCompleted = true, completedAt = Date()))
+            FutureTripReminderWorker.cancel(getApplication(), trip.tripID)
+            _lastDataSyncTrigger.value = Date()
+        }
+    }
+
+    fun delayFutureTrip(trip: FutureTripEntity, delayMillis: Long) {
+        if (trip.isOrdered) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val oldDay = zeroTime(trip.arrivalDate)
+            val delayed = trip.copy(
+                arrivalDate = Date(trip.arrivalDate.time + delayMillis),
+                isCompleted = false,
+                completedAt = null
+            )
+            db.futureTripDao().update(delayed)
+            reindexTimedTrip(zeroTime(delayed.arrivalDate), delayed)
+            FutureTripReminderWorker.schedule(getApplication(), delayed.tripID, delayed.arrivalDate)
+            if (oldDay.time != zeroTime(delayed.arrivalDate).time) {
+                reindexDayTrips(oldDay, null, null)
+            }
+            _lastDataSyncTrigger.value = Date()
+        }
+    }
+
+    fun deleteFutureTrip(trip: FutureTripEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val day = zeroTime(trip.arrivalDate)
+            db.futureTripDao().delete(trip)
+            FutureTripReminderWorker.cancel(getApplication(), trip.tripID)
+            reindexDayTrips(day, null, null)
+            _lastDataSyncTrigger.value = Date()
+        }
+    }
+
+    private suspend fun reindexDayTrips(day: Date, movingTrip: FutureTripEntity?, insertionAnchorTripID: String?) {
+        val end = Calendar.getInstance().apply { time = day; add(Calendar.DAY_OF_YEAR, 1) }.time
+        val trips = FutureTripEntity.dayOrdered(db.futureTripDao().getForDay(day, end))
+            .filter { movingTrip == null || it.tripID != movingTrip.tripID }
+            .toMutableList()
+        movingTrip?.let { trip ->
+            val targetIndex = when (insertionAnchorTripID) {
+                "__first__" -> 0
+                null, "__end__" -> trips.size
+                else -> trips.indexOfFirst { it.tripID == insertionAnchorTripID }.takeIf { it >= 0 }?.plus(1) ?: trips.size
+            }
+            trips.add(targetIndex.coerceIn(0, trips.size), trip)
+        }
+        trips.forEachIndexed { index, trip ->
+            if (trip.orderIndex != index + 1) {
+                db.futureTripDao().update(trip.copy(orderIndex = index + 1))
+            }
+        }
+    }
+
+    private suspend fun reindexTimedTrip(day: Date, movingTrip: FutureTripEntity) {
+        val end = Calendar.getInstance().apply { time = day; add(Calendar.DAY_OF_YEAR, 1) }.time
+        val trips = FutureTripEntity.dayOrdered(db.futureTripDao().getForDay(day, end))
+            .filter { it.tripID != movingTrip.tripID }
+            .toMutableList()
+        val sortTimes = futureTripSortTimes(trips, day)
+        val targetIndex = trips.indexOfFirst { (sortTimes[it.tripID] ?: it.arrivalDate) > movingTrip.arrivalDate }
+            .let { if (it >= 0) it else trips.size }
+        trips.add(targetIndex, movingTrip)
+        trips.forEachIndexed { index, trip ->
+            if (trip.orderIndex != index + 1) {
+                db.futureTripDao().update(trip.copy(orderIndex = index + 1))
+            }
+        }
+    }
+
+    private fun normalizedFutureTripDate(date: Date, hasArrivalTime: Boolean, hour: Int, minute: Int): Date {
+        return Calendar.getInstance().apply {
+            time = date
+            if (hasArrivalTime) {
+                set(Calendar.HOUR_OF_DAY, hour)
+                set(Calendar.MINUTE, minute)
+            } else {
+                set(Calendar.HOUR_OF_DAY, 12)
+                set(Calendar.MINUTE, 0)
+            }
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.time
+    }
+
+    private fun mergeTimelineItems(
+        footprints: List<FootprintEntity>,
+        transports: List<TransportRecordEntity>,
+        trips: List<FutureTripEntity>
+    ): List<TimelineItem> {
+        val orderedTrips = FutureTripEntity.dayOrdered(trips)
+        val tripSortTimes = futureTripSortTimes(orderedTrips, orderedTrips.firstOrNull()?.arrivalDate ?: Date())
+        return (
+            footprints.map { TimelineItem.FootprintItem(it) } +
+                transports.map { TimelineItem.TransportItem(it) } +
+                orderedTrips.map { TimelineItem.FutureTripItem(it) }
+            ).sortedByDescending { item ->
+                if (item is TimelineItem.FutureTripItem) {
+                    tripSortTimes[item.trip.tripID] ?: item.trip.arrivalDate
+                } else {
+                    item.startTime
+                }
+            }
+    }
+
+    private fun futureTripSortTimes(trips: List<FutureTripEntity>, day: Date): Map<String, Date> {
+        val sortTimes = mutableMapOf<String, Date>()
+        var anchorTime = Calendar.getInstance().apply {
+            time = zeroTime(day)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.time
+        var orderedOffset = 1
+        trips.forEach { trip ->
+            if (trip.isOrdered) {
+                sortTimes[trip.tripID] = Date(anchorTime.time + orderedOffset * 1000L)
+                orderedOffset += 1
+            } else {
+                val effective = trip.effectiveArrivalDate()
+                sortTimes[trip.tripID] = effective
+                anchorTime = effective
+                orderedOffset = 1
+            }
+        }
+        return sortTimes
     }
 
     private fun alignTransportItems(items: List<TimelineItem>, visibleFps: List<com.ct106.difangke.data.db.entity.FootprintEntity>): List<TimelineItem> {

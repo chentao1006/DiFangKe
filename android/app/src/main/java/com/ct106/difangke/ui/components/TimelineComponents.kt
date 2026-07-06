@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import com.google.gson.Gson
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.data.db.entity.FutureTripEntity
 import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.model.FootprintTitles
@@ -393,6 +394,137 @@ fun TransportCardView(
             }
         }
     }
+}
+
+@Composable
+fun FutureTripCardView(
+    trip: FutureTripEntity,
+    activityTypes: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
+    isFirst: Boolean,
+    isLast: Boolean,
+    showTimeline: Boolean = true,
+    onClick: () -> Unit = {}
+) {
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val cardColor = if (isDark) Color(0xFF1C1C1E) else Color.White
+    val titleColor = if (isDark) MaterialTheme.colorScheme.onSurface else Color.Black.copy(alpha = 0.82f)
+    val subtitleColor = if (isDark) MaterialTheme.colorScheme.onSurfaceVariant else Color.Gray
+    val activityType = activityTypes.firstOrNull { it.id == trip.activityTypeValue || it.name == trip.activityTypeValue }
+    val iconName = activityType?.icon ?: "place"
+    val defaultColor = MaterialTheme.colorScheme.primary
+    val iconColor = try {
+        activityType?.colorHex?.let { Color(android.graphics.Color.parseColor(it)) } ?: defaultColor
+    } catch (_: Exception) {
+        defaultColor
+    }
+    val opacity = if (trip.isCompleted) 1f else 0.62f
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 5.dp)
+            .clickable { onClick() },
+        shape = RoundedCornerShape(22.dp),
+        color = cardColor,
+        shadowElevation = 1.dp,
+        tonalElevation = 0.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
+        ) {
+            Box(modifier = Modifier.width(54.dp), contentAlignment = Alignment.TopCenter) {
+                if (showTimeline) {
+                    TimelineLine(isFirst = isFirst, isLast = isLast, isTransport = false)
+                }
+                Box(
+                    modifier = Modifier
+                        .padding(top = 12.dp)
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(cardColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = getIconForName(iconName),
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp).graphicsLayer(alpha = opacity),
+                        tint = iconColor
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = 14.dp)
+                    .padding(end = 16.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = trip.placeName,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = titleColor.copy(alpha = opacity),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (trip.isCompleted) {
+                        Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = "已完成",
+                            tint = Color(0xFF34C759),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(5.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text(
+                        text = futureTripTimeLabel(trip),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = subtitleColor.copy(alpha = 0.68f)
+                    )
+                    Text("·", color = subtitleColor.copy(alpha = 0.35f))
+                    Text(
+                        text = if (trip.isOrdered) "顺序计划" else "行程计划",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = subtitleColor.copy(alpha = 0.68f)
+                    )
+                    activityType?.name?.let {
+                        Text("·", color = subtitleColor.copy(alpha = 0.35f))
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = subtitleColor.copy(alpha = 0.68f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                if (!trip.notes.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = trip.notes,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (trip.isCompleted) 1f else 0.76f),
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun futureTripTimeLabel(trip: FutureTripEntity): String {
+    if (trip.isCompleted && trip.completedAt != null) return TIME_FORMAT.format(trip.completedAt)
+    return if (trip.hasArrivalTime) TIME_FORMAT.format(trip.arrivalDate) else "计划"
 }
 
 @Composable
@@ -1260,6 +1392,16 @@ fun TimelineRow(
             TransportCardView(
                 transport = item.transport,
                 allPlaces = allPlaces,
+                isFirst = isFirst,
+                isLast = isLast,
+                showTimeline = showTimeline,
+                onClick = onClick
+            )
+        }
+        is com.ct106.difangke.data.model.TimelineItem.FutureTripItem -> {
+            FutureTripCardView(
+                trip = item.trip,
+                activityTypes = activityTypes,
                 isFirst = isFirst,
                 isLast = isLast,
                 showTimeline = showTimeline,

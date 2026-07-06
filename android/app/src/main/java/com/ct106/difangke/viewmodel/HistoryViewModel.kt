@@ -101,7 +101,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                     summaryMap[date] = DaySummary(
                         date = date,
                         totalDuration = fps.sumOf { it.duration },
-                        footprintCount = fps.map { it.title.ifEmpty { it.locationHash } }.distinct().size,
+                        footprintCount = fps.map { (it.title ?: "").ifEmpty { it.locationHash } }.distinct().size,
                         highlightCount = fps.count { it.isHighlight == true },
                         highlightTitle = fps.firstOrNull { it.isHighlight == true }?.title,
                         hasConfirmed = fps.any { it.aiAnalyzed },
@@ -152,12 +152,14 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                         activityTypeById[item.footprint.activityTypeValue]?.icon ?: "place"
                     }
                     is TimelineItem.TransportItem -> "directions_bus"
+                    is TimelineItem.FutureTripItem -> "explore"
                 }
                 val colorHex = when (item) {
                     is TimelineItem.FootprintItem -> {
                         activityTypeById[item.footprint.activityTypeValue]?.colorHex ?: "#00A0AC"
                     }
                     is TimelineItem.TransportItem -> "#8E8E93"
+                    is TimelineItem.FutureTripItem -> "#FF9500"
                 }
                 val key = "$icon|$isTransport"
                 val existingIndex = positions[key]
