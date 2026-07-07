@@ -91,6 +91,7 @@ struct HistoryStatisticsView: View {
                         }
                         
                         heatmapSection
+                        frequentPlacesSection
                         activityRankSection
                         trendSection
                         Spacer(minLength: 60)
@@ -514,6 +515,69 @@ struct HistoryStatisticsView: View {
         }
     }
     
+    // MARK: - Frequent Places Section
+    private var frequentPlacesSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader("常去地点排行", icon: "mappin.and.ellipse")
+            
+            let data = getFrequentPlacesData()
+            
+            if data.isEmpty {
+                placeholderView("暂无常去地点数据")
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(data.indices, id: \.self) { index in
+                        let item = data[index]
+                        HStack(spacing: 12) {
+                            // Rank number
+                            Text("\(index + 1)")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(index < 3 ? .dfkAccent : .secondary.opacity(0.5))
+                                .frame(width: 24, alignment: .leading)
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.name)
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundColor(.primary)
+                                    .lineLimit(1)
+                                
+                                if !item.address.isEmpty && item.address != item.name {
+                                    Text(item.address)
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            
+                            Spacer()
+                            
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text("\(Int(item.duration / 3600))小时")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(.dfkAccent)
+                                
+                                Text("\(item.count)次")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 12)
+                        
+                        if index < data.count - 1 {
+                            Divider()
+                                .padding(.leading, 36)
+                        }
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                .background(Color.white.opacity(0.05))
+                .cornerRadius(24)
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+    
     // MARK: - Activity Rank Section
     private var activityRankSection: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -669,6 +733,48 @@ struct HistoryStatisticsView: View {
     }
     
     // MARK: - Data Helpers
+    
+    struct FrequentPlaceItem: Identifiable {
+        let id = UUID()
+        let name: String
+        let address: String
+        let count: Int
+        let duration: TimeInterval
+    }
+    
+    private func getFrequentPlacesData() -> [FrequentPlaceItem] {
+        var groups: [String: (name: String, address: String, count: Int, duration: TimeInterval)] = [:]
+        
+        for fp in filteredFootprints {
+            let name: String
+            let address: String
+            
+            if let pID = fp.placeID, let place = allPlaces.first(where: { $0.placeID == pID }) {
+                name = place.name
+                address = place.address ?? ""
+            } else if let addr = fp.address, !addr.isEmpty {
+                let parts = addr.components(separatedBy: "市").last?.components(separatedBy: "区").last?.components(separatedBy: "县").last ?? addr
+                name = parts.components(separatedBy: " ").first ?? addr
+                address = addr
+            } else {
+                continue
+            }
+            
+            if name.isEmpty || name.contains("未知") { continue }
+            
+            let key = name
+            if let existing = groups[key] {
+                groups[key] = (existing.name, existing.address, existing.count + 1, existing.duration + fp.duration)
+            } else {
+                groups[key] = (name, address, 1, fp.duration)
+            }
+        }
+        
+        return groups.values
+            .filter { $0.duration >= 3600 && $0.count > 2 }
+            .map { FrequentPlaceItem(name: $0.name, address: $0.address, count: $0.count, duration: $0.duration) }
+            .sorted { $0.duration > $1.duration }
+    }
     
     struct LocationPoint {
         let hash: String
