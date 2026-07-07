@@ -717,7 +717,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         transports: List<TransportRecordEntity>,
         trips: List<FutureTripEntity>
     ): List<TimelineItem> {
-        val orderedTrips = FutureTripEntity.dayOrdered(trips)
+        val activeTrips = trips.filter { !it.isCompleted }
+        val orderedTrips = FutureTripEntity.dayOrdered(activeTrips)
         val tripSortTimes = futureTripSortTimes(orderedTrips, orderedTrips.firstOrNull()?.arrivalDate ?: Date())
         return (
             footprints.map { TimelineItem.FootprintItem(it) } +

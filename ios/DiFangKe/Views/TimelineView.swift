@@ -1519,7 +1519,7 @@ private struct ContinuousTimelineView: View {
     private func futureTrips(for dates: Set<Date>) -> [FutureTrip] {
         let calendar = Calendar.current
         return futureTrips.filter { trip in
-            dates.contains(calendar.startOfDay(for: trip.arrivalDate))
+            !trip.isCompleted && dates.contains(calendar.startOfDay(for: trip.arrivalDate))
         }
     }
 
@@ -2891,7 +2891,7 @@ private struct ContinuousTimelineSheet: View {
     private func futureTrips(for date: Date) -> [FutureTrip] {
         let calendar = Calendar.current
         return FutureTrip.dayOrdered(futureTrips
-            .filter { calendar.isDate($0.arrivalDate, inSameDayAs: date) }
+            .filter { !$0.isCompleted && calendar.isDate($0.arrivalDate, inSameDayAs: date) }
         )
     }
 
