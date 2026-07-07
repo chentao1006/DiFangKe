@@ -4479,10 +4479,12 @@ class TripLiveActivityManager {
             FutureTrip.postDidChangeNotification()
         }
 
-        let candidateTrips = FutureTrip.dayOrdered(trips).filter { trip in
+        let orderedTrips = FutureTrip.dayOrdered(trips)
+        let candidateTrips = orderedTrips.filter { trip in
             guard !trip.isCompleted else { return false }
             if trip.isOrdered {
-                return calendar.isDateInToday(trip.arrivalDate)
+                return calendar.isDateInToday(trip.arrivalDate) &&
+                    !hasPendingTimedTripBefore(trip, in: orderedTrips, now: now, calendar: calendar)
             }
 
             let timeInterval = trip.effectiveArrivalDate(now: now, calendar: calendar).timeIntervalSince(now)
@@ -4496,7 +4498,7 @@ class TripLiveActivityManager {
             let mins = upcomingTrip.isOrdered ? 0 : max(0, Int(effectiveArrivalDate.timeIntervalSince(now) / 60))
             
             let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
-            let matchedIcon = allActivities.first(where: { $0.id.uuidString == upcomingTrip.activityTypeValue || $0.name == upcomingTrip.activityTypeValue })?.icon ?? "calendar"
+            let matchedIcon = allActivities.first(where: { $0.id.uuidString == upcomingTrip.activityTypeValue || $0.name == upcomingTrip.activityTypeValue })?.icon ?? "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted"
             
             let state = TripActivityAttributes.ContentState(
                 currentDistance: distance,
@@ -4584,6 +4586,26 @@ class TripLiveActivityManager {
         }
 
         return didComplete
+    }
+
+    private func hasPendingTimedTripBefore(_ trip: FutureTrip, in orderedTrips: [FutureTrip], now: Date, calendar: Calendar) -> Bool {
+        for orderedTrip in orderedTrips {
+            if orderedTrip.id == trip.id {
+                return false
+            }
+
+            guard !orderedTrip.isCompleted,
+                  !orderedTrip.isOrdered,
+                  calendar.isDate(orderedTrip.arrivalDate, inSameDayAs: trip.arrivalDate) else {
+                continue
+            }
+
+            if orderedTrip.effectiveArrivalDate(now: now, calendar: calendar) > now {
+                return true
+            }
+        }
+
+        return false
     }
     
     private func ensureTripMapSnapshot(latitude: Double, longitude: Double, tripId: String) async {

@@ -15,7 +15,7 @@ struct FutureTripTimelineRow: View {
     }
 
     private var icon: String {
-        activity?.icon ?? "mappin"
+        activity?.icon ?? "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted"
     }
 
     private var tint: Color {
@@ -80,11 +80,19 @@ struct FutureTripTimelineRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: ContinuousTimelineLayout.markerSpacing) {
-            Text(timeLabel)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary.opacity(itemOpacity))
-                .frame(width: ContinuousTimelineLayout.timeColumnWidth, alignment: .leading)
-                .padding(.top, 4)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(timeLabel)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary.opacity(itemOpacity))
+                
+                if !trip.isCompleted && trip.hasArrivalTime {
+                    Text("计划")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary.opacity(itemOpacity * 0.8))
+                }
+            }
+            .frame(width: ContinuousTimelineLayout.timeColumnWidth, alignment: .leading)
+            .padding(.top, 4)
 
             VStack(spacing: 0) {
                 ZStack {
@@ -120,7 +128,7 @@ struct FutureTripTimelineRow: View {
                 Text(trip.placeName)
                     .font(.body.weight(.bold))
                     .foregroundStyle(.primary.opacity(itemOpacity))
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 if let activityName = activity?.name {
                     Text(activityName)
@@ -215,7 +223,7 @@ struct FutureTripDetailView: View {
            let activity = allActivities.first(where: { $0.id == id }) {
             return activity.icon
         }
-        return "mappin"
+        return "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted"
     }
 
     private var selectedActivityColor: Color {
