@@ -79,8 +79,10 @@ struct _MapPickerView: UIViewRepresentable {
                           animated: false)
         }
         
-        // Pre-fetch address
-        context.coordinator.updateAddress(for: center)
+        // Pre-fetch address if we don't have one
+        if address.isEmpty || address == "正在解析位置..." {
+            context.coordinator.updateAddress(for: center)
+        }
         
         return map
     }
@@ -178,6 +180,18 @@ struct _MapPickerView: UIViewRepresentable {
             let mapPointsPerScreenPoint = mapView.visibleMapRect.size.width / Double(mapView.bounds.width)
             let actualRadiusInMeters = (Double(screenCircleRadius) * mapPointsPerScreenPoint) / mapPointsPerMeter
             
+            var didMoveSignificantly = false
+            if let oldCoord = self.selectedCoord {
+                let oldLoc = CLLocation(latitude: oldCoord.latitude, longitude: oldCoord.longitude)
+                let newLoc = CLLocation(latitude: center.latitude, longitude: center.longitude)
+                
+                if oldLoc.distance(from: newLoc) > 10.0 {
+                    didMoveSignificantly = true
+                }
+            } else {
+                didMoveSignificantly = true
+            }
+            
             // Sync values to bindings
             DispatchQueue.main.async {
                 // If not updating from slider, sync map radius back to binding
@@ -188,20 +202,14 @@ struct _MapPickerView: UIViewRepresentable {
                     }
                 }
                 
-                // Only update coordinate if it actually moved significant distance
-                if let oldCoord = self.selectedCoord {
-                    let oldLoc = CLLocation(latitude: oldCoord.latitude, longitude: oldCoord.longitude)
-                    let newLoc = CLLocation(latitude: center.latitude, longitude: center.longitude)
-                    
-                    if oldLoc.distance(from: newLoc) > 0.5 {
-                        self.selectedCoord = center
-                    }
-                } else {
+                if didMoveSignificantly {
                     self.selectedCoord = center
                 }
             }
             
-            updateAddress(for: center)
+            if didMoveSignificantly {
+                updateAddress(for: center)
+            }
             lastSpan = currentSpan
         }
         

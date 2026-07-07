@@ -102,9 +102,9 @@ struct LocationSearchSheet: View {
                         .onSubmit {
                             performFullSearch(query: searchText)
                         }
-                    if !searchText.isEmpty {
-                        Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundColor(.secondary) }
-                    }
+                    Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundColor(.secondary) }
+                        .opacity(searchText.isEmpty ? 0 : 1)
+                        .allowsHitTesting(!searchText.isEmpty)
                 }
                 .padding(10)
                 .background(Color(uiColor: .secondarySystemBackground))

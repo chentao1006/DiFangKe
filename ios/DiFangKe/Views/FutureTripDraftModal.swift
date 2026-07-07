@@ -50,6 +50,7 @@ struct FutureTripDraftModal: View {
     @State private var pinLiftOffset: CGFloat = 0
     @State private var pinAnimationTask: Task<Void, Never>?
     @State private var hasLoadedInitialValues = false
+    @State private var searchTask: Task<Void, Never>?
 
     init(editingTrip: FutureTrip? = nil) {
         self.editingTrip = editingTrip
@@ -70,18 +71,23 @@ struct FutureTripDraftModal: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                mapSection
-                selectedPlaceSection
-                arrivalSection
-                activitySection
-                notesSection
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .overlay(alignment: .top) {
-                if !placePicker.searchResults.isEmpty {
-                    searchResultsOverlay
+            ZStack(alignment: .top) {
+                Form {
+                    mapSection
+                    selectedPlaceSection
+                    arrivalSection
+                    activitySection
+                    notesSection
                 }
+                .scrollDismissesKeyboard(.interactively)
+                
+                VStack(spacing: 8) {
+                    searchBarOverlay
+                    searchResultsOverlay
+                        .opacity(placePicker.searchResults.isEmpty ? 0 : 1)
+                        .allowsHitTesting(!placePicker.searchResults.isEmpty)
+                }
+                .padding(.top, 12)
             }
             .navigationTitle(editingTrip == nil ? "行程计划" : "修改行程")
             .navigationBarTitleDisplayMode(.inline)
@@ -133,11 +139,6 @@ struct FutureTripDraftModal: View {
                 locationHUD
                     .padding(.bottom, 12)
                     .frame(maxHeight: .infinity, alignment: .bottom)
-
-                searchBarOverlay
-                    .padding(.top, 12)
-                    .padding(.horizontal, 16)
-                    .frame(maxHeight: .infinity, alignment: .top)
             }
             .frame(height: 280)
             .listRowInsets(EdgeInsets())
@@ -265,7 +266,7 @@ struct FutureTripDraftModal: View {
                 Button {
                     selectedActivityTypeValue = nil
                 } label: {
-                    Label("未设置", systemImage: "circle.slash")
+                    Label("无", systemImage: "circle.slash")
                 }
 
                 ForEach(allActivities) { activity in
@@ -281,7 +282,7 @@ struct FutureTripDraftModal: View {
                         .foregroundStyle(selectedActivity?.color ?? .secondary)
                         .frame(width: 24)
 
-                    Text(selectedActivity?.name ?? "未设置")
+                    Text(selectedActivity?.name ?? "无")
                         .foregroundStyle(selectedActivity == nil ? .secondary : .primary)
 
                     Spacer()
@@ -367,37 +368,41 @@ struct FutureTripDraftModal: View {
             TextField("搜索行程目的地", text: $searchText)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .task(id: searchText) {
+                .onChange(of: searchText) { _, newValue in
                     if isSkippingNextSearch {
                         isSkippingNextSearch = false
                         return
                     }
 
-                    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let query = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard query.count > 1 else {
                         placePicker.searchResults = []
                         return
                     }
 
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                    if Task.isCancelled { return }
-                    placePicker.search(query: query, userCoord: selectedCoordinate ?? locationManager.lastLocation?.coordinate)
+                    searchTask?.cancel()
+                    searchTask = Task {
+                        try? await Task.sleep(nanoseconds: 600_000_000)
+                        if Task.isCancelled { return }
+                        placePicker.search(query: query, userCoord: selectedCoordinate ?? locationManager.lastLocation?.coordinate)
+                    }
                 }
 
-            if !searchText.isEmpty {
-                Button {
-                    searchText = ""
-                    placePicker.searchResults = []
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
-                }
+            Button {
+                searchText = ""
+                placePicker.searchResults = []
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.secondary)
             }
+            .opacity(searchText.isEmpty ? 0 : 1)
+            .allowsHitTesting(!searchText.isEmpty)
         }
         .padding(10)
         .background(.ultraThinMaterial)
         .cornerRadius(10)
         .shadow(color: .black.opacity(0.1), radius: 5)
+        .padding(.horizontal, 16)
     }
 
     private var searchResultsOverlay: some View {
@@ -431,7 +436,6 @@ struct FutureTripDraftModal: View {
         .cornerRadius(12)
         .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 5)
         .padding(.horizontal, 16)
-        .padding(.top, 64)
     }
 
     private var locationHUD: some View {
@@ -630,9 +634,11 @@ struct FutureTripDraftModal: View {
     }
 
     private func reindexTimedTrip(in day: Date, movingTrip: FutureTrip) {
-        var trips = orderedDayTrips(for: day)
-            .filter { $0.id != movingTrip.id && !$0.isCompleted }
-        let sortTimes = futureTripSortTimes(for: trips, on: day)
+        let allTrips = orderedDayTrips(for: day)
+        let sortTimes = futureTripSortTimes(for: allTrips, on: day)
+        
+        var trips = allTrips.filter { $0.id != movingTrip.id && !$0.isCompleted }
+        
         let targetIndex = trips.firstIndex { trip in
             (sortTimes[trip.id] ?? trip.arrivalDate) > movingTrip.arrivalDate
         } ?? trips.count

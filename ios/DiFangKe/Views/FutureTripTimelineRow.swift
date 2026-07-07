@@ -4,6 +4,7 @@ import SwiftData
 import MapKit
 
 struct FutureTripTimelineRow: View {
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.colorScheme) private var colorScheme
     @Environment(LocationManager.self) private var locationManager
     let trip: FutureTrip
@@ -77,6 +78,12 @@ struct FutureTripTimelineRow: View {
         trip.isCompleted ? 1.0 : 0.58
     }
 
+    private func updateActivity(_ newValue: String?) {
+        trip.activityTypeValue = newValue
+        try? modelContext.save()
+        FutureTrip.postDidChangeNotification()
+    }
+
 
     var body: some View {
         HStack(alignment: .top, spacing: ContinuousTimelineLayout.markerSpacing) {
@@ -95,27 +102,43 @@ struct FutureTripTimelineRow: View {
             .padding(.top, 4)
 
             VStack(spacing: 0) {
-                ZStack {
-                    Circle()
-                        .fill(Color(uiColor: .systemBackground))
-                        .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
-                        .frame(width: ContinuousTimelineLayout.markerSize, height: ContinuousTimelineLayout.markerSize)
+                Menu {
+                    Button {
+                        updateActivity(nil)
+                    } label: {
+                        Label("无", systemImage: "circle.slash")
+                    }
+                    ForEach(activityTypes) { activity in
+                        Button {
+                            updateActivity(activity.id.uuidString)
+                        } label: {
+                            Label(activity.name, systemImage: activity.icon)
+                        }
+                    }
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(Color(uiColor: .systemBackground))
+                            .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
+                            .frame(width: ContinuousTimelineLayout.markerSize, height: ContinuousTimelineLayout.markerSize)
 
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                gradient: Gradient(colors: [tint.lighter(by: 0.25), tint]),
-                                startPoint: .top,
-                                endPoint: .bottom
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    gradient: Gradient(colors: [tint.lighter(by: 0.25), tint]),
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
                             )
-                        )
-                        .frame(width: ContinuousTimelineLayout.markerSize - 5, height: ContinuousTimelineLayout.markerSize - 5)
+                            .frame(width: ContinuousTimelineLayout.markerSize - 5, height: ContinuousTimelineLayout.markerSize - 5)
 
-                    Image(systemName: icon)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.white)
+                        Image(systemName: icon)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    .opacity(itemOpacity)
                 }
-                .opacity(itemOpacity)
+                .buttonStyle(.plain)
 
                 Rectangle()
                     .fill(ContinuousTimelineLayout.lineColor.opacity(0.45))
@@ -214,7 +237,7 @@ struct FutureTripDetailView: View {
            let activity = allActivities.first(where: { $0.id == id }) {
             return activity.name
         }
-        return "无活动类型"
+        return "无"
     }
     
     private var selectedActivityIcon: String {
@@ -269,6 +292,12 @@ struct FutureTripDetailView: View {
         } else {
             return "<1小时"
         }
+    }
+
+    private func updateActivity(_ newValue: String?) {
+        trip.activityTypeValue = newValue
+        try? modelContext.save()
+        FutureTrip.postDidChangeNotification()
     }
 
     var body: some View {
@@ -512,20 +541,46 @@ struct FutureTripDetailView: View {
     
     private var addressSection: some View {
         VStack(alignment: .center, spacing: 10) {
-            Image(systemName: selectedActivityIcon)
-                .font(.system(size: 42, weight: .semibold))
-                .foregroundColor(selectedActivityColor)
+            Menu {
+                Button {
+                    updateActivity(nil)
+                } label: {
+                    Label("无", systemImage: "circle.slash")
+                }
+                ForEach(allActivities) { activity in
+                    Button {
+                        updateActivity(activity.id.uuidString)
+                    } label: {
+                        Label(activity.name, systemImage: activity.icon)
+                    }
+                }
+            } label: {
+                Image(systemName: selectedActivityIcon)
+                    .font(.system(size: 42, weight: .semibold))
+                    .foregroundColor(selectedActivityColor)
+            }
+            .buttonStyle(.plain)
 
-            Text(trip.placeName)
-                .font(.system(.title2, design: .rounded).bold())
-                .foregroundColor(.primary)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
+            Button {
+                onEdit?()
+            } label: {
+                Text(trip.placeName)
+                    .font(.system(.title2, design: .rounded).bold())
+                    .foregroundColor(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+            .buttonStyle(.plain)
 
-            Text(arrivalDateTimeString)
-                .font(.system(size: 20, weight: .bold, design: .rounded))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
+            Button {
+                onEdit?()
+            } label: {
+                Text(arrivalDateTimeString)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity)
     }

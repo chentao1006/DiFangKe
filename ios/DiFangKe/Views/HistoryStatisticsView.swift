@@ -32,16 +32,12 @@ enum StatisticsRange: Hashable {
 }
 
 struct HistoryStatisticsView: View {
-    @Query(filter: #Predicate<Footprint> { $0.statusValue != "ignored" }, sort: \Footprint.startTime, order: .reverse) 
-    private var allFootprints: [Footprint]
+    @Environment(\.modelContext) private var modelContext
     
-    @Query(filter: #Predicate<TransportManualSelection> { $0.isDeleted == false }) 
-    private var manualTransports: [TransportManualSelection]
-    
-    @Query(sort: \ActivityType.sortOrder) 
-    private var activityTypes: [ActivityType]
-    
-    @Query private var allPlaces: [Place]
+    @State private var allFootprints: [Footprint] = []
+    @State private var manualTransports: [TransportManualSelection] = []
+    @State private var activityTypes: [ActivityType] = []
+    @State private var allPlaces: [Place] = []
     
     @State private var selectedRange: StatisticsRange = .last30Days
     @State private var appearanceTrigger = false
@@ -109,6 +105,7 @@ struct HistoryStatisticsView: View {
             updateMapPosition()
         }
         .onAppear {
+            fetchData()
             updateAiSummary()
             updateMapPosition()
             withAnimation(.easeIn(duration: 0.6)) {
@@ -706,7 +703,12 @@ struct HistoryStatisticsView: View {
         }
         
         return groups.map { LocationPoint(hash: $0.key, coord: CLLocationCoordinate2D(latitude: $0.value.0, longitude: $0.value.1), count: $0.value.2) }
-            .sorted { $0.count > $1.count }
+            .sorted { 
+                if $0.count == $1.count {
+                    return $0.hash < $1.hash
+                }
+                return $0.count > $1.count 
+            }
             .prefix(200) // 聚合后点数减少，可以适当放宽显示上限
             .map { $0 }
     }
@@ -770,7 +772,12 @@ struct HistoryStatisticsView: View {
             }
             
             return RankItem(name: name, count: count, color: .gray, icon: "mappin.and.ellipse")
-        }.sorted { $0.count > $1.count }
+        }.sorted { 
+            if $0.count == $1.count {
+                return $0.name < $1.name
+            }
+            return $0.count > $1.count 
+        }
     }
     
     struct TrendItem: Identifiable {
@@ -820,6 +827,35 @@ struct HistoryStatisticsView: View {
         }
         
         return points
+    }
+    
+    private func fetchData() {
+        let footprintDescriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate<Footprint> { $0.statusValue != "ignored" },
+            sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
+        )
+        if let fetched = try? modelContext.fetch(footprintDescriptor) {
+            allFootprints = fetched
+        }
+        
+        let transportDescriptor = FetchDescriptor<TransportManualSelection>(
+            predicate: #Predicate<TransportManualSelection> { $0.isDeleted == false }
+        )
+        if let fetched = try? modelContext.fetch(transportDescriptor) {
+            manualTransports = fetched
+        }
+        
+        let activityDescriptor = FetchDescriptor<ActivityType>(
+            sortBy: [SortDescriptor(\ActivityType.sortOrder)]
+        )
+        if let fetched = try? modelContext.fetch(activityDescriptor) {
+            activityTypes = fetched
+        }
+        
+        let placeDescriptor = FetchDescriptor<Place>()
+        if let fetched = try? modelContext.fetch(placeDescriptor) {
+            allPlaces = fetched
+        }
     }
 }
 
