@@ -154,10 +154,8 @@ struct MiniCalendarView: View {
                     .onTapGesture {
                         if isAvailable {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                selectedDate = date
-                                onDateSelected(date)
-                            }
+                            selectedDate = date
+                            onDateSelected(date)
                         }
                     }
                 } else {

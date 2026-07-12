@@ -63,6 +63,7 @@ struct FootprintModalView: View {
     @State private var showingSearchSheet = false
     @State private var showingActivityTypeEditor = false
     @State private var showingTimeAdjustment = false
+    @State private var sharePayload: DFKShareCardPayload?
     
     var isDraft: Bool = false
     var isInline: Bool = false
@@ -172,6 +173,15 @@ struct FootprintModalView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        prepareMomentShare()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button { 
                         saveDraftReasonIfNeeded()
                         if !isDraft { try? modelContext.save() }
@@ -192,6 +202,9 @@ struct FootprintModalView: View {
             }
             .sheet(isPresented: $showingActivityTypeEditor) {
                 ActivityTypeEditorView()
+            }
+            .sheet(item: $sharePayload) { payload in
+                DFKShareCardPreviewView(payload: payload)
             }
             .sheet(isPresented: $showingTimeAdjustment) {
                 FootprintTimeAdjustmentView(footprint: footprint) {
@@ -333,6 +346,41 @@ struct FootprintModalView: View {
 }
 
 extension FootprintModalView {
+    private func prepareMomentShare() {
+        saveDraftReasonIfNeeded()
+        let loadingPayload = DFKShareCardFactory.loadingPayload(
+            kind: .moment,
+            rangeText: DFKShareCardFactory.dateText(footprint.startTime),
+            coordinates: footprint.coordinates
+        )
+        sharePayload = loadingPayload
+        let payloadID = loadingPayload.id
+
+        DFKShareImageLoader.loadShareMedia(
+            assetIDs: footprint.photoAssetIDs,
+            coordinates: footprint.coordinates,
+            footprints: [footprint],
+            activities: allActivities
+        ) { media in
+            var payload = DFKShareCardFactory.momentPayload(
+                footprint: footprint,
+                activities: allActivities,
+                images: media.images,
+                mapImage: media.mapImage,
+                lightMapImage: media.lightMapImage,
+                darkMapImage: media.darkMapImage
+            )
+            payload.contentMapImage = media.mapImage
+            payload.contentMapLightImage = media.lightMapImage
+            payload.contentMapDarkImage = media.darkMapImage
+            payload.backgroundMapImage = media.backgroundMapImage
+            payload.backgroundMapLightImage = media.backgroundLightMapImage
+            payload.backgroundMapDarkImage = media.backgroundDarkMapImage
+            payload.id = payloadID
+            sharePayload = payload
+        }
+    }
+
     private func saveDraftReasonIfNeeded() {
         let text = reasonState.text
         if text != (footprint.reason ?? "") {

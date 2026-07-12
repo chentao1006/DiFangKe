@@ -614,6 +614,9 @@ private struct ContinuousTimelineView: View {
     }
 
     private func handleSelectedFootprintChange(_ newFootprint: Footprint?) {
+        if newFootprint != nil, selectedFutureTripDetail != nil {
+            selectedFutureTripDetail = nil
+        }
         if let footprint = newFootprint {
             focusMap(on: footprint)
         }
@@ -647,6 +650,9 @@ private struct ContinuousTimelineView: View {
     }
 
     private func handleSelectedFutureTripChange(_ newTrip: FutureTrip?) {
+        if newTrip != nil, selectedFootprint != nil {
+            selectedFootprint = nil
+        }
         refreshVisibleTimelineMap(delayNanoseconds: 0)
         if newTrip != nil {
             timelineDetent = .medium
@@ -859,8 +865,23 @@ private struct ContinuousTimelineView: View {
     private func loadTimelineDate(_ date: Date) async -> Bool {
         let calendar = Calendar.current
         let normalizedDate = calendar.startOfDay(for: date)
-        if timelinesByDate[normalizedDate] != nil || timelineCache.contains(normalizedDate) {
-            return loadedDates.contains(normalizedDate)
+        if let items = timelinesByDate[normalizedDate] {
+            guard shouldDisplayTimelineDate(normalizedDate, items: items) else { return false }
+            if !loadedDates.contains(normalizedDate) {
+                loadedDates = Set(loadedDates).union([normalizedDate]).sorted()
+            }
+            hiddenTimelineDateSet.remove(normalizedDate)
+            return true
+        }
+        if let cachedItems = timelineCache.cachedTimeline(for: normalizedDate) {
+            guard shouldDisplayTimelineDate(normalizedDate, items: cachedItems) else { return false }
+            timelinesByDate[normalizedDate] = cachedItems
+            loadedDates = Set(loadedDates).union([normalizedDate]).sorted()
+            hiddenTimelineDateSet.remove(normalizedDate)
+            return true
+        }
+        if timelineCache.isHidden(normalizedDate) {
+            return false
         }
 
         let availableDates = await availableTimelineDatesForLookup()
@@ -1816,6 +1837,7 @@ private struct ContinuousTimelineSheet: View {
     @State private var latestViewportHeight: CGFloat = 0
     @State private var calendarBackfillTask: Task<Void, Never>?
     @State private var initialTodayScrollTask: Task<Void, Never>?
+    @State private var timelineScrollPosition: ScrollTarget?
     @State private var lastUserInteractionTime = Date.distantPast
     @State private var isLoadingMoreEarlier = false
     @State private var isLoadingMoreLater = false
@@ -1838,6 +1860,8 @@ private struct ContinuousTimelineSheet: View {
     @State private var hasCompletedInitialTimelinePositioning = false
     @State private var requestedHistoryImport = false
     @State private var showingAddPlaceSheet = false
+    @State private var sharePayload: DFKShareCardPayload?
+    @State private var showingTimelineShareRangePicker = false
     @AppStorage("isImportantPlaceGuideDismissed") private var isImportantPlaceGuideDismissed = false
 
     let dates: [Date]
@@ -1869,6 +1893,19 @@ private struct ContinuousTimelineSheet: View {
 
     private var isCollapsed: Bool {
         timelineDetent == .height(88)
+    }
+
+    private var timelineScrollPositionBinding: Binding<ScrollTarget?> {
+        Binding(
+            get: { timelineScrollPosition },
+            set: { newValue in
+                // While a calendar jump is in flight, viewport updates may
+                // report the old (usually today) row. Keep the requested ID
+                // until that destination has actually become visible.
+                guard calendarScrollLockTarget == nil else { return }
+                timelineScrollPosition = newValue
+            }
+        )
     }
 
     private var isShowingFootprintDeletionAlert: Binding<Bool> {
@@ -1955,6 +1992,14 @@ private struct ContinuousTimelineSheet: View {
                             NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
                         }
                         .environment(locationManager)
+                    }
+                    .sheet(item: $sharePayload) { payload in
+                        DFKShareCardPreviewView(payload: payload)
+                    }
+                    .sheet(isPresented: $showingTimelineShareRangePicker) {
+                        DFKTimelineShareRangePicker(initialDate: activeTimelineDate) { startDate, endDate in
+                            prepareTimelineShare(startDate: startDate, endDate: endDate)
+                        }
                     }
                     .sheet(isPresented: $isShowingSettings) {
                         NavigationStack {
@@ -2210,8 +2255,9 @@ private struct ContinuousTimelineSheet: View {
                             .padding(.top, 30)
                             .padding(.horizontal, 16)
                             .padding(.bottom, 128)
+                            .scrollTargetLayout()
                         }
-                        .defaultScrollAnchor(.bottom)
+                        .scrollPosition(id: timelineScrollPositionBinding, anchor: .bottom)
                         .scrollDisabled(isCollapsed)
                         .coordinateSpace(name: "continuousTimelineScroll")
                         .onPreferenceChange(ContinuousTimelineDateFramePreferenceKey.self) { frames in
@@ -2386,12 +2432,16 @@ private struct ContinuousTimelineSheet: View {
                 let futureTripDates = futureTrips.map { Calendar.current.startOfDay(for: $0.arrivalDate) }
                 let activeDates = Set(availableDates.filter { $0 <= today }).union(futureTripDates)
 
-                MiniCalendarView(selectedDate: $activeTimelineDate, availableDates: activeDates) { date in
+                MiniCalendarView(
+                    selectedDate: Binding(
+                        get: { activeTimelineDate },
+                        set: { _ in }
+                    ),
+                    availableDates: activeDates
+                ) { date in
                     isShowingCalendar = false
                     let normalizedDate = Calendar.current.startOfDay(for: date)
-                    activeTimelineDate = normalizedDate
-                    visibleDatesChanged([normalizedDate])
-                    scrollToDate(date, using: proxy)
+                    scrollToDate(normalizedDate, using: proxy)
                 }
                 .presentationCompactAdaptation(.popover)
             }
@@ -2414,12 +2464,264 @@ private struct ContinuousTimelineSheet: View {
 
         ToolbarItem(placement: .topBarTrailing) {
             HStack(spacing: 8) {
+                Menu {
+                    Button {
+                        prepareTimelineShare()
+                    } label: {
+                        Label("分享当前日期足迹", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+                    }
+                    Button {
+                        showingTimelineShareRangePicker = true
+                    } label: {
+                        Label("选择日期范围分享", systemImage: "calendar.badge.plus")
+                    }
+                    Divider()
+                    Button {
+                        prepareTodayPlansShare()
+                    } label: {
+                        Label("分享今日计划", systemImage: "calendar")
+                    }
+                    Button {
+                        prepareFuturePlansShare()
+                    } label: {
+                        Label("分享未来7天计划", systemImage: "calendar.badge.clock")
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .accessibilityLabel("分享")
+
                 Button {
                     isShowingSettings = true
                 } label: {
                     Image(systemName: "gearshape")
                 }
             }
+        }
+    }
+
+    private func prepareTimelineShare() {
+        let date = Calendar.current.startOfDay(for: activeTimelineDate)
+        let items = timelinesByDate[date] ?? []
+        let photoAssetIDs = items.flatMap { item -> [String] in
+            if case .footprint(let footprint) = item {
+                return footprint.photoAssetIDs
+            }
+            return []
+        }
+        let footprints = items.compactMap { item -> Footprint? in
+            if case .footprint(let footprint) = item {
+                return footprint
+            }
+            return nil
+        }
+        let transports = shareTransportRecords(from: items)
+        let coordinates = shareMapCoordinates(from: items)
+        let loadingPayload = DFKShareCardFactory.loadingPayload(
+            kind: .timeline,
+            rangeText: DFKShareCardFactory.dateText(date),
+            coordinates: coordinates
+        )
+        sharePayload = loadingPayload
+        let payloadID = loadingPayload.id
+
+        DFKShareImageLoader.loadShareMedia(
+            assetIDs: photoAssetIDs,
+            coordinates: coordinates,
+            footprints: footprints,
+            transports: transports,
+            widgetDate: date,
+            activities: activityTypes
+        ) { media in
+            var payload = DFKShareCardFactory.timelinePayload(
+                date: date,
+                items: items,
+                activities: activityTypes,
+                images: media.images,
+                mapImage: media.mapImage,
+                lightMapImage: media.lightMapImage,
+                darkMapImage: media.darkMapImage
+            )
+            payload.contentMapImage = media.mapImage
+            payload.contentMapLightImage = media.lightMapImage
+            payload.contentMapDarkImage = media.darkMapImage
+            payload.backgroundMapImage = media.backgroundMapImage
+            payload.backgroundMapLightImage = media.backgroundLightMapImage
+            payload.backgroundMapDarkImage = media.backgroundDarkMapImage
+            payload.id = payloadID
+            sharePayload = payload
+        }
+    }
+
+    private func prepareTimelineShare(startDate: Date, endDate: Date) {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: min(startDate, endDate))
+        let selectedEnd = calendar.startOfDay(for: max(startDate, endDate))
+        let endExclusive = calendar.date(byAdding: .day, value: 1, to: selectedEnd) ?? selectedEnd.addingTimeInterval(24 * 3600)
+        let descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate<Footprint> {
+                $0.startTime < endExclusive && $0.endTime > start && $0.statusValue != "ignored"
+            },
+            sortBy: [SortDescriptor(\.startTime)]
+        )
+        let footprints = (try? modelContext.fetch(descriptor)) ?? []
+        let transportDescriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate<TransportRecord> {
+                $0.startTime < endExclusive && $0.endTime > start && $0.statusRaw != "ignored"
+            },
+            sortBy: [SortDescriptor(\.startTime)]
+        )
+        let transports = (try? modelContext.fetch(transportDescriptor)) ?? []
+        let photoAssetIDs = footprints.flatMap(\.photoAssetIDs)
+        let rangeText = DFKShareCardFactory.rangeText(from: start, to: selectedEnd)
+        let coordinates = footprints.flatMap(\.coordinates) + shareMapCoordinates(from: transports)
+        let loadingPayload = DFKShareCardFactory.loadingPayload(
+            kind: .timeline,
+            rangeText: rangeText,
+            coordinates: coordinates
+        )
+        sharePayload = loadingPayload
+        let payloadID = loadingPayload.id
+
+        DFKShareImageLoader.loadShareMedia(
+            assetIDs: photoAssetIDs,
+            coordinates: coordinates,
+            footprints: footprints,
+            transports: transports,
+            widgetDate: start == selectedEnd ? start : nil,
+            activities: activityTypes
+        ) { media in
+            var payload = DFKShareCardFactory.timelinePayload(
+                rangeText: rangeText,
+                footprints: footprints,
+                activities: activityTypes,
+                images: media.images,
+                mapImage: media.mapImage,
+                lightMapImage: media.lightMapImage,
+                darkMapImage: media.darkMapImage
+            )
+            payload.contentMapImage = media.mapImage
+            payload.contentMapLightImage = media.lightMapImage
+            payload.contentMapDarkImage = media.darkMapImage
+            payload.backgroundMapImage = media.backgroundMapImage
+            payload.backgroundMapLightImage = media.backgroundLightMapImage
+            payload.backgroundMapDarkImage = media.backgroundDarkMapImage
+            payload.id = payloadID
+            sharePayload = payload
+        }
+    }
+
+    private func shareTransportRecords(from items: [TimelineItem]) -> [TransportRecord] {
+        items.compactMap { item -> TransportRecord? in
+            guard case .transport(let transport) = item else { return nil }
+            let encodedPoints = transport.pathPoints.map {
+                CodableCoordinate(
+                    lat: $0.coordinate.latitude,
+                    lon: $0.coordinate.longitude,
+                    timestamp: $0.timestamp,
+                    isSyntheticPadding: $0.isSyntheticPadding
+                )
+            }
+            guard let pointsData = try? JSONEncoder().encode(encodedPoints), !encodedPoints.isEmpty else {
+                return nil
+            }
+            let record = TransportRecord(
+                recordID: transport.id,
+                day: Calendar.current.startOfDay(for: transport.startTime),
+                startTime: transport.startTime,
+                endTime: transport.endTime,
+                startLocation: transport.startLocation,
+                endLocation: transport.endLocation,
+                typeRaw: transport.type.rawValue,
+                distance: transport.distance,
+                averageSpeed: transport.averageSpeed,
+                pointsData: pointsData,
+                statusRaw: "active",
+                stepCount: transport.stepCount
+            )
+            record.manualTypeRaw = transport.manualType?.rawValue
+            return record
+        }
+    }
+
+    private func shareMapCoordinates(from items: [TimelineItem]) -> [CLLocationCoordinate2D] {
+        items.flatMap { item -> [CLLocationCoordinate2D] in
+            switch item {
+            case .footprint(let footprint):
+                let coordinates = footprint.coordinates
+                if !coordinates.isEmpty { return coordinates }
+                return [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
+            case .transport(let transport):
+                let coordinates = transport.lineSegments.flatMap(\.coordinates)
+                if !coordinates.isEmpty { return coordinates }
+                return transport.points
+            }
+        }
+    }
+
+    private func shareMapCoordinates(from transports: [TransportRecord]) -> [CLLocationCoordinate2D] {
+        transports.flatMap { record in
+            ((try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData)) ?? [])
+                .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                .filter {
+                    $0.latitude.isFinite &&
+                    $0.longitude.isFinite &&
+                    CLLocationCoordinate2DIsValid($0)
+                }
+        }
+    }
+
+    private func prepareTodayPlansShare() {
+        let today = Calendar.current.startOfDay(for: Date())
+        let selectedTrips = trips(in: today, through: today)
+        let coordinates = selectedTrips.map(\.coordinate)
+        let loadingPayload = DFKShareCardFactory.loadingPayload(kind: .plan, rangeText: "今天", coordinates: coordinates)
+        sharePayload = loadingPayload
+        let payloadID = loadingPayload.id
+        DFKShareImageLoader.loadMapImages(coordinates: coordinates) { mapImages in
+            var payload = DFKShareCardFactory.planPayload(
+                title: "今天的全部安排",
+                rangeText: "今天",
+                trips: selectedTrips
+            )
+            payload.backgroundMapImage = mapImages.light ?? mapImages.dark
+            payload.backgroundMapLightImage = mapImages.light
+            payload.backgroundMapDarkImage = mapImages.dark
+            payload.id = payloadID
+            sharePayload = payload
+        }
+    }
+
+    private func prepareFuturePlansShare() {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: activeTimelineDate)
+        let end = calendar.date(byAdding: .day, value: 6, to: start) ?? start
+        let selectedTrips = trips(in: start, through: end)
+        let rangeText = "\(DFKShareCardFactory.dateText(start)) - \(DFKShareCardFactory.dateText(end))"
+        let coordinates = selectedTrips.map(\.coordinate)
+        let loadingPayload = DFKShareCardFactory.loadingPayload(kind: .plan, rangeText: rangeText, coordinates: coordinates)
+        sharePayload = loadingPayload
+        let payloadID = loadingPayload.id
+        DFKShareImageLoader.loadMapImages(coordinates: coordinates) { mapImages in
+            var payload = DFKShareCardFactory.planPayload(
+                title: "未来7天计划",
+                rangeText: rangeText,
+                trips: selectedTrips
+            )
+            payload.backgroundMapImage = mapImages.light ?? mapImages.dark
+            payload.backgroundMapLightImage = mapImages.light
+            payload.backgroundMapDarkImage = mapImages.dark
+            payload.id = payloadID
+            sharePayload = payload
+        }
+    }
+
+    private func trips(in startDate: Date, through endDate: Date) -> [FutureTrip] {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: startDate)
+        let end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: endDate)) ?? endDate
+        return futureTrips.filter { trip in
+            trip.arrivalDate >= start && trip.arrivalDate < end
         }
     }
 
@@ -2963,23 +3265,34 @@ private struct ContinuousTimelineSheet: View {
 
     private func scrollToDate(_ date: Date, using proxy: ScrollViewProxy) {
         let normalizedDate = Calendar.current.startOfDay(for: date)
+        calendarBackfillTask?.cancel()
+        calendarScrollRetryTask?.cancel()
+        calendarScrollRetryTask = nil
+
+        // Lock viewport-driven date updates while the destination is loaded.
+        // Do not change activeTimelineDate yet: timelineDates automatically
+        // inserts that value, which would create an unloaded placeholder and
+        // make the bottom-anchored ScrollView move before the real row exists.
+        calendarScrollLockTarget = normalizedDate
+        pendingCalendarBackfillDates = timelineDatesToBackfill(afterSelecting: normalizedDate)
+
         Task { @MainActor in
-            calendarBackfillTask?.cancel()
-            calendarScrollRetryTask?.cancel()
-            calendarScrollRetryTask = nil
-            calendarScrollLockTarget = normalizedDate
-            pendingCalendarBackfillDates = timelineDatesToBackfill(afterSelecting: normalizedDate)
             if !dates.contains(normalizedDate) {
                 guard await loadDate(normalizedDate) else {
-                    calendarScrollLockTarget = nil
-                    pendingCalendarBackfillDates = []
-                    freezesViewportDrivenUpdatesUntil = nil
+                    if calendarScrollLockTarget == normalizedDate {
+                        calendarScrollLockTarget = nil
+                        pendingCalendarBackfillDates = []
+                        freezesViewportDrivenUpdatesUntil = nil
+                    }
                     return
                 }
             }
 
+            // A newer calendar selection may have replaced this request while
+            // the target date was loading.
+            guard calendarScrollLockTarget == normalizedDate else { return }
             applySelectedCalendarDate(normalizedDate)
-            calendarScrollLockTarget = normalizedDate
+            timelineScrollPosition = .date(normalizedDate)
             scheduleLockedCalendarScroll(using: proxy)
         }
     }
@@ -2994,6 +3307,7 @@ private struct ContinuousTimelineSheet: View {
             for attempt in 0..<10 {
                 guard !Task.isCancelled else { return }
                 applySelectedCalendarDate(target)
+                timelineScrollPosition = .date(target)
 
                 if attempt == 0 {
                     withAnimation(.easeInOut(duration: 0.35)) {
@@ -3036,8 +3350,12 @@ private struct ContinuousTimelineSheet: View {
 
     private func isCalendarScrollTargetVisible(_ date: Date) -> Bool {
         guard latestViewportHeight > 0, let frame = latestDateFrames[date] else { return false }
-        return abs(frame.maxY - latestViewportHeight) <= 80 ||
-            (frame.minY >= -20 && frame.maxY <= latestViewportHeight + 20)
+        // Calendar navigation scrolls the selected day with a .bottom anchor.
+        // Merely being somewhere inside the viewport is not success: recently
+        // loaded days can still have a stale/partially visible frame while the
+        // calendar popover is dismissing, which used to stop retries after the
+        // small bottom nudge the user observed.
+        return abs(frame.maxY - latestViewportHeight) <= 32
     }
 
     private func timelineDatesToBackfill(afterSelecting selectedDate: Date) -> [Date] {

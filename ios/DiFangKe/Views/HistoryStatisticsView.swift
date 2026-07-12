@@ -54,6 +54,7 @@ struct HistoryStatisticsView: View {
     
     @State private var showingFullMap = false
     @State private var activeYearForSegment: Int = Calendar.current.component(.year, from: Date())
+    @State private var sharePayload: DFKShareCardPayload?
     
     // Filtered footprints based on range
     private var filteredFootprints: [Footprint] {
@@ -101,6 +102,16 @@ struct HistoryStatisticsView: View {
             }
         }
         .background(Color.dfkBackground)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    prepareStatsShare()
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .accessibilityLabel("分享统计")
+            }
+        }
         .onChange(of: selectedRange) { _, _ in
             updateAiSummary()
             updateMapPosition()
@@ -115,6 +126,50 @@ struct HistoryStatisticsView: View {
         }
         .fullScreenCover(isPresented: $showingFullMap) {
             FullHeatmapView(heatmapPoints: heatmapPoints, initialPosition: mapPosition)
+        }
+        .sheet(item: $sharePayload) { payload in
+            DFKShareCardPreviewView(payload: payload)
+        }
+    }
+
+    private func prepareStatsShare() {
+        let footprints = filteredFootprints
+        let coordinates = footprints.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+        let loadingPayload = DFKShareCardFactory.loadingPayload(
+            kind: .stats,
+            rangeText: statisticsRangeText,
+            coordinates: coordinates
+        )
+        sharePayload = loadingPayload
+        let payloadID = loadingPayload.id
+
+        DFKShareImageLoader.loadMapImages(
+            coordinates: coordinates,
+            footprints: footprints,
+            activities: activityTypes
+        ) { mapImages in
+            var payload = DFKShareCardFactory.statsPayload(
+                rangeText: statisticsRangeText,
+                footprints: footprints,
+                places: allPlaces,
+                activities: activityTypes,
+                aiSummary: aiSummary
+            )
+            payload.backgroundMapImage = mapImages.light ?? mapImages.dark
+            payload.backgroundMapLightImage = mapImages.light
+            payload.backgroundMapDarkImage = mapImages.dark
+            payload.id = payloadID
+            sharePayload = payload
+        }
+    }
+
+    private var statisticsRangeText: String {
+        switch selectedRange {
+        case .last7Days: return "最近7天"
+        case .last30Days: return "最近30天"
+        case .last90Days: return "最近90天"
+        case .lastYear: return "过去一年"
+        case .customYear(let year): return "\(year)年"
         }
     }
     

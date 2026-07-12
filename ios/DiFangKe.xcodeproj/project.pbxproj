@@ -25,6 +25,7 @@
 		8F4D2C9E6A1B43D0A6C7E2B1 /* FutureTrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */; };
 		8F4D2CA16A1B43D0A6C7E2B1 /* FutureTripDraftModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2C9F6A1B43D0A6C7E2B1 /* FutureTripDraftModal.swift */; };
 		8F4D2CA26A1B43D0A6C7E2B1 /* FutureTripTimelineRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2CA06A1B43D0A6C7E2B1 /* FutureTripTimelineRow.swift */; };
+		8F4D2CA46A1B43D0A6C7E2B1 /* ShareCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2CA36A1B43D0A6C7E2B1 /* ShareCards.swift */; };
 		923B7C1655C4BB80D929DDCF /* Aptabase in Frameworks */ = {isa = PBXBuildFile; productRef = 68EA130148C5349D5CF940EE /* Aptabase */; };
 		93AB9A1A347A786C40F60D26 /* MapPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D750760587987B7CCDAB5FF /* MapPickerView.swift */; };
 		988AA12CFD19A21CA1592A1D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A099643BEA06307F4508FC0 /* SettingsView.swift */; };
@@ -128,6 +129,7 @@
 		8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTrip.swift; sourceTree = "<group>"; };
 		8F4D2C9F6A1B43D0A6C7E2B1 /* FutureTripDraftModal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTripDraftModal.swift; sourceTree = "<group>"; };
 		8F4D2CA06A1B43D0A6C7E2B1 /* FutureTripTimelineRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTripTimelineRow.swift; sourceTree = "<group>"; };
+		8F4D2CA36A1B43D0A6C7E2B1 /* ShareCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareCards.swift; sourceTree = "<group>"; };
 		8FECD1239FE04DF703FFB1E6 /* DataManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataManagerView.swift; sourceTree = "<group>"; };
 		97D09C072C5681826463BD99 /* PlacesManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesManagerView.swift; sourceTree = "<group>"; };
 		A49FF8D1053B68159E4D2EEC /* Footprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Footprint.swift; sourceTree = "<group>"; };
@@ -251,6 +253,7 @@
 			children = (
 				8F4D2C9F6A1B43D0A6C7E2B1 /* FutureTripDraftModal.swift */,
 				8F4D2CA06A1B43D0A6C7E2B1 /* FutureTripTimelineRow.swift */,
+				8F4D2CA36A1B43D0A6C7E2B1 /* ShareCards.swift */,
 				C6ACF7662F95110B006D9536 /* RawPointsListView.swift */,
 				C68544472F86A80500C605E9 /* HistoryStatisticsView.swift */,
 				C68544452F854DB400C605E9 /* ActivityTypeSettingsView.swift */,
@@ -462,6 +465,7 @@
 				8F4D2C9E6A1B43D0A6C7E2B1 /* FutureTrip.swift in Sources */,
 				8F4D2CA16A1B43D0A6C7E2B1 /* FutureTripDraftModal.swift in Sources */,
 				8F4D2CA26A1B43D0A6C7E2B1 /* FutureTripTimelineRow.swift in Sources */,
+				8F4D2CA46A1B43D0A6C7E2B1 /* ShareCards.swift in Sources */,
 				C67848582FA3A082002DF823 /* WidgetDataSyncManager.swift in Sources */,
 				AC19D6437C18A309FE001E29 /* TimelineView.swift in Sources */,
 				7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */,

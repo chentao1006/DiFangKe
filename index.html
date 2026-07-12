@@ -272,7 +272,11 @@
                 --accent-soft: rgba(79, 179, 165, 0.2);
             }
             body { background: #1c1c1e; }
-            .map-background::after { background: rgba(18, 24, 25, 0.48); }
+            .map-background::after { background: rgba(12, 16, 18, 0.2); }
+            #background-map {
+                opacity: 0.78 !important;
+                filter: invert(1) hue-rotate(180deg) grayscale(0.28) brightness(0.72) contrast(0.9) !important;
+            }
             header { 
                 background: rgba(28, 28, 30, 0.8) !important; 
                 border-bottom: 1px solid rgba(255,255,255,0.08) !important;
@@ -844,9 +848,9 @@
                 { name: '哈尔滨', coordinates: [45.8038, 126.5349], zoom: 8.6 }
             ];
             const internationalCities = [
-                { name: '东京', coordinates: [35.6762, 139.6503], zoom: 5.8 },
                 { name: '巴黎', coordinates: [48.8566, 2.3522], zoom: 5.6 },
                 { name: '纽约', coordinates: [40.7128, -74.0060], zoom: 5.6 },
+                { name: '东京', coordinates: [35.6762, 139.6503], zoom: 5.8 },
                 { name: '悉尼', coordinates: [-33.8688, 151.2093], zoom: 5.7 },
                 { name: '伦敦', coordinates: [51.5072, -0.1276], zoom: 5.7 }
             ];

@@ -151,6 +151,262 @@ final class WidgetDataSyncManager {
         await syncData(forOffset: offset)
         WidgetCenter.shared.reloadAllTimelines()
     }
+
+    func snapshotImagesForOffset(_ offset: Int) async -> (light: UIImage?, dark: UIImage?) {
+        let existing = readSnapshotImagesForOffset(offset)
+        if existing.light != nil || existing.dark != nil {
+            return existing
+        }
+
+        await syncOffsetOnDemand(offset)
+        return readSnapshotImagesForOffset(offset)
+    }
+
+    func makeShareMapSnapshots(
+        footprints: [Footprint],
+        transports: [TransportRecord],
+        activities: [ActivityType]
+    ) async -> (light: UIImage?, dark: UIImage?) {
+        let aggregatedFootprints = aggregatedFootprints(from: footprints)
+        let footprintPhotoImages = await loadAggregatedFootprintPhotoImages(aggregatedFootprints, targetSide: 88)
+        let decodedTransports = transports.compactMap { transport -> WidgetDecodedTransport? in
+            guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
+                  !decoded.isEmpty else {
+                return nil
+            }
+            let coordinates = decoded
+                .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                .filter {
+                    $0.latitude.isFinite &&
+                    $0.longitude.isFinite &&
+                    CLLocationCoordinate2DIsValid($0)
+                }
+            guard !coordinates.isEmpty else { return nil }
+            return WidgetDecodedTransport(
+                record: transport,
+                coordinates: coordinates,
+                segments: widgetTransportLineSegments(from: decoded)
+            )
+        }
+
+        let allMapCoordinates = (footprints.flatMap(\.coordinates) + decodedTransports.flatMap(\.coordinates)).filter {
+            $0.latitude.isFinite &&
+            $0.longitude.isFinite &&
+            CLLocationCoordinate2DIsValid($0)
+        }
+        guard !allMapCoordinates.isEmpty else { return (nil, nil) }
+
+        let allActivities = activities
+        let activitiesByID = Dictionary(allActivities.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { first, _ in first })
+        let activitiesByName = Dictionary(allActivities.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+
+        async let light = makeWidgetMapSnapshot(
+            coordinates: allMapCoordinates,
+            aggregatedFootprints: aggregatedFootprints,
+            footprintPhotoImages: footprintPhotoImages,
+            decodedTransports: decodedTransports,
+            activitiesByID: activitiesByID,
+            activitiesByName: activitiesByName,
+            style: .light
+        )
+        async let dark = makeWidgetMapSnapshot(
+            coordinates: allMapCoordinates,
+            aggregatedFootprints: aggregatedFootprints,
+            footprintPhotoImages: footprintPhotoImages,
+            decodedTransports: decodedTransports,
+            activitiesByID: activitiesByID,
+            activitiesByName: activitiesByName,
+            style: .dark
+        )
+        return await (light, dark)
+    }
+
+    private func makeWidgetMapSnapshot(
+        coordinates: [CLLocationCoordinate2D],
+        aggregatedFootprints: [AggregatedFootprintSnapshot],
+        footprintPhotoImages: [String: UIImage],
+        decodedTransports: [WidgetDecodedTransport],
+        activitiesByID: [String: ActivityType],
+        activitiesByName: [String: ActivityType],
+        style: UIUserInterfaceStyle
+    ) async -> UIImage? {
+        var minLat = coordinates[0].latitude
+        var maxLat = coordinates[0].latitude
+        var minLon = coordinates[0].longitude
+        var maxLon = coordinates[0].longitude
+        for point in coordinates {
+            minLat = min(minLat, point.latitude)
+            maxLat = max(maxLat, point.latitude)
+            minLon = min(minLon, point.longitude)
+            maxLon = max(maxLon, point.longitude)
+        }
+
+        let spanLat = max(0.005, (maxLat - minLat) * 1.6)
+        let spanLon = max(0.005, (maxLon - minLon) * 2.4)
+        let region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2),
+            span: MKCoordinateSpan(latitudeDelta: spanLat, longitudeDelta: spanLon)
+        )
+
+        let options = MKMapSnapshotter.Options()
+        options.region = region
+        options.size = CGSize(width: 329, height: 155)
+        options.scale = 3.0
+        options.traitCollection = UITraitCollection(userInterfaceStyle: style)
+
+        guard let snapshot = try? await MKMapSnapshotter(options: options).start() else {
+            return nil
+        }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 3.0
+        let renderer = UIGraphicsImageRenderer(size: snapshot.image.size, format: format)
+        return renderer.image { ctx in
+            snapshot.image.draw(at: .zero)
+
+            ctx.cgContext.setLineCap(.round)
+            ctx.cgContext.setLineJoin(.round)
+            let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
+
+            for transportSnapshot in decodedTransports {
+                let clCoords = transportSnapshot.coordinates
+
+                for segment in transportSnapshot.segments {
+                    let points = segment.coordinates.map { snapshot.point(for: $0) }
+                    guard points.count >= 2 else { continue }
+
+                    ctx.cgContext.beginPath()
+                    ctx.cgContext.move(to: points[0])
+                    for point in points.dropFirst() {
+                        ctx.cgContext.addLine(to: point)
+                    }
+                    ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor)
+                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.1 : 2.5)
+                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
+                    ctx.cgContext.strokePath()
+                }
+                ctx.cgContext.setLineDash(phase: 0, lengths: [])
+
+                if clCoords.count >= 2, let midCoord = clCoords.widgetMidpoint {
+                    let midPoint = snapshot.point(for: midCoord)
+                    let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
+                    let path = UIBezierPath(ovalIn: rect)
+
+                    UIColor.systemBackground.setFill()
+                    path.fill()
+                    themeColor.setStroke()
+                    path.lineWidth = 1.2
+                    path.stroke()
+
+                    let transportType = TransportType(rawValue: transportSnapshot.record.manualTypeRaw ?? transportSnapshot.record.typeRaw) ?? .slow
+                    if let iconImage = UIImage(systemName: transportType.sfSymbol) {
+                        let symbolSize: CGFloat = 8
+                        let symbolRect = CGRect(
+                            x: midPoint.x - symbolSize / 2,
+                            y: midPoint.y - symbolSize / 2,
+                            width: symbolSize,
+                            height: symbolSize
+                        )
+                        iconImage.withTintColor(themeColor).drawAspectFit(in: symbolRect)
+                    }
+                }
+            }
+
+            let sortedFootprints = aggregatedFootprints.sorted { $0.coordinate.latitude > $1.coordinate.latitude }
+            for aggregated in sortedFootprints {
+                let footprint = aggregated.representative
+                let point = snapshot.point(for: aggregated.coordinate)
+                let radius: CGFloat = 9
+                let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
+
+                let activity = footprint.activityTypeValue.flatMap { activitiesByID[$0] ?? activitiesByName[$0] }
+                let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
+                let iconColor: UIColor = .white
+
+                let pinPath = CGMutablePath()
+                pinPath.addArc(center: center, radius: radius, startAngle: 140 * .pi / 180, endAngle: 40 * .pi / 180, clockwise: false)
+                let bottomY = point.y - 1.5
+                pinPath.addLine(to: CGPoint(x: center.x + 1.5, y: bottomY))
+                pinPath.addArc(center: CGPoint(x: center.x, y: bottomY), radius: 1.5, startAngle: 0, endAngle: .pi, clockwise: false)
+                pinPath.closeSubpath()
+
+                ctx.cgContext.saveGState()
+                ctx.cgContext.setShadow(
+                    offset: CGSize(width: 0, height: 1.5),
+                    blur: 1.5,
+                    color: UIColor.black.withAlphaComponent(0.15).cgColor
+                )
+                ctx.cgContext.setFillColor(UIColor.systemBackground.cgColor)
+                ctx.cgContext.addPath(pinPath)
+                ctx.cgContext.fillPath()
+                ctx.cgContext.restoreGState()
+
+                let innerRadius = radius - 1.5
+                let innerCenter = CGPoint(x: center.x, y: center.y + 0.5)
+                let innerCirclePath = UIBezierPath(arcCenter: innerCenter, radius: innerRadius, startAngle: 0, endAngle: 2 * .pi, clockwise: true)
+
+                ctx.cgContext.saveGState()
+                innerCirclePath.addClip()
+                let colors = [activityColor.withAlphaComponent(0.7).cgColor, activityColor.cgColor] as CFArray
+                if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
+                    ctx.cgContext.drawLinearGradient(
+                        gradient,
+                        start: CGPoint(x: innerCenter.x, y: innerCenter.y - innerRadius),
+                        end: CGPoint(x: innerCenter.x, y: innerCenter.y + innerRadius),
+                        options: []
+                    )
+                } else {
+                    activityColor.setFill()
+                    innerCirclePath.fill()
+                }
+                ctx.cgContext.restoreGState()
+
+                if let latestPhotoAssetID = aggregated.latestPhotoAssetID,
+                   let photoImage = footprintPhotoImages[latestPhotoAssetID] {
+                    let photoRadius = innerRadius + 0.5
+                    let photoRect = CGRect(
+                        x: innerCenter.x - photoRadius,
+                        y: innerCenter.y - photoRadius,
+                        width: photoRadius * 2,
+                        height: photoRadius * 2
+                    )
+                    let clipPath = UIBezierPath(ovalIn: photoRect)
+                    ctx.cgContext.saveGState()
+                    clipPath.addClip()
+                    photoImage.drawAspectFill(in: photoRect)
+                    ctx.cgContext.restoreGState()
+                    activityColor.setStroke()
+                    clipPath.lineWidth = 1
+                    clipPath.stroke()
+                } else {
+                    let iconName = activity?.icon ?? FootprintIconDefaults.map
+                    if let iconImage = UIImage(systemName: iconName) {
+                        let iconSize: CGFloat = 11
+                        let iconRect = CGRect(
+                            x: innerCenter.x - iconSize / 2,
+                            y: innerCenter.y - iconSize / 2,
+                            width: iconSize,
+                            height: iconSize
+                        )
+                        iconImage.withTintColor(iconColor, renderingMode: .alwaysTemplate).draw(in: iconRect)
+                    }
+                }
+            }
+        }
+    }
+
+    private func readSnapshotImagesForOffset(_ offset: Int) -> (light: UIImage?, dark: UIImage?) {
+        (
+            readSnapshotImage(forOffset: offset, themeName: "light"),
+            readSnapshotImage(forOffset: offset, themeName: "dark")
+        )
+    }
+
+    private func readSnapshotImage(forOffset offset: Int, themeName: String) -> UIImage? {
+        let url = getFileURL(forOffset: offset, sizeName: "medium", themeName: themeName)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return UIImage(data: data)
+    }
     
     private func ensureContainer() {
         if container == nil {
