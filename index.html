@@ -876,19 +876,38 @@
                 return city;
             };
             let currentCity = pickCity();
+            let isChangingCity = false;
+            let driftTimer;
+
+            const driftMap = () => {
+                if (isChangingCity) return;
+                map.panBy(
+                    [(Math.random() - 0.5) * 90, (Math.random() - 0.5) * 60],
+                    { animate: true, duration: 3.7, easeLinearity: 0.25 }
+                );
+                driftTimer = setTimeout(driftMap, 3650);
+            };
+
             const visitCity = () => {
                 const city = currentCity;
                 const offsetLatitude = (Math.random() - 0.5) * 0.06;
                 const offsetLongitude = (Math.random() - 0.5) * 0.08;
+                isChangingCity = true;
+                clearTimeout(driftTimer);
                 map.flyTo(
                     [city.coordinates[0] + offsetLatitude, city.coordinates[1] + offsetLongitude],
                     city.zoom + (Math.random() > 0.5 ? 0.2 : -0.15),
                     { animate: true, duration: 5.5, easeLinearity: 0.18 }
                 );
                 currentCity = pickCity(city.name);
+                setTimeout(() => {
+                    isChangingCity = false;
+                    driftMap();
+                }, 5500);
             };
 
             map.setView(currentCity.coordinates, currentCity.zoom, { animate: false });
+            driftMap();
             setTimeout(visitCity, 3500);
             setInterval(visitCity, 9500);
         }
