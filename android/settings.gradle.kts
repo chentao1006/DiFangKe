@@ -30,7 +30,8 @@ dependencyResolutionManagement {
         
         google()
         mavenCentral()
-        // 高德地图 SDK
+        // 腾讯地图 SDK
+        maven { url = uri("https://mirrors.tencent.com/repository/maven/tencent_public/") }
         maven { url = uri("https://jitpack.io") }
     }
 }

@@ -60,7 +60,7 @@ import com.ct106.difangke.data.db.entity.PlaceEntity
 fun MainScreen(
     viewModel: MainViewModel = androidx.lifecycle.viewmodel.compose.viewModel(),
     initialDate: Date? = null,
-    onNavigateToHistory: () -> Unit,
+    onNavigateToHistory: (Date) -> Unit,
     onNavigateToStatistics: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onNavigateToMap: (Date?) -> Unit,
@@ -360,7 +360,7 @@ private fun ContinuousTimelineScaffold(
     onViewRawPoints: (Date) -> Unit,
     onNavigateToMap: (Date?) -> Unit,
     onNavigateToDetail: (String) -> Unit,
-    onNavigateToHistory: () -> Unit,
+    onNavigateToHistory: (Date) -> Unit,
     onNavigateToStatistics: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onAddFutureTrip: () -> Unit,
@@ -409,7 +409,7 @@ private fun ContinuousTimelineScaffold(
                     activityTypes = activityTypes,
                     allPlaces = allPlaces,
                     onNavigateToMap = { onNavigateToMap(selectedDate) },
-                    onNavigateToHistory = onNavigateToHistory,
+                    onNavigateToHistory = { onNavigateToHistory(selectedDate) },
                     onNavigateToStatistics = onNavigateToStatistics,
                     onNavigateToSettings = onNavigateToSettings,
                     onShowCalendar = onShowCalendar
@@ -426,7 +426,7 @@ private fun ContinuousTimelineScaffold(
                     activityTypes = activityTypes,
                     allPlaces = allPlaces,
                     onNavigateToMap = { onNavigateToMap(selectedDate) },
-                    onNavigateToHistory = onNavigateToHistory,
+                    onNavigateToHistory = { onNavigateToHistory(selectedDate) },
                     onNavigateToStatistics = onNavigateToStatistics,
                     onNavigateToSettings = onNavigateToSettings,
                     onShowCalendar = onShowCalendar

@@ -7,9 +7,10 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.*
 import android.util.Log
-import com.amap.api.location.AMapLocationClient
-import com.amap.api.location.AMapLocationClientOption
-import com.amap.api.location.AMapLocationListener
+import com.tencent.map.geolocation.TencentLocation
+import com.tencent.map.geolocation.TencentLocationListener
+import com.tencent.map.geolocation.TencentLocationManager
+import com.tencent.map.geolocation.TencentLocationRequest
 import com.ct106.difangke.AppConfig
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.FootprintEntity
@@ -73,7 +74,7 @@ class LocationTrackingService : Service() {
         private val gson = Gson()
         private val prefs by lazy { (application as DiFangKeApp).preferences }
 
-        private var locationClient: AMapLocationClient? = null
+        private var locationClient: TencentLocationManager? = null
         private val rawStore by lazy { RawLocationStore.getInstance(applicationContext) }
         private val db by lazy { DiFangKeApp.instance.database }
         private val geocoder by lazy { GeocodeService.shared }
@@ -132,18 +133,18 @@ class LocationTrackingService : Service() {
                 return false
         }
 
-        private fun getBestLocationMode(): AMapLocationClientOption.AMapLocationMode {
+        private fun getBestLocationMode(): Int {
                 return if (isVpnOrProxyActive() && hasAcquiredFirstLocation) {
                         Log.i(
                                 TAG,
                                 "检测到 VPN 或代理处于激活状态，且已获取过首次定位，使用 Device_Sensors 模式（仅 GPS）定位以防止定位漂移"
                         )
-                        AMapLocationClientOption.AMapLocationMode.Device_Sensors
+                        TencentLocationRequest.ONLY_GPS_MODE
                 } else {
                         if (currentAccuracyMode == "powerSaving") {
-                                AMapLocationClientOption.AMapLocationMode.Battery_Saving
+                                TencentLocationRequest.ONLY_NETWORK_MODE
                         } else {
-                                AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
+                                TencentLocationRequest.HIGH_ACCURACY_MODE
                         }
                 }
         }
@@ -166,15 +167,15 @@ class LocationTrackingService : Service() {
                                         }
                                 }
                         }
-                locationClient?.setLocationOption(
-                        AMapLocationClientOption().apply {
-                                locationMode = getBestLocationMode()
-                                interval = newInterval
-                                isNeedAddress = true
-                                isMockEnable = false
-                                isOffset = true
-                                isSensorEnable = true // 开启传感器辅助定位
-                        }
+                locationClient?.removeUpdates(locationListener)
+                locationClient?.requestLocationUpdates(
+                        TencentLocationRequest.create()
+                                .setLocMode(getBestLocationMode())
+                                .setInterval(newInterval)
+                                .setRequestLevel(TencentLocationRequest.REQUEST_LEVEL_GEO)
+                                .setAllowGPS(true)
+                                .setAllowCache(false),
+                        locationListener
                 )
                 Log.d(
                         TAG,
@@ -182,7 +183,10 @@ class LocationTrackingService : Service() {
                 )
         }
 
-        private val locationListener = AMapLocationListener { location ->
+        private val locationListener = object : TencentLocationListener {
+            override fun onStatusUpdate(name: String?, status: Int, desc: String?) = Unit
+
+            override fun onLocationChanged(location: TencentLocation?, errorCode: Int, errorInfo: String?) {
                 val currentVpnOrProxy = isVpnOrProxyActive()
                 val networkStateChanged = wasVpnOrProxyActive != currentVpnOrProxy
                 if (networkStateChanged) {
@@ -190,7 +194,7 @@ class LocationTrackingService : Service() {
                         Log.i(TAG, "VPN 或代理状态变更检测到: $currentVpnOrProxy，重新应用定位选项")
                 }
 
-                if (location != null && location.errorCode == 0) {
+                if (location != null && errorCode == TencentLocation.ERROR_OK) {
                         lastLocationUpdateTime = location.time.takeIf { it > 0L } ?: System.currentTimeMillis()
                         if (!hasAcquiredFirstLocation) {
                                 hasAcquiredFirstLocation = true
@@ -225,19 +229,18 @@ class LocationTrackingService : Service() {
                                         location.accuracy.toDouble(),
                                         location.speed.toDouble(),
                                         Date(location.time),
-                                        getShortAddress(location) // 优化：提取短地址
+                        getShortAddress(location) // 优化：提取短地址
                                 )
                         }
                         if (isStationaryProbeActive) {
                                 isStationaryProbeActive = false
                                 val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
                                 updateLocationClientOption(tier)
-                                locationClient?.startLocation()
                         }
                 } else {
                         Log.e(
                                 TAG,
-                                "定位失败: ${location?.errorCode} - ${location?.errorInfo} (VPN/代理: $currentVpnOrProxy)"
+                                "定位失败: $errorCode - $errorInfo (VPN/代理: $currentVpnOrProxy)"
                         )
                         // 如果是因为开启 VPN/代理 导致高精度定位失败，可在下一次尝试强制重置一次选项
                         if (networkStateChanged) {
@@ -245,13 +248,14 @@ class LocationTrackingService : Service() {
                                 updateLocationClientOption(tier)
                         }
                 }
+            }
         }
 
-        private fun getShortAddress(location: com.amap.api.location.AMapLocation): String? {
+        private fun getShortAddress(location: TencentLocation): String? {
                 return geocoder.coarseAutomaticPlaceName(
                         listOf(
-                                location.aoiName,
-                                location.poiName,
+                                location.poiList?.firstOrNull()?.name,
+                                location.name,
                                 listOfNotNull(location.district, location.street)
                                         .joinToString("")
                         )
@@ -274,19 +278,12 @@ class LocationTrackingService : Service() {
                 }
 
                 try {
-                        locationClient = AMapLocationClient(applicationContext)
+                        locationClient = TencentLocationManager.getInstance(applicationContext).also {
+                                it.setCoordinateType(TencentLocationManager.COORDINATE_TYPE_GCJ02)
+                                it.setMockEnable(false)
+                        }
                         wasVpnOrProxyActive = isVpnOrProxyActive()
-                        val option =
-                                AMapLocationClientOption().apply {
-                                        locationMode = getBestLocationMode()
-                                        interval = 30000L // 默认初次 30 秒定位一次
-                                        isNeedAddress = true
-                                        isMockEnable = false
-                                        isOffset = true // 自动修正偏移
-                                        isSensorEnable = true
-                                }
-                        locationClient?.setLocationOption(option)
-                        locationClient?.setLocationListener(locationListener)
+                        updateLocationClientOption(0)
                 } catch (e: Exception) {
                         Log.e(TAG, "初始化高德定位失败", e)
                 }
@@ -303,15 +300,14 @@ class LocationTrackingService : Service() {
                                         notification
                                 )
 
-                                // 开启高德后台定位
+                                // 腾讯定位复用应用自身的前台服务通知
                                 wasVpnOrProxyActive = isVpnOrProxyActive()
                                 val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
                                 updateLocationClientOption(tier)
-                                locationClient?.enableBackgroundLocation(
+                                locationClient?.enableForegroundLocation(
                                         NotificationHelper.TRACKING_NOTIFICATION_ID,
                                         notification
                                 )
-                                locationClient?.startLocation()
                                 watchdogHandler.removeCallbacks(locationWatchdog)
                                 watchdogHandler.postDelayed(locationWatchdog, 60_000L)
 
@@ -322,7 +318,7 @@ class LocationTrackingService : Service() {
                                 )
                         }
                         ACTION_STOP -> {
-                                locationClient?.disableBackgroundLocation(true)
+                                locationClient?.disableForegroundLocation(true)
                                 watchdogHandler.removeCallbacks(locationWatchdog)
                                 stopForeground(STOP_FOREGROUND_REMOVE)
 
@@ -333,7 +329,8 @@ class LocationTrackingService : Service() {
 
                                 stopSelf()
                                 stateFlow.value = TrackingState.Idle
-                                Log.i(TAG, "Amap Tracking stopped")
+                                locationClient?.removeUpdates(locationListener)
+                                Log.i(TAG, "Tencent Tracking stopped")
                                 return START_NOT_STICKY
                         }
                 }
@@ -358,18 +355,15 @@ class LocationTrackingService : Service() {
                         TAG,
                         "Long stationary stay has no fresh location for ${if (updateGap == Long.MAX_VALUE) "unknown duration" else "${updateGap / 1000}s"}. Requesting departure probe."
                 )
-                locationClient?.setLocationOption(
-                        AMapLocationClientOption().apply {
-                                locationMode = AMapLocationClientOption.AMapLocationMode.Hight_Accuracy
-                                interval = 2000L
-                                isOnceLocation = true
-                                isNeedAddress = true
-                                isMockEnable = false
-                                isOffset = true
-                                isSensorEnable = true
-                        }
+                locationClient?.requestSingleFreshLocation(
+                        TencentLocationRequest.create()
+                                .setLocMode(TencentLocationRequest.HIGH_ACCURACY_MODE)
+                                .setInterval(2000L)
+                                .setRequestLevel(TencentLocationRequest.REQUEST_LEVEL_GEO)
+                                .setAllowGPS(true),
+                        locationListener,
+                        Looper.getMainLooper()
                 )
-                locationClient?.startLocation()
         }
 
         private suspend fun handleNewLocation(
@@ -1212,9 +1206,8 @@ class LocationTrackingService : Service() {
         }
 
         override fun onDestroy() {
-                locationClient?.disableBackgroundLocation(true)
-                locationClient?.stopLocation()
-                locationClient?.onDestroy()
+                locationClient?.disableForegroundLocation(true)
+                locationClient?.removeUpdates(locationListener)
                 locationClient = null
                 serviceScope.cancel()
                 stateFlow.value = TrackingState.Idle

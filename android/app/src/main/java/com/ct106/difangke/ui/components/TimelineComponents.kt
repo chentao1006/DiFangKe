@@ -43,6 +43,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory
+import com.tencent.tencentmap.mapsdk.maps.TencentMap
+import com.tencent.tencentmap.mapsdk.maps.TextureMapView
+import com.tencent.tencentmap.mapsdk.maps.model.LatLng
+import com.tencent.tencentmap.mapsdk.maps.model.LatLngBounds
+import com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions
+import com.tencent.tencentmap.mapsdk.maps.model.MyLocationStyle
+import com.tencent.tencentmap.mapsdk.maps.model.PolylineOptions
 
 @Composable
 fun Modifier.breathing(isActive: Boolean): Modifier {
@@ -66,6 +74,18 @@ private val TIME_FORMAT = SimpleDateFormat("HH:mm", Locale.CHINA)
 private val DURATION_FORMAT = { durationSec: Int -> 
     val min = durationSec / 60
     if (min < 60) "${min}分钟" else "${min / 60}小时${min % 60}分"
+}
+
+private fun distanceMeters(first: LatLng, second: LatLng): Float {
+    val result = FloatArray(1)
+    android.location.Location.distanceBetween(
+        first.latitude,
+        first.longitude,
+        second.latitude,
+        second.longitude,
+        result
+    )
+    return result[0]
 }
 
 @Composable
@@ -910,8 +930,7 @@ fun MiniMapView(
     ) {
         androidx.compose.ui.viewinterop.AndroidView(
             factory = { ctx ->
-                com.amap.api.maps.TextureMapView(ctx).apply {
-                    onCreate(android.os.Bundle())
+                TextureMapView(ctx).apply {
                     onResume()
                 }
             },
@@ -922,7 +941,7 @@ fun MiniMapView(
             }
         ) { view ->
             val amap = view.map
-            amap.mapType = if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT else com.amap.api.maps.AMap.MAP_TYPE_NORMAL
+            amap.mapType = if (isDark) TencentMap.MAP_TYPE_DARK else TencentMap.MAP_TYPE_NORMAL
             
             amap.uiSettings.apply {
                 isZoomControlsEnabled = false
@@ -937,19 +956,18 @@ fun MiniMapView(
             amap.addImportantPlaceCircles(allPlaces)
             val markerPoints = mapMarkers
                 .filter { it.latitude.isRenderableCoordinate() && it.longitude.isRenderableCoordinate() }
-                .map { com.amap.api.maps.model.LatLng(it.latitude, it.longitude) }
+                .map { LatLng(it.latitude, it.longitude) }
             
             var handledCentering = false
             
             if (isCurrentLocation && lat != null && lon != null) {
-                val myLocationStyle = com.amap.api.maps.model.MyLocationStyle()
-                myLocationStyle.myLocationType(com.amap.api.maps.model.MyLocationStyle.LOCATION_TYPE_LOCATION_ROTATE_NO_CENTER)
-                myLocationStyle.showMyLocation(true)
-                amap.myLocationStyle = myLocationStyle
+                val myLocationStyle = MyLocationStyle()
+                myLocationStyle.myLocationType(MyLocationStyle.LOCATION_TYPE_LOCATION_ROTATE_NO_CENTER)
+                amap.setMyLocationStyle(myLocationStyle)
                 amap.isMyLocationEnabled = true
-                val target = com.amap.api.maps.model.LatLng(lat, lon)
+                val target = LatLng(lat, lon)
                 if (!hasCentred) {
-                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(target, 13.5f))
+                    amap.moveCamera(CameraUpdateFactory.newLatLngZoom(target, 13.5f))
                     hasCentred = true
                 }
                 handledCentering = true
@@ -958,8 +976,8 @@ fun MiniMapView(
             if (!handledCentering && pointsJson != null) {
                 try {
                     val array = org.json.JSONArray(pointsJson)
-                    val validPoints = mutableListOf<com.amap.api.maps.model.LatLng>()
-                    class SegmentInfo(val points: MutableList<com.amap.api.maps.model.LatLng> = mutableListOf(), var connectToNextWithDash: Boolean = false)
+                    val validPoints = mutableListOf<LatLng>()
+                    class SegmentInfo(val points: MutableList<LatLng> = mutableListOf(), var connectToNextWithDash: Boolean = false)
                     val segmentsInfo = mutableListOf<SegmentInfo>()
                     var currentSegment = SegmentInfo()
 
@@ -974,7 +992,7 @@ fun MiniMapView(
                                 currentSegment = SegmentInfo()
                             }
                         } else {
-                            val ll = com.amap.api.maps.model.LatLng(lat, lon)
+                            val ll = LatLng(lat, lon)
                             currentSegment.points.add(ll)
                             validPoints.add(ll)
                         }
@@ -985,15 +1003,15 @@ fun MiniMapView(
 
                     val processedSegments = segmentsInfo.map { segmentInfo ->
                         val segment = segmentInfo.points
-                        val splineLatLngs = mutableListOf<com.amap.api.maps.model.LatLng>()
+                        val splineLatLngs = mutableListOf<LatLng>()
                         
                         if (segment.size > 1) {
-                            val filtered = mutableListOf<com.amap.api.maps.model.LatLng>()
+                            val filtered = mutableListOf<LatLng>()
                             filtered.add(segment.first())
                             for (i in 1 until segment.size - 1) {
                                 val prev = filtered.last()
                                 val curr = segment[i]
-                                val dist = com.amap.api.maps.AMapUtils.calculateLineDistance(prev, curr)
+                                val dist = distanceMeters(prev, curr)
                                 if (dist > 4f) {
                                     filtered.add(curr)
                                 }
@@ -1004,7 +1022,7 @@ fun MiniMapView(
                                 filtered.add(segment[1])
                             }
 
-                            val averagedLatLngs = mutableListOf<com.amap.api.maps.model.LatLng>()
+                            val averagedLatLngs = mutableListOf<LatLng>()
                             val windowSize = 5
                             val halfWindow = windowSize / 2
                             for (i in filtered.indices) {
@@ -1020,7 +1038,7 @@ fun MiniMapView(
                                     sumLng += filtered[j].longitude
                                     count++
                                 }
-                                averagedLatLngs.add(com.amap.api.maps.model.LatLng(sumLat / count, sumLng / count))
+                                averagedLatLngs.add(LatLng(sumLat / count, sumLng / count))
                             }
 
                             if (averagedLatLngs.size >= 3) {
@@ -1035,7 +1053,7 @@ fun MiniMapView(
                                         val t2 = t * t; val t3 = t2 * t
                                         val lat = 0.5 * ((2.0 * p1.latitude) + (-p0.latitude + p2.latitude) * t + (2.0 * p0.latitude - 5.0 * p1.latitude + 4.0 * p2.latitude - p3.latitude) * t2 + (-p0.latitude + 3.0 * p1.latitude - 3.0 * p2.latitude + p3.latitude) * t3)
                                         val lon = 0.5 * ((2.0 * p1.longitude) + (-p0.longitude + p2.longitude) * t + (2.0 * p0.longitude - 5.0 * p1.longitude + 4.0 * p2.longitude - p3.longitude) * t2 + (-p0.longitude + 3.0 * p1.longitude - 3.0 * p2.longitude + p3.longitude) * t3)
-                                        splineLatLngs.add(com.amap.api.maps.model.LatLng(lat, lon))
+                                        splineLatLngs.add(LatLng(lat, lon))
                                     }
                                 }
                                 splineLatLngs.add(averagedLatLngs.last())
@@ -1049,9 +1067,7 @@ fun MiniMapView(
                     if (validPoints.isNotEmpty()) {
                         processedSegments.forEach { (_, splined) ->
                             if (splined.isNotEmpty()) {
-                                val options = com.amap.api.maps.model.PolylineOptions().addAll(splined).width(12f).color(primaryColor).useGradient(true)
-                                    .lineJoinType(com.amap.api.maps.model.PolylineOptions.LineJoinType.LineJoinRound)
-                                    .lineCapType(com.amap.api.maps.model.PolylineOptions.LineCapType.LineCapRound)
+                                val options = PolylineOptions().addAll(splined).width(12f).color(primaryColor).gradient(true)
                                 amap.addPolyline(options)
                             }
                         }
@@ -1087,16 +1103,16 @@ fun MiniMapView(
                                 val scale3 = if (len3 > 0) tLen3 / len3 else 0.0
                                 val fallbackScale = if (dist > 0) tLenFallback / dist else 0.0
                                 
-                                val c1 = com.amap.api.maps.model.LatLng(
+                                val c1 = LatLng(
                                     p0.latitude + (if(len0 > 0) dLat0 * scale0 else distLat * fallbackScale),
                                     p0.longitude + (if(len0 > 0) dLon0 * scale0 else distLon * fallbackScale)
                                 )
-                                val c2 = com.amap.api.maps.model.LatLng(
+                                val c2 = LatLng(
                                     p3.latitude - (if(len3 > 0) dLat3 * scale3 else distLat * fallbackScale),
                                     p3.longitude - (if(len3 > 0) dLon3 * scale3 else distLon * fallbackScale)
                                 )
                                 
-                                val bezierPoints = mutableListOf<com.amap.api.maps.model.LatLng>()
+                                val bezierPoints = mutableListOf<LatLng>()
                                 val steps = 20
                                 for (j in 0..steps) {
                                     val t = j.toDouble() / steps.toDouble()
@@ -1107,10 +1123,10 @@ fun MiniMapView(
                                     val t3 = t2 * t
                                     val lat = u3 * p0.latitude + 3.0 * u2 * t * c1.latitude + 3.0 * u * t2 * c2.latitude + t3 * p3.latitude
                                     val lon = u3 * p0.longitude + 3.0 * u2 * t * c1.longitude + 3.0 * u * t2 * c2.longitude + t3 * p3.longitude
-                                    bezierPoints.add(com.amap.api.maps.model.LatLng(lat, lon))
+                                    bezierPoints.add(LatLng(lat, lon))
                                 }
                                 
-                                val dashedOptions = com.amap.api.maps.model.PolylineOptions().addAll(bezierPoints).width(12f).color(primaryColor).setDottedLine(true)
+                                val dashedOptions = PolylineOptions().addAll(bezierPoints).width(12f).color(primaryColor)
                                 amap.addPolyline(dashedOptions)
                             }
                         }
@@ -1118,41 +1134,41 @@ fun MiniMapView(
                         val cameraPoints = validPoints + markerPoints
                         if (cameraPoints.size == 1) {
                             if (!hasCentred) {
-                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(cameraPoints[0], 13.5f))
+                                amap.moveCamera(CameraUpdateFactory.newLatLngZoom(cameraPoints[0], 13.5f))
                                 hasCentred = true
                             }
                         } else {
-                            val bounds = com.amap.api.maps.model.LatLngBounds.builder().apply {
+                            val bounds = LatLngBounds.builder().apply {
                                 cameraPoints.forEach { include(it) }
                             }.build()
                             val centerLat = (bounds.northeast.latitude + bounds.southwest.latitude) / 2
                             val centerLon = (bounds.northeast.longitude + bounds.southwest.longitude) / 2
-                            val center = com.amap.api.maps.model.LatLng(centerLat, centerLon)
+                            val center = LatLng(centerLat, centerLon)
                             
-                            val distance = com.amap.api.maps.AMapUtils.calculateLineDistance(bounds.southwest, bounds.northeast)
+                            val distance = distanceMeters(bounds.southwest, bounds.northeast)
                             
                             if (!hasCentred) {
                                 val doBounds = {
                                     val paddingPx = (30 * view.context.resources.displayMetrics.density).toInt()
                                     try {
                                         if (distance < 500f) {
-                                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(center, 13.5f))
+                                            amap.moveCamera(CameraUpdateFactory.newLatLngZoom(center, 13.5f))
                                         } else {
-                                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, paddingPx))
+                                            amap.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, paddingPx))
                                             if (amap.cameraPosition.zoom > 16f) {
-                                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.zoomTo(16f))
+                                                amap.moveCamera(CameraUpdateFactory.zoomTo(16f))
                                             }
                                         }
                                     } catch (e: Exception) {
-                                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(center, 13.5f))
+                                        amap.moveCamera(CameraUpdateFactory.newLatLngZoom(center, 13.5f))
                                     }
                                 }
 
                                 if (view.width > 0 && view.height > 0) {
                                     doBounds()
                                 } else {
-                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(center, 12f))
-                                    amap.setOnMapLoadedListener { doBounds() }
+                                    amap.moveCamera(CameraUpdateFactory.newLatLngZoom(center, 12f))
+                                    amap.addOnMapLoadedCallback { doBounds() }
                                 }
                                 hasCentred = true
                             }
@@ -1165,25 +1181,25 @@ fun MiniMapView(
             if (!handledCentering && markerPoints.isNotEmpty()) {
                 if (markerPoints.size == 1) {
                     if (!hasCentred) {
-                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(markerPoints[0], 13.5f))
+                        amap.moveCamera(CameraUpdateFactory.newLatLngZoom(markerPoints[0], 13.5f))
                         hasCentred = true
                     }
                 } else {
-                    val bounds = com.amap.api.maps.model.LatLngBounds.builder().apply {
+                    val bounds = LatLngBounds.builder().apply {
                         markerPoints.forEach { include(it) }
                     }.build()
                     if (!hasCentred) {
                         val doBounds = {
                             val paddingPx = (30 * view.context.resources.displayMetrics.density).toInt()
                             try {
-                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, paddingPx))
+                                amap.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, paddingPx))
                                 if (amap.cameraPosition.zoom > 16f) {
-                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.zoomTo(16f))
+                                    amap.moveCamera(CameraUpdateFactory.zoomTo(16f))
                                 }
                             } catch (e: Exception) {
                                 val centerLat = (bounds.northeast.latitude + bounds.southwest.latitude) / 2
                                 val centerLon = (bounds.northeast.longitude + bounds.southwest.longitude) / 2
-                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(com.amap.api.maps.model.LatLng(centerLat, centerLon), 13.5f))
+                                amap.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(centerLat, centerLon), 13.5f))
                             }
                         }
 
@@ -1192,8 +1208,8 @@ fun MiniMapView(
                         } else {
                             val centerLat = (bounds.northeast.latitude + bounds.southwest.latitude) / 2
                             val centerLon = (bounds.northeast.longitude + bounds.southwest.longitude) / 2
-                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(com.amap.api.maps.model.LatLng(centerLat, centerLon), 12f))
-                            amap.setOnMapLoadedListener { doBounds() }
+                            amap.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(centerLat, centerLon), 12f))
+                            amap.addOnMapLoadedCallback { doBounds() }
                         }
                         hasCentred = true
                     }
@@ -1204,10 +1220,10 @@ fun MiniMapView(
             val fallbackLat = lat
             val fallbackLon = lon
             if (!handledCentering && fallbackLat.isRenderableCoordinate() && fallbackLon.isRenderableCoordinate()) {
-                val target = com.amap.api.maps.model.LatLng(fallbackLat!!, fallbackLon!!)
-                amap.addMarker(com.amap.api.maps.model.MarkerOptions().position(target))
+                val target = LatLng(fallbackLat!!, fallbackLon!!)
+                amap.addMarker(MarkerOptions().position(target))
                 if (!hasCentred) {
-                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(target, 13.5f))
+                    amap.moveCamera(CameraUpdateFactory.newLatLngZoom(target, 13.5f))
                     hasCentred = true
                 }
             }

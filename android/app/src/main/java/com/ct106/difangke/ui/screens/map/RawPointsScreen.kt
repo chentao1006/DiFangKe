@@ -35,15 +35,15 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.amap.api.maps.AMap
-import com.amap.api.maps.CameraUpdateFactory
-import com.amap.api.maps.TextureMapView
-import com.amap.api.maps.model.BitmapDescriptorFactory
-import com.amap.api.maps.model.CircleOptions
-import com.amap.api.maps.model.LatLng
-import com.amap.api.maps.model.LatLngBounds
-import com.amap.api.maps.model.MarkerOptions
-import com.amap.api.maps.model.PolylineOptions
+import com.tencent.tencentmap.mapsdk.maps.TencentMap
+import com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory
+import com.tencent.tencentmap.mapsdk.maps.TextureMapView
+import com.tencent.tencentmap.mapsdk.maps.model.BitmapDescriptorFactory
+import com.tencent.tencentmap.mapsdk.maps.model.CircleOptions
+import com.tencent.tencentmap.mapsdk.maps.model.LatLng
+import com.tencent.tencentmap.mapsdk.maps.model.LatLngBounds
+import com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions
+import com.tencent.tencentmap.mapsdk.maps.model.PolylineOptions
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.location.RawLocationStore
 import com.ct106.difangke.ui.components.addImportantPlaceCircles
@@ -80,7 +80,7 @@ fun RawPointsScreen(
     var isSelecting by remember { mutableStateOf(false) }
     var selectedIndexes by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var isBatchDeleting by remember { mutableStateOf(false) }
-    var amapInstance by remember { mutableStateOf<AMap?>(null) }
+    var amapInstance by remember { mutableStateOf<TencentMap?>(null) }
 
     val exportDateFormat = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US) }
     val exportLauncher = rememberLauncherForActivityResult(
@@ -313,7 +313,7 @@ private fun RawPointsMapPreview(
     isDark: Boolean,
     primaryColor: Color,
     onPointSelected: (RawLocationStore.RawPoint) -> Unit,
-    onMapReady: (AMap) -> Unit,
+    onMapReady: (TencentMap) -> Unit,
     onRecenter: () -> Unit
 ) {
     val allPlaces by remember { DiFangKeApp.instance.database.placeDao().observeAll() }
@@ -323,7 +323,6 @@ private fun RawPointsMapPreview(
         AndroidView(
             factory = { ctx ->
                 TextureMapView(ctx).apply {
-                    onCreate(android.os.Bundle())
                     map.uiSettings.isZoomControlsEnabled = false
                     onMapReady(map)
                 }
@@ -331,7 +330,7 @@ private fun RawPointsMapPreview(
             modifier = Modifier.fillMaxSize()
         ) { view ->
             val map = view.map
-            map.mapType = if (isDark) AMap.MAP_TYPE_NIGHT else AMap.MAP_TYPE_NORMAL
+            map.mapType = if (isDark) TencentMap.MAP_TYPE_DARK else TencentMap.MAP_TYPE_NORMAL
             map.setOnMapClickListener { latLng ->
                 selectNearestEntry(latLng, filteredEntries, onPointSelected)
             }
@@ -342,7 +341,7 @@ private fun RawPointsMapPreview(
             if (entries.isNotEmpty()) {
                 val validLatLngs = entries.filter { !it.isDriftPoint }.map { LatLng(it.point.latitude, it.point.longitude) }
                 if (validLatLngs.isNotEmpty()) {
-                    map.addPolyline(PolylineOptions().addAll(validLatLngs).width(10f).color(primaryColor.toArgb()).useGradient(true))
+                    map.addPolyline(PolylineOptions().addAll(validLatLngs).width(10f).color(primaryColor.toArgb()).gradient(true))
                 }
 
                 entries.filter { it.isDriftPoint }.forEach { entry ->

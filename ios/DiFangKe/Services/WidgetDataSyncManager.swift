@@ -10,7 +10,14 @@ final class WidgetDataSyncManager {
     static let shared = WidgetDataSyncManager()
     // Keep this in sync with the widget reader. Bump it whenever the widget
     // renderer changes so WidgetKit cannot reuse an image drawn with old rules.
-    static let snapshotFileVersion = "v12"
+    static let snapshotFileVersion = "v13"
+
+    /// Marker outlines are composited after MapKit renders the map, so they
+    /// must use the snapshot's requested appearance instead of the app's
+    /// current dynamic system color.
+    private static func mapMarkerOutlineColor(for style: UIUserInterfaceStyle) -> UIColor {
+        style == .dark ? .black : .white
+    }
 
     private struct AggregatedFootprintSnapshot {
         let coordinate: CLLocationCoordinate2D
@@ -267,6 +274,7 @@ final class WidgetDataSyncManager {
             ctx.cgContext.setLineCap(.round)
             ctx.cgContext.setLineJoin(.round)
             let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
+            let markerOutlineColor = Self.mapMarkerOutlineColor(for: style)
 
             for transportSnapshot in decodedTransports {
                 let clCoords = transportSnapshot.coordinates
@@ -292,7 +300,7 @@ final class WidgetDataSyncManager {
                     let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
                     let path = UIBezierPath(ovalIn: rect)
 
-                    UIColor.systemBackground.setFill()
+                    markerOutlineColor.setFill()
                     path.fill()
                     themeColor.setStroke()
                     path.lineWidth = 1.2
@@ -336,7 +344,7 @@ final class WidgetDataSyncManager {
                     blur: 1.5,
                     color: UIColor.black.withAlphaComponent(0.15).cgColor
                 )
-                ctx.cgContext.setFillColor(UIColor.systemBackground.cgColor)
+                ctx.cgContext.setFillColor(markerOutlineColor.cgColor)
                 ctx.cgContext.addPath(pinPath)
                 ctx.cgContext.fillPath()
                 ctx.cgContext.restoreGState()
@@ -775,6 +783,7 @@ final class WidgetDataSyncManager {
                             ctx.cgContext.setLineCap(.round)
                             ctx.cgContext.setLineJoin(.round)
                             let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
+                            let markerOutlineColor = Self.mapMarkerOutlineColor(for: theme)
                             
                             for transportSnapshot in decodedTransports {
                                 let clCoords = transportSnapshot.coordinates
@@ -800,7 +809,7 @@ final class WidgetDataSyncManager {
                                     let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
                                     let path = UIBezierPath(ovalIn: rect)
 
-                                    UIColor.systemBackground.setFill()
+                                    markerOutlineColor.setFill()
                                     path.fill()
                                     themeColor.setStroke()
                                     path.lineWidth = 1.2
@@ -836,7 +845,7 @@ final class WidgetDataSyncManager {
 
                                 ctx.cgContext.saveGState()
                                 ctx.cgContext.setShadow(offset: CGSize(width: 0, height: 1.5), blur: 1.5, color: UIColor.black.withAlphaComponent(0.15).cgColor)
-                                ctx.cgContext.setFillColor(UIColor.systemBackground.cgColor)
+                                ctx.cgContext.setFillColor(markerOutlineColor.cgColor)
                                 ctx.cgContext.addPath(pinPath)
                                 ctx.cgContext.fillPath()
                                 ctx.cgContext.restoreGState()

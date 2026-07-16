@@ -21,7 +21,7 @@ import kotlinx.coroutines.runBlocking
 object NavRoutes {
     const val ONBOARDING = "onboarding"
     const val MAIN = "main?date={date}"
-    const val HISTORY = "history"
+    const val HISTORY = "history?date={date}"
     const val SETTINGS = "settings"
     const val MAP = "map?date={date}"
     const val STATISTICS = "statistics"
@@ -98,7 +98,7 @@ fun NavGraph(initialDate: Long? = null) {
             
             MainScreen(
                 initialDate = initialDate,
-                onNavigateToHistory = { navController.navigate(NavRoutes.HISTORY) },
+                onNavigateToHistory = { date -> navController.navigate("history?date=${date.time}") },
                 onNavigateToStatistics = { navController.navigate(NavRoutes.STATISTICS) },
                 onNavigateToSettings = { navController.navigate(NavRoutes.SETTINGS) },
                 onNavigateToMap = { date -> 
@@ -120,8 +120,13 @@ fun NavGraph(initialDate: Long? = null) {
                 }
             )
         }
-        composable(NavRoutes.HISTORY) {
+        composable(NavRoutes.HISTORY) { backStackEntry ->
+            val initialDate = backStackEntry.arguments?.getString("date")
+                ?.toLongOrNull()
+                ?.let { timestamp -> java.util.Date(timestamp) }
+                ?: java.util.Date()
             HistoryScreen(
+                initialDate = initialDate,
                 onBack = { navController.popBackStack() },
                 onNavigateToDetail = { id -> 
                     if (id.startsWith("t_")) {

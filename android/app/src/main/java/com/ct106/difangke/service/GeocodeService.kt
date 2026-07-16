@@ -1,25 +1,26 @@
 package com.ct106.difangke.service
 
+import android.net.Uri
 import android.util.Log
-import com.amap.api.services.core.LatLonPoint
-import com.amap.api.services.core.PoiItem
-import com.amap.api.services.geocoder.*
-import com.amap.api.services.poisearch.PoiResult
-import com.amap.api.services.poisearch.PoiSearch
-import com.ct106.difangke.DiFangKeApp
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
+import com.ct106.difangke.BuildConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
 
 /**
- * 高德地图地理编码与搜索服务
- * 使用 Android 原生 SDK 实现
+ * 腾讯位置服务的地理编码与 POI 搜索。
  */
 class GeocodeService private constructor() {
 
     companion object {
         val shared: GeocodeService by lazy { GeocodeService() }
         private const val TAG = "GeocodeService"
+        private const val BASE_URL = "https://apis.map.qq.com/ws"
     }
+
+    private val httpClient = OkHttpClient()
 
     data class SearchResult(
         val name: String,
@@ -33,38 +34,20 @@ class GeocodeService private constructor() {
     /**
      * 逆地理编码：获取语义化地址
      */
-    suspend fun reverseGeocode(lat: Double, lon: Double): String? = suspendCancellableCoroutine { continuation ->
-        val context = DiFangKeApp.instance
-        try {
-            val geocoderSearch = GeocodeSearch(context)
-            geocoderSearch.setOnGeocodeSearchListener(object : GeocodeSearch.OnGeocodeSearchListener {
-                override fun onRegeocodeSearched(result: RegeocodeResult?, rCode: Int) {
-                    if (rCode == 1000 && result != null) {
-                        val addr = result.regeocodeAddress
-                        val name = coarseAutomaticPlaceName(
-                            listOfNotNull(
-                                addr.aois?.firstOrNull()?.aoiName,
-                                addr.building,
-                                addr.neighborhood,
-                                addr.pois?.firstOrNull()?.title,
-                                listOfNotNull(addr.district, addr.township).joinToString("")
-                            )
-                        )
-                        
-                        continuation.resume(name)
-                    } else {
-                        Log.w(TAG, "逆地理编码失败码：$rCode")
-                        continuation.resume(null)
-                    }
-                }
-                override fun onGeocodeSearched(result: GeocodeResult?, rCode: Int) {}
-            })
-
-            val query = RegeocodeQuery(LatLonPoint(lat, lon), 200f, GeocodeSearch.AMAP)
-            geocoderSearch.getFromLocationAsyn(query)
-        } catch (e: Exception) {
-            continuation.resume(null)
-        }
+    suspend fun reverseGeocode(lat: Double, lon: Double): String? = withContext(Dispatchers.IO) {
+        val result = getJson("/geocoder/v1/?location=$lat,$lon&get_poi=1") ?: return@withContext null
+        val payload = result.optJSONObject("result") ?: return@withContext null
+        val pois = payload.optJSONArray("pois")
+        val firstPoi = pois?.optJSONObject(0)?.optString("title")
+        val addressComponent = payload.optJSONObject("address_component")
+        coarseAutomaticPlaceName(
+            listOf(
+                firstPoi,
+                payload.optString("address"),
+                addressComponent?.optString("district"),
+                addressComponent?.optString("street")
+            )
+        )
     }
 
     /**
@@ -74,80 +57,40 @@ class GeocodeService private constructor() {
         centerLat: Double,
         centerLon: Double,
         radiusMeters: Int = 3000
-    ): List<SearchResult> = suspendCancellableCoroutine { continuation ->
-        val context = DiFangKeApp.instance
-        try {
-            // 第一个参数为空表示搜索所有类型，第二个参数为空表示所有分类
-            val query = PoiSearch.Query("", "", "")
-            query.pageSize = 30
-            
-            val poiSearch = PoiSearch(context, query)
-            poiSearch.bound = PoiSearch.SearchBound(LatLonPoint(centerLat, centerLon), radiusMeters)
-            
-            poiSearch.setOnPoiSearchListener(object : PoiSearch.OnPoiSearchListener {
-                override fun onPoiSearched(result: PoiResult?, rCode: Int) {
-                    if (rCode == 1000 && result != null) {
-                        val searchResults = result.pois.map { poi ->
-                            SearchResult(
-                                name = poi.title ?: "",
-                                address = poi.snippet ?: "",
-                                latitude = poi.latLonPoint.latitude,
-                                longitude = poi.latLonPoint.longitude
-                            )
-                        }
-                        continuation.resume(searchResults)
-                    } else {
-                        Log.w(TAG, "PoiSearch 失败码：$rCode")
-                        continuation.resume(emptyList())
-                    }
-                }
-                override fun onPoiItemSearched(poi: PoiItem?, rCode: Int) {}
-            })
-            
-            poiSearch.searchPOIAsyn()
-        } catch (e: Exception) {
-            Log.e(TAG, "PoiSearch 异常", e)
-            continuation.resume(emptyList())
-        }
-    }
+    ): List<SearchResult> = searchTencentPois("", centerLat, centerLon, radiusMeters)
 
     suspend fun searchNearby(
         keyword: String,
         centerLat: Double,
         centerLon: Double,
         radiusMeters: Int = 10000 // 搜索模式下范围扩大到 10km
-    ): List<SearchResult> = suspendCancellableCoroutine { continuation ->
-        val context = DiFangKeApp.instance
-        try {
-            val query = PoiSearch.Query(keyword, "", "")
-            query.pageSize = 30
-            
-            val poiSearch = PoiSearch(context, query)
-            // 搜索模式下可以根据需要决定是否限制范围
-            poiSearch.bound = PoiSearch.SearchBound(LatLonPoint(centerLat, centerLon), radiusMeters)
-            
-            poiSearch.setOnPoiSearchListener(object : PoiSearch.OnPoiSearchListener {
-                override fun onPoiSearched(result: PoiResult?, rCode: Int) {
-                    if (rCode == 1000 && result != null) {
-                        val searchResults = result.pois.map { poi ->
-                            SearchResult(
-                                name = poi.title ?: "",
-                                address = poi.snippet ?: "",
-                                latitude = poi.latLonPoint.latitude,
-                                longitude = poi.latLonPoint.longitude
-                            )
-                        }
-                        continuation.resume(searchResults)
-                    } else {
-                        continuation.resume(emptyList())
-                    }
+    ): List<SearchResult> = searchTencentPois(keyword, centerLat, centerLon, radiusMeters)
+
+    private suspend fun searchTencentPois(keyword: String, lat: Double, lon: Double, radius: Int): List<SearchResult> =
+        withContext(Dispatchers.IO) {
+            val encodedKeyword = Uri.encode(keyword)
+            val json = getJson("/place/v1/search?keyword=$encodedKeyword&boundary=nearby($lat,$lon,$radius)&page_size=30")
+                ?: return@withContext emptyList()
+            val data = json.optJSONArray("data") ?: return@withContext emptyList()
+            buildList {
+                for (index in 0 until data.length()) {
+                    val poi = data.optJSONObject(index) ?: continue
+                    val location = poi.optJSONObject("location") ?: continue
+                    add(SearchResult(poi.optString("title"), poi.optString("address"), location.optDouble("lat"), location.optDouble("lng")))
                 }
-                override fun onPoiItemSearched(poi: PoiItem?, rCode: Int) {}
-            })
-            poiSearch.searchPOIAsyn()
-        } catch (e: Exception) {
-            continuation.resume(emptyList())
+            }
         }
+
+    private fun getJson(pathAndQuery: String): JSONObject? = try {
+        val separator = if (pathAndQuery.contains('?')) '&' else '?'
+        val url = "$BASE_URL$pathAndQuery${separator}key=${BuildConfig.TENCENT_MAP_KEY}"
+        httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            if (!response.isSuccessful) return null
+            response.body?.string()?.let(::JSONObject)?.takeIf { it.optInt("status") == 0 }
+        }
+    } catch (error: Exception) {
+        Log.w(TAG, "Tencent location service request failed", error)
+        null
     }
 
     fun coarseAutomaticPlaceName(candidates: List<String?>): String? {

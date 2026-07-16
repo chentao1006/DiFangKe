@@ -840,8 +840,7 @@ fun DetailMapView(
     
     AndroidView(
         factory = { ctx ->
-            com.amap.api.maps.TextureMapView(ctx).apply {
-                onCreate(Bundle())
+            com.tencent.tencentmap.mapsdk.maps.TextureMapView(ctx).apply {
                 onResume()
             }
         },
@@ -852,7 +851,7 @@ fun DetailMapView(
         }
     ) { view ->
         val amap = view.map
-        amap.mapType = if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT else com.amap.api.maps.AMap.MAP_TYPE_NORMAL
+        amap.mapType = if (isDark) com.tencent.tencentmap.mapsdk.maps.TencentMap.MAP_TYPE_DARK else com.tencent.tencentmap.mapsdk.maps.TencentMap.MAP_TYPE_NORMAL
         
         amap.uiSettings.apply {
             isZoomControlsEnabled = false
@@ -866,11 +865,11 @@ fun DetailMapView(
         val lons = try { JSONArray(footprint.longitudeJson) } catch (e: Exception) { JSONArray() }
         
         if (lats.length() > 0) {
-            val points = mutableListOf<com.amap.api.maps.model.LatLng>()
-            val builder = com.amap.api.maps.model.LatLngBounds.Builder()
+            val points = mutableListOf<com.tencent.tencentmap.mapsdk.maps.model.LatLng>()
+            val builder = com.tencent.tencentmap.mapsdk.maps.model.LatLngBounds.Builder()
             
             for (i in 0 until lats.length()) {
-                val p = com.amap.api.maps.model.LatLng(lats.getDouble(i), lons.getDouble(i))
+                val p = com.tencent.tencentmap.mapsdk.maps.model.LatLng(lats.getDouble(i), lons.getDouble(i))
                 points.add(p)
                 builder.include(p)
             }
@@ -878,29 +877,29 @@ fun DetailMapView(
             amap.clear()
             amap.addImportantPlaceCircles(allPlaces)
             amap.addPolyline(
-                com.amap.api.maps.model.PolylineOptions()
+                com.tencent.tencentmap.mapsdk.maps.model.PolylineOptions()
                     .addAll(points)
                     .width(12f)
                     .color(primaryColor)
-                    .useGradient(true)
+                    .gradient(true)
             )
             amap.addFootprintMarkers(buildFootprintMapMarkers(listOf(footprint), activityTypes), isDark = isDark)
             
             // 移动相机到轨迹范围 (优化版)
             if (points.size == 1) {
-                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points[0], 17f))
+                amap.moveCamera(com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.newLatLngZoom(points[0], 17f))
             } else {
                 val bounds = builder.build()
                 // 使用 post 确保地图布局完成
                 view.post {
                     try {
-                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(bounds, 150))
+                        amap.moveCamera(com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.newLatLngBounds(bounds, 150))
                         // 再次校验缩放，防止单点附近太近导致范围过大
                         if (amap.cameraPosition.zoom > 17f) {
-                            amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.zoomTo(17f))
+                            amap.moveCamera(com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.zoomTo(17f))
                         }
                     } catch (e: Exception) {
-                        amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points[0], 16f))
+                        amap.moveCamera(com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.newLatLngZoom(points[0], 16f))
                     }
                 }
             }

@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -53,6 +54,7 @@ fun HistoryScreen(
     onNavigateToDetail: (String) -> Unit,
     onDateSelected: (Date) -> Unit, // 跳向主页特定日期
     onNavigateToRawPoints: (Date) -> Unit,
+    initialDate: Date = Date(),
     viewModel: HistoryViewModel = viewModel()
 ) {
     val summaries by viewModel.summaries.collectAsState()
@@ -121,7 +123,7 @@ fun HistoryScreen(
                 verticalAlignment = Alignment.Top
             ) { page ->
                 when (page) {
-                    0 -> HistoryMonthView(summaries, onDateSelected, { viewModel.rebuildTimeline(it) }, onNavigateToRawPoints)
+                    0 -> HistoryMonthView(summaries, initialDate, onDateSelected, { viewModel.rebuildTimeline(it) }, onNavigateToRawPoints)
                     1 -> HistoryFavoritesView(
                         favorites = favoriteFootprints,
                         activityTypes = activityTypes,
@@ -328,22 +330,37 @@ fun StatSmallItem(icon: androidx.compose.ui.graphics.vector.ImageVector, value: 
 
 @Composable
 fun HistoryMonthView(
-    summaries: Map<Date, DaySummary>, 
+    summaries: Map<Date, DaySummary>,
+    targetDate: Date,
     onDateSelected: (Date) -> Unit,
     onRebuild: (Date) -> Unit,
     onViewRawPoints: (Date) -> Unit
 ) {
-    // 简易月份视图：列出最近 12 个月
+    // 月份按时间正序排列，与 iOS 一致：上旧下新。
     val months = remember {
-        val cal = Calendar.getInstance()
+        val cal = Calendar.getInstance().apply { add(Calendar.MONTH, -11) }
         (0..11).map {
             val date = cal.time
-            cal.add(Calendar.MONTH, -1)
+            cal.add(Calendar.MONTH, 1)
             date
         }
     }
+    val targetMonthIndex = remember(months, targetDate) {
+        val targetCalendar = Calendar.getInstance().apply { time = targetDate }
+        months.indexOfFirst { monthDate ->
+            Calendar.getInstance().apply { time = monthDate }.let { monthCalendar ->
+                monthCalendar.get(Calendar.YEAR) == targetCalendar.get(Calendar.YEAR) &&
+                    monthCalendar.get(Calendar.MONTH) == targetCalendar.get(Calendar.MONTH)
+            }
+        }.takeIf { it >= 0 } ?: months.lastIndex
+    }
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = targetMonthIndex)
 
-    LazyColumn(contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
+    LazyColumn(
+        state = listState,
+        contentPadding = PaddingValues(20.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp)
+    ) {
         items(months) { monthDate ->
             MonthGridSection(monthDate, summaries, onDateSelected, onRebuild, onViewRawPoints)
         }

@@ -1,6 +1,5 @@
 package com.ct106.difangke.ui.screens.settings
 
-import android.os.Bundle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -29,13 +28,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ct106.difangke.data.db.entity.PlaceEntity
-import com.amap.api.services.geocoder.GeocodeResult
-import com.amap.api.services.geocoder.GeocodeSearch
-import com.amap.api.services.geocoder.RegeocodeQuery
-import com.amap.api.services.geocoder.RegeocodeResult
-import com.amap.api.services.core.LatLonPoint
-import com.amap.api.services.poisearch.PoiResult
-import com.amap.api.services.poisearch.PoiSearch
+import com.ct106.difangke.service.GeocodeService
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -208,46 +202,7 @@ fun PlaceEditorDialog(
 
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
-    val context = androidx.compose.ui.platform.LocalContext.current
-    
-    // 初始化逆地理编码查询
-    val geocoder = remember {
-        GeocodeSearch(context).apply {
-            setOnGeocodeSearchListener(object : GeocodeSearch.OnGeocodeSearchListener {
-                override fun onRegeocodeSearched(result: RegeocodeResult?, rCode: Int) {
-                    if (rCode == 1000 && result?.regeocodeAddress != null) {
-                        val addr = result.regeocodeAddress
-                        val full = addr.formatAddress
-                        // 移除省、市、区前缀
-                        val prefix = (addr.province ?: "") + (addr.city ?: "") + (addr.district ?: "")
-                        address = full.replaceFirst(prefix, "")
-                    }
-                }
-                override fun onGeocodeSearched(result: GeocodeResult?, rCode: Int) {}
-            })
-        }
-    }
-
-    // POI 搜索监听
-    val poiSearchListener = remember {
-        object : PoiSearch.OnPoiSearchListener {
-            override fun onPoiSearched(result: PoiResult?, rCode: Int) {
-                if (rCode == 1000 && result?.pois?.isNotEmpty() == true) {
-                    val poi = result.pois[0]
-                    lat = poi.latLonPoint.latitude
-                    lon = poi.latLonPoint.longitude
-                    
-                    // 同样尝试移除省市区
-                    val full = poi.snippet ?: poi.title
-                    val prefix = (poi.provinceName ?: "") + (poi.cityName ?: "") + (poi.adName ?: "")
-                    address = full.replaceFirst(prefix, "")
-                    
-                    if (name.isBlank()) name = poi.title
-                }
-            }
-            override fun onPoiItemSearched(item: com.amap.api.services.core.PoiItem?, rCode: Int) {}
-        }
-    }
+    val coroutineScope = rememberCoroutineScope()
 
     Dialog(
         onDismissRequest = onDismiss, 
@@ -285,29 +240,28 @@ fun PlaceEditorDialog(
                     Box(modifier = Modifier.fillMaxSize()) {
                         AndroidView(
                             factory = { ctx ->
-                                com.amap.api.maps.TextureMapView(ctx).apply {
-                                    onCreate(Bundle())
+                                com.tencent.tencentmap.mapsdk.maps.TextureMapView(ctx).apply {
                                     onResume()
                                 }
                             },
                             modifier = Modifier.fillMaxSize()
                         ) { view ->
                             val amap = view.map
-                            amap.mapType = if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT else com.amap.api.maps.AMap.MAP_TYPE_NORMAL
+                            amap.mapType = if (isDark) com.tencent.tencentmap.mapsdk.maps.TencentMap.MAP_TYPE_DARK else com.tencent.tencentmap.mapsdk.maps.TencentMap.MAP_TYPE_NORMAL
                             amap.uiSettings.isZoomControlsEnabled = false
                             
-                            val center = com.amap.api.maps.model.LatLng(lat, lon)
+                            val center = com.tencent.tencentmap.mapsdk.maps.model.LatLng(lat, lon)
                             
                             // 仅当经纬度发生显著变化（非平移产生）时才从代码侧移动相机（如初始化）
                             val currentTarget = amap.cameraPosition.target
                             if (Math.abs(currentTarget.latitude - lat) > 0.000001 || Math.abs(currentTarget.longitude - lon) > 0.000001) {
-                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(center, 15f))
+                                amap.moveCamera(com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.newLatLngZoom(center, 15f))
                             }
                             
                             amap.clear()
                             // 移除 Marker，因为现在以中心十字准星为准
                             amap.addCircle(
-                                com.amap.api.maps.model.CircleOptions()
+                                com.tencent.tencentmap.mapsdk.maps.model.CircleOptions()
                                     .center(amap.cameraPosition.target) // 圆心始终随地图中心移动
                                     .radius(radius.toDouble())
                                     .fillColor(primaryColor and 0x22FFFFFF)
@@ -316,21 +270,13 @@ fun PlaceEditorDialog(
                             )
                             
                             // 平移地图即定坐标
-                            amap.setOnCameraChangeListener(object : com.amap.api.maps.AMap.OnCameraChangeListener {
-                                override fun onCameraChange(pos: com.amap.api.maps.model.CameraPosition?) {}
-                                override fun onCameraChangeFinish(pos: com.amap.api.maps.model.CameraPosition?) {
-                                    pos?.let {
-                                        lat = it.target.latitude
-                                        lon = it.target.longitude
-                                        
-                                        // 自动识别地址
-                                        geocoder.getFromLocationAsyn(
-                                            RegeocodeQuery(
-                                                LatLonPoint(lat, lon),
-                                                200f,
-                                                GeocodeSearch.AMAP
-                                            )
-                                        )
+                            amap.setOnCameraChangeListener(object : com.tencent.tencentmap.mapsdk.maps.TencentMap.OnCameraChangeListener {
+                                override fun onCameraChange(pos: com.tencent.tencentmap.mapsdk.maps.model.CameraPosition) = Unit
+                                override fun onCameraChangeFinished(pos: com.tencent.tencentmap.mapsdk.maps.model.CameraPosition) {
+                                    lat = pos.target.latitude
+                                    lon = pos.target.longitude
+                                    coroutineScope.launch {
+                                        GeocodeService.shared.reverseGeocode(lat, lon)?.let { address = it }
                                     }
                                 }
                             })
@@ -374,10 +320,14 @@ fun PlaceEditorDialog(
                                 keyboardActions = androidx.compose.foundation.text.KeyboardActions(
                                     onSearch = {
                                         if (searchQuery.isNotBlank()) {
-                                            val query = PoiSearch.Query(searchQuery, "", "")
-                                            val search = PoiSearch(context, query)
-                                            search.setOnPoiSearchListener(poiSearchListener)
-                                            search.searchPOIAsyn()
+                                            coroutineScope.launch {
+                                                GeocodeService.shared.searchNearby(searchQuery, lat, lon).firstOrNull()?.let { poi ->
+                                                    lat = poi.latitude
+                                                    lon = poi.longitude
+                                                    address = poi.address
+                                                    if (name.isBlank()) name = poi.name
+                                                }
+                                            }
                                         }
                                     }
                                 )

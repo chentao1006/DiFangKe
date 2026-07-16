@@ -4,8 +4,8 @@
 ROOT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 GRADLE_FILE="$ROOT_DIR/android/app/build.gradle.kts"
-APK_SOURCE="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
-AAB_SOURCE="$ROOT_DIR/android/app/build/outputs/bundle/release/app-release.aab"
+APK_SOURCE="$ROOT_DIR/android/app/build/outputs/apk/direct/release/app-direct-release.apk"
+AAB_SOURCE="$ROOT_DIR/android/app/build/outputs/bundle/playRelease/app-play-release.aab"
 DEPLOY_DIR="$ROOT_DIR/download"
 APK_DEST="$DEPLOY_DIR/difangke.apk"
 AAB_DEST="$DEPLOY_DIR/difangke.aab"
@@ -39,12 +39,12 @@ if [ "$ONLY_RELEASE" = false ]; then
     echo "----------------------------------------"
     echo ""
 
-    echo "🏗️  开始打包 APK + AAB (assembleRelease bundleRelease)..."
+    echo "🏗️  开始打包官网 APK + Play AAB..."
 
     # 1. 运行打包命令 (确保 gradlew 有执行权限)
     cd "$ROOT_DIR/android"
     chmod +x gradlew
-    ./gradlew clean assembleRelease bundleRelease --no-configuration-cache
+    ./gradlew clean assembleDirectRelease bundlePlayRelease --no-configuration-cache
     if [ $? -ne 0 ]; then
         echo "❌ 错误: 打包失败，请检查上面的编译报错。"
         exit 1
@@ -58,24 +58,15 @@ echo "🚀 开始自动化发布流程..."
 
 # 2. 检查输出文件
 if [ ! -f "$APK_SOURCE" ]; then
-    # 只允许已签名的正式版本
-    APK_SOURCE="$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk"
-    
-    if [ ! -f "$APK_SOURCE" ]; then
-        echo "❌ 错误: 找不到签名的 APK 文件 (app-release.apk)。"
-        echo "💡 提示: 请确保 build.gradle.kts 中配置了正确的 signingConfigs 且密码正确。"
-        exit 1
-    fi
+    echo "❌ 错误: 找不到官网 APK (app-direct-release.apk)。"
+    echo "💡 提示: 请先执行 assembleDirectRelease。"
+    exit 1
 fi
 
 if [ ! -f "$AAB_SOURCE" ]; then
-    AAB_SOURCE="$ROOT_DIR/android/app/build/outputs/bundle/release/app-release.aab"
-
-    if [ ! -f "$AAB_SOURCE" ]; then
-        echo "❌ 错误: 找不到上架用的 AAB 文件 (app-release.aab)。"
-        echo "💡 提示: 请确保 bundleRelease 执行成功且 release signingConfigs 配置正确。"
-        exit 1
-    fi
+    echo "❌ 错误: 找不到 Play AAB (app-play-release.aab)。"
+    echo "💡 提示: 请先执行 bundlePlayRelease。"
+    exit 1
 fi
 
 # 3. 提取版本信息
@@ -100,13 +91,14 @@ mkdir -p "$DEPLOY_DIR"
 # 4.1 手动强制重新签署 (确保同时拥有 V1 和 V2 证书)
 SDK_DIR=$(grep "^sdk.dir=" "$ROOT_DIR/android/local.properties" | cut -d'=' -f2)
 APKSIGNER=$(find "$SDK_DIR/build-tools" -name "apksigner" | sort -r | head -n 1)
-KS_PATH="$ROOT_DIR/android/key.jks"
+KS_PATH="$ROOT_DIR/android/$(get_local_prop "KEY_FILE")"
 KS_PASS=$(get_local_prop "STORE_PASSWORD")
 KEY_ALIAS=$(get_local_prop "KEY_ALIAS")
+KEY_PASS=$(get_local_prop "KEY_PASSWORD")
 
 if [ -x "$APKSIGNER" ] && [ -f "$KS_PATH" ]; then
     echo "🔏 正在进行手动二次签署 (强制开启 V1/V2)..."
-    "$APKSIGNER" sign --ks "$KS_PATH" --ks-pass "pass:$KS_PASS" --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KS_PASS" --v1-signing-enabled true --v2-signing-enabled true "$APK_SOURCE"
+    "$APKSIGNER" sign --ks "$KS_PATH" --ks-pass "pass:$KS_PASS" --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KEY_PASS" --v1-signing-enabled true --v2-signing-enabled true "$APK_SOURCE"
     if [ $? -eq 0 ]; then
         echo "✅ 手动签署完成！验证证书中..."
         "$APKSIGNER" verify -v "$APK_SOURCE" | grep "Verified using v"
@@ -126,7 +118,7 @@ cat <<EOF > "$JSON_DEST"
 {
   "versionCode": $VERSION_CODE,
   "versionName": "$VERSION_NAME",
-  "downloadUrl": "https://difang.app/download/difangke.apk",
+  "downloadUrl": "https://difangke.cn/download/difangke.apk",
   "releaseNotes": "1. 自动打包发布版本 $VERSION_NAME\n2. 修复已知问题并提升稳定性"
 }
 EOF
@@ -152,3 +144,6 @@ git add .
 git commit -m "chore: release version $VERSION_NAME (Build $VERSION_CODE)" || true
 git push
 echo "🚀 代码已同步至远程仓库"
+
+# 7. 在 Finder 中定位上架 AAB
+open -R "$AAB_DEST"

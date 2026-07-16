@@ -12,10 +12,6 @@ object AppConfig {
     const val AI_LIMIT_PER_HOUR = 30
     const val AI_LIMIT_PER_DAY = 100
 
-    // ── 高德地图 REST API ─────────────────────────────────────────
-    val AMAP_REST_KEY = BuildConfig.AMAP_REST_KEY
-    const val AMAP_GEOCODE_URL = "https://restapi.amap.com/v3/geocode/regeo"
-
     // ── 统计分析 ──────────────────────────────────────────────────
     val APTABASE_APP_KEY = BuildConfig.APTABASE_APP_KEY
 

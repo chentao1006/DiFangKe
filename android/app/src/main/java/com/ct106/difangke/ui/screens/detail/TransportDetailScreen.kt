@@ -378,7 +378,7 @@ fun TransportTypeChip(type: TransportType, onSelect: (TransportType) -> Unit) {
 
 @Composable
 fun TransportDetailMapView(
-        points: List<com.amap.api.maps.model.LatLng>,
+        points: List<com.tencent.tencentmap.mapsdk.maps.model.LatLng>,
         isDark: Boolean,
         primaryColor: Int,
         pathPoints: List<TransportDetailPathPoint> = emptyList(),
@@ -388,8 +388,7 @@ fun TransportDetailMapView(
 ) {
     AndroidView(
             factory = { ctx ->
-                com.amap.api.maps.TextureMapView(ctx).apply {
-                    onCreate(Bundle())
+                com.tencent.tencentmap.mapsdk.maps.TextureMapView(ctx).apply {
                     onResume()
                 }
             },
@@ -401,15 +400,14 @@ fun TransportDetailMapView(
     ) { view ->
         val amap = view.map
         amap.mapType =
-                if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT
-                else com.amap.api.maps.AMap.MAP_TYPE_NORMAL
+                if (isDark) com.tencent.tencentmap.mapsdk.maps.TencentMap.MAP_TYPE_DARK
+                else com.tencent.tencentmap.mapsdk.maps.TencentMap.MAP_TYPE_NORMAL
 
         amap.uiSettings.apply {
             isZoomControlsEnabled = false
             isMyLocationButtonEnabled = false
             isRotateGesturesEnabled = false
             isTiltGesturesEnabled = false
-            setLogoBottomMargin(-100) // Hide logo if possible or move it out
         }
 
         amap.clear()
@@ -432,29 +430,22 @@ fun TransportDetailMapView(
 
             segments.forEach { (segment, isDashed) ->
                 val options =
-                        com.amap.api.maps.model.PolylineOptions()
+                        com.tencent.tencentmap.mapsdk.maps.model.PolylineOptions()
                                 .addAll(segment)
                                 .width(18f)
                                 .color(primaryColor)
-                                .lineJoinType(
-                                        com.amap.api.maps.model.PolylineOptions.LineJoinType
-                                                .LineJoinRound
-                                )
-                                .useGradient(!isDashed)
-                if (isDashed) {
-                    options.setDottedLine(true)
-                }
+                                .gradient(!isDashed)
                 amap.addPolyline(options)
             }
 
             // Start Marker
             amap.addMarker(
-                    com.amap.api.maps.model.MarkerOptions()
+                    com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions()
                             .position(points.first())
                             .anchor(0.5f, 0.5f)
                             .icon(
-                                    com.amap.api.maps.model.BitmapDescriptorFactory.defaultMarker(
-                                            com.amap.api.maps.model.BitmapDescriptorFactory
+                                    com.tencent.tencentmap.mapsdk.maps.model.BitmapDescriptorFactory.defaultMarker(
+                                            com.tencent.tencentmap.mapsdk.maps.model.BitmapDescriptorFactory
                                                     .HUE_GREEN
                                     )
                             )
@@ -463,13 +454,13 @@ fun TransportDetailMapView(
             // End Marker
             if (points.size > 1) {
                 amap.addMarker(
-                        com.amap.api.maps.model.MarkerOptions()
+                        com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions()
                                 .position(points.last())
                                 .anchor(0.5f, 0.5f)
                                 .icon(
-                                        com.amap.api.maps.model.BitmapDescriptorFactory
+                                        com.tencent.tencentmap.mapsdk.maps.model.BitmapDescriptorFactory
                                                 .defaultMarker(
-                                                        com.amap.api.maps.model
+                                                        com.tencent.tencentmap.mapsdk.maps.model
                                                                 .BitmapDescriptorFactory.HUE_RED
                                                 )
                                 )
@@ -478,17 +469,17 @@ fun TransportDetailMapView(
 
             // Camera - Jump immediately
             amap.moveCamera(
-                    com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(points.first(), 15f)
+                    com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.newLatLngZoom(points.first(), 15f)
             )
 
             // Camera - Bounds fit
             if (points.size > 1) {
-                amap.setOnMapLoadedListener {
+                amap.addOnMapLoadedCallback {
                     try {
-                        val builder = com.amap.api.maps.model.LatLngBounds.Builder()
+                        val builder = com.tencent.tencentmap.mapsdk.maps.model.LatLngBounds.Builder()
                         points.forEach { builder.include(it) }
                         amap.animateCamera(
-                                com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(
+                                com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.newLatLngBounds(
                                         builder.build(),
                                         250
                                 )
@@ -499,38 +490,17 @@ fun TransportDetailMapView(
                 }
             }
 
-            // 重要地点文字标识 (Orange Text Labels)
-            val orangeColor = 0xFFFF9800.toInt()
+            // 重要地点名称通过腾讯 Marker 的标题展示。
             if (startLocation != null && points.isNotEmpty()) {
                 val matched = allPlaces.find { it.isUserDefined && it.name == startLocation }
                 if (matched != null) {
-                    amap.addText(
-                            com.amap.api.maps.model.TextOptions()
-                                    .position(points.first())
-                                    .text(startLocation)
-                                    .fontColor(orangeColor)
-                                    .fontSize(34)
-                                    .align(
-                                            com.amap.api.maps.model.Text.ALIGN_CENTER_HORIZONTAL,
-                                            com.amap.api.maps.model.Text.ALIGN_BOTTOM
-                                    )
-                    )
+                    amap.addMarker(com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions().position(points.first()).title(startLocation))
                 }
             }
             if (endLocation != null && points.size > 1) {
                 val matched = allPlaces.find { it.isUserDefined && it.name == endLocation }
                 if (matched != null) {
-                    amap.addText(
-                            com.amap.api.maps.model.TextOptions()
-                                    .position(points.last())
-                                    .text(endLocation)
-                                    .fontColor(orangeColor)
-                                    .fontSize(34)
-                                    .align(
-                                            com.amap.api.maps.model.Text.ALIGN_CENTER_HORIZONTAL,
-                                            com.amap.api.maps.model.Text.ALIGN_BOTTOM
-                                    )
-                    )
+                    amap.addMarker(com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions().position(points.last()).title(endLocation))
                 }
             }
         }
@@ -538,7 +508,7 @@ fun TransportDetailMapView(
 }
 
 data class TransportDetailPathPoint(
-        val coordinate: com.amap.api.maps.model.LatLng,
+        val coordinate: com.tencent.tencentmap.mapsdk.maps.model.LatLng,
         val timestamp: Long? = null
 )
 
@@ -563,14 +533,14 @@ private fun parseTransportDetailPathPoints(pointsJson: String): List<TransportDe
                 if (Math.abs(lat) > 90.0) {
                     list.add(
                             TransportDetailPathPoint(
-                                    com.amap.api.maps.model.LatLng(lon, lat),
+                                    com.tencent.tencentmap.mapsdk.maps.model.LatLng(lon, lat),
                                     timestamp
                             )
                     )
                 } else {
                     list.add(
                             TransportDetailPathPoint(
-                                    com.amap.api.maps.model.LatLng(lat, lon),
+                                    com.tencent.tencentmap.mapsdk.maps.model.LatLng(lat, lon),
                                     timestamp
                             )
                     )
@@ -585,7 +555,7 @@ private fun parseTransportDetailPathPoints(pointsJson: String): List<TransportDe
                 if (!lat.isNaN() && !lon.isNaN()) {
                     list.add(
                             TransportDetailPathPoint(
-                                    com.amap.api.maps.model.LatLng(lat, lon),
+                                    com.tencent.tencentmap.mapsdk.maps.model.LatLng(lat, lon),
                                     timestamp
                             )
                     )

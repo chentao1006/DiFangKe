@@ -46,6 +46,7 @@ fun StatisticsScreen(
     val heatmapPoints by viewModel.heatmapPoints.collectAsState()
     val allPlaces by viewModel.allPlaces.collectAsState()
     val activityRank by viewModel.activityRank.collectAsState()
+    val frequentPlaces by viewModel.frequentPlaces.collectAsState()
     val trendData by viewModel.trendData.collectAsState()
     val aiSummary by viewModel.aiSummary.collectAsState()
     val isGeneratingSummary by viewModel.isGeneratingSummary.collectAsState()
@@ -103,11 +104,80 @@ fun StatisticsScreen(
                     // Heatmap (Keep as card but matching iOS border radius)
                     HeatmapSection(points = heatmapPoints, allPlaces = allPlaces)
 
+                    // Frequent places (same threshold and duration-first ranking as iOS)
+                    FrequentPlacesSection(items = frequentPlaces)
+
                     // Activity Rank (iOS Style: Progress bars)
                     ActivityRankSection(items = activityRank)
 
                     // Trend Chart (iOS Style: Area/Line chart)
                     TrendSection(points = trendData, range = selectedRange)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FrequentPlacesSection(items: List<FrequentPlaceItem>) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SectionHeader("常去地点排行", Icons.Default.Place)
+        Spacer(Modifier.height(12.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f))
+        ) {
+            if (items.isEmpty()) {
+                Text(
+                    "暂无常去地点数据",
+                    modifier = Modifier.padding(20.dp),
+                    color = Color.LightGray
+                )
+            } else {
+                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
+                    items.forEachIndexed { index, item ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${index + 1}",
+                                modifier = Modifier.width(24.dp),
+                                color = if (index < 3) DfkAccent else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(item.name, maxLines = 1, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                                if (item.address.isNotBlank() && item.address != item.name) {
+                                    Text(
+                                        item.address,
+                                        maxLines = 1,
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    "${item.duration / 3600}小时",
+                                    color = DfkAccent,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "${item.count}次",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                        if (index < items.lastIndex) Divider(modifier = Modifier.padding(start = 36.dp))
+                    }
                 }
             }
         }
@@ -254,8 +324,7 @@ fun HeatmapSection(points: List<HeatmapPoint>, allPlaces: List<PlaceEntity> = em
             Box(modifier = Modifier.fillMaxSize()) {
                 androidx.compose.ui.viewinterop.AndroidView(
                     factory = { ctx ->
-                        com.amap.api.maps.TextureMapView(ctx).apply {
-                            onCreate(Bundle())
+                        com.tencent.tencentmap.mapsdk.maps.TextureMapView(ctx).apply {
                             onResume()
                             // 在这里处理底层 View 的触摸拦截
                             val amap = this.map
@@ -286,8 +355,8 @@ fun HeatmapSection(points: List<HeatmapPoint>, allPlaces: List<PlaceEntity> = em
                     modifier = Modifier.fillMaxSize()
                 ) { view ->
                     val amap = view.map
-                    if (amap.mapType != (if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT else com.amap.api.maps.AMap.MAP_TYPE_NORMAL)) {
-                        amap.mapType = if (isDark) com.amap.api.maps.AMap.MAP_TYPE_NIGHT else com.amap.api.maps.AMap.MAP_TYPE_NORMAL
+                    if (amap.mapType != (if (isDark) com.tencent.tencentmap.mapsdk.maps.TencentMap.MAP_TYPE_DARK else com.tencent.tencentmap.mapsdk.maps.TencentMap.MAP_TYPE_NORMAL)) {
+                        amap.mapType = if (isDark) com.tencent.tencentmap.mapsdk.maps.TencentMap.MAP_TYPE_DARK else com.tencent.tencentmap.mapsdk.maps.TencentMap.MAP_TYPE_NORMAL
                     }
                     amap.uiSettings.isZoomControlsEnabled = false
                     // 彻底禁止地图互动，防止滚动冲突
@@ -298,7 +367,7 @@ fun HeatmapSection(points: List<HeatmapPoint>, allPlaces: List<PlaceEntity> = em
 
                     if (points.isNotEmpty()) {
                         try {
-                            val latLngs = points.map { com.amap.api.maps.model.LatLng(it.lat, it.lon) }
+                            val latLngs = points.map { com.tencent.tencentmap.mapsdk.maps.model.LatLng(it.lat, it.lon) }
                             
                             // 创建一个在屏幕上大小固定的圆形图标
                             val size = (22 * view.context.resources.displayMetrics.density).toInt()
@@ -317,11 +386,11 @@ fun HeatmapSection(points: List<HeatmapPoint>, allPlaces: List<PlaceEntity> = em
                             paint.alpha = 200 // 描边也稍微透明一点
                             canvas.drawCircle(size / 2f, size / 2f, size / 2.2f, paint)
                             
-                            val descriptor = com.amap.api.maps.model.BitmapDescriptorFactory.fromBitmap(bitmap)
+                            val descriptor = com.tencent.tencentmap.mapsdk.maps.model.BitmapDescriptorFactory.fromBitmap(bitmap)
                             
                             points.forEach { pt ->
-                                val markerOptions = com.amap.api.maps.model.MarkerOptions()
-                                    .position(com.amap.api.maps.model.LatLng(pt.lat, pt.lon))
+                                val markerOptions = com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions()
+                                    .position(com.tencent.tencentmap.mapsdk.maps.model.LatLng(pt.lat, pt.lon))
                                     .icon(descriptor)
                                     .anchor(0.5f, 0.5f)
                                     .zIndex(1000f)
@@ -329,14 +398,14 @@ fun HeatmapSection(points: List<HeatmapPoint>, allPlaces: List<PlaceEntity> = em
                             }
                             
                             if (latLngs.size == 1) {
-                                amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(latLngs[0], 13f))
+                                amap.moveCamera(com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.newLatLngZoom(latLngs[0], 13f))
                             } else {
-                                val boundsBuilder = com.amap.api.maps.model.LatLngBounds.builder()
+                                val boundsBuilder = com.tencent.tencentmap.mapsdk.maps.model.LatLngBounds.builder()
                                 latLngs.forEach { boundsBuilder.include(it) }
                                 try {
-                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 50))
+                                    amap.moveCamera(com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 50))
                                 } catch (e: Exception) {
-                                    amap.moveCamera(com.amap.api.maps.CameraUpdateFactory.newLatLngZoom(latLngs[0], 10f))
+                                    amap.moveCamera(com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.newLatLngZoom(latLngs[0], 10f))
                                 }
                             }
                         } catch (e: Exception) {

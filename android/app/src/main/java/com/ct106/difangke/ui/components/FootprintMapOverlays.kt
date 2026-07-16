@@ -12,10 +12,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathNode
 import androidx.compose.ui.graphics.vector.VectorGroup
 import androidx.compose.ui.graphics.vector.VectorPath
-import com.amap.api.maps.AMap
-import com.amap.api.maps.model.BitmapDescriptorFactory
-import com.amap.api.maps.model.LatLng
-import com.amap.api.maps.model.MarkerOptions
+import com.tencent.tencentmap.mapsdk.maps.TencentMap
+import com.tencent.tencentmap.mapsdk.maps.model.BitmapDescriptorFactory
+import com.tencent.tencentmap.mapsdk.maps.model.LatLng
+import com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.AppConfig
@@ -33,7 +33,7 @@ data class FootprintMapMarker(
     val durationSeconds: Long = 0L
 )
 
-fun AMap.addFootprintMarkers(markers: List<FootprintMapMarker>, isDark: Boolean = false) {
+fun TencentMap.addFootprintMarkers(markers: List<FootprintMapMarker>, isDark: Boolean = false) {
     markers
         .filter { it.latitude.isFinite() && it.longitude.isFinite() }
         .forEach { marker ->
@@ -572,4 +572,3 @@ private fun pathFromNodes(nodes: List<PathNode>): Path {
     }
     return path
 }
-

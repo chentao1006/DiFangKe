@@ -30,11 +30,8 @@ class DiFangKeApp : Application() {
         Aptabase.instance.initialize(this, AppConfig.APTABASE_APP_KEY)
         Aptabase.instance.trackEvent("app_started")
         
-        // 高德隐私合规初始化（完整 3D 版 SDK 必须在所有高德接口调用前执行）
-        com.amap.api.maps.MapsInitializer.updatePrivacyShow(this, true, true)
-        com.amap.api.maps.MapsInitializer.updatePrivacyAgree(this, true)
-        com.amap.api.location.AMapLocationClient.updatePrivacyShow(this, true, true)
-        com.amap.api.location.AMapLocationClient.updatePrivacyAgree(this, true)
+        com.tencent.tencentmap.mapsdk.maps.TencentMapInitializer.setAgreePrivacy(true)
+        com.tencent.map.geolocation.TencentLocationManager.setUserAgreePrivacy(true)
         
         createNotificationChannels()
         

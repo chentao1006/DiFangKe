@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 定位权限 -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -11,7 +12,7 @@
     <!-- 定位类型前台服务（Android 14+） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
-    <!-- 网络权限（AI 服务 + 高德地理编码） -->
+    <!-- 网络权限（AI 服务 + 腾讯地理编码） -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
@@ -24,7 +25,7 @@
     <!-- 保持 CPU 唤醒 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- 高德定位所需的额外权限 -->
+    <!-- 腾讯定位所需的额外权限 -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
@@ -41,13 +42,14 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="false"
+        tools:replace="android:supportsRtl"
         android:theme="@style/Theme.DiFangKe"
         android:allowBackup="true">
 
-        <!-- 高德地图 API Key（请在 https://lbs.amap.com/ 申请后替换） -->
+        <!-- 腾讯地图 API Key -->
         <meta-data
-            android:name="com.amap.api.v2.apikey"
-            android:value="${AMAP_KEY}" />
+            android:name="TencentMapSDK"
+            android:value="${TENCENT_MAP_KEY}" />
 
         <activity
             android:name=".MainActivity"
@@ -67,9 +69,6 @@
             android:name=".service.LocationTrackingService"
             android:exported="false"
             android:foregroundServiceType="location" />
-
-        <!-- 高德定位后台服务核心 -->
-        <service android:name="com.amap.api.location.APSService" />
 
         <!-- 开机启动 Receiver -->
         <receiver

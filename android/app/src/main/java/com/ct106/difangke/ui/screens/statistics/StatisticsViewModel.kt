@@ -30,6 +30,7 @@ sealed class StatisticsRange(val label: String, val days: Int?) {
 
 data class HeatmapPoint(val lat: Double, val lon: Double, val count: Int)
 data class ActivityRankItem(val name: String, val count: Int, val colorHex: String, val icon: String)
+data class FrequentPlaceItem(val name: String, val address: String, val count: Int, val duration: Long)
 data class TrendPoint(val date: Date, val score: Double)
 
 class StatisticsViewModel(application: Application) : AndroidViewModel(application) {
@@ -46,6 +47,9 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
 
     private val _activityRank = MutableStateFlow<List<ActivityRankItem>>(emptyList())
     val activityRank: StateFlow<List<ActivityRankItem>> = _activityRank.asStateFlow()
+
+    private val _frequentPlaces = MutableStateFlow<List<FrequentPlaceItem>>(emptyList())
+    val frequentPlaces: StateFlow<List<FrequentPlaceItem>> = _frequentPlaces.asStateFlow()
 
     private val _trendData = MutableStateFlow<List<TrendPoint>>(emptyList())
     val trendData: StateFlow<List<TrendPoint>> = _trendData.asStateFlow()
@@ -117,10 +121,13 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
             // 2. Activity Rank
             _activityRank.value = calculateActivityRank(filteredFootprints, filteredTransports, activityTypes)
 
-            // 3. Trend Data
+            // 3. Frequent Places
+            _frequentPlaces.value = calculateFrequentPlaces(filteredFootprints, db.placeDao().getAll())
+
+            // 4. Trend Data
             _trendData.value = calculateTrend(filteredFootprints, range.days ?: 90)
 
-            // 4. AI Summary
+            // 5. AI Summary
             checkAiSummaryCacheOrGenerate(filteredFootprints, range)
         }
     }
@@ -265,6 +272,43 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
                 icon = act?.icon ?: "mappin"
             )
         }.sortedByDescending { it.count }
+    }
+
+    private fun calculateFrequentPlaces(
+        footprints: List<FootprintEntity>,
+        places: List<com.ct106.difangke.data.db.entity.PlaceEntity>
+    ): List<FrequentPlaceItem> {
+        data class PlaceAggregate(val name: String, val address: String, var count: Int, var duration: Long)
+
+        val placesById = places.associateBy { it.placeID }
+        val groups = mutableMapOf<String, PlaceAggregate>()
+
+        footprints.forEach { footprint ->
+            val place = footprint.placeID?.let(placesById::get)
+            val address = place?.address ?: footprint.address.orEmpty()
+            val name = place?.name?.takeIf { it.isNotBlank() }
+                ?: address
+                    .substringAfterLast("市", address)
+                    .substringAfterLast("区", address)
+                    .substringAfterLast("县", address)
+                    .trim()
+                    .substringBefore(" ")
+
+            if (name.isBlank() || name.contains("未知")) return@forEach
+
+            val aggregate = groups.getOrPut(name) {
+                PlaceAggregate(name = name, address = address, count = 0, duration = 0)
+            }
+            aggregate.count += 1
+            aggregate.duration += footprint.duration
+        }
+
+        return groups.values
+            .asSequence()
+            .filter { it.duration >= 3600 && it.count > 2 }
+            .sortedByDescending { it.duration }
+            .map { FrequentPlaceItem(it.name, it.address, it.count, it.duration) }
+            .toList()
     }
 
     private fun calculateTrend(footprints: List<FootprintEntity>, daysInScope: Int): List<TrendPoint> {

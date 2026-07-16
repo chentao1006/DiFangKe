@@ -1,11 +1,3 @@
-import org.gradle.api.DefaultTask
-import org.gradle.api.GradleException
-import org.gradle.api.file.DirectoryProperty
-import org.gradle.api.provider.Property
-import org.gradle.api.tasks.Input
-import org.gradle.api.tasks.InputDirectory
-import org.gradle.api.tasks.TaskAction
-import java.io.File
 import java.util.Properties
 
 plugins {
@@ -16,83 +8,6 @@ plugins {
 }
 
 val requiredNdkVersion = "27.1.12297006"
-val requiredNativePageAlignment = 16 * 1024
-
-abstract class VerifyNativePageSizeTask : DefaultTask() {
-    @get:InputDirectory
-    abstract val nativeLibDir: DirectoryProperty
-
-    @get:Input
-    abstract val sdkDir: Property<String>
-
-    @get:Input
-    abstract val ndkVersion: Property<String>
-
-    @get:Input
-    abstract val requiredAlignment: Property<Int>
-
-    @TaskAction
-    fun verify() {
-        val readelf = findReadelf()
-        val nativeLibs = nativeLibDir.get().asFile
-            .listFiles { file -> file.isFile && file.extension == "so" }
-            ?.sortedBy { nativeLib -> nativeLib.name }
-            ?: emptyList()
-
-        val incompatibleLibs = nativeLibs.mapNotNull { nativeLib ->
-            val process = ProcessBuilder(readelf.absolutePath, "-lW", nativeLib.absolutePath)
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().use { reader -> reader.readText() }
-            val exitCode = process.waitFor()
-            if (exitCode != 0) {
-                throw GradleException("llvm-readelf failed for ${nativeLib.name}:\n$output")
-            }
-
-            val loadAlignments = output
-                .lineSequence()
-                .filter { line -> line.trimStart().startsWith("LOAD") }
-                .mapNotNull { line -> line.trim().split(Regex("\\s+")).lastOrNull()?.removePrefix("0x")?.toIntOrNull(16) }
-                .toList()
-
-            if (loadAlignments.isEmpty() || loadAlignments.any { alignment -> alignment < requiredAlignment.get() }) {
-                val alignmentSummary = if (loadAlignments.isEmpty()) {
-                    "no LOAD segment alignment found"
-                } else {
-                    loadAlignments.joinToString { alignment -> "0x${alignment.toString(16)}" }
-                }
-                "${nativeLib.name}: $alignmentSummary"
-            } else {
-                null
-            }
-        }
-
-        if (incompatibleLibs.isNotEmpty()) {
-            throw GradleException(
-                "AMap native libraries are not Android 16 KB page-size compatible. " +
-                    "Upgrade app/libs to AMap SDK artifacts built with the new ABI/NDK toolchain, then rerun the build.\n" +
-                    incompatibleLibs.joinToString(separator = "\n")
-            )
-        }
-    }
-
-    private fun findReadelf(): File {
-        val executableNamesByHost = listOf(
-            "darwin-arm64" to "llvm-readelf",
-            "darwin-x86_64" to "llvm-readelf",
-            "linux-x86_64" to "llvm-readelf",
-            "windows-x86_64" to "llvm-readelf.exe"
-        )
-
-        return executableNamesByHost
-            .map { (host, executableName) ->
-                File("${sdkDir.get()}/ndk/${ndkVersion.get()}/toolchains/llvm/prebuilt/$host/bin/$executableName")
-            }
-            .firstOrNull { candidate -> candidate.isFile }
-            ?: throw GradleException("NDK ${ndkVersion.get()} llvm-readelf was not found under ${sdkDir.get()}.")
-    }
-}
-
 android {
     namespace = "com.ct106.difangke"
     compileSdk = 36
@@ -133,13 +48,27 @@ android {
             abiFilters.add("arm64-v8a")
         }
 
-        // 地图 Key 配置：直接从 local.properties 读取，避免泄露
-        manifestPlaceholders["AMAP_KEY"] = localProperties.getProperty("AMAP_REST_KEY") ?: ""
-        
+        manifestPlaceholders["TENCENT_MAP_KEY"] =
+            localProperties.getProperty("TENCENT_MAP_KEY") ?: ""
+        buildConfigField(
+            "String",
+            "TENCENT_MAP_KEY",
+            "\"${localProperties.getProperty("TENCENT_MAP_KEY") ?: ""}\""
+        )
+
         buildConfigField("String", "SERVICE_SECRET", "\"${localProperties.getProperty("SERVICE_SECRET") ?: ""}\"")
         buildConfigField("String", "PUBLIC_SERVICE_URL", "\"${localProperties.getProperty("PUBLIC_SERVICE_URL") ?: ""}\"")
-        buildConfigField("String", "AMAP_REST_KEY", "\"${localProperties.getProperty("AMAP_REST_KEY") ?: ""}\"")
         buildConfigField("String", "APTABASE_APP_KEY", "\"${localProperties.getProperty("APTABASE_APP_KEY") ?: ""}\"")
+    }
+
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("direct") {
+            dimension = "distribution"
+        }
+        create("play") {
+            dimension = "distribution"
+        }
     }
 
     signingConfigs {
@@ -201,9 +130,8 @@ android {
 
     sourceSets {
         getByName("main") {
-            // Native AMap binaries are loaded from app/libs. Keep a single source of truth
-            // so stale duplicates under src/main/jniLibs do not get repackaged by mistake.
-            jniLibs.setSrcDirs(listOf("libs"))
+            // Tencent Map supplies native binaries through Maven AARs.
+            jniLibs.setSrcDirs(emptyList<String>())
         }
     }
 }
@@ -259,8 +187,9 @@ dependencies {
     // Gson
     implementation("com.google.code.gson:gson:2.11.0")
 
-    // 高德地图 SDK (使用本地最新版本)
-    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar"))))
+    // 腾讯地图与定位 SDK
+    implementation("com.tencent.map:tencent-map-vector-sdk:5.10.0")
+    implementation("com.tencent.map.geolocation:TencentLocationSdk-openplatform:7.6.1.12")
 
     // Debug tools
     debugImplementation("androidx.compose.ui:ui-tooling")
@@ -272,28 +201,4 @@ dependencies {
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
-}
-
-val nativeVerificationProperties = Properties()
-val nativeVerificationPropertiesFile = rootProject.file("local.properties")
-if (nativeVerificationPropertiesFile.exists()) {
-    nativeVerificationPropertiesFile.inputStream().use(nativeVerificationProperties::load)
-}
-
-val verifyAmapNativePageSize by tasks.registering(VerifyNativePageSizeTask::class) {
-    group = "verification"
-    description = "Verifies bundled AMap arm64 native libraries support Android 16 KB page sizes."
-    nativeLibDir.set(layout.projectDirectory.dir("libs/arm64-v8a"))
-    sdkDir.set(
-        nativeVerificationProperties.getProperty("sdk.dir")
-            ?: System.getenv("ANDROID_HOME")
-            ?: System.getenv("ANDROID_SDK_ROOT")
-            ?: ""
-    )
-    ndkVersion.set(requiredNdkVersion)
-    requiredAlignment.set(requiredNativePageAlignment)
-}
-
-tasks.named("preBuild") {
-    dependsOn(verifyAmapNativePageSize)
 }
