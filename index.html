@@ -845,14 +845,42 @@
                 { name: '青岛', coordinates: [36.0671, 120.3826], zoom: 8.6 },
                 { name: '昆明', coordinates: [25.0389, 102.7183], zoom: 8.6 },
                 { name: '长沙', coordinates: [28.2282, 112.9388], zoom: 8.7 },
-                { name: '哈尔滨', coordinates: [45.8038, 126.5349], zoom: 8.6 }
+                { name: '哈尔滨', coordinates: [45.8038, 126.5349], zoom: 8.6 },
+                { name: '天津', coordinates: [39.0842, 117.2009], zoom: 8.7 },
+                { name: '郑州', coordinates: [34.7466, 113.6254], zoom: 8.7 },
+                { name: '济南', coordinates: [36.6512, 117.1201], zoom: 8.7 },
+                { name: '福州', coordinates: [26.0745, 119.2965], zoom: 8.7 },
+                { name: '合肥', coordinates: [31.8206, 117.2272], zoom: 8.7 },
+                { name: '南昌', coordinates: [28.6820, 115.8579], zoom: 8.7 },
+                { name: '贵阳', coordinates: [26.6470, 106.6302], zoom: 8.7 },
+                { name: '南宁', coordinates: [22.8170, 108.3669], zoom: 8.7 },
+                { name: '海口', coordinates: [20.0440, 110.1983], zoom: 8.7 },
+                { name: '兰州', coordinates: [36.0611, 103.8343], zoom: 8.7 },
+                { name: '乌鲁木齐', coordinates: [43.8256, 87.6168], zoom: 8.5 },
+                { name: '拉萨', coordinates: [29.6520, 91.1721], zoom: 8.5 },
+                { name: '大连', coordinates: [38.9140, 121.6147], zoom: 8.7 },
+                { name: '宁波', coordinates: [29.8683, 121.5440], zoom: 8.8 }
             ];
             const internationalCities = [
-                { name: '巴黎', coordinates: [48.8566, 2.3522], zoom: 5.6 },
-                { name: '纽约', coordinates: [40.7128, -74.0060], zoom: 5.6 },
-                { name: '东京', coordinates: [35.6762, 139.6503], zoom: 5.8 },
-                { name: '悉尼', coordinates: [-33.8688, 151.2093], zoom: 5.7 },
-                { name: '伦敦', coordinates: [51.5072, -0.1276], zoom: 5.7 }
+                { name: '巴黎', coordinates: [48.8566, 2.3522], zoom: 6.6 },
+                { name: '纽约', coordinates: [40.7128, -74.0060], zoom: 6.6 },
+                { name: '东京', coordinates: [35.6762, 139.6503], zoom: 6.8 },
+                { name: '悉尼', coordinates: [-33.8688, 151.2093], zoom: 6.7 },
+                { name: '伦敦', coordinates: [51.5072, -0.1276], zoom: 6.7 },
+                { name: '首尔', coordinates: [37.5665, 126.9780], zoom: 6.8 },
+                { name: '新加坡', coordinates: [1.3521, 103.8198], zoom: 7.1 },
+                { name: '曼谷', coordinates: [13.7563, 100.5018], zoom: 6.8 },
+                { name: '迪拜', coordinates: [25.2048, 55.2708], zoom: 6.7 },
+                { name: '罗马', coordinates: [41.9028, 12.4964], zoom: 6.7 },
+                { name: '柏林', coordinates: [52.5200, 13.4050], zoom: 6.7 },
+                { name: '阿姆斯特丹', coordinates: [52.3676, 4.9041], zoom: 6.7 },
+                { name: '巴塞罗那', coordinates: [41.3874, 2.1686], zoom: 6.7 },
+                { name: '温哥华', coordinates: [49.2827, -123.1207], zoom: 6.6 },
+                { name: '旧金山', coordinates: [37.7749, -122.4194], zoom: 6.6 },
+                { name: '洛杉矶', coordinates: [34.0522, -118.2437], zoom: 6.6 },
+                { name: '多伦多', coordinates: [43.6532, -79.3832], zoom: 6.6 },
+                { name: '墨尔本', coordinates: [-37.8136, 144.9631], zoom: 6.7 },
+                { name: '奥克兰', coordinates: [-36.8509, 174.7645], zoom: 6.7 }
             ];
             const map = L.map('background-map', {
                 zoomControl: false,
@@ -913,7 +941,7 @@
             map.setView(currentCity.coordinates, currentCity.zoom, { animate: false });
             driftMap();
             setTimeout(visitCity, 3500);
-            setInterval(visitCity, 9500);
+            setInterval(visitCity, 8500);
         }
 
         setupBackgroundMap();
