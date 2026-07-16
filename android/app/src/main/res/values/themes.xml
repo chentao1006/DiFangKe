@@ -1,11 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 基础主题 -->
-    <style name="Theme.DiFangKe" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- 基础状态栏颜色，Compose 会在代码中覆盖 -->
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
-    </style>
+    <style name="Theme.DiFangKe" parent="Theme.Material3.DayNight.NoActionBar" />
 
     <!-- Splash Screen 主题 (Android 12+) -->
     <style name="Theme.DiFangKe.Splash" parent="Theme.SplashScreen">
