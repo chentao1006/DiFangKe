@@ -1,6 +1,90 @@
 import SwiftUI
 import MapKit
 import CoreLocation
+import UIKit
+
+// MARK: - IME-safe text editing
+
+/// Keeps in-progress input-method composition out of a parent form's state updates.
+///
+/// SwiftUI may recreate a text field when a large form observes its own `@State` text
+/// on every keystroke. That interrupts marked text (for example, Chinese Pinyin) and
+/// commits the first character prematurely. Keep the editing state in this small
+/// observable object and copy it back only when the enclosing form saves or loses focus.
+final class IMETextState: ObservableObject {
+    @Published var text: String
+
+    init(_ text: String = "") {
+        self.text = text
+    }
+}
+
+struct IMESafeMultilineTextField: View {
+    let prompt: LocalizedStringKey
+    @ObservedObject var textState: IMETextState
+    @FocusState.Binding var isFocused: Bool
+    var alignment: TextAlignment = .leading
+
+    var body: some View {
+        TextField(prompt, text: $textState.text, axis: .vertical)
+            .multilineTextAlignment(alignment)
+            .focused($isFocused)
+    }
+}
+
+/// A UIKit-backed editor for fields where retaining marked text is critical.
+/// `UITextView` owns an active Pinyin/Zhuyin composition until the candidate is
+/// committed; SwiftUI state is deliberately updated only after that point.
+struct IMESafeTextView: UIViewRepresentable {
+    @ObservedObject var textState: IMETextState
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(textState: textState)
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.backgroundColor = .clear
+        textView.font = .preferredFont(forTextStyle: .body)
+        textView.textColor = .label
+        textView.delegate = context.coordinator
+        textView.isScrollEnabled = true
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textView.text = textState.text
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        // Never assign text while the keyboard has marked (uncommitted) text.
+        // Doing so is what commits the first Pinyin letter prematurely.
+        guard textView.markedTextRange == nil, textView.text != textState.text else { return }
+        textView.text = textState.text
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        private let textState: IMETextState
+
+        init(textState: IMETextState) {
+            self.textState = textState
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            guard textView.markedTextRange == nil else { return }
+            commit(textView)
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            commit(textView)
+        }
+
+        private func commit(_ textView: UITextView) {
+            guard textState.text != textView.text else { return }
+            textState.text = textView.text
+        }
+    }
+}
 
 // MARK: - Location Selection Components (Shared)
 

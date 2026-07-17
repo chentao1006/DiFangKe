@@ -41,12 +41,12 @@ struct FutureTripDraftModal: View {
     @State private var inferredPlaceName: String?
     @State private var justPickedSearchResult = false
     @State private var arrivalDate = Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+    @State private var hasPlanDate = true
     @State private var hasArrivalTime = false
     @State private var scheduleMode: FutureTripScheduleMode = .timed
     @State private var orderedInsertionPosition = OrderedInsertionPosition.end
     @State private var selectedActivityTypeValue: String?
-    @State private var notes = ""
-    @FocusState private var notesFocused: Bool
+    @State private var notesState = IMETextState()
     @State private var pinLiftOffset: CGFloat = 0
     @State private var pinAnimationTask: Task<Void, Never>?
     @State private var hasLoadedInitialValues = false
@@ -186,18 +186,34 @@ struct FutureTripDraftModal: View {
 
     private var arrivalSection: some View {
         Section("计划时间") {
-            DatePicker("日期", selection: $arrivalDate, in: Date()..., displayedComponents: .date)
-                .datePickerStyle(.compact)
-
-            Toggle("设置具体时间", isOn: $hasArrivalTime)
+            Toggle("设定计划日期", isOn: $hasPlanDate)
                 .tint(Color.dfkAccent)
 
-            if hasArrivalTime {
-                DatePicker("时间", selection: $arrivalDate, in: Date()..., displayedComponents: .hourAndMinute)
+            if hasPlanDate {
+                DatePicker("日期", selection: $arrivalDate, in: Date()..., displayedComponents: .date)
                     .datePickerStyle(.compact)
+
+                Toggle("设置具体时间", isOn: $hasArrivalTime)
+                    .tint(Color.dfkAccent)
+
+                if hasArrivalTime {
+                    DatePicker("时间", selection: $arrivalDate, in: Date()..., displayedComponents: .hourAndMinute)
+                        .datePickerStyle(.compact)
+                } else {
+                    orderedInsertionMenu
+                }
             } else {
                 orderedInsertionMenu
+                Text("未设日期的计划会排在所有已设日期计划之后。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
+        }
+        .onChange(of: hasPlanDate) { _, hasDate in
+            guard !hasDate else { return }
+            hasArrivalTime = false
+            scheduleMode = .ordered
+            orderedInsertionPosition = .end
         }
         .onChange(of: hasArrivalTime) { _, hasTime in
             scheduleMode = hasTime ? .timed : .ordered
@@ -254,9 +270,15 @@ struct FutureTripDraftModal: View {
 
     private var notesSection: some View {
         Section("备注") {
-            TextField("添加备注...", text: $notes, axis: .vertical)
-                .lineLimit(3...6)
-                .focused($notesFocused)
+            ZStack(alignment: .topLeading) {
+                if notesState.text.isEmpty {
+                    Text("添加备注...")
+                        .foregroundStyle(.tertiary)
+                        .allowsHitTesting(false)
+                }
+                IMESafeTextView(textState: notesState)
+                    .frame(minHeight: 44, maxHeight: 132)
+            }
         }
     }
 
@@ -307,13 +329,21 @@ struct FutureTripDraftModal: View {
     }
 
     private var insertionCandidateTripsForSelectedDay: [FutureTrip] {
-        orderedDayTrips(for: normalizedTripDay)
+        if !hasPlanDate {
+            return undatedTrips
+                .filter { $0.id != editingTrip?.id && !$0.isCompleted }
+        }
+        return orderedDayTrips(for: normalizedTripDay)
             .filter { $0.id != editingTrip?.id && !$0.isCompleted }
+    }
+
+    private var undatedTrips: [FutureTrip] {
+        FutureTrip.dayOrdered(allFutureTrips.filter { !$0.hasPlanDate })
     }
 
     private var orderedInsertionTitle: String {
         if insertionCandidateTripsForSelectedDay.isEmpty {
-            return "当天第 1 个计划"
+            return hasPlanDate ? "当天第 1 个计划" : "第 1 个计划"
         }
 
         switch orderedInsertionPosition {
@@ -357,7 +387,7 @@ struct FutureTripDraftModal: View {
 
     private func orderedDayTrips(for day: Date) -> [FutureTrip] {
         let calendar = Calendar.current
-        let trips = allFutureTrips.filter { calendar.isDate($0.arrivalDate, inSameDayAs: day) }
+        let trips = allFutureTrips.filter { $0.hasPlanDate && calendar.isDate($0.arrivalDate, inSameDayAs: day) }
         return FutureTrip.dayOrdered(trips)
     }
 
@@ -495,8 +525,9 @@ struct FutureTripDraftModal: View {
 
     private func saveTrip() {
         guard canSave, let coordinate = selectedCoordinate else { return }
-        let previousDay = editingTrip.map { Calendar.current.startOfDay(for: $0.arrivalDate) }
-        let isOrderedTrip = !hasArrivalTime
+        let previousDay = editingTrip.flatMap { $0.hasPlanDate ? Calendar.current.startOfDay(for: $0.arrivalDate) : nil }
+        let wasUndated = editingTrip.map { !$0.hasPlanDate } ?? false
+        let isOrderedTrip = !hasPlanDate || !hasArrivalTime
 
         var matchingPlaceID: UUID?
         if let places = try? modelContext.fetch(FetchDescriptor<Place>()) {
@@ -511,6 +542,7 @@ struct FutureTripDraftModal: View {
             editingTrip.address = currentCenterAddress == "正在解析位置..." ? nil : currentCenterAddress
             editingTrip.coordinate = coordinate
             editingTrip.arrivalDate = normalizedArrivalDate
+            editingTrip.hasPlanDate = hasPlanDate
             editingTrip.hasArrivalTime = isOrderedTrip ? false : hasArrivalTime
             editingTrip.scheduleMode = isOrderedTrip ? .ordered : .timed
             editingTrip.activityTypeValue = selectedActivityTypeValue
@@ -518,7 +550,10 @@ struct FutureTripDraftModal: View {
             if matchingPlaceID != nil {
                 editingTrip.placeID = matchingPlaceID
             }
-            if isOrderedTrip {
+            if !hasPlanDate {
+                NotificationManager.shared.cancelFutureTripNotification(for: editingTrip.id)
+                reindexUndatedTrips(movingTrip: editingTrip, position: orderedInsertionPosition)
+            } else if isOrderedTrip {
                 NotificationManager.shared.cancelFutureTripNotification(for: editingTrip.id)
                 reindexDayTrips(in: normalizedTripDay, movingTrip: editingTrip, position: orderedInsertionPosition)
             } else {
@@ -533,12 +568,15 @@ struct FutureTripDraftModal: View {
                 notes: normalizedNotes,
                 coordinate: coordinate,
                 arrivalDate: normalizedArrivalDate,
+                hasPlanDate: hasPlanDate,
                 hasArrivalTime: isOrderedTrip ? false : hasArrivalTime,
                 scheduleMode: isOrderedTrip ? .ordered : .timed,
                 activityTypeValue: selectedActivityTypeValue
             )
             modelContext.insert(trip)
-            if isOrderedTrip {
+            if !hasPlanDate {
+                reindexUndatedTrips(movingTrip: trip, position: orderedInsertionPosition)
+            } else if isOrderedTrip {
                 reindexDayTrips(in: normalizedTripDay, movingTrip: trip, position: orderedInsertionPosition)
             } else {
                 reindexTimedTrip(in: normalizedTripDay, movingTrip: trip)
@@ -546,8 +584,11 @@ struct FutureTripDraftModal: View {
             }
         }
 
-        if let previousDay, previousDay != normalizedTripDay {
+        if let previousDay, (!hasPlanDate || previousDay != normalizedTripDay) {
             reindexDayTrips(in: previousDay, movingTrip: nil, position: .end)
+        }
+        if wasUndated && hasPlanDate {
+            reindexUndatedTrips(movingTrip: nil, position: .end)
         }
 
         try? modelContext.save()
@@ -565,11 +606,12 @@ struct FutureTripDraftModal: View {
             inferredPlaceName = trip.placeName
             currentCenterAddress = trip.address ?? trip.placeName
             arrivalDate = trip.arrivalDate
+            hasPlanDate = trip.hasPlanDate
             hasArrivalTime = trip.hasArrivalTime
             scheduleMode = trip.hasArrivalTime ? .timed : .ordered
-            orderedInsertionPosition = insertionPositionForExistingTrip(trip)
+            orderedInsertionPosition = trip.hasPlanDate ? insertionPositionForExistingTrip(trip) : insertionPositionForExistingUndatedTrip(trip)
             selectedActivityTypeValue = trip.activityTypeValue
-            notes = trip.notes ?? ""
+            notesState.text = trip.notes ?? ""
             justPickedSearchResult = true
             
             centerTrigger = UUID()
@@ -584,6 +626,7 @@ struct FutureTripDraftModal: View {
 
     private var normalizedArrivalDate: Date {
         let calendar = Calendar.current
+        guard hasPlanDate else { return arrivalDate }
         if hasArrivalTime { return arrivalDate }
         return endOfSelectedDay(using: calendar)
     }
@@ -595,7 +638,7 @@ struct FutureTripDraftModal: View {
     }
 
     private var normalizedNotes: String? {
-        let value = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = notesState.text.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
     }
 
@@ -628,6 +671,32 @@ struct FutureTripDraftModal: View {
             trips.insert(movingTrip, at: min(max(targetIndex, 0), trips.count))
         }
 
+        for (index, trip) in trips.enumerated() {
+            trip.orderIndex = index + 1
+        }
+    }
+
+    private func insertionPositionForExistingUndatedTrip(_ trip: FutureTrip) -> OrderedInsertionPosition {
+        let trips = undatedTrips
+        guard let index = trips.firstIndex(where: { $0.id == trip.id }) else { return .end }
+        if index == 0 { return .first }
+        return .after(trips[index - 1].id)
+    }
+
+    private func reindexUndatedTrips(movingTrip: FutureTrip?, position: OrderedInsertionPosition) {
+        var trips = FutureTrip.dayOrdered(allFutureTrips.filter { !$0.hasPlanDate && $0.id != movingTrip?.id && !$0.isCompleted })
+        if let movingTrip {
+            let targetIndex: Int
+            switch position {
+            case .first:
+                targetIndex = 0
+            case .after(let id):
+                targetIndex = (trips.firstIndex(where: { $0.id == id }) ?? (trips.count - 1)) + 1
+            case .end:
+                targetIndex = trips.count
+            }
+            trips.insert(movingTrip, at: min(max(targetIndex, 0), trips.count))
+        }
         for (index, trip) in trips.enumerated() {
             trip.orderIndex = index + 1
         }

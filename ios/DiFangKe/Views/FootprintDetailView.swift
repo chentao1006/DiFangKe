@@ -8,24 +8,6 @@ import Aptabase
 // MARK: - FootprintModalView
 // Replaces old FootprintDetailView content to ensure scope visibility
 
-class ReasonState: ObservableObject {
-    @Published var text: String = ""
-}
-
-struct IsolatedReasonField: View {
-    @ObservedObject var reasonState: ReasonState
-    @FocusState.Binding var isFocused: Bool
-
-    var body: some View {
-        TextField("输入感悟...", text: $reasonState.text, axis: .vertical)
-            .font(.body)
-            .foregroundColor(Color.dfkMainText.opacity(0.85))
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: .infinity)
-            .focused($isFocused)
-    }
-}
-
 struct FootprintModalView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
@@ -43,7 +25,7 @@ struct FootprintModalView: View {
     @State private var showAI = false
     @FocusState private var addressFocused: Bool
     @FocusState private var reasonFocused: Bool
-    @State private var reasonState = ReasonState()
+    @State private var reasonState = IMETextState()
     var autoFocus: Bool = false
     @State private var showingDeleteAlert = false
     @State private var showAddPhotoDialog = false
@@ -931,8 +913,11 @@ extension FootprintModalView {
                 .foregroundColor(.secondary)
                 .frame(maxWidth: .infinity)
             
-            IsolatedReasonField(reasonState: reasonState, isFocused: $reasonFocused)
-            .padding(14)
+            IMESafeMultilineTextField(prompt: "输入感悟...", textState: reasonState, isFocused: $reasonFocused, alignment: .center)
+                .font(.body)
+                .foregroundColor(Color.dfkMainText.opacity(0.85))
+                .frame(maxWidth: .infinity)
+                .padding(14)
             .background(
                 RoundedRectangle(cornerRadius: 12)
                     .fill(reasonFocused ? Color.dfkAccent.opacity(0.05) : Color.secondary.opacity(0.05))

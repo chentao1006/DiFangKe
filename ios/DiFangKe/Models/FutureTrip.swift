@@ -16,6 +16,9 @@ final class FutureTrip {
     var latitude: Double = 0
     var longitude: Double = 0
     var arrivalDate: Date = Date()
+    /// Whether this plan is assigned to a calendar day. Kept true by default so
+    /// previously saved plans retain their existing dated behaviour.
+    var hasPlanDate: Bool = true
     var hasArrivalTime: Bool = false
     var scheduleModeValue: String = FutureTripScheduleMode.timed.rawValue
     var orderIndex: Int = 0
@@ -49,6 +52,7 @@ final class FutureTrip {
         notes: String? = nil,
         coordinate: CLLocationCoordinate2D,
         arrivalDate: Date,
+        hasPlanDate: Bool = true,
         hasArrivalTime: Bool,
         scheduleMode: FutureTripScheduleMode = .timed,
         orderIndex: Int = 0,
@@ -65,6 +69,7 @@ final class FutureTrip {
         self.latitude = coordinate.latitude
         self.longitude = coordinate.longitude
         self.arrivalDate = arrivalDate
+        self.hasPlanDate = hasPlanDate
         self.hasArrivalTime = hasArrivalTime
         self.scheduleModeValue = scheduleMode.rawValue
         self.orderIndex = orderIndex
@@ -109,6 +114,10 @@ final class FutureTrip {
     static func dayOrdered(_ trips: [FutureTrip]) -> [FutureTrip] {
         let hasExplicitOrder = trips.contains { $0.orderIndex > 0 }
         return trips.sorted { lhs, rhs in
+            if lhs.hasPlanDate != rhs.hasPlanDate {
+                return lhs.hasPlanDate
+            }
+
             if hasExplicitOrder {
                 let leftOrder = lhs.orderIndex > 0 ? lhs.orderIndex : Int.max
                 let rightOrder = rhs.orderIndex > 0 ? rhs.orderIndex : Int.max

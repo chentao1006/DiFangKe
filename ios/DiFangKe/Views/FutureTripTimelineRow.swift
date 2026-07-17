@@ -16,7 +16,7 @@ struct FutureTripTimelineRow: View {
     }
 
     private var icon: String {
-        activity?.icon ?? "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted"
+        activity?.icon ?? (trip.hasPlanDate ? "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted" : "target")
     }
 
     private var tint: Color {
@@ -197,6 +197,7 @@ struct FutureTripTimelineRow: View {
         if trip.isCompleted, let completedAt = trip.completedAt {
             return completedAt.formatted(date: .omitted, time: .shortened)
         }
+        if !trip.hasPlanDate { return "计划" }
         return trip.hasArrivalTime ? trip.arrivalDate.formatted(date: .omitted, time: .shortened) : "计划"
     }
 }

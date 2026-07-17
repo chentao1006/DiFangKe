@@ -491,6 +491,7 @@ struct BackupDTO: Codable {
         let lat: Double
         let lon: Double
         let arrivalDate: Date
+        let hasPlanDate: Bool?
         let hasArrivalTime: Bool
         let scheduleMode: String?
         let orderIndex: Int?
@@ -552,6 +553,7 @@ final class BackupService {
                     lat: trip.latitude,
                     lon: trip.longitude,
                     arrivalDate: trip.arrivalDate,
+                    hasPlanDate: trip.hasPlanDate,
                     hasArrivalTime: trip.hasArrivalTime,
                     scheduleMode: trip.scheduleModeValue,
                     orderIndex: trip.orderIndex,
@@ -714,6 +716,7 @@ final class BackupService {
                             notes: t.notes,
                             coordinate: CLLocationCoordinate2D(latitude: t.lat, longitude: t.lon),
                             arrivalDate: t.arrivalDate,
+                            hasPlanDate: t.hasPlanDate ?? true,
                             hasArrivalTime: t.hasArrivalTime,
                             scheduleMode: FutureTripScheduleMode(rawValue: t.scheduleMode ?? "") ?? .timed,
                             orderIndex: t.orderIndex ?? 0,

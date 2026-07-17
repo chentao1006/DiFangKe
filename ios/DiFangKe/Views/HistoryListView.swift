@@ -302,14 +302,14 @@ struct HistoryListView: View {
     
     private var earliestHistoryDate: Date {
         let footprintDate = allFootprints.last?.startTime
-        let futureTripDate = futureTrips.map(\.arrivalDate).min()
+        let futureTripDate = futureTrips.filter(\.hasPlanDate).map(\.arrivalDate).min()
         return [footprintDate, futureTripDate].compactMap { $0 }.min() ?? Calendar.current.startOfDay(for: Date())
     }
 
     private var latestHistoryDate: Date {
         let today = Calendar.current.startOfDay(for: Date())
         let footprintDate = allFootprints.first?.startTime
-        let futureTripDate = futureTrips.map(\.arrivalDate).max()
+        let futureTripDate = futureTrips.filter(\.hasPlanDate).map(\.arrivalDate).max()
         return [today, footprintDate, futureTripDate].compactMap { $0 }.max() ?? today
     }
     
@@ -319,7 +319,7 @@ struct HistoryListView: View {
     
     private var historyYears: [(year: Int, date: Date)] {
         let calendar = Calendar.current
-        let dates = allFootprints.map(\.startTime) + futureTrips.map(\.arrivalDate)
+        let dates = allFootprints.map(\.startTime) + futureTrips.filter(\.hasPlanDate).map(\.arrivalDate)
         let grouped = Dictionary(grouping: dates) { date in
             calendar.component(.year, from: date)
         }
@@ -370,7 +370,7 @@ struct HistoryListView: View {
             }
         }
 
-        for trip in futureTrips {
+        for trip in futureTrips where trip.hasPlanDate {
             let day = calendar.startOfDay(for: trip.arrivalDate)
             tripMap[day, default: []].append(trip)
         }

@@ -170,7 +170,7 @@ private struct ContinuousTimelineView: View {
         dates.insert(activeTimelineDate)
 
         if hasCompletedInitialTimelineLoad {
-            let futureDates = futureTrips.map { calendar.startOfDay(for: $0.arrivalDate) }
+            let futureDates = futureTrips.filter(\.hasPlanDate).map { calendar.startOfDay(for: $0.arrivalDate) }
             dates.formUnion(futureDates)
         }
 
@@ -1540,7 +1540,7 @@ private struct ContinuousTimelineView: View {
     private func futureTrips(for dates: Set<Date>) -> [FutureTrip] {
         let calendar = Calendar.current
         return futureTrips.filter { trip in
-            !trip.isCompleted && dates.contains(calendar.startOfDay(for: trip.arrivalDate))
+            trip.hasPlanDate && !trip.isCompleted && dates.contains(calendar.startOfDay(for: trip.arrivalDate))
         }
     }
 
@@ -2244,6 +2244,10 @@ private struct ContinuousTimelineSheet: View {
                                     .id(ScrollTarget.date(date))
                                 }
 
+                                if !undatedFutureTrips.isEmpty {
+                                    undatedFutureTripsSection
+                                }
+
                                 if canLoadLaterDates {
                                     TimelineLoadMoreButton(
                                         title: "查看更多足迹",
@@ -2429,7 +2433,7 @@ private struct ContinuousTimelineSheet: View {
             )
             .popover(isPresented: $isShowingCalendar) {
                 let today = Calendar.current.startOfDay(for: Date())
-                let futureTripDates = futureTrips.map { Calendar.current.startOfDay(for: $0.arrivalDate) }
+                let futureTripDates = futureTrips.filter(\.hasPlanDate).map { Calendar.current.startOfDay(for: $0.arrivalDate) }
                 let activeDates = Set(availableDates.filter { $0 <= today }).union(futureTripDates)
 
                 MiniCalendarView(
@@ -2477,14 +2481,9 @@ private struct ContinuousTimelineSheet: View {
                     }
                     Divider()
                     Button {
-                        prepareTodayPlansShare()
-                    } label: {
-                        Label("分享今日计划", systemImage: "calendar")
-                    }
-                    Button {
                         prepareFuturePlansShare()
                     } label: {
-                        Label("分享未来7天计划", systemImage: "calendar.badge.clock")
+                        Label("分享未来计划", systemImage: "calendar.badge.clock")
                     }
                 } label: {
                     Image(systemName: "square.and.arrow.up")
@@ -2548,6 +2547,7 @@ private struct ContinuousTimelineSheet: View {
             payload.backgroundMapImage = media.backgroundMapImage
             payload.backgroundMapLightImage = media.backgroundLightMapImage
             payload.backgroundMapDarkImage = media.backgroundDarkMapImage
+            payload.mapTransports = transports
             payload.id = payloadID
             sharePayload = payload
         }
@@ -2606,6 +2606,7 @@ private struct ContinuousTimelineSheet: View {
             payload.backgroundMapImage = media.backgroundMapImage
             payload.backgroundMapLightImage = media.backgroundLightMapImage
             payload.backgroundMapDarkImage = media.backgroundDarkMapImage
+            payload.mapTransports = transports
             payload.id = payloadID
             sharePayload = payload
         }
@@ -2671,48 +2672,34 @@ private struct ContinuousTimelineSheet: View {
         }
     }
 
-    private func prepareTodayPlansShare() {
-        let today = Calendar.current.startOfDay(for: Date())
-        let selectedTrips = trips(in: today, through: today)
-        let coordinates = selectedTrips.map(\.coordinate)
-        let loadingPayload = DFKShareCardFactory.loadingPayload(kind: .plan, rangeText: "今天", coordinates: coordinates)
-        sharePayload = loadingPayload
-        let payloadID = loadingPayload.id
-        DFKShareImageLoader.loadMapImages(coordinates: coordinates) { mapImages in
-            var payload = DFKShareCardFactory.planPayload(
-                title: "今天的全部安排",
-                rangeText: "今天",
-                trips: selectedTrips
-            )
-            payload.backgroundMapImage = mapImages.light ?? mapImages.dark
-            payload.backgroundMapLightImage = mapImages.light
-            payload.backgroundMapDarkImage = mapImages.dark
-            payload.id = payloadID
-            sharePayload = payload
-        }
-    }
-
     private func prepareFuturePlansShare() {
         let calendar = Calendar.current
-        let start = calendar.startOfDay(for: activeTimelineDate)
-        let end = calendar.date(byAdding: .day, value: 6, to: start) ?? start
-        let selectedTrips = trips(in: start, through: end)
-        let rangeText = "\(DFKShareCardFactory.dateText(start)) - \(DFKShareCardFactory.dateText(end))"
+        let start = calendar.startOfDay(for: Date())
+        let selectedTrips = futureTrips.filter { !$0.hasPlanDate || $0.arrivalDate >= start }
+        let rangeText = "未来计划"
         let coordinates = selectedTrips.map(\.coordinate)
         let loadingPayload = DFKShareCardFactory.loadingPayload(kind: .plan, rangeText: rangeText, coordinates: coordinates)
         sharePayload = loadingPayload
         let payloadID = loadingPayload.id
-        DFKShareImageLoader.loadMapImages(coordinates: coordinates) { mapImages in
-            var payload = DFKShareCardFactory.planPayload(
-                title: "未来7天计划",
-                rangeText: rangeText,
-                trips: selectedTrips
-            )
-            payload.backgroundMapImage = mapImages.light ?? mapImages.dark
-            payload.backgroundMapLightImage = mapImages.light
-            payload.backgroundMapDarkImage = mapImages.dark
-            payload.id = payloadID
-            sharePayload = payload
+        var payload = DFKShareCardFactory.planPayload(
+            title: "计划行程",
+            rangeText: rangeText,
+            trips: selectedTrips,
+            activities: activityTypes
+        )
+        payload.id = payloadID
+        DFKShareImageLoader.loadPlanMapImages(
+            plans: payload.plans
+        ) { mapImages in
+            DFKShareImageLoader.loadBackgroundMapImages(coordinates: coordinates) { backgroundImages in
+                payload.backgroundMapImage = backgroundImages.light ?? backgroundImages.dark
+                payload.backgroundMapLightImage = backgroundImages.light
+                payload.backgroundMapDarkImage = backgroundImages.dark
+                payload.contentMapImage = mapImages.light ?? mapImages.dark
+                payload.contentMapLightImage = mapImages.light
+                payload.contentMapDarkImage = mapImages.dark
+                sharePayload = payload
+            }
         }
     }
 
@@ -2721,7 +2708,7 @@ private struct ContinuousTimelineSheet: View {
         let start = calendar.startOfDay(for: startDate)
         let end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: endDate)) ?? endDate
         return futureTrips.filter { trip in
-            trip.arrivalDate >= start && trip.arrivalDate < end
+            trip.hasPlanDate && trip.arrivalDate >= start && trip.arrivalDate < end
         }
     }
 
@@ -3112,6 +3099,60 @@ private struct ContinuousTimelineSheet: View {
         }
     }
 
+    private var undatedFutureTrips: [FutureTrip] {
+        FutureTrip.dayOrdered(futureTrips.filter { !$0.hasPlanDate && !$0.isCompleted })
+    }
+
+    private var undatedFutureTripsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TimelineDateGapConnector(skippedDays: 7)
+
+            ZStack(alignment: .leading) {
+                DottedTimelineSeparator()
+                    .offset(y: -12)
+                Rectangle()
+                    .fill(ContinuousTimelineLayout.lineColor)
+                    .frame(width: 2, height: 30)
+                    .offset(x: ContinuousTimelineLayout.markerCenterX - 1)
+                Text("未来")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: ContinuousTimelineLayout.dateColumnWidth, alignment: .leading)
+            }
+            .frame(height: 30)
+
+            ForEach(undatedFutureTrips) { trip in
+                FutureTripTimelineRow(trip: trip, activityTypes: activityTypes)
+                    .id(ScrollTarget.futureTrip(trip.id))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        futureTripTimelineAnchorDate = Calendar.current.startOfDay(for: activeTimelineDate)
+                        futureTripTimelineAnchorID = trip.id
+                        withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
+                            selectedFutureTripDetail = trip
+                        }
+                    }
+                    .contextMenu {
+                        Button {
+                            futureTripTimelineAnchorDate = Calendar.current.startOfDay(for: activeTimelineDate)
+                            futureTripTimelineAnchorID = trip.id
+                            selectedFutureTrip = trip
+                        } label: {
+                            Label("编辑", systemImage: "pencil")
+                        }
+
+                        Button(role: .destructive) {
+                            futureTripTimelineAnchorDate = Calendar.current.startOfDay(for: activeTimelineDate)
+                            futureTripTimelineAnchorID = nil
+                            futureTripPendingDeletion = trip
+                        } label: {
+                            Label("删除", systemImage: "trash")
+                        }
+                    }
+            }
+        }
+    }
+
     private func requestScrollToToday(using proxy: ScrollViewProxy) {
         if let target = targetScrollDate {
             scrollToDate(target, using: proxy)
@@ -3193,7 +3234,7 @@ private struct ContinuousTimelineSheet: View {
     private func futureTrips(for date: Date) -> [FutureTrip] {
         let calendar = Calendar.current
         return FutureTrip.dayOrdered(futureTrips
-            .filter { !$0.isCompleted && calendar.isDate($0.arrivalDate, inSameDayAs: date) }
+            .filter { $0.hasPlanDate && !$0.isCompleted && calendar.isDate($0.arrivalDate, inSameDayAs: date) }
         )
     }
 

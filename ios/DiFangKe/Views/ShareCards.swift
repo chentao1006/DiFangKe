@@ -107,30 +107,6 @@ enum DFKShareCardTheme: String, CaseIterable, Identifiable {
     }
 }
 
-enum DFKShareCardSize: String, CaseIterable, Identifiable {
-    case square
-    case portrait
-    case longPortrait
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .square: return "方形"
-        case .portrait: return "竖版"
-        case .longPortrait: return "长竖版"
-        }
-    }
-
-    var pixelSize: CGSize {
-        switch self {
-        case .square: return CGSize(width: 1080, height: 1080)
-        case .portrait: return CGSize(width: 1080, height: 1440)
-        case .longPortrait: return CGSize(width: 1080, height: 1920)
-        }
-    }
-}
-
 enum DFKShareCardKind {
     case moment
     case timeline
@@ -154,6 +130,10 @@ struct DFKShareCardPayload: Identifiable {
     var contentMapLightImage: UIImage?
     var contentMapDarkImage: UIImage?
     var coordinates: [CLLocationCoordinate2D] = []
+    // Keep the raw map inputs so place toggles can filter pins without deleting transport overlays.
+    var mapFootprints: [Footprint] = []
+    var mapTransports: [TransportRecord] = []
+    var mapActivities: [ActivityType] = []
     var entries: [DFKShareEntry] = []
     var plans: [DFKSharePlanEntry] = []
     var stats: [DFKShareStatEntry] = []
@@ -175,6 +155,8 @@ struct DFKShareEntry: Identifiable {
     var count: Int = 1
     var mergeText: String?
     var isIncluded: Bool = true
+    var dayDividerText: String?
+    var footprintIDs: [UUID] = []
 }
 
 struct DFKSharePlanEntry: Identifiable {
@@ -182,7 +164,11 @@ struct DFKSharePlanEntry: Identifiable {
     var time: String
     var place: String
     var note: String?
-    var status: String
+    var isUndated: Bool = false
+    var markerIconName: String = "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted"
+    var markerColor: Color = .dfkAccent
+    var isIncluded: Bool = true
+    var coordinate: CLLocationCoordinate2D?
 }
 
 struct DFKShareStatEntry: Identifiable {
@@ -198,10 +184,13 @@ struct DFKShareCardPreviewView: View {
 
     @State private var editablePayload: DFKShareCardPayload
     @State private var selectedTheme: DFKShareCardTheme = .light
-    @State private var selectedSize: DFKShareCardSize = .portrait
     @State private var renderedImage: UIImage?
+    @State private var renderedImageURL: URL?
     @State private var isRendering = false
     @State private var showingShareSheet = false
+    @State private var previewZoom: CGFloat = 1
+    @State private var hasInitializedPreviewZoom = false
+    @GestureState private var magnificationGesture: CGFloat = 1
     @State private var editingText = ""
     @State private var editingCommit: ((String) -> Void)?
     @State private var showingTextEditor = false
@@ -210,8 +199,10 @@ struct DFKShareCardPreviewView: View {
     @State private var editingSelectionRequest = UUID()
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @State private var showingAINotEnabledAlert = false
+    @State private var pendingShareTitleGeneration: Bool?
     @State private var hasRequestedAutomaticShareTitle = false
     @State private var isShareTitleBreathing = false
+    @State private var mapRefreshRequest = UUID()
 
     init(payload: DFKShareCardPayload) {
         self.payload = payload
@@ -224,51 +215,100 @@ struct DFKShareCardPreviewView: View {
                 GeometryReader { proxy in
                     let availableWidth = max(1, proxy.size.width - 28)
                     let availableHeight = max(1, proxy.size.height - 12)
-                    let targetSize = selectedSize.pixelSize
-                    let previewScale = min(availableWidth / targetSize.width, availableHeight / targetSize.height)
-                    let previewWidth = targetSize.width * previewScale
-                    let previewHeight = targetSize.height * previewScale
+                    let targetSize = DFKShareCardView.pixelSize(for: editablePayload)
+                    let previewScale = availableWidth / targetSize.width
+                    let fullHeightZoom = min(1, (availableHeight / targetSize.height) / previewScale)
+                    let baseZoom = hasInitializedPreviewZoom ? previewZoom : fullHeightZoom
+                    let activeZoom = min(max(baseZoom * magnificationGesture, fullHeightZoom), 1)
+                    let cardScale = previewScale * activeZoom
+                    let cardSize = CGSize(
+                        width: targetSize.width * cardScale,
+                        height: targetSize.height * cardScale
+                    )
 
-                    ZStack {
+                    ZStack(alignment: .top) {
                         Color(uiColor: .secondarySystemBackground)
                         if editablePayload.isLoading {
                             ProgressView("正在生成分享卡片...")
                                 .controlSize(.large)
                                 .foregroundStyle(.secondary)
                         } else {
-                            ZStack(alignment: .topLeading) {
-                                DFKShareCardView(
-                                    payload: editablePayload,
-                                    theme: selectedTheme,
-                                    size: selectedSize,
-                                    displayScale: 1
+                            ScrollViewReader { scrollProxy in
+                                ScrollView(.vertical) {
+                                    ZStack(alignment: .topLeading) {
+                                        DFKShareCardView(payload: editablePayload, theme: selectedTheme)
+                                            .frame(
+                                                width: targetSize.width,
+                                                height: targetSize.height,
+                                                alignment: .topLeading
+                                            )
+                                            // Scale the finished 1080 pt canvas. Do not rerun the
+                                            // internal layout at preview size, or photos/text reflow.
+                                            .scaleEffect(cardScale, anchor: .topLeading)
+
+                                        // ScrollViewReader needs concrete targets to focus the
+                                        // expanded preview at the point the user tapped.
+                                        VStack(spacing: 0) {
+                                            ForEach(0 ... 100, id: \.self) { index in
+                                                Color.clear
+                                                    .frame(height: cardSize.height / 101)
+                                                    .id("share-card-anchor-\(index)")
+                                            }
+                                        }
+                                    }
+                                    .frame(width: cardSize.width, height: cardSize.height, alignment: .topLeading)
+                                    .id("share-card-preview")
+                                    .shadow(color: .black.opacity(0.16), radius: 18, x: 0, y: 10)
+                                    .frame(maxWidth: .infinity, alignment: .top)
+                                }
+                                .scrollIndicators(.visible)
+                                .simultaneousGesture(
+                                    MagnifyGesture()
+                                        .updating($magnificationGesture) { value, state, _ in
+                                            state = value.magnification
+                                        }
+                                        .onEnded { value in
+                                            previewZoom = min(max(baseZoom * value.magnification, fullHeightZoom), 1)
+                                            hasInitializedPreviewZoom = true
+                                        }
                                 )
-                                .frame(width: targetSize.width, height: targetSize.height, alignment: .topLeading)
-                                .scaleEffect(previewScale, anchor: .topLeading)
+                                .simultaneousGesture(
+                                    SpatialTapGesture()
+                                        .onEnded { value in
+                                            let isExpanding = abs(baseZoom - 1) >= 0.02
+                                            let tapRatio = min(max(value.location.y / max(cardSize.height, 1), 0), 1)
+                                            let targetAnchor = Int((tapRatio * 100).rounded())
+                                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                                                previewZoom = isExpanding ? 1 : fullHeightZoom
+                                        hasInitializedPreviewZoom = true
+                                    }
+                                    // Wait for the expanded canvas to get its new scroll range;
+                                    // resolving earlier makes every anchor collapse to the top.
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                                                scrollProxy.scrollTo(
+                                                    isExpanding ? "share-card-anchor-\(targetAnchor)" : "share-card-preview",
+                                                    anchor: isExpanding ? .center : .top
+                                                )
+                                        }
+                                    }
+                                        }
+                                )
                             }
-                            .frame(width: previewWidth, height: previewHeight, alignment: .topLeading)
-                            .clipped()
-                            .shadow(color: .black.opacity(0.16), radius: 18, x: 0, y: 10)
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
                 }
                 .background(Color(uiColor: .secondarySystemBackground))
 
                 VStack(spacing: 12) {
                     titleEditorRow
-                    timelineEntryPicker
+                    shareItemPicker
 
                     Picker("主题", selection: $selectedTheme) {
                         ForEach(DFKShareCardTheme.allCases) { theme in
                             Text(theme.title).tag(theme)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    Picker("尺寸", selection: $selectedSize) {
-                        ForEach(DFKShareCardSize.allCases) { size in
-                            Text(size.title).tag(size)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -295,8 +335,8 @@ struct DFKShareCardPreviewView: View {
                 }
             }
             .sheet(isPresented: $showingShareSheet) {
-                if let renderedImage {
-                    ActivityView(activityItems: [renderedImage])
+                if let renderedImageURL {
+                    ActivityView(activityItems: [renderedImageURL])
                 }
             }
             .sheet(isPresented: $showingTextEditor) {
@@ -349,8 +389,13 @@ struct DFKShareCardPreviewView: View {
             .alert("开启 AI 智能助手", isPresented: $showingAINotEnabledAlert) {
                 Button("立刻开启") {
                     isAiAssistantEnabled = true
+                    let applyDirectlyToPreview = pendingShareTitleGeneration ?? true
+                    pendingShareTitleGeneration = nil
+                    generateShareTitle(applyDirectlyToPreview: applyDirectlyToPreview)
                 }
-                Button("暂时不用", role: .cancel) { }
+                Button("暂时不用", role: .cancel) {
+                    pendingShareTitleGeneration = nil
+                }
             } message: {
                 Text("请先在设置中开启 AI 智能辅助，才能生成分享标题。")
             }
@@ -368,13 +413,13 @@ struct DFKShareCardPreviewView: View {
     @ViewBuilder
     private var titleEditorRow: some View {
         if !editablePayload.isLoading {
-            Button {
-                beginEditing(editablePayload.title) { newText in
-                    timelineTitleWasEdited = true
-                    editablePayload.title = newText
-                }
-            } label: {
-                HStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Button {
+                    beginEditing(editablePayload.title) { newText in
+                        timelineTitleWasEdited = true
+                        editablePayload.title = newText
+                    }
+                } label: {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("标题")
                             .font(.system(size: 12, weight: .medium))
@@ -385,66 +430,179 @@ struct DFKShareCardPreviewView: View {
                             .opacity(isGeneratingShareTitle && isShareTitleBreathing ? 0.42 : 1)
                             .lineLimit(1)
                     }
-                    Spacer()
-                    Image(systemName: "pencil")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Color.dfkAccent)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(Color(uiColor: .secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .buttonStyle(.plain)
+
+                Button {
+                    generateShareTitle(applyDirectlyToPreview: true)
+                } label: {
+                    if isGeneratingShareTitle {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(Color.dfkAccent)
+                    } else {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(Color.dfkAccent)
+                    }
+                }
+                .disabled(isGeneratingShareTitle)
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
     }
 
     @ViewBuilder
-    private var timelineEntryPicker: some View {
+    private var shareItemPicker: some View {
         if editablePayload.kind == .timeline,
            !editablePayload.entries.isEmpty,
            !editablePayload.isLoading {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach($editablePayload.entries) { $entry in
-                        HStack(spacing: 10) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.title)
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .lineLimit(1)
-                                Text(entry.time)
-                                    .font(.system(size: 12, weight: .medium).monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Toggle("", isOn: Binding(
-                                get: { entry.isIncluded },
+            List {
+                ForEach($editablePayload.entries) { $entry in
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.title)
+                                .font(.system(size: 15, weight: .semibold))
+                                .lineLimit(1)
+                            Text(entry.time)
+                                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { entry.isIncluded },
                                 set: { isIncluded in
                                     entry.isIncluded = isIncluded
                                     refreshAutomaticTimelineTitleIfNeeded()
-                                }
-                            ))
-                                .labelsHidden()
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-
-                        if entry.id != editablePayload.entries.last?.id {
-                            Divider().padding(.leading, 12)
-                        }
+                                    refreshSelectedMap()
+                            }
+                        ))
+                            .labelsHidden()
                     }
+                    .listRowInsets(.init(top: 8, leading: 12, bottom: 8, trailing: 12))
+                    .listRowBackground(Color.clear)
                 }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
             .frame(maxHeight: 156)
-            .background(Color(uiColor: .secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        } else if editablePayload.kind == .plan,
+                  !editablePayload.plans.isEmpty,
+                  !editablePayload.isLoading {
+            List {
+                ForEach($editablePayload.plans) { $plan in
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(plan.place)
+                                .font(.system(size: 15, weight: .semibold))
+                                .lineLimit(1)
+                            Text(plan.time)
+                                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { plan.isIncluded },
+                            set: { isIncluded in
+                                plan.isIncluded = isIncluded
+                                refreshSelectedMap()
+                            }
+                        ))
+                            .labelsHidden()
+                    }
+                    .listRowInsets(.init(top: 8, leading: 12, bottom: 8, trailing: 12))
+                    .listRowBackground(Color.clear)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .frame(maxHeight: 156)
         }
     }
 
     private func refreshAutomaticTimelineTitleIfNeeded() {
         guard editablePayload.kind == .timeline, !timelineTitleWasEdited else { return }
         let includedCount = editablePayload.entries.filter(\.isIncluded).count
-        editablePayload.title = includedCount == 0 ? "这段时间还没有足迹" : "这段时间去了 \(includedCount) 个地方"
+        let title = includedCount == 0 ? "这段时间还没有足迹" : "这段时间去了 \(includedCount) 个地方"
+        guard editablePayload.title != title else { return }
+        editablePayload.title = title
+    }
+
+    private func refreshSelectedMap() {
+        let coordinates: [CLLocationCoordinate2D]
+        var selectedTimelineEntries: [DFKShareEntry] = []
+        switch editablePayload.kind {
+        case .timeline:
+            selectedTimelineEntries = editablePayload.entries.filter(\.isIncluded)
+            coordinates = selectedTimelineEntries.compactMap(\.coordinate)
+        case .plan:
+            coordinates = editablePayload.plans
+                .filter(\.isIncluded)
+                .compactMap(\.coordinate)
+        case .moment, .stats:
+            return
+        }
+
+        let requestID = UUID()
+        mapRefreshRequest = requestID
+        editablePayload.coordinates = coordinates
+        let hasTransportOverlay: Bool
+        if case .timeline = editablePayload.kind {
+            hasTransportOverlay = !editablePayload.mapTransports.isEmpty
+        } else {
+            hasTransportOverlay = false
+        }
+        guard !coordinates.isEmpty || hasTransportOverlay else {
+            editablePayload.contentMapImage = nil
+            editablePayload.contentMapLightImage = nil
+            editablePayload.contentMapDarkImage = nil
+            editablePayload.backgroundMapImage = nil
+            editablePayload.backgroundMapLightImage = nil
+            editablePayload.backgroundMapDarkImage = nil
+            return
+        }
+
+        let applyMapImages: ((light: UIImage?, dark: UIImage?)) -> Void = { mapImages in
+            guard mapRefreshRequest == requestID else { return }
+            editablePayload.contentMapImage = mapImages.light ?? mapImages.dark
+            editablePayload.contentMapLightImage = mapImages.light
+            editablePayload.contentMapDarkImage = mapImages.dark
+        }
+
+        DFKShareImageLoader.loadBackgroundMapImages(coordinates: coordinates) { mapImages in
+            guard mapRefreshRequest == requestID else { return }
+            editablePayload.backgroundMapImage = mapImages.light ?? mapImages.dark
+            editablePayload.backgroundMapLightImage = mapImages.light
+            editablePayload.backgroundMapDarkImage = mapImages.dark
+        }
+        if case .plan = editablePayload.kind {
+            DFKShareImageLoader.loadPlanMapImages(
+                plans: editablePayload.plans.filter(\.isIncluded),
+                completion: applyMapImages
+            )
+        } else if !editablePayload.mapFootprints.isEmpty || !editablePayload.mapTransports.isEmpty {
+            let includedFootprintIDs = Set(selectedTimelineEntries.flatMap(\.footprintIDs))
+            let selectedFootprints = editablePayload.mapFootprints.filter {
+                includedFootprintIDs.contains($0.footprintID)
+            }
+            DFKShareImageLoader.loadMapImages(
+                coordinates: coordinates,
+                footprints: selectedFootprints,
+                transports: editablePayload.mapTransports,
+                activities: editablePayload.mapActivities,
+                completion: applyMapImages
+            )
+        } else {
+            DFKShareImageLoader.loadSelectedTimelineMapImages(
+                entries: selectedTimelineEntries,
+                completion: applyMapImages
+            )
+        }
     }
 
     private func beginEditing(_ text: String, commit: @escaping (String) -> Void) {
@@ -465,6 +623,7 @@ struct DFKShareCardPreviewView: View {
 
     private func generateShareTitle(applyDirectlyToPreview: Bool = false) {
         guard isAiAssistantEnabled else {
+            pendingShareTitleGeneration = applyDirectlyToPreview
             showingAINotEnabledAlert = true
             return
         }
@@ -475,14 +634,14 @@ struct DFKShareCardPreviewView: View {
         }
 
         let styles = ["轻松口语", "有画面感", "俏皮有梗", "简洁有力", "温暖治愈", "旅行感"]
-        let facts = editablePayload.entries.map { entry in
+        let facts = editablePayload.entries.filter(\.isIncluded).map { entry in
             [entry.time, entry.title, entry.tag, entry.detail]
                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
                 .joined(separator: "｜")
         }.joined(separator: "\n")
-        let plans = editablePayload.plans.map { plan in
-            [plan.time, plan.place, plan.status, plan.note]
+        let plans = editablePayload.plans.filter(\.isIncluded).map { plan in
+            [plan.time, plan.place, plan.note]
                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
                 .joined(separator: "｜")
@@ -490,7 +649,10 @@ struct DFKShareCardPreviewView: View {
         let prompt = """
         为一张地方客分享卡片写一个适合传播的中文标题。
         请随机采用“\(styles.randomElement()!)”风格，标题要自然、有记忆点，控制在 8 到 22 个字，只输出标题本身，不要引号、解释、标签或换行。标题绝对不要包含日期、年份、月份、几号、星期、今天、昨天、明天等任何日期表达。
-        必须以提供的时间、地点、活动、交通等事实为依据；交通信息若没有明确提供，绝不能虚构交通方式或行程。不要编造心情、人物、事件或具体细节。不要罗列地点名称，要提炼行程的主线、最有代表性的行动或变化，用一句话概括重点。
+        必须以提供的时间、地点、活动、交通等事实为依据；交通信息若没有明确提供，绝不能虚构交通方式或行程。不要编造心情、人物、事件或具体细节。不要罗列地点名称，要提炼行程或计划的主线，用一句话概括重点。
+
+        标题场景要求：
+        \(shareTitleScenarioInstruction)
 
         分享类型：\(shareKindName)
         行程时长：\(shareDurationDescription)
@@ -528,6 +690,13 @@ struct DFKShareCardPreviewView: View {
         }
     }
 
+    private var shareTitleScenarioInstruction: String {
+        if case .plan = editablePayload.kind {
+            return "这是尚未发生的未来计划。标题必须表达准备、期待、将要或计划中的方向；严禁使用“去了、玩了、吃了、走过、经历、回忆、这一天”等已完成或回顾性的说法。只能根据已选计划提炼未来安排，不能暗示任何计划已经发生。"
+        }
+        return "这是已经发生的足迹或生活记录。标题应基于已提供的事实概括经历，不要虚构未发生的安排。"
+    }
+
     private var shareDurationDescription: String {
         let range = editablePayload.rangeText
         let isDateRange = range.contains(" - ") || range.contains("至") || range.contains("~")
@@ -541,29 +710,236 @@ struct DFKShareCardPreviewView: View {
     private func renderAndShare() {
         guard !editablePayload.isLoading else { return }
         isRendering = true
-        let targetSize = selectedSize.pixelSize
+        renderedImageURL = nil
+        let targetSize = DFKShareCardView.pixelSize(for: editablePayload)
         let renderer = ImageRenderer(
-            content: DFKShareCardView(payload: editablePayload, theme: selectedTheme, size: selectedSize)
+            content: DFKShareCardView(payload: editablePayload, theme: selectedTheme)
                 .frame(width: targetSize.width, height: targetSize.height)
         )
         renderer.proposedSize = ProposedViewSize(targetSize)
-        renderer.scale = 1
-        renderedImage = renderer.uiImage
+        // WeChat and pasteboard providers are unreliable with extra-tall raw
+        // bitmaps. Keep all content but scale long cards to an 8192 px maximum.
+        let exportScale = min(CGFloat(1), CGFloat(8_192) / targetSize.height)
+        renderer.scale = exportScale
+        // The card has a fully opaque canvas. Avoid an AlphaPremulLast bitmap,
+        // which doubles decode memory for long timeline exports.
+        renderer.isOpaque = true
+        if let image = renderer.uiImage {
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = image.scale
+            format.opaque = true
+            let flattenedImage = UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
+                UIColor(selectedTheme.background).setFill()
+                UIRectFill(CGRect(origin: .zero, size: image.size))
+                image.draw(at: .zero)
+            }
+            renderedImage = flattenedImage
+            let temporaryURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("difangke-share-\(UUID().uuidString).jpg")
+            if let jpegData = flattenedImage.jpegData(compressionQuality: 0.88) {
+                do {
+                    try jpegData.write(to: temporaryURL, options: .atomic)
+                    renderedImageURL = temporaryURL
+                } catch {
+                    renderedImageURL = nil
+                }
+            }
+        }
         isRendering = false
-        showingShareSheet = renderedImage != nil
+        showingShareSheet = renderedImageURL != nil
+    }
+
+}
+
+private struct DFKShareDateRangeCalendar: View {
+    @Binding var startDate: Date?
+    @Binding var endDate: Date?
+    @State private var displayedMonth: Date
+
+    private let calendar: Calendar = {
+        var calendar = Calendar.current
+        calendar.firstWeekday = 1
+        return calendar
+    }()
+    private let weekdays = ["日", "一", "二", "三", "四", "五", "六"]
+
+    init(initialMonth: Date, startDate: Binding<Date?>, endDate: Binding<Date?>) {
+        _startDate = startDate
+        _endDate = endDate
+        let components = Calendar.current.dateComponents([.year, .month], from: initialMonth)
+        _displayedMonth = State(initialValue: Calendar.current.date(from: components) ?? initialMonth)
+    }
+
+    private var monthTitle: String {
+        displayedMonth.formatted(.dateTime.year().month())
+    }
+
+    private var monthPages: [Date] {
+        guard let firstMonth = calendar.date(byAdding: .month, value: -120, to: displayedMonthOfToday) else {
+            return []
+        }
+        return (0 ... 120).compactMap { calendar.date(byAdding: .month, value: $0, to: firstMonth) }
+    }
+
+    private var displayedMonthOfToday: Date {
+        calendar.date(from: calendar.dateComponents([.year, .month], from: Date())) ?? Date()
+    }
+
+    private func days(for month: Date) -> [Date?] {
+        guard let dayRange = calendar.range(of: .day, in: .month, for: month),
+              let firstDay = calendar.date(from: calendar.dateComponents([.year, .month], from: month)) else {
+            return []
+        }
+        let leadingDays = calendar.component(.weekday, from: firstDay) - 1
+        var result = Array<Date?>(repeating: nil, count: leadingDays)
+        result += dayRange.compactMap { calendar.date(bySetting: .day, value: $0, of: firstDay) }
+        result += Array(repeating: nil, count: (7 - result.count % 7) % 7)
+        return result
+    }
+
+    var body: some View {
+        VStack(spacing: 18) {
+            HStack(spacing: 0) {
+                rangeLabel("起始日期", date: startDate)
+                Divider().frame(height: 34)
+                rangeLabel("结束日期", date: endDate)
+            }
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color(uiColor: .secondarySystemBackground)))
+
+            HStack {
+                Button { moveMonth(by: -1) } label: { Image(systemName: "chevron.left") }
+                Spacer()
+                Text(monthTitle).font(.headline)
+                Spacer()
+                Button { moveMonth(by: 1) } label: { Image(systemName: "chevron.right") }
+                    .disabled(!canMoveToNextMonth)
+            }
+            .buttonStyle(.plain)
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 7), spacing: 10) {
+                ForEach(weekdays, id: \.self) { weekday in
+                    Text(weekday).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                }
+            }
+
+            TabView(selection: $displayedMonth) {
+                ForEach(monthPages, id: \.self) { month in
+                    monthGrid(for: month)
+                        .tag(month)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .frame(height: 278)
+            .onChange(of: displayedMonth) { _, _ in
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private func monthGrid(for month: Date) -> some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 7), spacing: 10) {
+            ForEach(Array(days(for: month).enumerated()), id: \.offset) { _, day in
+                if let day {
+                    dayButton(day)
+                } else {
+                    Color.clear.frame(height: 38)
+                }
+            }
+        }
+        .padding(.horizontal, 1)
+    }
+
+    private func rangeLabel(_ title: String, date: Date?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(date?.formatted(.dateTime.month().day()) ?? "请选择")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(date == nil ? .secondary : .primary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+    }
+
+    private func dayButton(_ day: Date) -> some View {
+        let isDisabled = day > calendar.startOfDay(for: Date())
+        let isStart = startDate.map { calendar.isDate($0, inSameDayAs: day) } ?? false
+        let isEnd = endDate.map { calendar.isDate($0, inSameDayAs: day) } ?? false
+        let isInRange: Bool = {
+            guard let startDate, let endDate else { return false }
+            return day >= startDate && day <= endDate
+        }()
+        return Button { select(day) } label: {
+            ZStack {
+                if isInRange {
+                    GeometryReader { proxy in
+                        let highlight = Color.dfkAccent.opacity(0.22)
+                        if isStart && !isEnd {
+                            highlight
+                                .frame(width: proxy.size.width / 2)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                        } else if isEnd && !isStart {
+                            highlight
+                                .frame(width: proxy.size.width / 2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else if !isStart && !isEnd {
+                            highlight
+                        }
+                    }
+                }
+                if isStart || isEnd {
+                    Circle().fill(Color.dfkAccent)
+                        .frame(width: 38, height: 38)
+                }
+                Text("\(calendar.component(.day, from: day))")
+                    .font(.subheadline.weight(isStart || isEnd ? .bold : .regular))
+                    .foregroundStyle(isStart || isEnd ? Color.white : (isDisabled ? Color.secondary.opacity(0.35) : Color.primary))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+    }
+
+    private var canMoveToNextMonth: Bool {
+        guard let next = calendar.date(byAdding: .month, value: 1, to: displayedMonth) else { return false }
+        return next <= calendar.startOfDay(for: Date())
+    }
+
+    private func moveMonth(by value: Int) {
+        guard let month = calendar.date(byAdding: .month, value: value, to: displayedMonth) else { return }
+        if value > 0, month > calendar.startOfDay(for: Date()) { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            displayedMonth = month
+        }
+    }
+
+    private func select(_ date: Date) {
+        let selected = calendar.startOfDay(for: date)
+        if startDate == nil || endDate != nil {
+            startDate = selected
+            endDate = nil
+        } else if let startDate, selected < startDate {
+            self.startDate = selected
+        } else {
+            endDate = selected
+        }
     }
 }
 
 struct DFKTimelineShareRangePicker: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var startDate: Date
-    @State private var endDate: Date
+    @State private var startDate: Date?
+    @State private var endDate: Date?
     let onConfirm: (Date, Date) -> Void
 
     init(initialDate: Date, onConfirm: @escaping (Date, Date) -> Void) {
         let normalized = Calendar.current.startOfDay(for: min(initialDate, Date()))
-        _startDate = State(initialValue: normalized)
-        _endDate = State(initialValue: normalized)
+        _startDate = State(initialValue: nil)
+        _endDate = State(initialValue: nil)
+        self.initialDate = normalized
         self.onConfirm = onConfirm
     }
 
@@ -571,20 +947,13 @@ struct DFKTimelineShareRangePicker: View {
         NavigationStack {
             Form {
                 Section {
-                    DatePicker(
-                        "开始日期",
-                        selection: $startDate,
-                        in: ...Date(),
-                        displayedComponents: .date
-                    )
-                    DatePicker(
-                        "结束日期",
-                        selection: $endDate,
-                        in: startDate...Date(),
-                        displayedComponents: .date
+                    DFKShareDateRangeCalendar(
+                        initialMonth: startDate ?? normalizedInitialMonth,
+                        startDate: $startDate,
+                        endDate: $endDate
                     )
                 } footer: {
-                    Text("分享会包含所选日期范围内的全部足迹。")
+                    Text(startDate == nil ? "先选起始日期；若不选结束日期，将只分享当天足迹。" : "分享会包含所选日期范围内的全部足迹。")
                 }
             }
             .navigationTitle("选择分享日期")
@@ -597,40 +966,68 @@ struct DFKTimelineShareRangePicker: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
+                        guard let startDate else { return }
                         dismiss()
                         let selectedStart = startDate
-                        let selectedEnd = endDate
+                        let selectedEnd = endDate ?? startDate
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                             onConfirm(selectedStart, selectedEnd)
                         }
                     } label: {
                         Image(systemName: "checkmark").dfkToolbarConfirmIcon()
                     }
-                }
-            }
-            .onChange(of: startDate) { _, newValue in
-                if endDate < newValue {
-                    endDate = newValue
+                    .disabled(startDate == nil)
                 }
             }
         }
     }
+
+    private var normalizedInitialMonth: Date {
+        Calendar.current.startOfDay(for: min(initialDate, Date()))
+    }
+
+    private let initialDate: Date
 }
 
 struct DFKShareCardView: View {
     let payload: DFKShareCardPayload
     let theme: DFKShareCardTheme
-    let size: DFKShareCardSize
     var displayScale: CGFloat = 1
     var onTextEdit: ((String, @escaping (String) -> Void) -> Void)? = nil
     var onPayloadChange: ((DFKShareCardPayload) -> Void)? = nil
 
-    private var contentLimit: Int {
-        switch size {
-        case .square: return 3
-        case .portrait: return 5
-        case .longPortrait: return 7
+    static func pixelSize(for payload: DFKShareCardPayload) -> CGSize {
+        let width: CGFloat = 1080
+        let hasPhoto = payload.heroImages.first != nil || payload.heroImage != nil
+        if case .plan = payload.kind {
+            let planCount = max(1, payload.plans.filter(\.isIncluded).count)
+            let titleLineCount = max(1, Int(ceil(CGFloat(payload.title.count) / 10)))
+            let titleExtraHeight = CGFloat(titleLineCount - 1) * 180
+            // Plan rows are substantially more compact than footprint rows;
+            // reserve only the space they use, while keeping the branding area clear.
+            return CGSize(width: width, height: max(CGFloat(1_280), 960 + CGFloat(planCount) * 220 + titleExtraHeight))
         }
+        guard case .timeline = payload.kind else {
+            return CGSize(width: width, height: hasPhoto ? 1970 : 1440)
+        }
+
+        // One consistent card width; estimate from the text that is actually
+        // rendered instead of reserving a two-line/detail row for every place.
+        let entries = payload.entries.filter(\.isIncluded)
+        let entryHeight = entries.reduce(CGFloat.zero) { partialResult, entry in
+            var height: CGFloat = 195 // icon, time, one-line title and vertical padding
+            if entry.title.count > 14 { height += 76 }
+            if let detail = entry.detail, !detail.isEmpty {
+                height += detail.count > 18 ? 102 : 54
+            }
+            return partialResult + height
+        }
+        let dayDividerCount = entries.filter { $0.dayDividerText != nil }.count
+        let photoSectionHeight: CGFloat = hasPhoto ? 370 : 0
+        let titleLineCount = max(1, Int(ceil(CGFloat(payload.title.count) / 10)))
+        let titleExtraHeight = CGFloat(titleLineCount - 1) * 180
+        let height = max(CGFloat(1080), 900 + photoSectionHeight + titleExtraHeight + entryHeight + CGFloat(dayDividerCount) * 76)
+        return CGSize(width: width, height: height)
     }
 
     private var themedMapImage: UIImage? {
@@ -712,10 +1109,11 @@ struct DFKShareCardView: View {
     }
 
     var body: some View {
-        let cardWidth = s(size.pixelSize.width)
-        let cardHeight = s(size.pixelSize.height)
-        let inset: CGFloat = s(size == .square ? 58 : 68)
-        let verticalGap: CGFloat = s(size == .square ? 20 : 28)
+        let canvasSize = Self.pixelSize(for: payload)
+        let cardWidth = s(canvasSize.width)
+        let cardHeight = s(canvasSize.height)
+        let inset: CGFloat = s(68)
+        let verticalGap: CGFloat = s(28)
         let qrSide: CGFloat = s(144)
 
         ZStack {
@@ -727,14 +1125,8 @@ struct DFKShareCardView: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 header
-                if size == .longPortrait {
-                    Spacer(minLength: s(24))
-                        .frame(height: s(24))
-                } else {
-                    Spacer(minLength: verticalGap)
-                }
+                Color.clear.frame(height: verticalGap)
                 mainContent
-                Spacer(minLength: 0)
             }
             .padding(.top, inset)
             .padding(.horizontal, inset)
@@ -824,7 +1216,7 @@ struct DFKShareCardView: View {
 
     private var momentContent: some View {
         VStack(alignment: .leading, spacing: s(30)) {
-            mediaBlock(height: s(size == .square ? 380 : 500))
+            mediaBlock(height: s(500))
             entryList(payload.entries.prefix(3).map { $0 })
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -832,75 +1224,60 @@ struct DFKShareCardView: View {
 
     private var timelineContent: some View {
         VStack(alignment: .leading, spacing: s(28)) {
-            mediaBlock(height: s(timelineMediaHeight))
-            entryList(Array(includedEntries.prefix(timelineEntryLimit)))
+            mediaBlock(height: s(340))
+            entryList(includedEntries, isTimeline: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var timelineEntryLimit: Int {
-        switch size {
-        case .square: return 3
-        case .portrait, .longPortrait: return 4
-        }
-    }
-
-    private var timelineMediaHeight: CGFloat {
-        switch size {
-        case .square: return 260
-        case .portrait: return 340
-        case .longPortrait: return 480
-        }
-    }
-
     private var planContent: some View {
-        VStack(alignment: .leading, spacing: s(20)) {
-            ForEach(Array(payload.plans.prefix(contentLimit))) { plan in
+        VStack(alignment: .leading, spacing: s(28)) {
+            mediaBlock(height: s(400))
+            ForEach(payload.plans.filter(\.isIncluded)) { plan in
                 HStack(alignment: .top, spacing: s(20)) {
-                    editableText(plan.time, update: { newText in
-                        updatePlan(plan.id) { $0.time = newText }
-                    }) {
-                        Text(plan.time)
-                            .font(.system(size: fs(27), weight: .medium).monospacedDigit())
-                            .foregroundStyle(theme.secondary)
-                            .frame(width: s(118), alignment: .leading)
+                    VStack(spacing: 0) {
+                        Circle()
+                            .fill(plan.markerColor)
+                            .frame(width: s(48), height: s(48))
+                            .overlay {
+                                Image(systemName: plan.markerIconName)
+                                    .font(.system(size: fs(24), weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                        Rectangle().fill(plan.markerColor.opacity(0.28)).frame(width: max(1, s(3)), height: s(88))
                     }
 
                     VStack(alignment: .leading, spacing: s(8)) {
-                        HStack(alignment: .firstTextBaseline, spacing: s(12)) {
-                            editableText(plan.place, update: { newText in
-                                updatePlan(plan.id) { $0.place = newText }
-                            }) {
-                                Text(plan.place)
-                                    .font(.system(size: fs(34), weight: .semibold))
-                                    .foregroundStyle(theme.foreground)
-                                    .lineLimit(2)
-                            }
-                            editableText(plan.status, update: { newText in
-                                updatePlan(plan.id) { $0.status = newText }
-                            }) {
-                                Text(plan.status)
-                                    .font(.system(size: fs(22), weight: .medium))
-                                    .foregroundStyle(theme.accent)
-                                    .padding(.horizontal, s(14))
-                                    .padding(.vertical, s(7))
-                                    .background(Capsule().fill(theme.accent.opacity(0.14)))
-                            }
+                        editableText(plan.time, update: { newText in
+                            updatePlan(plan.id) { $0.time = newText }
+                        }) {
+                            Text(plan.time)
+                                .font(.system(size: fs(46), weight: .bold).monospacedDigit())
+                                .foregroundStyle(theme.foreground)
+                        }
+                        editableText(plan.place, update: { newText in
+                            updatePlan(plan.id) { $0.place = newText }
+                        }) {
+                            Text(plan.place)
+                                .font(.system(size: fs(60), weight: .semibold))
+                                .foregroundStyle(theme.foreground)
+                                .lineLimit(2)
                         }
                         if let note = plan.note, !note.isEmpty {
                             editableText(note, update: { newText in
                                 updatePlan(plan.id) { $0.note = newText }
                             }) {
                                 Text(note)
-                                    .font(.system(size: fs(27), weight: .regular))
+                                    .font(.system(size: fs(42), weight: .regular))
                                     .foregroundStyle(theme.secondary)
                                     .lineLimit(2)
                             }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(s(24))
-                .background(RoundedRectangle(cornerRadius: s(18)).fill(theme.card))
+                .padding(.top, s(16))
+                .padding(.bottom, s(20))
             }
         }
     }
@@ -924,7 +1301,7 @@ struct DFKShareCardView: View {
             }
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: s(18)) {
-                ForEach(payload.stats.prefix(contentLimit)) { stat in
+                ForEach(payload.stats.prefix(5)) { stat in
                     VStack(alignment: .leading, spacing: s(10)) {
                         editableText(stat.label, update: { newText in
                             updateStat(stat.id) { $0.label = newText }
@@ -962,16 +1339,22 @@ struct DFKShareCardView: View {
     }
 
     private func mediaBlock(height: CGFloat) -> some View {
-        ZStack {
-            if payload.heroImages.count > 1 {
-                DFKSharePhotoStackView(images: Array(payload.heroImages.prefix(10)), theme: theme)
-                    .frame(height: height)
-            } else if let image = payload.heroImages.first ?? payload.heroImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity)
-                    .frame(height: height)
+        let hasPhoto = payload.heroImages.first != nil || payload.heroImage != nil
+        let totalHeight = hasPhoto ? height * 2 + s(30) : height
+        return ZStack {
+            if let image = payload.heroImages.first ?? payload.heroImage {
+                VStack(spacing: s(30)) {
+                    photoLayer(image: image, height: height)
+                    mapLayer(height: height)
+                        .clipShape(
+                            UnevenRoundedRectangle(
+                                topLeadingRadius: s(28),
+                                bottomLeadingRadius: 0,
+                                bottomTrailingRadius: 0,
+                                topTrailingRadius: s(28)
+                            )
+                        )
+                }
             } else if let image = themedContentMapImage {
                 shareMapImageLayer(image: image, height: height)
             } else {
@@ -979,10 +1362,28 @@ struct DFKShareCardView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: height)
+        .frame(height: totalHeight)
         .clipShape(RoundedRectangle(cornerRadius: s(28)))
         .overlay(RoundedRectangle(cornerRadius: s(28)).stroke(.white.opacity(usesDarkMapStyle ? 0.08 : 0.35), lineWidth: max(1, s(1))))
         .clipped()
+    }
+
+    @ViewBuilder
+    private func mapLayer(height: CGFloat) -> some View {
+        if let image = themedContentMapImage {
+            shareMapImageLayer(image: image, height: height)
+        } else {
+            shareMapFallbackLayer(height: height)
+        }
+    }
+
+    @ViewBuilder
+    private func photoLayer(image: UIImage, height: CGFloat) -> some View {
+        let images = payload.heroImages.isEmpty ? [image] : Array(payload.heroImages.prefix(20))
+        DFKSharePhotoStackView(images: images, theme: theme)
+            .frame(maxWidth: .infinity)
+            .frame(height: height)
+            .clipped()
     }
 
     private func shareMapImageLayer(image: UIImage, height: CGFloat) -> some View {
@@ -1006,20 +1407,40 @@ struct DFKShareCardView: View {
             .clipped()
     }
 
-    private func entryList(_ entries: [DFKShareEntry]) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+    private func entryList(_ entries: [DFKShareEntry], isTimeline: Bool = false) -> some View {
+        let markerSide = isTimeline ? s(48) : s(36)
+        let timeFont = isTimeline ? fs(36) : fs(30)
+        let titleFont = isTimeline ? fs(60) : fs(50)
+        let detailFont = isTimeline ? fs(42) : fs(36)
+        return VStack(alignment: .leading, spacing: 0) {
             ForEach(entries) { entry in
+                if isTimeline, let dayDividerText = entry.dayDividerText {
+                    HStack(spacing: s(16)) {
+                        Rectangle()
+                            .fill(theme.secondary.opacity(0.28))
+                            .frame(height: max(1, s(2)))
+                        Text(dayDividerText)
+                            .font(.system(size: fs(30), weight: .bold))
+                            .foregroundStyle(theme.secondary)
+                            .lineLimit(1)
+                        Rectangle()
+                            .fill(theme.secondary.opacity(0.28))
+                            .frame(height: max(1, s(2)))
+                    }
+                    .padding(.top, s(24))
+                    .padding(.bottom, s(8))
+                }
                 HStack(alignment: .top, spacing: s(20)) {
                     VStack(spacing: 0) {
                         Circle()
                             .fill(entry.activityColor ?? theme.accent)
-                            .frame(width: s(36), height: s(36))
+                            .frame(width: markerSide, height: markerSide)
                             .overlay {
                                 Image(systemName: entry.activityIcon ?? "mappin")
-                                    .font(.system(size: fs(18), weight: .bold))
+                                    .font(.system(size: isTimeline ? fs(24) : fs(18), weight: .bold))
                                     .foregroundStyle(.white)
                             }
-                        Rectangle().fill(theme.accent.opacity(0.28)).frame(width: max(1, s(3)), height: s(66))
+                        Rectangle().fill(theme.accent.opacity(0.28)).frame(width: max(1, s(3)), height: isTimeline ? s(88) : s(66))
                     }
                     VStack(alignment: .leading, spacing: s(8)) {
                         HStack(alignment: .firstTextBaseline, spacing: s(12)) {
@@ -1027,7 +1448,7 @@ struct DFKShareCardView: View {
                                 updateEntry(entry.id) { $0.time = newText }
                             }) {
                                 Text(entry.time)
-                                    .font(.system(size: fs(30), weight: .medium).monospacedDigit())
+                                    .font(.system(size: timeFont, weight: .medium).monospacedDigit())
                                     .foregroundStyle(theme.secondary)
                             }
                         }
@@ -1036,7 +1457,7 @@ struct DFKShareCardView: View {
                             updateEntry(entry.id) { $0.title = newText }
                         }) {
                             Text(entry.title)
-                                .font(.system(size: fs(50), weight: .semibold))
+                                .font(.system(size: titleFont, weight: .semibold))
                                 .foregroundStyle(theme.foreground)
                                 .lineLimit(2)
                                 .minimumScaleFactor(0.72)
@@ -1047,7 +1468,7 @@ struct DFKShareCardView: View {
                                 updateEntry(entry.id) { $0.detail = newText }
                             }) {
                                 Text(detail)
-                                    .font(.system(size: fs(36)))
+                                    .font(.system(size: detailFont))
                                     .foregroundStyle(theme.secondary)
                                     .lineLimit(2)
                                     .minimumScaleFactor(0.76)
@@ -1058,12 +1479,11 @@ struct DFKShareCardView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     Spacer(minLength: 0)
                 }
+                .padding(.top, isTimeline ? s(16) : 0)
                 .padding(.bottom, s(20))
             }
         }
-        .padding(s(28))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: s(22)).fill(theme.card))
     }
 
     private var footer: some View {
@@ -1071,7 +1491,7 @@ struct DFKShareCardView: View {
             Image("AppLogo")
                 .resizable()
                 .scaledToFit()
-                .frame(width: s(92), height: s(92))
+                .frame(width: s(120), height: s(120))
                 .clipShape(RoundedRectangle(cornerRadius: s(22)))
             VStack(alignment: .leading, spacing: s(8)) {
                 editableText(payload.brandName, update: { newText in
@@ -1318,23 +1738,26 @@ private struct DFKSharePhotoStackView: View {
     let images: [UIImage]
     let theme: DFKShareCardTheme
 
-    private let rotations: [Double] = [-7, 4.5, -3, 8, -5.5, 2, -8.5, 6, -1, 5]
+    private let rotations: [Double] = [-7, 4.5, -3, 8, -5.5, 2, -8.5, 6, -1, 5, 7.5, -4, 3, -7.5, 5.5, -2, 8.5, -6, 1.5, 4]
 
     var body: some View {
         GeometryReader { proxy in
-            let count = min(images.count, 10)
-            let cardWidth = proxy.size.width * (count <= 2 ? 0.70 : (count <= 5 ? 0.56 : 0.28))
-            let cardHeight = proxy.size.height * (count <= 5 ? 0.76 : 0.42)
+            let count = min(images.count, 20)
+            let cardWidth = proxy.size.width * (count <= 2 ? 0.70 : (count <= 5 ? 0.56 : (count <= 10 ? 0.28 : 0.22)))
+            let cardHeight = proxy.size.height * (count <= 5 ? 0.76 : (count <= 10 ? 0.42 : 0.34))
             let positions = stackPositions(count: count, size: proxy.size)
 
             ZStack {
-                theme.card.opacity(0.42)
-
-                ForEach(Array(images.prefix(10).enumerated()), id: \.offset) { index, image in
+                ForEach(Array(images.prefix(20).enumerated()), id: \.offset) { index, image in
                     let photoSize = fittedPhotoSize(
                         for: image,
                         maximumWidth: cardWidth,
                         maximumHeight: cardHeight
+                    )
+                    let verticalSafetyInset = max(36, photoSize.height * 0.14)
+                    let safeY = min(
+                        max(positions[index].y, photoSize.height / 2 + verticalSafetyInset),
+                        proxy.size.height - photoSize.height / 2 - verticalSafetyInset
                     )
                     Image(uiImage: image)
                         .resizable()
@@ -1348,7 +1771,7 @@ private struct DFKSharePhotoStackView: View {
                         )
                         .shadow(color: .black.opacity(theme == .dark ? 0.30 : 0.16), radius: 18, x: 0, y: 12)
                         .rotationEffect(.degrees(rotations[index % rotations.count]))
-                        .position(positions[index])
+                        .position(x: positions[index].x, y: safeY)
                         .zIndex(Double(index))
                 }
             }
@@ -1376,33 +1799,36 @@ private struct DFKSharePhotoStackView: View {
             return [center]
         case 2:
             return [
-                CGPoint(x: size.width * 0.38, y: size.height * 0.52),
-                CGPoint(x: size.width * 0.62, y: size.height * 0.46)
+                CGPoint(x: size.width * 0.37, y: size.height * 0.57),
+                CGPoint(x: size.width * 0.65, y: size.height * 0.43)
             ]
         case 3:
             return [
-                CGPoint(x: size.width * 0.32, y: size.height * 0.52),
-                CGPoint(x: size.width * 0.58, y: size.height * 0.44),
-                CGPoint(x: size.width * 0.48, y: size.height * 0.60)
+                CGPoint(x: size.width * 0.30, y: size.height * 0.62),
+                CGPoint(x: size.width * 0.60, y: size.height * 0.38),
+                CGPoint(x: size.width * 0.70, y: size.height * 0.67)
             ]
         default:
             if count > 5 {
                 let scatteredPoints: [(CGFloat, CGFloat)] = [
-                    (0.18, 0.24), (0.49, 0.17), (0.79, 0.31),
-                    (0.32, 0.45), (0.67, 0.51), (0.13, 0.68),
-                    (0.50, 0.67), (0.84, 0.73), (0.27, 0.87),
-                    (0.68, 0.88)
+                    (0.16, 0.21), (0.46, 0.14), (0.78, 0.24),
+                    (0.30, 0.38), (0.64, 0.39), (0.13, 0.55),
+                    (0.49, 0.56), (0.85, 0.58), (0.26, 0.75),
+                    (0.70, 0.78), (0.11, 0.32), (0.59, 0.20),
+                    (0.89, 0.42), (0.40, 0.65), (0.18, 0.88),
+                    (0.54, 0.88), (0.86, 0.86), (0.36, 0.25),
+                    (0.72, 0.67), (0.44, 0.45)
                 ]
                 return scatteredPoints.prefix(count).map { point in
                     CGPoint(x: size.width * point.0, y: size.height * point.1)
                 }
             }
             return [
-                CGPoint(x: size.width * 0.30, y: size.height * 0.54),
-                CGPoint(x: size.width * 0.52, y: size.height * 0.42),
-                CGPoint(x: size.width * 0.70, y: size.height * 0.55),
-                CGPoint(x: size.width * 0.42, y: size.height * 0.64),
-                CGPoint(x: size.width * 0.62, y: size.height * 0.68)
+                CGPoint(x: size.width * 0.21, y: size.height * 0.35),
+                CGPoint(x: size.width * 0.53, y: size.height * 0.27),
+                CGPoint(x: size.width * 0.77, y: size.height * 0.48),
+                CGPoint(x: size.width * 0.36, y: size.height * 0.70),
+                CGPoint(x: size.width * 0.69, y: size.height * 0.75)
             ]
         }
     }
@@ -1458,9 +1884,15 @@ enum DFKShareCardFactory {
 
     static func timelinePayload(rangeText: String, footprints: [Footprint], activities: [ActivityType], images: [UIImage], mapImage: UIImage?, lightMapImage: UIImage? = nil, darkMapImage: UIImage? = nil) -> DFKShareCardPayload {
         let sortedFootprints = footprints.sorted { $0.startTime < $1.startTime }
-        let entries = mergedEntries(from: sortedFootprints, activities: activities)
+        let calendar = Calendar.current
+        let distinctDays = Set(sortedFootprints.map { calendar.startOfDay(for: $0.startTime) })
+        let entries = mergedEntries(
+            from: sortedFootprints,
+            activities: activities,
+            showsDayDividers: distinctDays.count > 1
+        )
         let title = entries.isEmpty ? "这段时间还没有足迹" : "这段时间去了 \(entries.count) 个地方"
-        return DFKShareCardPayload(
+        var payload = DFKShareCardPayload(
             kind: .timeline,
             title: title,
             subtitle: "我这一段时间去了哪里",
@@ -1473,6 +1905,9 @@ enum DFKShareCardFactory {
             coordinates: sortedFootprints.flatMap(\.coordinates),
             entries: entries
         )
+        payload.mapFootprints = sortedFootprints
+        payload.mapActivities = activities
+        return payload
     }
 
     static func rangeText(from startDate: Date, to endDate: Date) -> String {
@@ -1485,7 +1920,7 @@ enum DFKShareCardFactory {
         return "\(dateText(start)) - \(dateText(end))"
     }
 
-    static func planPayload(title: String, rangeText: String, trips: [FutureTrip]) -> DFKShareCardPayload {
+    static func planPayload(title: String, rangeText: String, trips: [FutureTrip], activities: [ActivityType] = []) -> DFKShareCardPayload {
         let sortedTrips = FutureTrip.dayOrdered(trips)
         return DFKShareCardPayload(
             kind: .plan,
@@ -1495,11 +1930,17 @@ enum DFKShareCardFactory {
             backgroundMapImage: nil,
             coordinates: sortedTrips.map(\.coordinate),
             plans: sortedTrips.map { trip in
-                DFKSharePlanEntry(
-                    time: trip.hasArrivalTime ? trip.arrivalDate.formatted(date: .omitted, time: .shortened) : "计划",
+                let activity = activities.first {
+                    $0.id.uuidString == trip.activityTypeValue || $0.name == trip.activityTypeValue
+                }
+                return DFKSharePlanEntry(
+                    time: trip.hasPlanDate ? (trip.hasArrivalTime ? trip.arrivalDate.formatted(.dateTime.month().day().hour().minute()) : trip.arrivalDate.formatted(.dateTime.month().day())) : "计划",
                     place: trip.placeName,
                     note: trip.notes?.trimmingCharacters(in: .whitespacesAndNewlines),
-                    status: planStatus(for: trip)
+                    isUndated: !trip.hasPlanDate,
+                    markerIconName: activity?.icon ?? (!trip.hasPlanDate ? "target" : "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted"),
+                    markerColor: activity?.color ?? .dfkAccent,
+                    coordinate: trip.coordinate
                 )
             }
         )
@@ -1549,7 +1990,11 @@ enum DFKShareCardFactory {
         return text.isEmpty ? "一个生活现场" : text
     }
 
-    private static func mergedEntries(from footprints: [Footprint], activities: [ActivityType]) -> [DFKShareEntry] {
+    private static func mergedEntries(
+        from footprints: [Footprint],
+        activities: [ActivityType],
+        showsDayDividers: Bool
+    ) -> [DFKShareEntry] {
         struct Accumulator {
             var weightedLatitude: Double
             var weightedLongitude: Double
@@ -1562,13 +2007,17 @@ enum DFKShareCardFactory {
             var tag: String?
             var activityIcon: String?
             var activityColor: Color?
+            var footprintIDs: [UUID]
         }
 
         var buckets: [String: Accumulator] = [:]
         var orderedKeys: [String] = []
 
+        let calendar = Calendar.current
         for footprint in footprints.sorted(by: { $0.startTime < $1.startTime }) {
-            let key = placeKey(for: footprint)
+            let dayStart = calendar.startOfDay(for: footprint.startTime)
+            // A place may merge within the same day, never across separate days.
+            let key = "\(dayStart.timeIntervalSinceReferenceDate)|\(placeKey(for: footprint))"
             let detail = footprint.reason?.trimmingCharacters(in: .whitespacesAndNewlines)
             let activity = footprint.getActivityType(from: activities)
             let tag = activity?.name
@@ -1581,6 +2030,7 @@ enum DFKShareCardFactory {
                 existing.firstStartTime = min(existing.firstStartTime, footprint.startTime)
                 existing.lastEndTime = max(existing.lastEndTime, footprint.endTime)
                 existing.count += 1
+                existing.footprintIDs.append(footprint.footprintID)
                 if footprint.duration > existing.representative.duration {
                     existing.representative = footprint
                 }
@@ -1608,16 +2058,26 @@ enum DFKShareCardFactory {
                     detail: detail,
                     tag: tag,
                     activityIcon: activity?.icon,
-                    activityColor: activity?.color
+                    activityColor: activity?.color,
+                    footprintIDs: [footprint.footprintID]
                 )
             }
         }
 
+        var previousDay: Date?
         return orderedKeys.compactMap { key in
             guard let item = buckets[key] else { return nil }
             let duration = max(item.totalDuration, 1)
+            let dayStart = calendar.startOfDay(for: item.firstStartTime)
+            let dividerText: String?
+            if showsDayDividers && (previousDay == nil || !calendar.isDate(previousDay!, inSameDayAs: dayStart)) {
+                dividerText = formattedDayDivider(for: dayStart)
+            } else {
+                dividerText = nil
+            }
+            previousDay = dayStart
             return DFKShareEntry(
-                time: mergedTimeText(start: item.firstStartTime, end: item.lastEndTime),
+                time: startAndAccumulatedDurationText(start: item.firstStartTime, duration: duration),
                 title: displayPlace(for: item.representative),
                 detail: item.detail,
                 tag: item.tag,
@@ -1627,9 +2087,18 @@ enum DFKShareCardFactory {
                     latitude: item.weightedLatitude / duration,
                     longitude: item.weightedLongitude / duration
                 ),
-                count: item.count
+                count: item.count,
+                dayDividerText: dividerText,
+                footprintIDs: item.footprintIDs
             )
         }
+    }
+
+    private static func formattedDayDivider(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "M月d日 EEEE"
+        return formatter.string(from: date)
     }
 
     private static func placeKey(for footprint: Footprint) -> String {
@@ -1650,14 +2119,18 @@ enum DFKShareCardFactory {
         "\(start.formatted(date: .omitted, time: .shortened)) - \(end.formatted(date: .omitted, time: .shortened))"
     }
 
-    private static func mergedTimeText(start: Date, end: Date) -> String {
-        if Calendar.current.isDate(start, inSameDayAs: end) {
-            if abs(end.timeIntervalSince(start)) < 60 {
-                return start.formatted(date: .omitted, time: .shortened)
-            }
-            return "\(start.formatted(date: .omitted, time: .shortened)) - \(end.formatted(date: .omitted, time: .shortened))"
+    private static func startAndAccumulatedDurationText(start: Date, duration: TimeInterval) -> String {
+        let startText = start.formatted(date: .omitted, time: .shortened)
+        let totalMinutes = max(1, Int(duration / 60))
+        let durationText: String
+        if totalMinutes >= 1_440 {
+            durationText = "\(totalMinutes / 1_440)天"
+        } else if totalMinutes >= 60 {
+            durationText = "\(totalMinutes / 60)小时"
+        } else {
+            durationText = "\(totalMinutes)分钟"
         }
-        return "\(start.formatted(.dateTime.month().day().hour().minute())) - \(end.formatted(.dateTime.month().day().hour().minute()))"
+        return "\(startText) · \(durationText)"
     }
 
     static func dateText(_ date: Date) -> String {
@@ -1665,15 +2138,6 @@ enum DFKShareCardFactory {
         formatter.locale = Locale(identifier: "zh_Hans_CN")
         formatter.dateFormat = "yyyy年M月d日 EEEE"
         return formatter.string(from: date)
-    }
-
-    private static func planStatus(for trip: FutureTrip) -> String {
-        if trip.isCompleted { return "已完成" }
-        let now = Date()
-        if trip.hasArrivalTime, abs(trip.arrivalDate.timeIntervalSince(now)) < 3600 {
-            return "进行中"
-        }
-        return "未开始"
     }
 
     private static func topPlaceName(footprints: [Footprint], places: [Place]) -> String? {
@@ -1727,9 +2191,59 @@ private struct DFKShareMapSnapshotMarker {
     let iconName: String
     let color: UIColor
     let duration: TimeInterval
+    let scale: CGFloat
 }
 
 enum DFKShareImageLoader {
+    static func loadPlanMapImages(
+        plans: [DFKSharePlanEntry],
+        completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
+    ) {
+        let validPlans = plans.filter { plan in
+            guard let coordinate = plan.coordinate else { return false }
+            return CLLocationCoordinate2DIsValid(coordinate) &&
+                abs(coordinate.latitude) > 0.000001 &&
+                abs(coordinate.longitude) > 0.000001
+        }
+        let validCoordinates = validPlans.compactMap(\.coordinate)
+        let markers = validPlans.compactMap { plan -> DFKShareMapSnapshotMarker? in
+            guard let coordinate = plan.coordinate else { return nil }
+            return DFKShareMapSnapshotMarker(
+                coordinate: coordinate,
+                iconName: plan.markerIconName,
+                color: UIColor(plan.markerColor),
+                duration: 0,
+                scale: 2.2
+            )
+        }
+        Task {
+            async let light = makeMapSnapshot(
+                coordinates: validCoordinates,
+                markers: markers,
+                style: .light,
+                drawsPath: false,
+                size: CGSize(width: 329, height: 139),
+                spanMultiplier: 1.5,
+                minimumSpan: 0.004,
+                verticalCenterBias: 0.17
+            )
+            async let dark = makeMapSnapshot(
+                coordinates: validCoordinates,
+                markers: markers,
+                style: .dark,
+                drawsPath: false,
+                size: CGSize(width: 329, height: 139),
+                spanMultiplier: 1.5,
+                minimumSpan: 0.004,
+                verticalCenterBias: 0.17
+            )
+            let images = await (light, dark)
+            await MainActor.run {
+                completion(images)
+            }
+        }
+    }
+
     static func loadShareMedia(
         assetIDs: [String],
         coordinates: [CLLocationCoordinate2D],
@@ -1739,7 +2253,7 @@ enum DFKShareImageLoader {
         activities: [ActivityType] = [],
         completion: @escaping (DFKShareMedia) -> Void
     ) {
-        let selectedAssetIDs = Array(NSOrderedSet(array: assetIDs).array.compactMap { $0 as? String }.shuffled().prefix(10))
+        let selectedAssetIDs = Array(NSOrderedSet(array: assetIDs).array.compactMap { $0 as? String }.shuffled().prefix(20))
         let group = DispatchGroup()
         let lock = NSLock()
         var loadedImages: [(String, UIImage)] = []
@@ -1780,7 +2294,7 @@ enum DFKShareImageLoader {
         }
 
         group.enter()
-        loadUnmarkedMapImages(coordinates: coordinates) { images in
+        loadBackgroundMapImages(coordinates: coordinates) { images in
             backgroundLightMapImage = images.light
             backgroundDarkMapImage = images.dark
             backgroundMapImage = images.light ?? images.dark
@@ -1806,7 +2320,7 @@ enum DFKShareImageLoader {
         loadMapSnapshot(coordinates: coordinates, completion: completion)
     }
 
-    private static func loadUnmarkedMapImages(
+    static func loadBackgroundMapImages(
         coordinates: [CLLocationCoordinate2D],
         completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
     ) {
@@ -1833,16 +2347,8 @@ enum DFKShareImageLoader {
         activities: [ActivityType] = [],
         completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
     ) {
-        if let widgetDate, let offset = widgetOffset(for: widgetDate) {
+        if let widgetDate, widgetOffset(for: widgetDate) != nil {
             Task {
-                let images = await WidgetDataSyncManager.shared.snapshotImagesForOffset(offset)
-                if images.light != nil || images.dark != nil {
-                    await MainActor.run {
-                        completion(images)
-                    }
-                    return
-                }
-
                 let generated = await WidgetDataSyncManager.shared.makeShareMapSnapshots(
                     footprints: footprints,
                     transports: transports,
@@ -1876,6 +2382,31 @@ enum DFKShareImageLoader {
         )
     }
 
+    static func loadSelectedTimelineMapImages(
+        entries: [DFKShareEntry],
+        completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
+    ) {
+        let markers = entries.compactMap { entry -> DFKShareMapSnapshotMarker? in
+            guard let coordinate = entry.coordinate,
+                  CLLocationCoordinate2DIsValid(coordinate),
+                  abs(coordinate.latitude) > 0.000001,
+                  abs(coordinate.longitude) > 0.000001 else { return nil }
+            return DFKShareMapSnapshotMarker(
+                coordinate: coordinate,
+                iconName: entry.activityIcon ?? "mappin",
+                color: UIColor(entry.activityColor ?? Color.dfkAccent),
+                duration: 0,
+                scale: 2.2
+            )
+        }
+        loadMapImages(
+            coordinates: markers.map(\.coordinate),
+            markers: markers,
+            drawsPath: false,
+            completion: completion
+        )
+    }
+
     private static func widgetOffset(for date: Date) -> Int? {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
@@ -1890,6 +2421,7 @@ enum DFKShareImageLoader {
     private static func loadMapImages(
         coordinates: [CLLocationCoordinate2D],
         markers: [DFKShareMapSnapshotMarker],
+        drawsPath: Bool = true,
         completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
     ) {
         let validCoordinates = coordinates.filter { coordinate in
@@ -1903,8 +2435,8 @@ enum DFKShareImageLoader {
         }
 
         Task {
-            async let light = makeMapSnapshot(coordinates: validCoordinates, markers: markers, style: .light)
-            async let dark = makeMapSnapshot(coordinates: validCoordinates, markers: markers, style: .dark)
+            async let light = makeMapSnapshot(coordinates: validCoordinates, markers: markers, style: .light, drawsPath: drawsPath)
+            async let dark = makeMapSnapshot(coordinates: validCoordinates, markers: markers, style: .dark, drawsPath: drawsPath)
             let images = await (light, dark)
             await MainActor.run {
                 completion(images)
@@ -1945,11 +2477,20 @@ enum DFKShareImageLoader {
         coordinates: [CLLocationCoordinate2D],
         markers: [DFKShareMapSnapshotMarker],
         style: UIUserInterfaceStyle = .unspecified,
-        drawsFootprintOverlays: Bool = true
+        drawsFootprintOverlays: Bool = true,
+        drawsPath: Bool = true,
+        size: CGSize = CGSize(width: 1200, height: 720),
+        spanMultiplier: CLLocationDegrees = 2.2,
+        minimumSpan: CLLocationDegrees = 0.012,
+        verticalCenterBias: CLLocationDegrees = 0
     ) async -> UIImage? {
-        guard let region = snapshotRegion(for: coordinates) else { return nil }
+        guard let region = snapshotRegion(
+            for: coordinates,
+            spanMultiplier: spanMultiplier,
+            minimumSpan: minimumSpan,
+            verticalCenterBias: verticalCenterBias
+        ) else { return nil }
 
-        let size = CGSize(width: 1200, height: 720)
         let options = MKMapSnapshotter.Options()
         options.region = region
         options.size = size
@@ -1971,7 +2512,9 @@ enum DFKShareImageLoader {
             return renderer.image { context in
                 snapshot.image.draw(at: .zero)
                 if drawsFootprintOverlays {
-                    drawPath(coordinates: coordinates, snapshot: snapshot, in: context.cgContext)
+                    if drawsPath {
+                        drawPath(coordinates: coordinates, snapshot: snapshot, in: context.cgContext)
+                    }
                     if markers.isEmpty {
                         drawEndpointMarkers(coordinates: coordinates, snapshot: snapshot, in: context.cgContext)
                     } else {
@@ -1999,7 +2542,8 @@ enum DFKShareImageLoader {
                 coordinate: coordinate,
                 iconName: activity?.icon ?? FootprintIconDefaults.card,
                 color: UIColor(activity?.color ?? Color.gray),
-                duration: footprint.duration
+                duration: footprint.duration,
+                scale: 2.2
             )
         }
     }
@@ -2018,12 +2562,20 @@ enum DFKShareImageLoader {
         return String(format: "%.5f,%.5f", footprint.latitude, footprint.longitude)
     }
 
-    private static func snapshotRegion(for coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion? {
+    private static func snapshotRegion(
+        for coordinates: [CLLocationCoordinate2D],
+        spanMultiplier: CLLocationDegrees = 2.2,
+        minimumSpan: CLLocationDegrees = 0.012,
+        verticalCenterBias: CLLocationDegrees = 0
+    ) -> MKCoordinateRegion? {
         guard let first = coordinates.first else { return nil }
         guard coordinates.count > 1 else {
             return MKCoordinateRegion(
-                center: first,
-                span: MKCoordinateSpan(latitudeDelta: 0.012, longitudeDelta: 0.012)
+                center: CLLocationCoordinate2D(
+                    latitude: first.latitude + minimumSpan * verticalCenterBias,
+                    longitude: first.longitude
+                ),
+                span: MKCoordinateSpan(latitudeDelta: minimumSpan, longitudeDelta: minimumSpan)
             )
         }
 
@@ -2034,12 +2586,12 @@ enum DFKShareImageLoader {
               let minLon = lons.min(),
               let maxLon = lons.max() else { return nil }
 
+        let latDelta = max(minimumSpan, (maxLat - minLat) * spanMultiplier)
+        let lonDelta = max(minimumSpan, (maxLon - minLon) * spanMultiplier)
         let center = CLLocationCoordinate2D(
-            latitude: (minLat + maxLat) / 2,
+            latitude: (minLat + maxLat) / 2 + latDelta * verticalCenterBias,
             longitude: (minLon + maxLon) / 2
         )
-        let latDelta = max(0.012, (maxLat - minLat) * 2.2)
-        let lonDelta = max(0.012, (maxLon - minLon) * 2.2)
         return MKCoordinateRegion(
             center: center,
             span: MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lonDelta)
@@ -2095,13 +2647,12 @@ enum DFKShareImageLoader {
         in context: CGContext
     ) {
         let iconColor: UIColor = style == .dark ? .black : .white
-        let scale: CGFloat = 2.2
-        let markerSize = 20 * scale
-        let iconSize = 23 * scale * 0.52
-        let radius = markerSize / 2
-
         context.saveGState()
         for marker in markers.prefix(12) {
+            let scale = marker.scale
+            let markerSize = 20 * scale
+            let iconSize = 23 * scale * 0.52
+            let radius = markerSize / 2
             let point = snapshot.point(for: marker.coordinate)
             let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
 

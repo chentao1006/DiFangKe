@@ -172,7 +172,8 @@ final class WidgetDataSyncManager {
     func makeShareMapSnapshots(
         footprints: [Footprint],
         transports: [TransportRecord],
-        activities: [ActivityType]
+        activities: [ActivityType],
+        size: CGSize = CGSize(width: 329, height: 119)
     ) async -> (light: UIImage?, dark: UIImage?) {
         let aggregatedFootprints = aggregatedFootprints(from: footprints)
         let footprintPhotoImages = await loadAggregatedFootprintPhotoImages(aggregatedFootprints, targetSide: 88)
@@ -214,7 +215,8 @@ final class WidgetDataSyncManager {
             decodedTransports: decodedTransports,
             activitiesByID: activitiesByID,
             activitiesByName: activitiesByName,
-            style: .light
+            style: .light,
+            size: size
         )
         async let dark = makeWidgetMapSnapshot(
             coordinates: allMapCoordinates,
@@ -223,7 +225,8 @@ final class WidgetDataSyncManager {
             decodedTransports: decodedTransports,
             activitiesByID: activitiesByID,
             activitiesByName: activitiesByName,
-            style: .dark
+            style: .dark,
+            size: size
         )
         return await (light, dark)
     }
@@ -235,7 +238,8 @@ final class WidgetDataSyncManager {
         decodedTransports: [WidgetDecodedTransport],
         activitiesByID: [String: ActivityType],
         activitiesByName: [String: ActivityType],
-        style: UIUserInterfaceStyle
+        style: UIUserInterfaceStyle,
+        size: CGSize
     ) async -> UIImage? {
         var minLat = coordinates[0].latitude
         var maxLat = coordinates[0].latitude
@@ -248,16 +252,16 @@ final class WidgetDataSyncManager {
             maxLon = max(maxLon, point.longitude)
         }
 
-        let spanLat = max(0.005, (maxLat - minLat) * 1.6)
-        let spanLon = max(0.005, (maxLon - minLon) * 2.4)
+        let spanLat = max(0.005, (maxLat - minLat) * 2.0)
+        let spanLon = max(0.005, (maxLon - minLon) * 2.8)
         let region = MKCoordinateRegion(
-            center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2),
+            center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2 + spanLat * 0.17, longitude: (minLon + maxLon) / 2),
             span: MKCoordinateSpan(latitudeDelta: spanLat, longitudeDelta: spanLon)
         )
 
         let options = MKMapSnapshotter.Options()
         options.region = region
-        options.size = CGSize(width: 329, height: 155)
+        options.size = size
         options.scale = 3.0
         options.traitCollection = UITraitCollection(userInterfaceStyle: style)
 
