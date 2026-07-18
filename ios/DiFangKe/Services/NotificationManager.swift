@@ -97,7 +97,10 @@ class NotificationManager {
     }
 
     func sendHighlightNotification(title: String, body: String, footprintID: UUID? = nil, date: Date) {
-        let isEnabled = UserDefaults.standard.bool(forKey: "isHighlightNotificationEnabled")
+        // Keep this default in sync with SettingsView's @AppStorage default.  `bool(forKey:)`
+        // returns false for a missing key, which previously made existing users whose toggle
+        // had never been changed appear to have disabled highlight notifications.
+        let isEnabled = UserDefaults.standard.object(forKey: "isHighlightNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }
         
         let content = UNMutableNotificationContent()

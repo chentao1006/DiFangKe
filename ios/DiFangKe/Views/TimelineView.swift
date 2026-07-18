@@ -157,6 +157,7 @@ private struct ContinuousTimelineView: View {
     @State private var selectedFutureTripFromMap: FutureTrip?
     @State private var selectedFootprintPhotos: [PHAsset] = []
     @State private var selectedMapPhotoAssetID: String? = nil
+    @State private var showsUndatedFutureTripsOnMap = false
     @State private var isFollowingUserLocation = false
     @State private var navigatingTrip: FutureTrip? = nil
     @State private var pendingFutureTripDelayOptionsID: UUID? = nil
@@ -322,6 +323,11 @@ private struct ContinuousTimelineView: View {
             calendarBackfillBatchSize: Self.calendarBackfillDateBatchSize,
             availableDates: loadableTimelineDateSet,
             visibleDatesChanged: updateVisibleTimelineDates,
+            undatedFutureTripsVisibilityChanged: { isVisible in
+                guard showsUndatedFutureTripsOnMap != isVisible else { return }
+                showsUndatedFutureTripsOnMap = isVisible
+                refreshVisibleTimelineMap(for: visibleTimelineDates, delayNanoseconds: 0)
+            },
             isShowingSettings: $isShowingSettings,
             pendingFutureTripDelayOptionsID: $pendingFutureTripDelayOptionsID,
             pendingFutureTripAbandonAlertID: $pendingFutureTripAbandonAlertID,
@@ -1540,7 +1546,10 @@ private struct ContinuousTimelineView: View {
     private func futureTrips(for dates: Set<Date>) -> [FutureTrip] {
         let calendar = Calendar.current
         return futureTrips.filter { trip in
-            trip.hasPlanDate && !trip.isCompleted && dates.contains(calendar.startOfDay(for: trip.arrivalDate))
+            !trip.isCompleted && (
+                (trip.hasPlanDate && dates.contains(calendar.startOfDay(for: trip.arrivalDate))) ||
+                (!trip.hasPlanDate && showsUndatedFutureTripsOnMap)
+            )
         }
     }
 
@@ -1886,6 +1895,7 @@ private struct ContinuousTimelineSheet: View {
     private let calendarBackfillDateLoadLimit = 1_000
     let availableDates: Set<Date>
     let visibleDatesChanged: (Set<Date>) -> Void
+    let undatedFutureTripsVisibilityChanged: (Bool) -> Void
     @Binding var isShowingSettings: Bool
     @Binding var pendingFutureTripDelayOptionsID: UUID?
     @Binding var pendingFutureTripAbandonAlertID: UUID?
@@ -2246,6 +2256,14 @@ private struct ContinuousTimelineSheet: View {
 
                                 if !undatedFutureTrips.isEmpty {
                                     undatedFutureTripsSection
+                                        .background {
+                                            GeometryReader { geometry in
+                                                Color.clear.preference(
+                                                    key: ContinuousTimelineUndatedFutureTripsFramePreferenceKey.self,
+                                                    value: geometry.frame(in: .named("continuousTimelineScroll"))
+                                                )
+                                            }
+                                        }
                                 }
 
                                 if canLoadLaterDates {
@@ -2270,6 +2288,17 @@ private struct ContinuousTimelineSheet: View {
                                 await Task.yield()
                                 applyDateFrameUpdate(frames, viewportHeight: viewportHeight, using: proxy)
                             }
+                        }
+                        .onPreferenceChange(ContinuousTimelineUndatedFutureTripsFramePreferenceKey.self) { frame in
+                            let viewportHeight = viewport.size.height
+                            // The footer may be laid out before it is actually
+                            // readable. Wait until the future section has moved
+                            // well into the viewport before putting its plans on
+                            // the map.
+                            let isVisible = frame.map {
+                                $0.maxY > 52 && $0.minY < viewportHeight - 140
+                            } ?? false
+                            undatedFutureTripsVisibilityChanged(isVisible)
                         }
                         .overlay(alignment: .bottom) {
                             if isCollapsed {
@@ -4182,6 +4211,14 @@ private struct ContinuousTimelineDateFramePreferenceKey: PreferenceKey {
 
     static func reduce(value: inout [Date: CGRect], nextValue: () -> [Date: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
+private struct ContinuousTimelineUndatedFutureTripsFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect? = nil
+
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
     }
 }
 

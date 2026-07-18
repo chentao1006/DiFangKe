@@ -1018,7 +1018,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var todayTotalPointsCount: Int = 0    // 全天流水点数，基于本地文件统计
     var ongoingTitle: String?
     private var lastAIAnalysisTime: Date?
-    private var lastNotifiedStayStart: Date?
     private var lastPastMemoriesCheckDate: String? // yyyy-MM-dd
     private var isAnalyzingOngoing = false
     /// 标记上一个分类足迹的截止时间，避免重复识别 (同时满足 3 天全量数据保留)
@@ -2270,10 +2269,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
             
-            // 4. 触发正在持续停留的 AI 分析 (停留 10 分钟后触发第一次，之后每 60 分钟刷新)
+            // 4. 触发正在持续停留的 AI 分析 (停留 1 小时后触发第一次，之后每 60 分钟刷新)
             if let start = potentialStopStartLocation?.timestamp {
                 let duration = Date().timeIntervalSince(start)
-                if duration >= 10 * 60 {
+                if duration >= 60 * 60 {
                     let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
                     if isAiEnabled && !isAnalyzingOngoing && (ongoingTitle == nil || (lastAIAnalysisTime != nil && Date().timeIntervalSince(lastAIAnalysisTime!) > 60 * 60)) {
                         // 只在有坐标时分析
@@ -2574,8 +2573,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
     
-    private func analyzeOngoingStay(at location: CLLocation) {
-        guard let startLoc = potentialStopStartLocation else { return }
+    private func analyzeOngoingStay(at _: CLLocation) {
         let place = matchedPlace
         
         // Set title immediately based on location instead of calling AI
@@ -2584,16 +2582,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         self.saveOngoingTitle()
         self.triggerNotificationSummaryRefresh()
         
-        // --- 核心改进：新足迹与久违提醒 ---
-        // 如果该停留点的起始时间没有被通知过，则进行新旧地点的判定
-        if lastNotifiedStayStart != startLoc.timestamp {
-            checkAndSendNewPlaceNotification(at: location, startTime: startLoc.timestamp, place: place)
-            lastNotifiedStayStart = startLoc.timestamp
-        }
     }
     
-    private func checkAndSendNewPlaceNotification(at location: CLLocation, startTime: Date, place: Place?) {
+    private func checkAndSendNewPlaceNotification(for footprint: Footprint, place: Place?) {
         guard let context = modelContext else { return }
+        let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
+        let startTime = footprint.startTime
         
         // 判定规则：
         // 1. 新地方：历史上从未在该地点（或周边 200m）有过足迹
@@ -2621,11 +2615,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         var isNewPlace = false
         var isLongTimeNoSee = false
         var lastVisitDate: Date? = nil
-        var notificationDate = startTime
-        
         if let last = history.first {
             lastVisitDate = last.startTime
-            notificationDate = last.startTime
             let days = Calendar.current.dateComponents([.day], from: lastVisitDate!, to: startTime).day ?? 0
             if days >= 365 {
                 isLongTimeNoSee = true
@@ -2634,6 +2625,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             isNewPlace = true
         }
         
+        // First visits need a more meaningful stay; returning after a long absence can be
+        // surfaced sooner.  Both thresholds are evaluated on the saved footprint so a tap
+        // can always open its detail page.
+        if isNewPlace, footprint.duration < 60 * 60 {
+            return
+        }
+        if isLongTimeNoSee, footprint.duration < 10 * 60 {
+            return
+        }
+
         if isNewPlace || isLongTimeNoSee {
             let placeName = place?.name ?? currentAddress
             let title = isNewPlace ? "发现新地方" : "久违了"
@@ -2649,7 +2650,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             NotificationManager.shared.sendHighlightNotification(
                 title: title,
                 body: body,
-                date: notificationDate
+                footprintID: footprint.footprintID,
+                date: footprint.startTime
             )
         }
     }
@@ -2663,7 +2665,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let remainingDays = days % 365
         return remainingDays >= 30 ? "\(years) 年多" : "\(years) 年"
     }
-    
+
     private func saveOngoingTitle() {
         if let title = ongoingTitle {
             UserDefaults.standard.set(title, forKey: "pending_title")
@@ -2963,6 +2965,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             context.insert(newFootprint)
             try? context.save()
+
+            // A detail can only be opened after the footprint has been saved.  Attach its ID
+            // to the highlight notification so tapping it opens this footprint directly.
+            if !isHistorical {
+                checkAndSendNewPlaceNotification(for: newFootprint, place: effectivePlace)
+            }
             
             // 核心修复：重置或历史回溯时也要触发分析逻辑，以补全地址和标题
             analyzeFootprint(newFootprint, context: context)
@@ -4481,7 +4489,10 @@ class TripLiveActivityManager {
 
         let orderedTrips = FutureTrip.dayOrdered(trips)
         let candidateTrips = orderedTrips.filter { trip in
-            guard !trip.isCompleted else { return false }
+            // Plans without a calendar date are deliberately not eligible for
+            // a Live Activity. Their stored arrivalDate is only a placeholder
+            // for persistence and ordering.
+            guard trip.hasPlanDate, !trip.isCompleted else { return false }
             if trip.isOrdered {
                 return calendar.isDateInToday(trip.arrivalDate) &&
                     !hasPendingTimedTripBefore(trip, in: orderedTrips, now: now, calendar: calendar)
@@ -4571,7 +4582,7 @@ class TripLiveActivityManager {
     private func completeArrivedTrips(location: CLLocation, trips: [FutureTrip], context: ModelContext, calendar: Calendar) -> Bool {
         var didComplete = false
 
-        for trip in trips where !trip.isCompleted && calendar.isDateInToday(trip.arrivalDate) {
+        for trip in trips where !trip.isCompleted && (!trip.hasPlanDate || calendar.isDateInToday(trip.arrivalDate)) {
             let tripLocation = CLLocation(latitude: trip.latitude, longitude: trip.longitude)
             guard location.distance(from: tripLocation) < 200 else { continue }
 
