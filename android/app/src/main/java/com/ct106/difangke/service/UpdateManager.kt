@@ -8,6 +8,7 @@ import android.os.Build
 import android.util.Log
 import android.widget.Toast
 import com.ct106.difangke.AppConfig
+import com.ct106.difangke.BuildConfig
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -114,22 +115,8 @@ class UpdateManager private constructor(private val context: Context) {
         }
     }
 
-    /**
-     * 判断应用是否是从 Google Play Store 安装的
-     */
-    fun isPlayStoreInstall(): Boolean {
-        return try {
-            val installer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                context.packageManager.getInstallSourceInfo(context.packageName).installingPackageName
-            } else {
-                @Suppress("DEPRECATION")
-                context.packageManager.getInstallerPackageName(context.packageName)
-            }
-            installer == "com.android.vending"
-        } catch (e: Exception) {
-            false
-        }
-    }
+    /** Google Play 发行包始终到 Google Play 检查更新。 */
+    fun isPlayStoreDistribution(): Boolean = BuildConfig.IS_PLAY_DISTRIBUTION
 
     /**
      * 打开 Google Play Store 对应的应用页面
@@ -138,6 +125,8 @@ class UpdateManager private constructor(private val context: Context) {
         val appPackageName = context.packageName
         try {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$appPackageName")).apply {
+                // market:// 是通用协议；不指定包名会被部分国产 ROM 的应用商店接管。
+                setPackage("com.android.vending")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(intent)

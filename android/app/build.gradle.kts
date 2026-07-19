@@ -65,9 +65,11 @@ android {
     productFlavors {
         create("direct") {
             dimension = "distribution"
+            buildConfigField("boolean", "IS_PLAY_DISTRIBUTION", "false")
         }
         create("play") {
             dimension = "distribution"
+            buildConfigField("boolean", "IS_PLAY_DISTRIBUTION", "true")
         }
     }
 

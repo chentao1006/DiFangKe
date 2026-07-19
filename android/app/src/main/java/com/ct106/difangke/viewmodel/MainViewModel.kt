@@ -724,7 +724,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             footprints.map { TimelineItem.FootprintItem(it) } +
                 transports.map { TimelineItem.TransportItem(it) } +
                 orderedTrips.map { TimelineItem.FutureTripItem(it) }
-            ).sortedByDescending { item ->
+            ).sortedBy { item ->
                 if (item is TimelineItem.FutureTripItem) {
                     tripSortTimes[item.trip.tripID] ?: item.trip.arrivalDate
                 } else {

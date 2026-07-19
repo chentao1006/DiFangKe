@@ -157,7 +157,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun checkUpdate() {
         val updateManager = UpdateManager.getInstance(getApplication())
-        if (updateManager.isPlayStoreInstall()) {
+        if (updateManager.isPlayStoreDistribution()) {
             updateManager.openPlayStore()
             return
         }
@@ -186,4 +186,3 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         return UpdateManager.getInstance(getApplication()).isNewVersionAvailable(remoteVersionCode)
     }
 }
-
