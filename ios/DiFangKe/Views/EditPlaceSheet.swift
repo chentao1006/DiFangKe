@@ -47,7 +47,7 @@ struct EditPlaceSheet: View {
                 Section {
                     // Interactive Map Section (Now inside Form to allow scrolling)
                     ZStack {
-                        MapPickerView(selectedCoord: $selectedCoord, radius: $radius, address: $currentCenterAddress, centerTrigger: centerTrigger, shouldSnapToUser: $shouldSnapToUser, userCoord: selectedCoord, radiusTrigger: radiusTrigger)
+                        MapPickerView(selectedCoord: $selectedCoord, radius: $radius, address: $currentCenterAddress, inferredPlaceName: Binding(get: { placeName }, set: { placeName = $0 ?? "未知地点" }), centerTrigger: centerTrigger, shouldSnapToUser: $shouldSnapToUser, userCoord: selectedCoord, radiusTrigger: radiusTrigger)
 
                         Circle()
                             .stroke(Color.orange.opacity(0.8), lineWidth: 3)
@@ -79,8 +79,14 @@ struct EditPlaceSheet: View {
                     .padding(.top, 4)
                     .padding(.bottom, 12)
                 ) {
-                    TextField("给这个地点起个名字", text: $placeName)
-                        .font(.body)
+                    HStack {
+                        TextField("给这个地点起个名字", text: $placeName)
+                            .font(.body)
+                        if placeName == "未知地点" {
+                            Image(systemName: "pencil")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 Section(header: Text("感知半径"), footer: Text("进入该范围内时自动识别为此地点")) {
@@ -215,18 +221,18 @@ struct EditPlaceSheet: View {
                 VStack(spacing: 0) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
-                            ForEach(vm.searchResults, id: \.self) { item in
+                            ForEach(vm.searchResults) { item in
                                 Button {
                                     isSkippingNextSearch = true
-                                    selectedCoord = item.placemark.coordinate
+                                    selectedCoord = item.coordinate
                                     centerTrigger = UUID()
-                                    searchText = item.name ?? ""
+                                    searchText = item.name
                                     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                                     vm.searchResults = []
                                 } label: {
                                     VStack(alignment: .leading, spacing: 4) {
-                                        Text(item.name ?? "").font(.subheadline.bold()).foregroundColor(.primary)
-                                        Text(item.placemark.title ?? "").font(.caption).foregroundColor(.secondary)
+                                        Text(item.name).font(.subheadline.bold()).foregroundColor(.primary)
+                                        Text(item.address).font(.caption).foregroundColor(.secondary)
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.horizontal, 20)

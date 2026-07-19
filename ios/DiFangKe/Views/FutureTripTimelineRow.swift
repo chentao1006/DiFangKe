@@ -514,7 +514,7 @@ struct FutureTripDetailView: View {
                         .cornerRadius(12)
                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.dfkAccent.opacity(0.3), lineWidth: 1))
                     }
-                    if trip.effectiveArrivalDate() < Date() {
+                    if trip.hasPlanDate && trip.effectiveArrivalDate() < Date() {
                         delayButton
                     }
                     abandonButton
@@ -529,7 +529,7 @@ struct FutureTripDetailView: View {
                     }
                 }
                 .padding(.bottom, 8)
-                if trip.effectiveArrivalDate() < Date() {
+                if trip.hasPlanDate && trip.effectiveArrivalDate() < Date() {
                     HStack(spacing: 8) {
                         delayButton
                         abandonButton
@@ -573,15 +573,19 @@ struct FutureTripDetailView: View {
             }
             .buttonStyle(.plain)
 
-            Button {
-                onEdit?()
-            } label: {
-                Text(arrivalDateTimeString)
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
+            // `arrivalDate` is retained internally for ordering and persistence,
+            // but an undated plan must not present it as a user-chosen date.
+            if trip.hasPlanDate || (trip.isCompleted && trip.completedAt != nil) {
+                Button {
+                    onEdit?()
+                } label: {
+                    Text(arrivalDateTimeString)
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity)
     }

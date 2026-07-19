@@ -2195,13 +2195,22 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 if let placemark = placemarks?.first {
                     // 优先获取兴趣点（如：某某商场、某某公园）
                     let poiName = placemark.areasOfInterest?.first
-                    let name = [poiName, placemark.name, placemark.thoroughfare, placemark.subLocality]
+                    let name = [poiName, placemark.name, placemark.thoroughfare, placemark.subLocality, placemark.locality, placemark.country]
                         .compactMap { $0 }
-                        .first ?? "未知位置"
+                        .first
                     
-                    DispatchQueue.main.async {
-                        self?.currentAddress = name
+                    if let name, !name.isEmpty {
+                        DispatchQueue.main.async {
+                            self?.currentAddress = name
+                        }
+                        return
                     }
+                }
+
+                Task { @MainActor [weak self] in
+                    let fallback = await OpenStreetMapGeocoder.shared.lookup(coordinate: location.coordinate)
+                    guard let name = fallback?.placeName, !name.isEmpty else { return }
+                    self?.currentAddress = name
                 }
             }
         }
@@ -3203,19 +3212,30 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 let footprintID = footprint.footprintID
                 
                 geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
-                    guard let self = self, let placemark = placemarks?.first else { return }
-                    
-                    Task {
-                        let name = await TimelineBuilder.resolveProminentPOI(coordinate: location.coordinate, placemark: placemark)
-                        
-                        await MainActor.run {
-                            // 在主线程重新获取该对象，确保线程安全
-                            if let mainContext = self.modelContext?.container.mainContext {
-                                let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
-                                if let mainFp = try? mainContext.fetch(descriptor).first {
-                                    mainFp.address = name
-                                    try? mainContext.save()
-                                }
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        let name: String?
+                        if let placemark = placemarks?.first {
+                            let resolved = await TimelineBuilder.resolveProminentPOI(coordinate: location.coordinate, placemark: placemark)
+                            if resolved.isEmpty {
+                                name = await OpenStreetMapGeocoder.shared.lookup(coordinate: location.coordinate)?.placeName
+                            } else {
+                                name = resolved
+                            }
+                        } else {
+                            // Apple has no overseas placemark: use the shared
+                            // OpenStreetMap fallback before leaving this footprint
+                            // as a generic “地点记录”.
+                            name = await OpenStreetMapGeocoder.shared.lookup(coordinate: location.coordinate)?.placeName
+                        }
+
+                        guard let name, !name.isEmpty else { return }
+                        // 在主线程重新获取该对象，确保线程安全
+                        if let mainContext = self.modelContext?.container.mainContext {
+                            let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+                            if let mainFp = try? mainContext.fetch(descriptor).first {
+                                mainFp.address = name
+                                try? mainContext.save()
                             }
                         }
                     }

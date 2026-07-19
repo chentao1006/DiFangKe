@@ -31,7 +31,8 @@ struct FutureTripDraftModal: View {
 
     @State private var selectedCoordinate: CLLocationCoordinate2D?
     @State private var selectedPlaceName = ""
-    @State private var searchText = ""
+    @StateObject private var searchTextState = IMETextState()
+    @FocusState private var isSearchFieldFocused: Bool
     @State private var isSkippingNextSearch = false
     @State private var currentCenterAddress = "正在解析位置..."
     @State private var centerTrigger = UUID()
@@ -168,11 +169,10 @@ struct FutureTripDraftModal: View {
                     .frame(width: 24)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(selectedDisplayName)
+                    TextField("地点名称", text: $selectedPlaceName)
                         .font(.body.weight(.semibold))
-                        .foregroundStyle(selectedDisplayName == "未选择地点" ? .secondary : .primary)
-                    if selectedDisplayName != currentCenterAddress,
-                       currentCenterAddress != "正在解析位置...",
+                        .foregroundStyle(selectedPlaceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .secondary : .primary)
+                    if currentCenterAddress != "正在解析位置...",
                        !currentCenterAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Text(currentCenterAddress)
                             .font(.caption)
@@ -395,10 +395,14 @@ struct FutureTripDraftModal: View {
         HStack {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(.secondary)
-            TextField("搜索行程目的地", text: $searchText)
+            IMESafeMultilineTextField(
+                prompt: "搜索行程目的地",
+                textState: searchTextState,
+                isFocused: $isSearchFieldFocused
+            )
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .onChange(of: searchText) { _, newValue in
+                .onChange(of: searchTextState.text) { _, newValue in
                     if isSkippingNextSearch {
                         isSkippingNextSearch = false
                         return
@@ -419,14 +423,14 @@ struct FutureTripDraftModal: View {
                 }
 
             Button {
-                searchText = ""
+                searchTextState.text = ""
                 placePicker.searchResults = []
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundColor(.secondary)
             }
-            .opacity(searchText.isEmpty ? 0 : 1)
-            .allowsHitTesting(!searchText.isEmpty)
+            .opacity(searchTextState.text.isEmpty ? 0 : 1)
+            .allowsHitTesting(!searchTextState.text.isEmpty)
         }
         .padding(10)
         .background(.ultraThinMaterial)
@@ -439,15 +443,15 @@ struct FutureTripDraftModal: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(placePicker.searchResults, id: \.self) { item in
+                    ForEach(placePicker.searchResults) { item in
                         Button {
                             applySearchResult(item)
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(item.name ?? "位置")
+                                Text(item.name)
                                     .font(.subheadline.bold())
                                     .foregroundColor(.primary)
-                                Text(item.placemark.title ?? "")
+                                Text(item.address)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -495,13 +499,13 @@ struct FutureTripDraftModal: View {
         }
     }
 
-    private func applySearchResult(_ item: MKMapItem) {
+    private func applySearchResult(_ item: PlaceSearchResult) {
         isSkippingNextSearch = true
         justPickedSearchResult = true
-        selectedCoordinate = item.placemark.coordinate
-        selectedPlaceName = item.name ?? "位置"
-        searchText = item.name ?? ""
-        currentCenterAddress = item.placemark.title ?? currentCenterAddress
+        selectedCoordinate = item.coordinate
+        selectedPlaceName = item.name
+        searchTextState.text = item.name
+        currentCenterAddress = item.address
         centerTrigger = UUID()
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         placePicker.searchResults = []

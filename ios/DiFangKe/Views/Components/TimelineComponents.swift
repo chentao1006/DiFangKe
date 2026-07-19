@@ -646,6 +646,8 @@ struct FootprintCardView: View {
     @State private var showingSplitFootprint = false
     @State private var confirmedAnimating: Bool = false
     @State private var pendingMergeCandidate: AdjacentFootprintMergeCandidate?
+    @State private var isResolvingUnknownPlace = false
+    @State private var isPlaceTitleBreathing = false
     
     var body: some View {
         if footprint.status == .ignored {
@@ -671,6 +673,8 @@ struct FootprintCardView: View {
                                 .font(.system(.headline, design: .rounded))
                                 .foregroundColor(matchedPlace != nil ? .orange : Color.dfkMainText)
                                 .lineLimit(1)
+                                .opacity(isResolvingUnknownPlace && isPlaceTitleBreathing ? 0.38 : 1)
+                                .scaleEffect(isResolvingUnknownPlace && isPlaceTitleBreathing ? 0.985 : 1, anchor: .leading)
                         }
                         
                         HStack(spacing: 4) {
@@ -787,38 +791,40 @@ struct FootprintCardView: View {
                 // 自动关联缺失或无效的照片（针对首次入场或跨设备同步的情况）
                 locationManager.linkPhotos(to: footprint, context: modelContext)
             }
+            .onChange(of: isResolvingUnknownPlace) { _, isResolving in
+                guard isResolving else {
+                    isPlaceTitleBreathing = false
+                    return
+                }
+                isPlaceTitleBreathing = false
+                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                    isPlaceTitleBreathing = true
+                }
+            }
         }
     }
     
     private func geocodeAddress() {
-        guard (footprint.address ?? "").isEmpty else { return }
-        
-        let geocoder = CLGeocoder()
-        let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
-        
-        geocoder.reverseGeocodeLocation(location) { placemarks, error in
+        let existingAddress = (footprint.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let unresolvedValues: Set<String> = ["", "未知位置", "未知地点", "地点记录", "正在解析位置...", "此处"]
+        guard unresolvedValues.contains(existingAddress) else { return }
 
-            guard let placemark = placemarks?.first, error == nil else { return }
-            
-            let name = placemark.name ?? ""
-            let subLocality = placemark.subLocality ?? ""
-            let thoroughfare = placemark.thoroughfare ?? ""
-            
-            let addressStr: String
-            if !thoroughfare.isEmpty && name != thoroughfare {
-                addressStr = "\(thoroughfare) \(name)"
-            } else if !subLocality.isEmpty {
-                addressStr = "\(subLocality) \(name)"
-            } else {
-                addressStr = name
-            }
-            
-            if !addressStr.isEmpty {
-                DispatchQueue.main.async {
-                    footprint.address = addressStr
-                    try? footprint.modelContext?.save()
-                }
-            }
+        let targetFootprint = footprint
+        let coordinate = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+
+        // These are already known Apple misses from an older import/history.
+        // Start with OSM instead of waiting for another potentially stalled
+        // Apple request; use Apple only if OSM has no result.
+        Task { @MainActor in
+            isResolvingUnknownPlace = true
+            defer { isResolvingUnknownPlace = false }
+
+            let osmAddress = await OpenStreetMapGeocoder.shared.lookup(coordinate: coordinate)?.address
+            let resolvedAddress = osmAddress
+            guard let resolvedAddress, !resolvedAddress.isEmpty else { return }
+
+            targetFootprint.address = resolvedAddress
+            try? targetFootprint.modelContext?.save()
         }
     }
 

@@ -3,6 +3,23 @@ import UIKit
 import CoreLocation
 import SwiftData
 
+private final class PhotoGeocodeCache: @unchecked Sendable {
+    private var storage: [String: (String, String?)] = [:]
+    private let lock = NSLock()
+
+    func value(for key: String) -> (String, String?)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage[key]
+    }
+
+    func set(_ value: (String, String?), for key: String) {
+        lock.lock()
+        storage[key] = value
+        lock.unlock()
+    }
+}
+
 class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     static let shared = PhotoService()
     
@@ -269,7 +286,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         
         DispatchQueue.global(qos: .userInitiated).async {
             let sortedClusters = clusters.sorted(by: { $0.count > $1.count })
-            var geocodeCache: [String: (String, String?)] = [:]
+            let geocodeCache = PhotoGeocodeCache()
             let group = DispatchGroup()
             let geocoder = CLGeocoder()
             var processedPhotosCount = 0
@@ -368,7 +385,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 }
                 
                 if matchedPlaceID == nil {
-                    if let cached = geocodeCache[cacheKey] {
+                    if let cached = geocodeCache.value(for: cacheKey) {
                         createAndAdd(t: cached.0, a: cached.1, pID: nil)
                     } else {
                         var isFinished = false
@@ -398,9 +415,29 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                                 if !pmName.isEmpty { resolvedTitle = pmName }
                                 else if let pmSub = pm.subLocality, !pmSub.isEmpty { resolvedTitle = "\(pmSub) 附近" }
                                 resolvedAddress = (pmThorough.isEmpty || pmName == pmThorough) ? pmName : "\(pmThorough) \(pmName)"
-                                geocodeCache[cacheKey] = (resolvedTitle, resolvedAddress)
+                                if !resolvedTitle.isEmpty || !(resolvedAddress ?? "").isEmpty {
+                                    geocodeCache.set((resolvedTitle, resolvedAddress), for: cacheKey)
+                                    createAndAdd(t: resolvedTitle, a: resolvedAddress, pID: nil)
+                                } else {
+                                    Task {
+                                        let fallback = await OpenStreetMapGeocoder.shared.lookup(coordinate: firstLoc.coordinate)
+                                        let fallbackTitle = fallback?.placeName ?? ""
+                                        let fallbackAddress = fallback?.address
+                                        geocodeCache.set((fallbackTitle, fallbackAddress), for: cacheKey)
+                                        createAndAdd(t: fallbackTitle, a: fallbackAddress, pID: nil)
+                                    }
+                                }
+                            } else {
+                                // Photos imported outside Apple Maps coverage use
+                                // the same OpenStreetMap fallback as map picking.
+                                Task {
+                                    let fallback = await OpenStreetMapGeocoder.shared.lookup(coordinate: firstLoc.coordinate)
+                                    let fallbackTitle = fallback?.placeName ?? ""
+                                    let fallbackAddress = fallback?.address
+                                    geocodeCache.set((fallbackTitle, fallbackAddress), for: cacheKey)
+                                    createAndAdd(t: fallbackTitle, a: fallbackAddress, pID: nil)
+                                }
                             }
-                            createAndAdd(t: resolvedTitle, a: resolvedAddress, pID: nil)
                         }
                         Thread.sleep(forTimeInterval: 0.25)
                     }

@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import Foundation
 
 struct MapPickerView: View {
     @Binding var selectedCoord: CLLocationCoordinate2D?
@@ -158,6 +159,7 @@ struct _MapPickerView: UIViewRepresentable {
         private let screenCircleRadius: CGFloat = 60 // 120pt / 2
         private let geocoder = CLGeocoder()
         private var lastSpan: MKCoordinateSpan?
+        private var geocodeRequestID = UUID()
 
         init(selectedCoord: Binding<CLLocationCoordinate2D?>, radius: Binding<Float>, address: Binding<String>, inferredPlaceName: Binding<String?>?, radiusTrigger: UUID) {
             _selectedCoord = selectedCoord
@@ -214,14 +216,246 @@ struct _MapPickerView: UIViewRepresentable {
         }
         
         func updateAddress(for coord: CLLocationCoordinate2D) {
-            geocoder.reverseGeocodeLocation(CLLocation(latitude: coord.latitude, longitude: coord.longitude)) { [weak self] placemarks, _ in
-                if let pm = placemarks?.first {
-                    let poiName = pm.areasOfInterest?.first
-                    let name = [poiName, pm.name, pm.thoroughfare].compactMap { $0 }.first ?? ""
-                    self?.address = (pm.locality ?? "") + name
-                    self?.inferredPlaceName?.wrappedValue = poiName ?? pm.name ?? name
+            // Do not replace the label while a request is still in flight. That
+            // causes the UI to flash an "unknown" coordinate on every small pan.
+            // We only fall back after this specific request has actually failed.
+            let requestID = UUID()
+            geocodeRequestID = requestID
+            let coordinateText = String(format: "%.6f, %.6f", coord.latitude, coord.longitude)
+
+            geocoder.cancelGeocode()
+            geocoder.reverseGeocodeLocation(
+                CLLocation(latitude: coord.latitude, longitude: coord.longitude),
+                preferredLocale: Locale(identifier: "zh_CN")
+            ) { [weak self] placemarks, _ in
+                guard let self, self.geocodeRequestID == requestID else { return }
+                guard let pm = placemarks?.first else {
+                    self.resolveWithOpenStreetMapFallback(
+                        for: coord,
+                        requestID: requestID,
+                        coordinateText: coordinateText
+                    )
+                    return
+                }
+
+                let poiName = pm.areasOfInterest?.first
+                let cleaned: (String?) -> String? = { value in
+                    guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+                    // Nominatim-style localized data sometimes contains both
+                    // simplified and traditional variants separated by `;`.
+                    return value.split(separator: ";", maxSplits: 1).first.map(String.init)
+                }
+                // Some overseas placemarks contain only ISO country code and no
+                // localized `country` string. Convert the code ourselves so the
+                // country is never lost merely because that optional is empty.
+                let countryName = cleaned(pm.country)
+                    ?? pm.isoCountryCode.flatMap { Locale(identifier: "zh_CN").localizedString(forRegionCode: $0) }
+                let placeName = [poiName, pm.name, pm.thoroughfare, pm.locality, pm.administrativeArea, countryName]
+                    .compactMap(cleaned)
+                    .first
+                // A reverse-geocoding response without a POI can still reliably
+                // identify a country, state/province, or city. Keep overseas
+                // hierarchy, while preserving the original concise China format.
+                let addressParts = (pm.isoCountryCode == "CN"
+                    ? [pm.locality, pm.subLocality, pm.thoroughfare, pm.subThoroughfare]
+                    : [countryName, pm.administrativeArea, pm.subAdministrativeArea, pm.locality, pm.subLocality, pm.thoroughfare, pm.subThoroughfare])
+                    .compactMap(cleaned)
+                    .reduce(into: [String]()) { parts, part in
+                        if !parts.contains(part) { parts.append(part) }
+                    }
+                guard let placeName, !addressParts.isEmpty else {
+                    self.resolveWithOpenStreetMapFallback(
+                        for: coord,
+                        requestID: requestID,
+                        coordinateText: coordinateText
+                    )
+                    return
+                }
+
+                DispatchQueue.main.async {
+                    guard self.geocodeRequestID == requestID else { return }
+                    self.address = pm.isoCountryCode == "CN"
+                        ? addressParts.joined()
+                        : addressParts.joined(separator: " ")
+                    self.inferredPlaceName?.wrappedValue = placeName
                 }
             }
         }
+
+        private func resolveWithOpenStreetMapFallback(
+            for coordinate: CLLocationCoordinate2D,
+            requestID: UUID,
+            coordinateText: String
+        ) {
+            Task { [weak self] in
+                let result = await OpenStreetMapGeocoder.shared.lookup(coordinate: coordinate)
+                DispatchQueue.main.async {
+                    guard let self, self.geocodeRequestID == requestID else { return }
+                    if let result {
+                        self.address = result.address
+                        self.inferredPlaceName?.wrappedValue = result.placeName
+                    } else {
+                        self.address = coordinateText
+                        self.inferredPlaceName?.wrappedValue = "未知地点"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Secondary reverse-geocoder used only after Apple's service returns no usable
+/// placemark. Nominatim is backed by OpenStreetMap and its public endpoint
+/// requires low request volume, so results are cached and calls are serialized
+/// to at most one per second.
+actor OpenStreetMapGeocoder {
+    struct Result: Sendable {
+        let placeName: String
+        let address: String
+    }
+
+    struct SearchResult: Sendable {
+        let name: String
+        let address: String
+        let coordinate: CLLocationCoordinate2D
+    }
+
+    static let shared = OpenStreetMapGeocoder()
+
+    private var cache: [String: Result] = [:]
+    private var searchCache: [String: [SearchResult]] = [:]
+    private var nextRequestDate = Date.distantPast
+
+    func lookup(coordinate: CLLocationCoordinate2D) async -> Result? {
+        guard coordinate.latitude.isFinite, coordinate.longitude.isFinite,
+              CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+
+        let key = String(format: "%.4f,%.4f", coordinate.latitude, coordinate.longitude)
+        if let cached = cache[key] { return cached }
+
+        await waitForRequestSlot()
+
+        var components = URLComponents(string: "https://nominatim.openstreetmap.org/reverse")!
+        components.queryItems = [
+            URLQueryItem(name: "format", value: "jsonv2"),
+            URLQueryItem(name: "lat", value: String(coordinate.latitude)),
+            URLQueryItem(name: "lon", value: String(coordinate.longitude)),
+            URLQueryItem(name: "zoom", value: "18"),
+            URLQueryItem(name: "addressdetails", value: "1"),
+            URLQueryItem(name: "accept-language", value: "zh-CN")
+        ]
+        guard let url = components.url else { return nil }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.setValue("DiFangKe iOS reverse-geocoding fallback", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            let payload = try JSONDecoder().decode(NominatimReverseResponse.self, from: data)
+            guard let result = makeResult(from: payload.address) else { return nil }
+            cache[key] = result
+            return result
+        } catch {
+            return nil
+        }
+    }
+
+    func search(query: String) async -> [SearchResult] {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty else { return [] }
+        if let cached = searchCache[normalizedQuery] { return cached }
+
+        await waitForRequestSlot()
+        var components = URLComponents(string: "https://nominatim.openstreetmap.org/search")!
+        components.queryItems = [
+            URLQueryItem(name: "format", value: "jsonv2"),
+            URLQueryItem(name: "q", value: normalizedQuery),
+            URLQueryItem(name: "limit", value: "5"),
+            URLQueryItem(name: "addressdetails", value: "1"),
+            URLQueryItem(name: "accept-language", value: "zh-CN")
+        ]
+        guard let url = components.url else { return [] }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.setValue("DiFangKe iOS place-search fallback", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return [] }
+            let payload = try JSONDecoder().decode([NominatimSearchResponse].self, from: data)
+            let results = payload.compactMap { entry -> SearchResult? in
+                guard let latitude = Double(entry.lat), let longitude = Double(entry.lon) else { return nil }
+                let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+                guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+                let address = makeResult(from: entry.address)?.address ?? entry.displayName
+                let name = entry.name?.split(separator: "/", maxSplits: 1).first.map(String.init)
+                    ?? makeResult(from: entry.address)?.placeName
+                    ?? entry.displayName
+                return SearchResult(name: name, address: address, coordinate: coordinate)
+            }
+            searchCache[normalizedQuery] = results
+            return results
+        } catch {
+            return []
+        }
+    }
+
+    private func waitForRequestSlot() async {
+        let wait = nextRequestDate.timeIntervalSinceNow
+        if wait > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+        }
+        nextRequestDate = Date().addingTimeInterval(1)
+    }
+
+    private func makeResult(from address: [String: String]) -> Result? {
+        func value(_ keys: String...) -> String? {
+            keys.lazy.compactMap { key in
+                guard let text = address[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+                return text.split(separator: ";", maxSplits: 1).first.map(String.init)
+            }.first
+        }
+        func unique(_ parts: [String?]) -> [String] {
+            parts.compactMap { $0 }.reduce(into: [String]()) { result, part in
+                if !result.contains(part) { result.append(part) }
+            }
+        }
+
+        let countryCode = value("country_code")?.uppercased()
+        let country = value("country")
+            ?? countryCode.flatMap { Locale(identifier: "zh_CN").localizedString(forRegionCode: $0) }
+        let city = value("city", "town", "village", "municipality", "county")
+        let region = value("state", "state_district", "province")
+        let locality = value("suburb", "city_district", "neighbourhood")
+        let road = value("road", "pedestrian", "residential")
+        let houseNumber = value("house_number")
+        let placeName = value("amenity", "building", "shop", "tourism") ?? city ?? region ?? country
+        guard let placeName else { return nil }
+
+        let address = countryCode == "CN"
+            ? unique([city, locality, road, houseNumber]).joined()
+            : unique([country, region, city, locality, road, houseNumber]).joined(separator: " ")
+        guard !address.isEmpty else { return nil }
+        return Result(placeName: placeName, address: address)
+    }
+}
+
+private struct NominatimReverseResponse: Decodable {
+    let address: [String: String]
+}
+
+private struct NominatimSearchResponse: Decodable {
+    let lat: String
+    let lon: String
+    let name: String?
+    let displayName: String
+    let address: [String: String]
+
+    enum CodingKeys: String, CodingKey {
+        case lat, lon, name, address
+        case displayName = "display_name"
     }
 }
