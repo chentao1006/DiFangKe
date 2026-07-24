@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://difang.app/sitemap.xml
+Sitemap: https://difangke.cn/sitemap.xml
