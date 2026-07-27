@@ -1449,6 +1449,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         guard let context = modelContext else { return }
         await PersistentTimelineBuilder.syncDay(date: Date(), in: context, runConsolidation: false)
         NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+        // syncDay may have just persisted transport records.  Refresh after the
+        // write so the notification does not retain its earlier 0m snapshot.
+        triggerNotificationSummaryRefresh()
     }
     
     private func siftYesterday() {
@@ -3010,10 +3013,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             Task { @MainActor in
                 await PersistentTimelineBuilder.syncDay(date: syncDate, in: context)
                 NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                self.triggerNotificationSummaryRefresh()
             }
         }
-
-        triggerNotificationSummaryRefresh()
     }
 
     private func shouldMergeExistingFootprint(_ last: Footprint, with candidate: CandidateFootprint, matchedPlace: Place?) -> Bool {
@@ -3262,14 +3264,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         // Filter out ignored footprints and include ongoing stay
         let validFootprints = todayFootprints.filter { $0.status != .ignored }
-        let footprintCount = Set(validFootprints.map { fp -> String in
-            if let addr = fp.address, !addr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return addr
-            }
-            return fp.locationHash
-        }).count
+        // A summary reports timeline events, not unique addresses.  Several
+        // visits to the same place are still several footprints.
+        let footprintCount = validFootprints.count
         let transportDescriptor = FetchDescriptor<TransportRecord>(
-            predicate: #Predicate { $0.startTime >= targetDate && $0.startTime < tomorrowStart && $0.statusRaw == "active" },
+            predicate: #Predicate { $0.startTime < tomorrowStart && $0.endTime > targetDate && $0.statusRaw == "active" },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]
         )
         let todayTransports = (try? context.fetch(transportDescriptor)) ?? []
@@ -3312,6 +3311,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     footprintCount: footprintCount,
                     pointsCount: rawPoints.count,
                     mileage: mileage,
+                    transportCount: todayTransports.count,
                     overviewSummary: resolvedOverview
                 )
 

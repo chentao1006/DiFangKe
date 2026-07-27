@@ -224,6 +224,14 @@ struct DiFangKeApp: App {
                                     locationManager.modelContext = context
                                     PhotoService.shared.modelContext = context
                                     OpenAIService.shared.modelContainer = container
+
+                                    // Clean up duplicates created by older builds
+                                    // before the timeline reads them.  New rebuilds
+                                    // are guarded at insertion time as well.
+                                    if DataDeduplicationService.deduplicateTransports(context: context) > 0 {
+                                        TimelineBuilder.timelineCache.removeAll()
+                                        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                                    }
                                     
                                     let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
                                     if isEnabled {

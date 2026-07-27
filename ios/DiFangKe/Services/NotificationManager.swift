@@ -71,7 +71,7 @@ class NotificationManager {
         }
     }
     
-    func refreshDailySummary(footprintCount: Int, pointsCount: Int, mileage: Double, overviewSummary: String? = nil) {
+    func refreshDailySummary(footprintCount: Int, pointsCount: Int, mileage: Double, transportCount: Int = 0, overviewSummary: String? = nil) {
         let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }
         
@@ -88,7 +88,10 @@ class NotificationManager {
         
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
         
-        if isAiEnabled, let overviewSummary, !overviewSummary.isEmpty {
+        let saysStayedHome = overviewSummary?.contains("宅在家") == true || overviewSummary?.contains("没出门") == true || overviewSummary?.contains("在家休息") == true
+        // Never let a stale/model-generated "stayed home" sentence contradict
+        // recorded travel.  The factual stats remain visible either way.
+        if isAiEnabled, let overviewSummary, !overviewSummary.isEmpty, !(transportCount > 0 && saysStayedHome) {
             let finalBody = "\(overviewSummary)\n\(statsInfo)"
             self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: "每日足迹汇总", body: finalBody)
         } else {

@@ -2657,11 +2657,41 @@ class PersistentTimelineBuilder {
                         pointsData: augmentedPtsData,
                         stepCount: metrics.steps
                     )
-                    
-                    context.insert(tp)
+
+                    // syncDay can be requested again after a cold launch while
+                    // Health/Motion data is still changing.  Do not persist the
+                    // same time interval again just because its inferred vehicle
+                    // type changed (car/subway/etc.).
+                    if !hasEquivalentTransport(tp, startOfDay: startOfDay, context: context) {
+                        context.insert(tp)
+                    }
                 }
                 i = k // 移动到下一个可能的停留点或末尾
             }
+        }
+    }
+
+    @MainActor
+    private static func hasEquivalentTransport(
+        _ candidate: TransportRecord,
+        startOfDay: Date,
+        context: ModelContext
+    ) -> Bool {
+        let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay) ?? candidate.endTime
+        let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.statusRaw != "ignored" && $0.startTime < endOfDay && $0.endTime > startOfDay
+        })
+        let existing = (try? context.fetch(descriptor)) ?? []
+        return existing.contains { record in
+            let startDiff = abs(record.startTime.timeIntervalSince(candidate.startTime))
+            let endDiff = abs(record.endTime.timeIntervalSince(candidate.endTime))
+            guard startDiff <= 300, endDiff <= 300 else { return false }
+            let overlap = max(0, min(record.endTime, candidate.endTime).timeIntervalSince(max(record.startTime, candidate.startTime)))
+            let shorterDuration = min(
+                record.endTime.timeIntervalSince(record.startTime),
+                candidate.endTime.timeIntervalSince(candidate.startTime)
+            )
+            return shorterDuration > 0 && overlap / shorterDuration >= 0.8
         }
     }
     

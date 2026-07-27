@@ -89,19 +89,10 @@ class LocationTrackingService : Service() {
         private var currentIntervalTier = -1 // -1: initial, 0: stationary, 1: moving, 2: fast
         private var currentAccuracyMode = "automatic"
         private var hasAcquiredFirstLocation = false
-        private var lastLocationUpdateTime: Long? = null
-        private var lastStationaryProbeTime: Long = 0L
-        private var isStationaryProbeActive = false
+        private var initialLocationAcquisitionTimedOut = false
+        private var initialLocationFallbackJob: Job? = null
         private val ongoingStayMaxPointGapMs =
                 (AppConfig.TRANSPORT_MAX_GAP_THRESHOLD * 1000).toLong()
-        private val watchdogHandler = Handler(Looper.getMainLooper())
-        private val locationWatchdog =
-                object : Runnable {
-                        override fun run() {
-                                runStationaryDepartureProbeIfNeeded()
-                                watchdogHandler.postDelayed(this, 60_000L)
-                        }
-                }
 
         private var wasVpnOrProxyActive: Boolean? = null
 
@@ -150,37 +141,66 @@ class LocationTrackingService : Service() {
         }
 
         private fun updateLocationClientOption(tier: Int) {
+                // 在同一地点持续使用 GPS 会让定位芯片无法休眠。静止时只保留低功耗的网络
+                // 定位作离开检测；一旦速度表明正在移动，下面的分级策略会立即恢复精确定位。
+                val useLowPowerStationaryMode =
+                        hasAcquiredFirstLocation &&
+                                tier <= 0 &&
+                                currentAccuracyMode in setOf("automatic", "powerSaving")
+                val useLowPowerInitialFallback =
+                        !hasAcquiredFirstLocation && initialLocationAcquisitionTimedOut
+                val useLowPowerMode = useLowPowerStationaryMode || useLowPowerInitialFallback
                 val newInterval =
-                        if (!hasAcquiredFirstLocation) {
+                        if (!hasAcquiredFirstLocation && !initialLocationAcquisitionTimedOut) {
                                 2000L // 首次定位成功前，保持高频重试（2秒），防止冷启动失败后等待太久
+                        } else if (useLowPowerInitialFallback) {
+                                10 * 60_000L // 室内首次定位失败后不持续拉起 GPS
                         } else {
                                 when (currentAccuracyMode) {
                                         "high" -> 5000L
                                         "balanced" -> 15000L
-                                        "powerSaving" -> 60000L
+                                        "powerSaving" -> 10 * 60_000L
                                         else -> {
                                                 when (tier) {
                                                         2 -> 8000L // 高速：8秒
                                                         1 -> 15000L // 正常移动：15秒
-                                                        else -> 30000L // 停留：30秒
+                                                        else -> 10 * 60_000L // 停留：10 分钟
                                                 }
                                         }
                                 }
                         }
+                val locationMode =
+                        if (useLowPowerMode) {
+                                TencentLocationRequest.ONLY_NETWORK_MODE
+                        } else {
+                                getBestLocationMode()
+                        }
                 locationClient?.removeUpdates(locationListener)
                 locationClient?.requestLocationUpdates(
                         TencentLocationRequest.create()
-                                .setLocMode(getBestLocationMode())
+                                .setLocMode(locationMode)
                                 .setInterval(newInterval)
                                 .setRequestLevel(TencentLocationRequest.REQUEST_LEVEL_GEO)
-                                .setAllowGPS(true)
-                                .setAllowCache(false),
+                                .setAllowGPS(!useLowPowerMode)
+                                .setAllowCache(useLowPowerMode),
                         locationListener
                 )
                 Log.d(
                         TAG,
-                        "Location option updated: interval=$newInterval ms, mode=${getBestLocationMode()}"
+                        "Location option updated: interval=$newInterval ms, mode=$locationMode, lowPower=$useLowPowerMode"
                 )
+        }
+
+        private fun scheduleInitialLocationFallback() {
+                if (hasAcquiredFirstLocation || initialLocationFallbackJob != null) return
+                initialLocationFallbackJob = serviceScope.launch {
+                        delay(2 * 60_000L)
+                        if (!hasAcquiredFirstLocation) {
+                                initialLocationAcquisitionTimedOut = true
+                                Log.w(TAG, "Initial location timed out; switching to low-power network location")
+                                updateLocationClientOption(0)
+                        }
+                }
         }
 
         private val locationListener = object : TencentLocationListener {
@@ -195,9 +215,10 @@ class LocationTrackingService : Service() {
                 }
 
                 if (location != null && errorCode == TencentLocation.ERROR_OK) {
-                        lastLocationUpdateTime = location.time.takeIf { it > 0L } ?: System.currentTimeMillis()
                         if (!hasAcquiredFirstLocation) {
                                 hasAcquiredFirstLocation = true
+                                initialLocationFallbackJob?.cancel()
+                                initialLocationFallbackJob = null
                                 Log.i(TAG, "首次定位成功，恢复正常采样频率")
                                 val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
                                 updateLocationClientOption(tier)
@@ -231,11 +252,6 @@ class LocationTrackingService : Service() {
                                         Date(location.time),
                         getShortAddress(location) // 优化：提取短地址
                                 )
-                        }
-                        if (isStationaryProbeActive) {
-                                isStationaryProbeActive = false
-                                val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
-                                updateLocationClientOption(tier)
                         }
                 } else {
                         Log.e(
@@ -302,15 +318,13 @@ class LocationTrackingService : Service() {
 
                                 // 腾讯定位复用应用自身的前台服务通知
                                 wasVpnOrProxyActive = isVpnOrProxyActive()
+                                scheduleInitialLocationFallback()
                                 val tier = if (currentIntervalTier == -1) 0 else currentIntervalTier
                                 updateLocationClientOption(tier)
                                 locationClient?.enableForegroundLocation(
                                         NotificationHelper.TRACKING_NOTIFICATION_ID,
                                         notification
                                 )
-                                watchdogHandler.removeCallbacks(locationWatchdog)
-                                watchdogHandler.postDelayed(locationWatchdog, 60_000L)
-
                                 stateFlow.value = TrackingState.Tracking()
                                 Log.i(
                                         TAG,
@@ -318,8 +332,9 @@ class LocationTrackingService : Service() {
                                 )
                         }
                         ACTION_STOP -> {
+                                initialLocationFallbackJob?.cancel()
+                                initialLocationFallbackJob = null
                                 locationClient?.disableForegroundLocation(true)
-                                watchdogHandler.removeCallbacks(locationWatchdog)
                                 stopForeground(STOP_FOREGROUND_REMOVE)
 
                                 // 清理持久化的停留状态
@@ -335,35 +350,6 @@ class LocationTrackingService : Service() {
                         }
                 }
                 return START_STICKY
-        }
-
-        private fun runStationaryDepartureProbeIfNeeded() {
-                if (currentAccuracyMode == "powerSaving") return
-                val stay = ongoingStayStart ?: return
-                val now = System.currentTimeMillis()
-                val stationaryDuration = now - stay.timestamp.time
-                if (stationaryDuration <= 10 * 60_000L) return
-
-                val lastUpdate = lastLocationUpdateTime
-                val updateGap = if (lastUpdate != null) now - lastUpdate else Long.MAX_VALUE
-                if (updateGap <= 3 * 60_000L) return
-                if (now - lastStationaryProbeTime <= 5 * 60_000L) return
-                lastStationaryProbeTime = now
-                isStationaryProbeActive = true
-
-                Log.i(
-                        TAG,
-                        "Long stationary stay has no fresh location for ${if (updateGap == Long.MAX_VALUE) "unknown duration" else "${updateGap / 1000}s"}. Requesting departure probe."
-                )
-                locationClient?.requestSingleFreshLocation(
-                        TencentLocationRequest.create()
-                                .setLocMode(TencentLocationRequest.HIGH_ACCURACY_MODE)
-                                .setInterval(2000L)
-                                .setRequestLevel(TencentLocationRequest.REQUEST_LEVEL_GEO)
-                                .setAllowGPS(true),
-                        locationListener,
-                        Looper.getMainLooper()
-                )
         }
 
         private suspend fun handleNewLocation(
@@ -1206,6 +1192,8 @@ class LocationTrackingService : Service() {
         }
 
         override fun onDestroy() {
+                initialLocationFallbackJob?.cancel()
+                initialLocationFallbackJob = null
                 locationClient?.disableForegroundLocation(true)
                 locationClient?.removeUpdates(locationListener)
                 locationClient = null

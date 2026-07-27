@@ -51,6 +51,24 @@ enum DataDeduplicationService {
         return report
     }
 
+    /// Safe to run during normal timeline rebuilding.  This intentionally only
+    /// touches transport records, so a bad rebuild cannot make the timeline
+    /// grow on every launch while leaving user places and footprints alone.
+    @discardableResult
+    static func deduplicateTransports(context: ModelContext) -> Int {
+        var report = Report()
+        let transports = (try? context.fetch(FetchDescriptor<TransportRecord>())) ?? []
+        deduplicateTransports(transports, context: context, report: &report)
+        if report.transportsDeleted > 0 {
+            do {
+                try context.save()
+            } catch {
+                print("[DataDeduplication] transport cleanup save failed: \(error)")
+            }
+        }
+        return report.transportsDeleted
+    }
+
     private static func deduplicatePlaces(_ places: [Place], footprints: [Footprint], context: ModelContext, report: inout Report) -> [UUID: UUID] {
         var rewriteMap: [UUID: UUID] = [:]
         var remainingPlaces = places
@@ -149,8 +167,18 @@ enum DataDeduplicationService {
                 sorted.removeAll { candidate in
                     let startDiff = abs(candidate.startTime.timeIntervalSince(keeper.startTime))
                     let endDiff = abs(candidate.endTime.timeIntervalSince(keeper.endTime))
-                    // Start and end within 5 minutes of each other
-                    if startDiff <= 300 && endDiff <= 300 {
+                    // A pair merely occurring near each other is not enough: two
+                    // short, back-to-back trips can legitimately be five minutes
+                    // apart.  Automatic rebuild duplicates cover essentially the
+                    // same interval, usually with a different inferred vehicle.
+                    let overlap = max(0, min(candidate.endTime, keeper.endTime).timeIntervalSince(max(candidate.startTime, keeper.startTime)))
+                    let shorterDuration = min(
+                        candidate.endTime.timeIntervalSince(candidate.startTime),
+                        keeper.endTime.timeIntervalSince(keeper.startTime)
+                    )
+                    let isSameTrip = startDiff <= 300 && endDiff <= 300 &&
+                        shorterDuration > 0 && overlap / shorterDuration >= 0.8
+                    if isSameTrip {
                         duplicates.append(candidate)
                         return true
                     }

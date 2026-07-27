@@ -33,9 +33,6 @@
     <!-- 读取外部存储（用于 CSV 存储在旧设备） -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
-    <!-- 忽略电池优化权限 -->
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-
     <!-- 腾讯定位 SDK 会自动合入此权限；本应用不枚举用户安装的应用。 -->
     <uses-permission
         android:name="android.permission.QUERY_ALL_PACKAGES"

@@ -132,10 +132,6 @@ fun MainScreen(
     var isNotificationGuideDismissed by remember { 
         mutableStateOf(sharedPreferences.getBoolean("isNotificationGuideDismissed", false)) 
     }
-    var hasPromptedBatteryRationale by remember { 
-        mutableStateOf(sharedPreferences.getBoolean("hasPromptedBatteryRationale", false)) 
-    }
-    
     val dismissGuide = {
         isNotificationGuideDismissed = true
         sharedPreferences.edit().putBoolean("isNotificationGuideDismissed", true).apply()
@@ -178,28 +174,6 @@ fun MainScreen(
         }
     }
     
-    var showBatteryRationale by remember { mutableStateOf(false) }
-
-    // 监听定位状态：真正第一次定位到了以后自动弹出请求忽略电池优化
-    LaunchedEffect(trackingState) {
-        if (!hasPromptedBatteryRationale) {
-            val isLocated = when (trackingState) {
-                is LocationTrackingService.TrackingState.Tracking -> true
-                is LocationTrackingService.TrackingState.OngoingStay -> true
-                else -> false
-            }
-            if (isLocated) {
-                hasPromptedBatteryRationale = true
-                sharedPreferences.edit().putBoolean("hasPromptedBatteryRationale", true).apply()
-                
-                val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
-                if (!pm.isIgnoringBatteryOptimizations(context.packageName)) {
-                    showBatteryRationale = true
-                }
-            }
-        }
-    }
-
     val isDark = isSystemInDarkTheme()
     val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
 
@@ -309,36 +283,6 @@ fun MainScreen(
             )
         }
 
-        if (showBatteryRationale) {
-            AlertDialog(
-                onDismissRequest = { showBatteryRationale = false },
-                title = { Text("允许始终在后台运行") },
-                text = { Text("为了保证您在锁屏或使用其他应用时，足迹依然能被持续、完整地记录，我们需要您允许本应用始终在后台运行（忽略电池优化）。") },
-                confirmButton = {
-                    Button(onClick = {
-                        showBatteryRationale = false
-                        try {
-                            val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                                data = android.net.Uri.parse("package:${context.packageName}")
-                            }
-                            context.startActivity(intent)
-                        } catch (e: Exception) {
-                            try {
-                                val intent = android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                                context.startActivity(intent)
-                            } catch (e2: Exception) {}
-                        }
-                    }) {
-                        Text("去设置")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showBatteryRationale = false }) {
-                        Text("取消")
-                    }
-                }
-            )
-        }
     }
 }
 
