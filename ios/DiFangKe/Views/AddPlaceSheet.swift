@@ -228,7 +228,12 @@ struct AddPlaceSheet: View {
                                 } label: {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(item.name).font(.subheadline.bold()).foregroundColor(.primary)
-                                        Text(item.address).font(.caption).foregroundColor(.secondary)
+                                        Text(item.address)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .multilineTextAlignment(.leading)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .fixedSize(horizontal: false, vertical: true)
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.horizontal, 20)

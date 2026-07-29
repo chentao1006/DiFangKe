@@ -165,19 +165,17 @@ enum DataDeduplicationService {
                 var duplicates: [TransportRecord] = []
                 
                 sorted.removeAll { candidate in
-                    let startDiff = abs(candidate.startTime.timeIntervalSince(keeper.startTime))
-                    let endDiff = abs(candidate.endTime.timeIntervalSince(keeper.endTime))
-                    // A pair merely occurring near each other is not enough: two
-                    // short, back-to-back trips can legitimately be five minutes
-                    // apart.  Automatic rebuild duplicates cover essentially the
-                    // same interval, usually with a different inferred vehicle.
-                    let overlap = max(0, min(candidate.endTime, keeper.endTime).timeIntervalSince(max(candidate.startTime, keeper.startTime)))
-                    let shorterDuration = min(
-                        candidate.endTime.timeIntervalSince(candidate.startTime),
-                        keeper.endTime.timeIntervalSince(keeper.startTime)
-                    )
-                    let isSameTrip = startDiff <= 300 && endDiff <= 300 &&
-                        shorterDuration > 0 && overlap / shorterDuration >= 0.8
+                    // A person cannot be taking two automatically detected modes
+                    // of transport at once.  Rebuilds can describe the same raw
+                    // route with slightly different boundaries when Health/Motion
+                    // data arrives late, so endpoint proximity alone is too
+                    // strict.  Two manual records are left alone, since they
+                    // are explicit user edits.  When only one is manual, the
+                    // scoring below keeps it and removes the automatic shadow.
+                    guard keeper.manualTypeRaw == nil || candidate.manualTypeRaw == nil else {
+                        return false
+                    }
+                    let isSameTrip = isSameAutomaticTrip(keeper, candidate)
                     if isSameTrip {
                         duplicates.append(candidate)
                         return true
@@ -295,6 +293,39 @@ enum DataDeduplicationService {
         if keeper.pointsData.isEmpty {
             keeper.pointsData = duplicate.pointsData
         }
+    }
+
+    private static func isSameAutomaticTrip(_ first: TransportRecord, _ second: TransportRecord) -> Bool {
+        let overlap = max(0, min(first.endTime, second.endTime).timeIntervalSince(max(first.startTime, second.startTime)))
+        let shorterDuration = min(
+            first.endTime.timeIntervalSince(first.startTime),
+            second.endTime.timeIntervalSince(second.startTime)
+        )
+        if shorterDuration > 0 && overlap / shorterDuration >= 0.8 {
+            return true
+        }
+
+        // Some rebuild paths trim the first/last raw points differently.  Their
+        // records can sit a few minutes apart while still tracing the exact same
+        // trip.  Require matching endpoints and distance so adjacent real trips
+        // are never collapsed merely because they are close in time.
+        let startDiff = abs(first.startTime.timeIntervalSince(second.startTime))
+        let endDiff = abs(first.endTime.timeIntervalSince(second.endTime))
+        guard startDiff <= 15 * 60, endDiff <= 15 * 60,
+              first.distance > 0, second.distance > 0,
+              abs(first.distance - second.distance) <= max(150, max(first.distance, second.distance) * 0.2),
+              let firstPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: first.pointsData),
+              let secondPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: second.pointsData),
+              let firstStart = firstPoints.first, let firstEnd = firstPoints.last,
+              let secondStart = secondPoints.first, let secondEnd = secondPoints.last else {
+            return false
+        }
+
+        let startDistance = CLLocation(latitude: firstStart.lat, longitude: firstStart.lon)
+            .distance(from: CLLocation(latitude: secondStart.lat, longitude: secondStart.lon))
+        let endDistance = CLLocation(latitude: firstEnd.lat, longitude: firstEnd.lon)
+            .distance(from: CLLocation(latitude: secondEnd.lat, longitude: secondEnd.lon))
+        return startDistance <= 250 && endDistance <= 250
     }
 
     private static func placeKeepScore(_ place: Place, referencedPlaceIDs: Set<UUID>) -> Int {

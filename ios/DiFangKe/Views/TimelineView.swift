@@ -2468,7 +2468,7 @@ private struct ContinuousTimelineSheet: View {
                             .font(.headline)
                             .lineLimit(1)
                             .minimumScaleFactor(0.75)
-                        Image(systemName: "chevron.down")
+                        Image(systemName: "chevron.up.chevron.down")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(.secondary.opacity(0.5))
                     }
@@ -4510,8 +4510,8 @@ private struct DottedTimelineSeparator: View {
                 path.addLine(to: CGPoint(x: geometry.size.width, y: 0.5))
             }
             .stroke(
-                Color.secondary.opacity(0.28),
-                style: StrokeStyle(lineWidth: 1.25, lineCap: .round, dash: [1.25, 5])
+                Color.secondary.opacity(0.38),
+                style: StrokeStyle(lineWidth: 2, lineCap: .round)
             )
         }
         .frame(height: 2)

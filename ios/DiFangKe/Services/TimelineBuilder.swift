@@ -1938,7 +1938,13 @@ class PersistentTimelineBuilder {
                         pointsData: ptsData,
                         stepCount: metrics.steps
                     )
-                    context.insert(tp)
+                    // This gap-filling path runs independently from the normal
+                    // point segmentation below.  It must use the same overlap
+                    // guard, otherwise the two paths can save the same route
+                    // under different inferred transport modes.
+                    if !hasEquivalentTransport(tp, startOfDay: startOfDay, context: context) {
+                        context.insert(tp)
+                    }
                 }
             }
         }
@@ -2683,16 +2689,41 @@ class PersistentTimelineBuilder {
         })
         let existing = (try? context.fetch(descriptor)) ?? []
         return existing.contains { record in
-            let startDiff = abs(record.startTime.timeIntervalSince(candidate.startTime))
-            let endDiff = abs(record.endTime.timeIntervalSince(candidate.endTime))
-            guard startDiff <= 300, endDiff <= 300 else { return false }
-            let overlap = max(0, min(record.endTime, candidate.endTime).timeIntervalSince(max(record.startTime, candidate.startTime)))
-            let shorterDuration = min(
-                record.endTime.timeIntervalSince(record.startTime),
-                candidate.endTime.timeIntervalSince(candidate.startTime)
-            )
-            return shorterDuration > 0 && overlap / shorterDuration >= 0.8
+            // A manual correction owns its time range and should suppress an
+            // automatically inferred replacement.  The comparison also covers
+            // near-in-time records with the same route, whose endpoints shifted
+            // when delayed sensor data changed the raw-point trimming.
+            return isSameAutomaticTrip(record, candidate)
         }
+    }
+
+    private static func isSameAutomaticTrip(_ first: TransportRecord, _ second: TransportRecord) -> Bool {
+        let overlap = max(0, min(first.endTime, second.endTime).timeIntervalSince(max(first.startTime, second.startTime)))
+        let shorterDuration = min(
+            first.endTime.timeIntervalSince(first.startTime),
+            second.endTime.timeIntervalSince(second.startTime)
+        )
+        if shorterDuration > 0 && overlap / shorterDuration >= 0.8 {
+            return true
+        }
+
+        let startDiff = abs(first.startTime.timeIntervalSince(second.startTime))
+        let endDiff = abs(first.endTime.timeIntervalSince(second.endTime))
+        guard startDiff <= 15 * 60, endDiff <= 15 * 60,
+              first.distance > 0, second.distance > 0,
+              abs(first.distance - second.distance) <= max(150, max(first.distance, second.distance) * 0.2),
+              let firstPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: first.pointsData),
+              let secondPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: second.pointsData),
+              let firstStart = firstPoints.first, let firstEnd = firstPoints.last,
+              let secondStart = secondPoints.first, let secondEnd = secondPoints.last else {
+            return false
+        }
+
+        let startDistance = CLLocation(latitude: firstStart.lat, longitude: firstStart.lon)
+            .distance(from: CLLocation(latitude: secondStart.lat, longitude: secondStart.lon))
+        let endDistance = CLLocation(latitude: firstEnd.lat, longitude: firstEnd.lon)
+            .distance(from: CLLocation(latitude: secondEnd.lat, longitude: secondEnd.lon))
+        return startDistance <= 250 && endDistance <= 250
     }
     
     private static func departureTailSplitIndex(points: [CLLocation], clusterStartIndex: Int, clusterEndIndex: Int, clusterPoints: [CLLocation]) -> Int? {

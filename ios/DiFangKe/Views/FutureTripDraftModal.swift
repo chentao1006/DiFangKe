@@ -454,6 +454,9 @@ struct FutureTripDraftModal: View {
                                 Text(item.address)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 20)

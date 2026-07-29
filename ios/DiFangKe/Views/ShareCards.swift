@@ -1000,12 +1000,19 @@ struct DFKShareCardView: View {
         let width: CGFloat = 1080
         let hasPhoto = payload.heroImages.first != nil || payload.heroImage != nil
         if case .plan = payload.kind {
-            let planCount = max(1, payload.plans.filter(\.isIncluded).count)
+            let includedPlans = payload.plans.filter(\.isIncluded)
+            let planCount = max(1, includedPlans.count)
             let titleLineCount = max(1, Int(ceil(CGFloat(payload.title.count) / 10)))
             let titleExtraHeight = CGFloat(titleLineCount - 1) * 180
-            // Plan rows are substantially more compact than footprint rows;
-            // reserve only the space they use, while keeping the branding area clear.
-            return CGSize(width: width, height: max(CGFloat(1_280), 960 + CGFloat(planCount) * 220 + titleExtraHeight))
+            // A note adds a third text block to a plan row. Give it its own
+            // vertical budget so it cannot run underneath the fixed footer.
+            let notesExtraHeight = CGFloat(includedPlans.filter {
+                !($0.note?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            }.count) * 100
+            return CGSize(
+                width: width,
+                height: max(CGFloat(1_280), 960 + CGFloat(planCount) * 220 + titleExtraHeight + notesExtraHeight)
+            )
         }
         guard case .timeline = payload.kind else {
             return CGSize(width: width, height: hasPhoto ? 1970 : 1440)
