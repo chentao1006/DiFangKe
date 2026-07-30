@@ -1322,6 +1322,44 @@ struct CodableCoordinate: Codable {
 class PersistentTimelineBuilder {
     @MainActor
     private static var syncingDates: Set<Date> = []
+
+    /// 根据同一地点已有足迹的活动类型历史进行推断：优先同一时间窗，其次总出现次数。
+    /// 不根据地点名称作任何特殊或确定性判断。
+    private static func frequentActivityTypeValue(
+        for placeID: UUID,
+        at time: Date,
+        context: ModelContext,
+        window: Int,
+        threshold: Int
+    ) -> String? {
+        let descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate<Footprint> { $0.placeID == placeID && $0.activityTypeValue != nil }
+        )
+        guard let history = try? context.fetch(descriptor) else { return nil }
+
+        let calendar = Calendar.current
+        let targetMinutes = calendar.component(.hour, from: time) * 60 + calendar.component(.minute, from: time)
+        var windowCounts: [String: Int] = [:]
+        var totalCounts: [String: Int] = [:]
+
+        for footprint in history {
+            guard let type = footprint.activityTypeValue else { continue }
+            totalCounts[type, default: 0] += 1
+            let footprintMinutes = calendar.component(.hour, from: footprint.startTime) * 60 + calendar.component(.minute, from: footprint.startTime)
+            let difference = abs(targetMinutes - footprintMinutes)
+            if min(difference, 1440 - difference) <= window {
+                windowCounts[type, default: 0] += 1
+            }
+        }
+
+        if let bestInWindow = windowCounts.max(by: { $0.value < $1.value }) {
+            return bestInWindow.key
+        }
+        if let bestOverall = totalCounts.max(by: { $0.value < $1.value }), bestOverall.value >= threshold {
+            return bestOverall.key
+        }
+        return nil
+    }
     
     /// 分析历史数据，判断用户更习惯哪种车载/轨道方式（汽车、公交、摩托车、轨交）
     /// 排除目标日期，防止因用户正在修改当前数据而导致判定结果在“临界点”反复跳变
@@ -1616,6 +1654,12 @@ class PersistentTimelineBuilder {
             )
             bridgeFp.address = previousFp?.address
             bridgeFp.placeID = previousFp?.placeID
+            if let placeID = bridgeFp.placeID {
+                bridgeFp.activityTypeValue = frequentActivityTypeValue(
+                    for: placeID, at: bridgeFp.startTime, context: context,
+                    window: AppConfig.shared.habitTimeWindow, threshold: AppConfig.shared.habitFrequencyThreshold
+                )
+            }
             context.insert(bridgeFp)
         }
     }
@@ -2496,6 +2540,10 @@ class PersistentTimelineBuilder {
                 if let matched = TimelineBuilder.getPlaceForCoordinate(loc.coordinate, allPlaces: litePlaces) {
                     fp.placeID = matched.placeID
                     fp.address = matched.name
+                    fp.activityTypeValue = frequentActivityTypeValue(
+                        for: matched.placeID, at: fp.startTime, context: context,
+                        window: AppConfig.shared.habitTimeWindow, threshold: AppConfig.shared.habitFrequencyThreshold
+                    )
                 }
 
                 let candidate = CandidateFootprint(
@@ -2519,6 +2567,12 @@ class PersistentTimelineBuilder {
 
                     if existing.placeID == nil, let matchedPlace {
                         existing.placeID = matchedPlace.placeID
+                    }
+                    if existing.activityTypeValue == nil, let matchedPlace {
+                        existing.activityTypeValue = frequentActivityTypeValue(
+                            for: matchedPlace.placeID, at: existing.startTime, context: context,
+                            window: AppConfig.shared.habitTimeWindow, threshold: AppConfig.shared.habitFrequencyThreshold
+                        )
                     }
                     if !existing.isAddressEditedByHand {
                         if let matchedPlace {

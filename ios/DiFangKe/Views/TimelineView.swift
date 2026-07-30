@@ -311,6 +311,7 @@ private struct ContinuousTimelineView: View {
             todayScrollRequest: $todayScrollRequest,
             targetScrollDate: $targetScrollDate,
             timelineDetent: $timelineDetent,
+            isSideBySide: isSideBySide,
             selectedFootprint: $selectedFootprint,
             selectedFutureTripDetail: $selectedFutureTripDetail,
             selectedTransport: $selectedTransport,
@@ -1902,6 +1903,7 @@ private struct ContinuousTimelineSheet: View {
     @Binding var todayScrollRequest: Int
     @Binding var targetScrollDate: Date?
     @Binding var timelineDetent: PresentationDetent
+    let isSideBySide: Bool
     @Binding var selectedFootprint: Footprint?
     @Binding var selectedFutureTripDetail: FutureTrip?
     @Binding var selectedTransport: Transport?
@@ -1922,7 +1924,7 @@ private struct ContinuousTimelineSheet: View {
     @Binding var selectedMapPhotoAssetID: String?
 
     private var isCollapsed: Bool {
-        timelineDetent == .height(88)
+        !isSideBySide && timelineDetent == .height(88)
     }
 
     private var timelineScrollPositionBinding: Binding<ScrollTarget?> {

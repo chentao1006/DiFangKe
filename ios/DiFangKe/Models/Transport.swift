@@ -90,6 +90,14 @@ enum TransportType: String, CaseIterable, Codable {
             (walkingDistance > 250 && walkingDistanceRatio > 0.55) ||
             (stepsPerMinute > 35 && walkingDistance > 120) ||
             (floorsClimbed >= 2 && walkingDistance > 80)
+        // 跑步不能只由 GPS 速度或单一传感器决定：同时要求 Core Motion 跑步、
+        // 高步频、HealthKit 的步行/跑步距离覆盖，以及合理的 GPS 速度。
+        let hasCorroboratedRunningEvidence =
+            motionType == .running &&
+            stepsPerMinute >= 120 &&
+            walkingDistance >= max(120, minutes * 70) &&
+            walkingDistanceRatio >= 0.45 &&
+            kmh >= 6.5 && kmh <= 25
         
         // --- 物理常识铁律：最高速度约束 ---
         var effectiveMotionType = motionType
@@ -98,6 +106,10 @@ enum TransportType: String, CaseIterable, Codable {
         }
         if kmh > 35 && motionType == .running {
             effectiveMotionType = .unknown // 跑步很难持续超过 35km/h
+        }
+        if motionType == .running && !hasCorroboratedRunningEvidence {
+            // 跑步证据不足时不要误降为步行；交还给后续速度、距离、轨迹点和偏好车辆的综合兜底。
+            effectiveMotionType = .unknown
         }
         if kmh > 45 && (motionType == .walking || motionType == .running || motionType == .unknown) {
             effectiveMotionType = .automotive // 确定是车载
@@ -140,7 +152,7 @@ enum TransportType: String, CaseIterable, Codable {
         // 1. 优先使用传感器数据 (Core Motion)
         switch effectiveMotionType {
         case .walking:
-            return kmh > 7 ? .running : .slow
+            return .slow
         case .running:
             return .running
         case .cycling:
@@ -156,13 +168,11 @@ enum TransportType: String, CaseIterable, Codable {
         
         // 2. 结合健康数据判定 (HealthKit)
         if hasStrongOnFootEvidence {
-            if stepsPerMinute > 140 && kmh < 35 { return .running }
             if stepsPerMinute > 65 && kmh < 18 { return .slow }
             if walkingDistanceRatio > 0.7 && kmh < 15 { return .slow }
         }
 
         if stepCount > 100 && duration > 0 {
-            if stepsPerMinute > 140 && kmh < 35 { return .running }
             if stepsPerMinute > 30 && kmh < 15 { return .slow }
         }
         
