@@ -595,6 +595,7 @@ struct DFKShareCardPreviewView: View {
                 footprints: selectedFootprints,
                 transports: editablePayload.mapTransports,
                 activities: editablePayload.mapActivities,
+                markerScale: selectedFootprints.count <= 1 ? 2.2 : 1.5,
                 completion: applyMapImages
             )
         } else {
@@ -646,6 +647,21 @@ struct DFKShareCardPreviewView: View {
                 .filter { !$0.isEmpty }
                 .joined(separator: "｜")
         }.joined(separator: "\n")
+        let transports = editablePayload.mapTransports
+            .filter { $0.statusRaw == "active" }
+            .sorted { $0.startTime < $1.startTime }
+            .map { transport in
+                let type = TransportType(rawValue: transport.manualTypeRaw ?? transport.typeRaw)?.localizedName ?? "出行"
+                let distance = transport.distance >= 1_000
+                    ? String(format: "%.1f公里", transport.distance / 1_000)
+                    : "\(Int(transport.distance.rounded()))米"
+                let time = "\(transport.startTime.formatted(.dateTime.hour().minute()))-\(transport.endTime.formatted(.dateTime.hour().minute()))"
+                return [time, type, distance, transport.startLocation, transport.endLocation]
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "｜")
+            }
+            .joined(separator: "\n")
         let prompt = """
         为一张地方客分享卡片写一个适合传播的中文标题。
         请随机采用“\(styles.randomElement()!)”风格，标题要自然、有记忆点，控制在 8 到 22 个字，只输出标题本身，不要引号、解释、标签或换行。标题绝对不要包含日期、年份、月份、几号、星期、今天、昨天、明天等任何日期表达。
@@ -659,6 +675,8 @@ struct DFKShareCardPreviewView: View {
         行程范围（仅供判断跨度，绝不能写进标题）：\(editablePayload.rangeText)
         足迹与活动：
         \(facts.isEmpty ? "无" : facts)
+        交通：
+        \(transports.isEmpty ? "无" : transports)
         计划：
         \(plans.isEmpty ? "无" : plans)
         """
@@ -1120,7 +1138,7 @@ struct DFKShareCardView: View {
         let cardWidth = s(canvasSize.width)
         let cardHeight = s(canvasSize.height)
         let inset: CGFloat = s(68)
-        let verticalGap: CGFloat = s(28)
+        let verticalGap: CGFloat = s(84)
         let qrSide: CGFloat = s(144)
 
         ZStack {
@@ -2199,6 +2217,28 @@ private struct DFKShareMapSnapshotMarker {
     let color: UIColor
     let duration: TimeInterval
     let scale: CGFloat
+    let style: Style
+
+    enum Style {
+        case footprint
+        case futureTrip
+    }
+
+    init(
+        coordinate: CLLocationCoordinate2D,
+        iconName: String,
+        color: UIColor,
+        duration: TimeInterval,
+        scale: CGFloat,
+        style: Style = .footprint
+    ) {
+        self.coordinate = coordinate
+        self.iconName = iconName
+        self.color = color
+        self.duration = duration
+        self.scale = scale
+        self.style = style
+    }
 }
 
 enum DFKShareImageLoader {
@@ -2220,7 +2260,8 @@ enum DFKShareImageLoader {
                 iconName: plan.markerIconName,
                 color: UIColor(plan.markerColor),
                 duration: 0,
-                scale: 2.2
+                scale: validPlans.count <= 1 ? 2.2 : 1.5,
+                style: .futureTrip
             )
         }
         Task {
@@ -2258,6 +2299,7 @@ enum DFKShareImageLoader {
         transports: [TransportRecord] = [],
         widgetDate: Date? = nil,
         activities: [ActivityType] = [],
+        markerScale: CGFloat = 1,
         completion: @escaping (DFKShareMedia) -> Void
     ) {
         let selectedAssetIDs = Array(NSOrderedSet(array: assetIDs).array.compactMap { $0 as? String }.shuffled().prefix(20))
@@ -2292,7 +2334,8 @@ enum DFKShareImageLoader {
             footprints: footprints,
             transports: transports,
             widgetDate: widgetDate,
-            activities: activities
+            activities: activities,
+            markerScale: markerScale
         ) { images in
             lightMapImage = images.light
             darkMapImage = images.dark
@@ -2352,6 +2395,7 @@ enum DFKShareImageLoader {
         transports: [TransportRecord] = [],
         widgetDate: Date? = nil,
         activities: [ActivityType] = [],
+        markerScale: CGFloat = 1,
         completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
     ) {
         if let widgetDate, widgetOffset(for: widgetDate) != nil {
@@ -2359,7 +2403,8 @@ enum DFKShareImageLoader {
                 let generated = await WidgetDataSyncManager.shared.makeShareMapSnapshots(
                     footprints: footprints,
                     transports: transports,
-                    activities: activities
+                    activities: activities,
+                    markerScale: markerScale
                 )
                 await MainActor.run {
                     completion(generated)
@@ -2373,7 +2418,8 @@ enum DFKShareImageLoader {
                 let images = await WidgetDataSyncManager.shared.makeShareMapSnapshots(
                     footprints: footprints,
                     transports: transports,
-                    activities: activities
+                    activities: activities,
+                    markerScale: markerScale
                 )
                 await MainActor.run {
                     completion(images)
@@ -2653,36 +2699,90 @@ enum DFKShareImageLoader {
         style: UIUserInterfaceStyle,
         in context: CGContext
     ) {
-        let iconColor: UIColor = style == .dark ? .black : .white
+        let iconColor: UIColor = .white
         context.saveGState()
         for marker in markers.prefix(12) {
             let scale = marker.scale
-            let markerSize = 20 * scale
-            let iconSize = 23 * scale * 0.52
-            let radius = markerSize / 2
             let point = snapshot.point(for: marker.coordinate)
-            let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
+            let center: CGPoint
+            let radius: CGFloat
+            let iconSize: CGFloat
 
             context.saveGState()
             context.setShadow(offset: CGSize(width: 0, height: 3), blur: 5, color: UIColor.black.withAlphaComponent(0.22).cgColor)
 
-            let pinPath = CGMutablePath()
-            pinPath.addArc(center: center, radius: radius, startAngle: 125 * .pi / 180, endAngle: 55 * .pi / 180, clockwise: false)
-            pinPath.addLine(to: CGPoint(x: center.x, y: center.y + radius * 1.4))
-            pinPath.closeSubpath()
+            switch marker.style {
+            case .futureTrip:
+                // Identical geometry to the footprint-share marker, except
+                // that plan cards do not draw a duration badge.
+                let markerScale = scale
+                radius = 9 * markerScale
+                iconSize = 11 * markerScale
+                center = CGPoint(x: point.x, y: point.y - radius * 1.4)
+                let bottomY = point.y - 1.5 * markerScale
+                let shell = CGMutablePath()
+                shell.addArc(center: center, radius: radius, startAngle: 140 * .pi / 180, endAngle: 40 * .pi / 180, clockwise: false)
+                shell.addLine(to: CGPoint(x: center.x + 1.5 * markerScale, y: bottomY))
+                shell.addArc(center: CGPoint(x: center.x, y: bottomY), radius: 1.5 * markerScale, startAngle: 0, endAngle: .pi, clockwise: false)
+                shell.closeSubpath()
+                context.setFillColor((style == .dark ? UIColor.black : UIColor.white).cgColor)
+                context.addPath(shell)
+                context.fillPath()
 
-            context.setFillColor(marker.color.cgColor)
-            context.addPath(pinPath)
-            context.fillPath()
+                let innerRadius = radius - 1.5 * markerScale
+                let innerCenter = center
+                let bodyRect = CGRect(x: innerCenter.x - innerRadius, y: innerCenter.y - innerRadius, width: innerRadius * 2, height: innerRadius * 2)
+                let bodyPath = UIBezierPath(ovalIn: bodyRect)
+                context.saveGState()
+                bodyPath.addClip()
+                let colors = style == .dark
+                    ? [marker.color.cgColor, marker.color.withAlphaComponent(0.7).cgColor] as CFArray
+                    : [marker.color.withAlphaComponent(0.7).cgColor, marker.color.cgColor] as CFArray
+                if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
+                    context.drawLinearGradient(
+                        gradient,
+                        start: CGPoint(x: innerCenter.x, y: innerCenter.y - innerRadius),
+                        end: CGPoint(x: innerCenter.x, y: innerCenter.y + innerRadius),
+                        options: []
+                    )
+                } else {
+                    context.setFillColor(marker.color.cgColor)
+                    context.fillEllipse(in: bodyRect)
+                }
+                context.restoreGState()
+
+            case .footprint:
+                let markerSize = 20 * scale
+                radius = markerSize / 2
+                iconSize = 23 * scale * 0.52
+                center = CGPoint(x: point.x, y: point.y - radius * 1.4)
+
+                let pinPath = CGMutablePath()
+                pinPath.addArc(center: center, radius: radius, startAngle: 125 * .pi / 180, endAngle: 55 * .pi / 180, clockwise: false)
+                pinPath.addLine(to: CGPoint(x: center.x, y: center.y + radius * 1.4))
+                pinPath.closeSubpath()
+
+                context.setFillColor(marker.color.cgColor)
+                context.addPath(pinPath)
+                context.fillPath()
+            }
             context.restoreGState()
 
             if let iconImage = UIImage(systemName: marker.iconName) {
                 let image = iconImage.withTintColor(iconColor, renderingMode: .alwaysOriginal)
-                image.draw(in: CGRect(
+                let iconRect = CGRect(
                     x: center.x - iconSize / 2,
                     y: center.y - iconSize / 2,
                     width: iconSize,
                     height: iconSize
+                )
+                let drawScale = min(iconRect.width / image.size.width, iconRect.height / image.size.height)
+                let drawSize = CGSize(width: image.size.width * drawScale, height: image.size.height * drawScale)
+                image.draw(in: CGRect(
+                    x: iconRect.midX - drawSize.width / 2,
+                    y: iconRect.midY - drawSize.height / 2,
+                    width: drawSize.width,
+                    height: drawSize.height
                 ))
             }
 

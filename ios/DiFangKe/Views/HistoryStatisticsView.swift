@@ -146,7 +146,8 @@ struct HistoryStatisticsView: View {
         DFKShareImageLoader.loadMapImages(
             coordinates: coordinates,
             footprints: footprints,
-            activities: activityTypes
+            activities: activityTypes,
+            markerScale: footprints.count <= 1 ? 2.2 : 1.5
         ) { mapImages in
             var payload = DFKShareCardFactory.statsPayload(
                 rangeText: statisticsRangeText,

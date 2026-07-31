@@ -2114,24 +2114,32 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         }
 
         static func futureTripImage(symbolName: String, color: UIColor, iconColor: UIColor) -> UIImage {
-            let size = CGSize(width: 22, height: 28)
+            let size = CGSize(width: 26, height: 32)
             let renderer = UIGraphicsImageRenderer(size: size)
-            return renderer.image { _ in
-                let bodyRect = CGRect(x: 2, y: 1, width: 18, height: 18)
-                color.setFill()
-                UIBezierPath(ovalIn: bodyRect).fill()
+            return renderer.image { context in
+                let pinRect = CGRect(x: 2, y: 1, width: 22, height: 26.4)
+                let radius = pinRect.width / 2
+                let tipRadius: CGFloat = 1.5
+                let shellCenter = CGPoint(x: pinRect.midX, y: pinRect.minY + radius)
 
-                let tail = UIBezierPath()
-                tail.move(to: CGPoint(x: 11, y: 27))
-                tail.addLine(to: CGPoint(x: 7, y: 17))
-                tail.addLine(to: CGPoint(x: 15, y: 17))
-                tail.close()
+                let shell = UIBezierPath()
+                shell.addArc(withCenter: shellCenter, radius: radius, startAngle: 140 * .pi / 180, endAngle: 40 * .pi / 180, clockwise: false)
+                shell.addLine(to: CGPoint(x: pinRect.midX + tipRadius, y: pinRect.maxY - tipRadius))
+                shell.addArc(withCenter: CGPoint(x: pinRect.midX, y: pinRect.maxY - tipRadius), radius: tipRadius, startAngle: 0, endAngle: .pi, clockwise: false)
+                shell.close()
+                context.cgContext.setShadow(offset: CGSize(width: 0, height: 2), blur: 2, color: UIColor.black.withAlphaComponent(0.15).cgColor)
+                UIColor.systemBackground.setFill()
+                shell.fill()
+                context.cgContext.setShadow(offset: .zero, blur: 0, color: nil)
+
+                let bodyDiameter: CGFloat = 17
+                let bodyCenter = CGPoint(x: pinRect.midX, y: pinRect.midY + 2.5)
                 color.setFill()
-                tail.fill()
+                UIBezierPath(ovalIn: CGRect(x: bodyCenter.x - bodyDiameter / 2, y: bodyCenter.y - bodyDiameter / 2, width: bodyDiameter, height: bodyDiameter)).fill()
 
                 UIImage(systemName: symbolName)?
                     .withTintColor(iconColor, renderingMode: .alwaysOriginal)
-                    .draw(in: CGRect(x: 6, y: 5, width: 10, height: 10))
+                    .draw(in: CGRect(x: bodyCenter.x - 5, y: bodyCenter.y - 5, width: 10, height: 10))
             }
         }
 

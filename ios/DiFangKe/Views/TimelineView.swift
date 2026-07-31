@@ -2601,7 +2601,8 @@ private struct ContinuousTimelineSheet: View {
             footprints: footprints,
             transports: transports,
             widgetDate: date,
-            activities: activityTypes
+            activities: activityTypes,
+            markerScale: footprints.count <= 1 ? 2.2 : 1.5
         ) { media in
             var payload = DFKShareCardFactory.timelinePayload(
                 date: date,
@@ -2660,7 +2661,8 @@ private struct ContinuousTimelineSheet: View {
             footprints: footprints,
             transports: transports,
             widgetDate: start == selectedEnd ? start : nil,
-            activities: activityTypes
+            activities: activityTypes,
+            markerScale: footprints.count <= 1 ? 2.2 : 1.5
         ) { media in
             var payload = DFKShareCardFactory.timelinePayload(
                 rangeText: rangeText,

@@ -340,7 +340,8 @@ extension FootprintModalView {
             assetIDs: footprint.photoAssetIDs,
             coordinates: footprint.coordinates,
             footprints: [footprint],
-            activities: allActivities
+            activities: allActivities,
+            markerScale: 2.2
         ) { media in
             var payload = DFKShareCardFactory.momentPayload(
                 footprint: footprint,

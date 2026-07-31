@@ -173,6 +173,7 @@ final class WidgetDataSyncManager {
         footprints: [Footprint],
         transports: [TransportRecord],
         activities: [ActivityType],
+        markerScale: CGFloat = 1,
         size: CGSize = CGSize(width: 329, height: 119)
     ) async -> (light: UIImage?, dark: UIImage?) {
         let aggregatedFootprints = aggregatedFootprints(from: footprints)
@@ -215,6 +216,7 @@ final class WidgetDataSyncManager {
             decodedTransports: decodedTransports,
             activitiesByID: activitiesByID,
             activitiesByName: activitiesByName,
+            markerScale: markerScale,
             style: .light,
             size: size
         )
@@ -225,6 +227,7 @@ final class WidgetDataSyncManager {
             decodedTransports: decodedTransports,
             activitiesByID: activitiesByID,
             activitiesByName: activitiesByName,
+            markerScale: markerScale,
             style: .dark,
             size: size
         )
@@ -238,6 +241,7 @@ final class WidgetDataSyncManager {
         decodedTransports: [WidgetDecodedTransport],
         activitiesByID: [String: ActivityType],
         activitiesByName: [String: ActivityType],
+        markerScale: CGFloat,
         style: UIUserInterfaceStyle,
         size: CGSize
     ) async -> UIImage? {
@@ -328,7 +332,7 @@ final class WidgetDataSyncManager {
             for aggregated in sortedFootprints {
                 let footprint = aggregated.representative
                 let point = snapshot.point(for: aggregated.coordinate)
-                let radius: CGFloat = 9
+                let radius: CGFloat = 9 * markerScale
                 let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
 
                 let activity = footprint.activityTypeValue.flatMap { activitiesByID[$0] ?? activitiesByName[$0] }
@@ -337,9 +341,10 @@ final class WidgetDataSyncManager {
 
                 let pinPath = CGMutablePath()
                 pinPath.addArc(center: center, radius: radius, startAngle: 140 * .pi / 180, endAngle: 40 * .pi / 180, clockwise: false)
-                let bottomY = point.y - 1.5
-                pinPath.addLine(to: CGPoint(x: center.x + 1.5, y: bottomY))
-                pinPath.addArc(center: CGPoint(x: center.x, y: bottomY), radius: 1.5, startAngle: 0, endAngle: .pi, clockwise: false)
+                let tipRadius = 1.5 * markerScale
+                let bottomY = point.y - tipRadius
+                pinPath.addLine(to: CGPoint(x: center.x + tipRadius, y: bottomY))
+                pinPath.addArc(center: CGPoint(x: center.x, y: bottomY), radius: tipRadius, startAngle: 0, endAngle: .pi, clockwise: false)
                 pinPath.closeSubpath()
 
                 ctx.cgContext.saveGState()
@@ -353,13 +358,15 @@ final class WidgetDataSyncManager {
                 ctx.cgContext.fillPath()
                 ctx.cgContext.restoreGState()
 
-                let innerRadius = radius - 1.5
-                let innerCenter = CGPoint(x: center.x, y: center.y + 0.5)
+                let innerRadius = radius - tipRadius
+                let innerCenter = center
                 let innerCirclePath = UIBezierPath(arcCenter: innerCenter, radius: innerRadius, startAngle: 0, endAngle: 2 * .pi, clockwise: true)
 
                 ctx.cgContext.saveGState()
                 innerCirclePath.addClip()
-                let colors = [activityColor.withAlphaComponent(0.7).cgColor, activityColor.cgColor] as CFArray
+                let colors = style == .dark
+                    ? [activityColor.cgColor, activityColor.withAlphaComponent(0.7).cgColor] as CFArray
+                    : [activityColor.withAlphaComponent(0.7).cgColor, activityColor.cgColor] as CFArray
                 if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
                     ctx.cgContext.drawLinearGradient(
                         gradient,
@@ -393,14 +400,14 @@ final class WidgetDataSyncManager {
                 } else {
                     let iconName = activity?.icon ?? FootprintIconDefaults.map
                     if let iconImage = UIImage(systemName: iconName) {
-                        let iconSize: CGFloat = 11
+                        let iconSize: CGFloat = 11 * markerScale
                         let iconRect = CGRect(
                             x: innerCenter.x - iconSize / 2,
                             y: innerCenter.y - iconSize / 2,
                             width: iconSize,
                             height: iconSize
                         )
-                        iconImage.withTintColor(iconColor, renderingMode: .alwaysTemplate).draw(in: iconRect)
+                        iconImage.withTintColor(iconColor, renderingMode: .alwaysTemplate).drawAspectFit(in: iconRect)
                     }
                 }
             }
@@ -855,12 +862,14 @@ final class WidgetDataSyncManager {
                                 ctx.cgContext.restoreGState()
 
                                 let innerRadius = radius - 1.5
-                                let innerCenter = CGPoint(x: center.x, y: center.y + 0.5)
+                                let innerCenter = center
                                 let innerCirclePath = UIBezierPath(arcCenter: innerCenter, radius: innerRadius, startAngle: 0, endAngle: 2 * .pi, clockwise: true)
                                 
                                 ctx.cgContext.saveGState()
                                 innerCirclePath.addClip()
-                                let colors = [activityColor.withAlphaComponent(0.7).cgColor, activityColor.cgColor] as CFArray
+                                let colors = theme == .dark
+                                    ? [activityColor.cgColor, activityColor.withAlphaComponent(0.7).cgColor] as CFArray
+                                    : [activityColor.withAlphaComponent(0.7).cgColor, activityColor.cgColor] as CFArray
                                 if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0.0, 1.0]) {
                                     ctx.cgContext.drawLinearGradient(gradient, start: CGPoint(x: innerCenter.x, y: innerCenter.y - innerRadius), end: CGPoint(x: innerCenter.x, y: innerCenter.y + innerRadius), options: [])
                                 } else {
@@ -886,7 +895,7 @@ final class WidgetDataSyncManager {
                                     if let iconImage = UIImage(systemName: iconName) {
                                         let iconSize: CGFloat = 11.0
                                         let iconRect = CGRect(x: innerCenter.x - iconSize/2, y: innerCenter.y - iconSize/2, width: iconSize, height: iconSize)
-                                        iconImage.withTintColor(iconColor, renderingMode: .alwaysTemplate).draw(in: iconRect)
+                                        iconImage.withTintColor(iconColor, renderingMode: .alwaysTemplate).drawAspectFit(in: iconRect)
                                     }
                                 }
                             }
