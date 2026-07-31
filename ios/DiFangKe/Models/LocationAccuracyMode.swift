@@ -21,7 +21,7 @@ enum LocationAccuracyMode: String, CaseIterable, Identifiable {
     
     var description: String {
         switch self {
-        case .automatic: return "根据活动状态智能调整定位精度，兼顾轨迹质量与电池续航。"
+        case .automatic: return "停留时降低定位功耗；出门后自动恢复高精度，兼顾轨迹质量与续航。"
         case .high: return "强制保持最高精度定位，轨迹最准但耗电量大。"
         case .balanced: return "使用标准精度，适合日常通勤记录。"
         case .powerSaving: return "仅在移动距离较大时记录，最大程度省电。"

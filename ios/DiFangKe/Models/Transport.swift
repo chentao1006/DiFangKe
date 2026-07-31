@@ -78,7 +78,8 @@ enum TransportType: String, CaseIterable, Codable {
         distanceMeters: Double = 0,
         pointCount: Int = 0,
         preferredAutomotive: TransportType = .car,
-        preferredCycling: TransportType = .bicycle
+        preferredCycling: TransportType = .bicycle,
+        preferredTransport: TransportType? = nil
     ) -> TransportType {
         let kmh = speed * 3.6
         let minutes = max(duration / 60, 0)
@@ -90,6 +91,22 @@ enum TransportType: String, CaseIterable, Codable {
             (walkingDistance > 250 && walkingDistanceRatio > 0.55) ||
             (stepsPerMinute > 35 && walkingDistance > 120) ||
             (floorsClimbed >= 2 && walkingDistance > 80)
+        // 交通工具也会产生零碎步行数据（等灯、推行、上下车）。只有步行
+        // 距离占比明显占主导时，才允许低速把一段完整路线判成步行。
+        let hasDominantOnFootEvidence =
+            (walkingDistance > 250 && walkingDistanceRatio > 0.75) ||
+            (stepsPerMinute > 65 && walkingDistance > 180) ||
+            (floorsClimbed >= 3 && walkingDistance > 120)
+        let hasMeaningfulTrip =
+            effectiveDistance >= max(800, AppConfig.shared.transportMinDistanceThreshold) &&
+            duration >= 3 * 60
+        let habitualRoadTransport: TransportType? = {
+            guard let preferredTransport,
+                  preferredTransport.category == 2 || preferredTransport.category == 3 else {
+                return nil
+            }
+            return preferredTransport
+        }()
         // 跑步不能只由 GPS 速度或单一传感器决定：同时要求 Core Motion 跑步、
         // 高步频、HealthKit 的步行/跑步距离覆盖，以及合理的 GPS 速度。
         let hasCorroboratedRunningEvidence =
@@ -117,7 +134,7 @@ enum TransportType: String, CaseIterable, Codable {
         if kmh > 100 && motionType == .cycling {
             effectiveMotionType = .automotive 
         }
-        if effectiveMotionType == .automotive && hasStrongOnFootEvidence && kmh < 22 {
+        if effectiveMotionType == .automotive && hasDominantOnFootEvidence && kmh < 14 {
             effectiveMotionType = .walking
         }
 
@@ -152,6 +169,9 @@ enum TransportType: String, CaseIterable, Codable {
         // 1. 优先使用传感器数据 (Core Motion)
         switch effectiveMotionType {
         case .walking:
+            if hasMeaningfulTrip && !hasDominantOnFootEvidence && kmh >= 8 {
+                return preferredCycling
+            }
             return .slow
         case .running:
             return .running
@@ -168,8 +188,8 @@ enum TransportType: String, CaseIterable, Codable {
         
         // 2. 结合健康数据判定 (HealthKit)
         if hasStrongOnFootEvidence {
-            if stepsPerMinute > 65 && kmh < 18 { return .slow }
-            if walkingDistanceRatio > 0.7 && kmh < 15 { return .slow }
+            if hasDominantOnFootEvidence && stepsPerMinute > 65 && kmh < 14 { return .slow }
+            if hasDominantOnFootEvidence && walkingDistanceRatio > 0.75 && kmh < 14 { return .slow }
         }
 
         if stepCount > 100 && duration > 0 {
@@ -177,7 +197,18 @@ enum TransportType: String, CaseIterable, Codable {
         }
         
         // 3. 速度兜底 (传统逻辑)
-        if kmh < 4.5 { 
+        if kmh < 4.5 {
+            // 平均速度很低不等于步行：电动车在红灯和拥堵中同样会降到这个区间。
+            // 有足够位移且没有占主导的步行证据时，优先保留骑行/电动车类型。
+            if hasMeaningfulTrip && !hasDominantOnFootEvidence {
+                if let habitualRoadTransport,
+                   habitualRoadTransport.category == 3,
+                   effectiveDistance >= 3000,
+                   duration >= 10 * 60 {
+                    return habitualRoadTransport
+                }
+                return preferredCycling
+            }
             // 如果速度极低，但步数也很少（每分钟不到 5 步），说明大概率是在车里堵车，而不是真的在走
             if stepsPerMinute < 5 && stepCount < 20 && walkingDistance < 80 {
                 return safePreferredAuto 
@@ -189,10 +220,21 @@ enum TransportType: String, CaseIterable, Codable {
         if maxAllowedTypeCategory < 4 && effectiveKmh >= 120.0 { effectiveKmh = 119.0 }
         if maxAllowedTypeCategory < 3 && effectiveKmh >= 25.0 { effectiveKmh = 24.0 }
 
-        if effectiveKmh < 9 && hasStrongOnFootEvidence { return .slow }
-        if effectiveKmh < 12 { return .bicycle }
-        if effectiveKmh < 22 && hasStrongOnFootEvidence && walkingDistanceRatio > 0.45 { return preferredCycling }
-        if effectiveKmh < 25 { return preferredCycling } 
+        if effectiveKmh < 12 && hasDominantOnFootEvidence { return .slow }
+        if effectiveKmh < 18 && hasStrongOnFootEvidence && walkingDistanceRatio > 0.45 { return preferredCycling }
+        // 不按常规巡航速度判断：短途电动车经常被红灯、路口和拥堵拉低均速。
+        // 低于 35 km/h 且没有明确汽车/轨道证据时，优先归入用户偏好的骑行方式。
+        if effectiveKmh < 35 {
+            if let habitualRoadTransport {
+                let isPlausibleHabitualTrip =
+                    (habitualRoadTransport.category == 2 && effectiveDistance <= 20_000) ||
+                    (habitualRoadTransport.category == 3 && hasMeaningfulTrip)
+                if isPlausibleHabitualTrip {
+                    return habitualRoadTransport
+                }
+            }
+            return preferredCycling
+        }
         if effectiveKmh < 120 { return safePreferredAuto }
         if effectiveKmh < 350 { return .train }
         return .airplane

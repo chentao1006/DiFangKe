@@ -306,7 +306,7 @@ struct FootprintModalView: View {
                 
                 Button("暂时不用", role: .cancel) { }
             } message: {
-                Text("开启后，地方客将利用 AI 为您的足迹自动建议标题和感悟，让您的记录更生动。")
+                Text("开启后，地方客将利用 AI 为您的足迹自动建议标题和备注，让您的记录更生动。")
             }
             .alert("AI 分析失败", isPresented: $showingAIErrorAlert) {
                 Button("确定", role: .cancel) { }
@@ -530,6 +530,12 @@ extension FootprintModalView {
                     .lineLimit(2)
                     .minimumScaleFactor(0.72)
                     .multilineTextAlignment(.center)
+                    .overlay(alignment: .trailing) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary.opacity(0.42))
+                        .offset(x: 18)
+                    }
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.plain)
@@ -540,14 +546,22 @@ extension FootprintModalView {
                 VStack(alignment: .center, spacing: 4) {
                     Text(footprint.date.formatted(.dateTime.year().month().day().weekday()))
                         .font(.system(size: 15, weight: .medium, design: .rounded))
-                    
+                        .foregroundColor(.secondary)
+
                     Text(timeRangeString)
                         .font(.system(size: 20, weight: .bold, design: .rounded))
-                    
+                        .foregroundColor(Color.dfkMainText)
+                        .overlay(alignment: .trailing) {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.secondary.opacity(0.42))
+                            .offset(x: 18)
+                        }
+
                     Text("停留 \(durationString)")
                         .font(.system(size: 15, weight: .medium, design: .rounded))
+                        .foregroundColor(.secondary)
                 }
-                .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
                 .contentShape(Rectangle())
@@ -908,12 +922,12 @@ extension FootprintModalView {
     
     private var aiSection: some View {
         VStack(alignment: .center, spacing: 10) {
-            Text("足迹感悟与备注")
+            Text("足迹备注")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.secondary)
                 .frame(maxWidth: .infinity)
             
-            IMESafeMultilineTextField(prompt: "输入感悟...", textState: reasonState, isFocused: $reasonFocused, alignment: .center)
+            IMESafeMultilineTextField(prompt: "输入备注...", textState: reasonState, isFocused: $reasonFocused, alignment: .center)
                 .font(.body)
                 .foregroundColor(Color.dfkMainText.opacity(0.85))
                 .frame(maxWidth: .infinity)
@@ -1114,9 +1128,11 @@ private struct FootprintTimeAdjustmentView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     GeometryReader { proxy in
-                        if proxy.size.width > 1 && proxy.size.height > 1 {
+                        if proxy.size.width > 1 && proxy.size.height > 1 && !selectedCoordinates.isEmpty {
                             FootprintTimeAdjustmentMapView(coordinates: selectedCoordinates)
                                 .frame(minWidth: 1, minHeight: 1)
+                        } else {
+                            Color.secondary.opacity(0.05)
                         }
                     }
                     .frame(height: 300)
@@ -1872,7 +1888,7 @@ private struct SplitPreviewFootprintCard: View {
     }
 }
 
-private struct FootprintTimeRangeSlider: UIViewRepresentable {
+struct FootprintTimeRangeSlider: UIViewRepresentable {
     let rangeStart: Date
     let rangeEnd: Date
     @Binding var start: Date
@@ -1898,7 +1914,7 @@ private struct FootprintTimeRangeSlider: UIViewRepresentable {
     }
 }
 
-private final class NativeTimeRangeSliderView: UIView {
+final class NativeTimeRangeSliderView: UIView {
     private let trackLayer = CALayer()
     private let selectedTrackLayer = CALayer()
     private let startSlider = ThumbHitTestSlider(frame: .zero)
@@ -2193,7 +2209,7 @@ private final class ThumbHitTestSlider: UISlider {
     }
 }
 
-private struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
+struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
     private static let maxRenderedPoints = 1_200
 
     let coordinates: [CLLocationCoordinate2D]
@@ -2214,8 +2230,23 @@ private struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
         mapView.showsScale = false
         mapView.isPitchEnabled = false
         mapView.isRotateEnabled = false
+        setInitialVisibleRegion(on: mapView)
         context.coordinator.mapView = mapView
         return mapView
+    }
+
+    private func setInitialVisibleRegion(on mapView: MKMapView) {
+        let validCoordinates = coordinates.filter(\.isRawPointsRenderable)
+        guard let first = validCoordinates.first else { return }
+        if validCoordinates.count == 1 {
+            mapView.setRegion(MKCoordinateRegion(center: first, latitudinalMeters: 500, longitudinalMeters: 500), animated: false)
+            return
+        }
+        let rect = validCoordinates.reduce(MKMapRect.null) { partial, coordinate in
+            let point = MKMapPoint(coordinate)
+            return partial.union(MKMapRect(x: point.x, y: point.y, width: 1, height: 1))
+        }
+        mapView.setVisibleMapRect(rect, animated: false)
     }
 
     static func dismantleUIView(_ mapView: MKMapView, coordinator: Coordinator) {

@@ -2179,14 +2179,14 @@ private struct ContinuousTimelineSheet: View {
                     } // GeometryReader
                 } // ScrollViewReader
             } // NavigationStack
-            .opacity((selectedFootprint != nil || selectedFutureTripDetail != nil) ? 0 : 1)
-            .animation(.default, value: (selectedFootprint == nil && selectedFutureTripDetail == nil))
-            .allowsHitTesting(selectedFootprint == nil && selectedFutureTripDetail == nil)
+            .opacity(selectedFutureTripDetail != nil ? 0 : 1)
+            .animation(.default, value: selectedFutureTripDetail == nil)
+            .allowsHitTesting(selectedFutureTripDetail == nil)
 
-            if let footprint = selectedFootprint {
-                buildFootprintModalView(for: footprint)
+            if isInitialTimelineLoading {
+                initialTimelineLoadingOverlay
             }
-            
+
             if let trip = selectedFutureTripDetail {
                 buildFutureTripDetailView(for: trip)
             }
@@ -2200,6 +2200,10 @@ private struct ContinuousTimelineSheet: View {
             let assetIDs = selectedFootprint?.photoAssetIDs ?? [item.value]
             let currentIndex = assetIDs.firstIndex(of: item.value) ?? 0
             PhotoFullscreenView(assetIDs: assetIDs, currentIndex: currentIndex)
+        }
+        .sheet(item: $selectedFootprint) { footprint in
+            buildFootprintModalView(for: footprint)
+                .presentationDetents([.medium, .large])
         }
     } // body
     
@@ -2404,17 +2408,29 @@ private struct ContinuousTimelineSheet: View {
             }
         }
     }
+
+    private var isInitialTimelineLoading: Bool {
+        !initialTimelineLoadCompleted || !hasCompletedInitialTimelinePositioning
+    }
+
+    private var initialTimelineLoadingOverlay: some View {
+        ZStack {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .ignoresSafeArea()
+
+            ProgressView()
+                .controlSize(.large)
+        }
+        .accessibilityLabel("正在加载时间轴")
+    }
     @ViewBuilder
     private func buildFootprintModalView(for footprint: Footprint) -> some View {
         FootprintModalView(
             footprint: footprint,
             autoFocus: false,
-            isInline: true,
-            presentationDetent: $timelineDetent
+            isInline: false
         ) { didChange in
-            withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
-                selectedFootprint = nil
-            }
             guard didChange else { return }
             invalidateAndRefreshTimeline(containing: footprint.startTime)
             CloudSettingsManager.shared.triggerDataSyncPulse()

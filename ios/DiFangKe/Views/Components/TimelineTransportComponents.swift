@@ -175,6 +175,9 @@ struct TransportModalView: View {
     @State private var mapPhotoImages: [String: UIImage] = [:]
     @State private var selectedPhotoAsset: IdentifiableString?
     @State private var interactiveMapReady = false
+    @State private var showingTimeAdjustment = false
+    @State private var localStartTime: Date? = nil
+    @State private var localEndTime: Date? = nil
     
     enum LocationType: Identifiable {
         case start, end
@@ -188,6 +191,9 @@ struct TransportModalView: View {
     private var currentEndLocation: String {
         localEndOverride ?? transport.endLocation
     }
+
+    private var currentStartTime: Date { localStartTime ?? transport.startTime }
+    private var currentEndTime: Date { localEndTime ?? transport.endTime }
 
     private var validTransportPoints: [CLLocationCoordinate2D] {
         transport.points.filter {
@@ -257,40 +263,14 @@ struct TransportModalView: View {
 
                             // Start Marker (Physical Look & Title)
                             if let start = validTransportPoints.first {
-                                Marker(currentStartLocation, coordinate: start)
+                                Marker("", coordinate: start)
                                     .tint(.green)
-                            }
-                            
-                            // Start Interaction Layer
-                            if let start = validTransportPoints.first {
-                                Annotation("", coordinate: start, anchor: .top) {
-                                    Text(currentStartLocation)
-                                        .font(.system(size: 11, weight: .bold))
-                                        .foregroundColor(isStartImportantPlace ? .orange : .primary)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
-                                        .overlay(Capsule().stroke(Color.green, lineWidth: 1))
-                                }
                             }
                             
                             // End Marker (Physical Look & Title)
                             if let end = validTransportPoints.last {
-                                Marker(currentEndLocation, coordinate: end)
+                                Marker("", coordinate: end)
                                     .tint(.blue)
-                            }
-                            
-                            // End Interaction Layer
-                            if let end = validTransportPoints.last {
-                                Annotation("", coordinate: end, anchor: .top) {
-                                    Text(currentEndLocation)
-                                        .font(.system(size: 11, weight: .bold))
-                                        .foregroundColor(isEndImportantPlace ? .orange : .primary)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(Capsule().fill(Color(uiColor: .systemBackground).opacity(0.9)))
-                                        .overlay(Capsule().stroke(Color.blue, lineWidth: 1))
-                                }
                             }
                             
                             ForEach(transport.lineSegments) { segment in
@@ -359,50 +339,20 @@ struct TransportModalView: View {
                 // Bottom Info Summary
                 VStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 12) {
-                        // Start/End Locations Section
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack(spacing: 12) {
-                                Image(systemName: "circle.fill")
-                                    .font(.system(size: 8))
-                                    .foregroundColor(.green)
-                                
-                                let matchedStart = allPlaces.first(where: { place in
-                                    guard place.isUserDefined else { return false }
-                                    let startAddr = currentStartLocation.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == startAddr || 
-                                           (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == startAddr)
-                                })
-                                Text("起点: " + currentStartLocation)
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundColor(matchedStart != nil ? .orange : .primary)
-                                    .lineLimit(1)
-                            }
-                            
-                            HStack(spacing: 12) {
-                                Image(systemName: "circle.fill")
-                                    .font(.system(size: 8))
-                                    .foregroundColor(.blue)
-                                
-                                let matchedEnd = allPlaces.first(where: { place in
-                                    guard place.isUserDefined else { return false }
-                                    let endAddr = currentEndLocation.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == endAddr || 
-                                           (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == endAddr)
-                                })
-                                Text("终点: " + currentEndLocation)
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundColor(matchedEnd != nil ? .orange : .primary)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .padding(.bottom, 4)
-                        
-                        Divider().opacity(0.5)
-                        
                         HStack {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text(transport.startTime.formatted(.dateTime.hour().minute()) + " - " + transport.endTime.formatted(.dateTime.hour().minute()))
-                                    .font(.headline)
+                                Button {
+                                    showingTimeAdjustment = true
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Text(currentStartTime.formatted(.dateTime.hour().minute()) + " - " + currentEndTime.formatted(.dateTime.hour().minute()))
+                                            .font(.headline)
+                                        Image(systemName: "pencil")
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundColor(.secondary.opacity(0.42))
+                                    }
+                                }
+                                .buttonStyle(.plain)
                                 
                                 // 交通工具选择器
                                 Menu {
@@ -465,6 +415,13 @@ struct TransportModalView: View {
                     forOngoing: false
                 ) { newName in
                     saveLocationOverride(type: type, name: newName)
+                }
+            }
+            .sheet(isPresented: $showingTimeAdjustment) {
+                TransportTimeAdjustmentView(transport: transport) { start, end in
+                    localStartTime = start
+                    localEndTime = end
+                    onLocationUpdate?()
                 }
             }
             .onAppear {
@@ -616,5 +573,410 @@ struct TransportModalView: View {
         }
         
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+}
+
+private struct TransportTimeAdjustmentView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+
+    let transport: Transport
+    let onSave: (Date, Date) -> Void
+
+    @State private var rangeStart = Date()
+    @State private var rangeEnd = Date()
+    @State private var draftStart = Date()
+    @State private var draftEnd = Date()
+    @State private var rawPoints: [CLLocation] = []
+    @State private var isLoadingRawPoints = true
+    @State private var hasInitializedRange = false
+
+    private let minimumDuration: TimeInterval = 60
+
+    private var selectedPoints: [CLLocation] {
+        rawPoints.filter { $0.timestamp >= draftStart && $0.timestamp <= draftEnd }
+    }
+
+    private var selectedCoordinates: [CLLocationCoordinate2D] {
+        selectedPoints.map(\.coordinate).filter {
+            $0.latitude.isFinite && $0.longitude.isFinite && CLLocationCoordinate2DIsValid($0)
+        }
+    }
+
+    private var canSave: Bool {
+        hasInitializedRange && draftEnd.timeIntervalSince(draftStart) >= minimumDuration
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 18) {
+                    GeometryReader { proxy in
+                        if proxy.size.width > 1 && proxy.size.height > 1 && !selectedCoordinates.isEmpty {
+                            FootprintTimeAdjustmentMapView(coordinates: selectedCoordinates)
+                                .frame(minWidth: 1, minHeight: 1)
+                        } else {
+                            Color.secondary.opacity(0.05)
+                        }
+                    }
+                    .frame(height: 300)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(alignment: .bottomLeading) {
+                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
+                            .font(.caption.bold())
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(Color.black.opacity(0.45)))
+                            .padding(12)
+                    }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("调整时间")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("\(timeText(hasInitializedRange ? draftStart : transport.startTime))-\(timeText(hasInitializedRange ? draftEnd : transport.endTime))")
+                                .font(.system(size: 22, weight: .bold, design: .monospaced))
+                                .foregroundColor(.dfkMainText)
+                        }
+
+                        if hasInitializedRange {
+                            FootprintTimeRangeSlider(
+                                rangeStart: rangeStart,
+                                rangeEnd: rangeEnd,
+                                start: $draftStart,
+                                end: $draftEnd
+                            )
+                            .frame(height: 34)
+                        } else {
+                            Color.clear.frame(height: 34)
+                        }
+
+                        HStack {
+                            Text(timeText(hasInitializedRange ? rangeStart : transport.startTime))
+                            Spacer()
+                            Text(timeText(hasInitializedRange ? rangeEnd : transport.endTime))
+                        }
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    }
+                    .padding(16)
+                    .background(RoundedRectangle(cornerRadius: 14).fill(Color.secondary.opacity(0.05)))
+                }
+                .padding(20)
+            }
+            .navigationTitle("调整时间")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { saveAdjustment() } label: {
+                        Image(systemName: "checkmark").dfkToolbarConfirmIcon().fontWeight(.bold)
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+        .onAppear {
+            setupInitialRange()
+            loadRawPoints()
+        }
+    }
+
+    private func setupInitialRange() {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: transport.startTime)
+        let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(24 * 3600)
+        rangeStart = editableRangeStart(dayStart: dayStart)
+        rangeEnd = editableRangeEnd(dayEnd: dayEnd)
+        if rangeEnd.timeIntervalSince(rangeStart) < minimumDuration {
+            rangeStart = dayStart
+            rangeEnd = dayEnd
+        }
+        draftStart = min(max(transport.startTime, rangeStart), rangeEnd.addingTimeInterval(-minimumDuration))
+        draftEnd = max(min(transport.endTime, rangeEnd), draftStart.addingTimeInterval(minimumDuration))
+        hasInitializedRange = true
+    }
+
+    /// A connected neighbor can donate up to the alignment threshold to this
+    /// transport, while retaining its own minimum valid duration.  This lets a
+    /// user correct a slightly too-short inferred trip instead of only shrinking it.
+    private func editableRangeStart(dayStart: Date) -> Date {
+        let threshold = AppConfig.shared.transportAlignmentThreshold
+        guard let previous = nearestPreviousItem(near: transport.startTime, threshold: threshold) else {
+            return max(previousItemEnd(defaultingTo: dayStart), dayStart)
+        }
+        let earliestByNeighbor = previous.startTime.addingTimeInterval(minimumDuration(for: previous))
+        let earliestByThreshold = transport.startTime.addingTimeInterval(-threshold)
+        return max(dayStart, max(earliestByNeighbor, earliestByThreshold))
+    }
+
+    private func editableRangeEnd(dayEnd: Date) -> Date {
+        let threshold = AppConfig.shared.transportAlignmentThreshold
+        guard let next = nearestNextItem(near: transport.endTime, threshold: threshold) else {
+            return min(nextItemStart(defaultingTo: dayEnd), dayEnd)
+        }
+        let latestByNeighbor = next.endTime.addingTimeInterval(-minimumDuration(for: next))
+        let latestByThreshold = transport.endTime.addingTimeInterval(threshold)
+        return min(dayEnd, min(latestByNeighbor, latestByThreshold))
+    }
+
+    private func loadRawPoints() {
+        isLoadingRawPoints = true
+        let dates = touchedDates(start: rangeStart, end: rangeEnd)
+        Task {
+            let points = await Task.detached {
+                dates.flatMap { RawLocationStore.shared.loadAllDevicesLocations(for: $0) }
+                    .sorted { $0.timestamp < $1.timestamp }
+            }.value
+            await MainActor.run {
+                rawPoints = points
+                isLoadingRawPoints = false
+            }
+        }
+    }
+
+    private func previousItemEnd(defaultingTo fallback: Date) -> Date {
+        let id = transport.id
+        let transportStart = transport.startTime
+        let transportDescriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate { $0.recordID != id && $0.endTime <= transportStart && $0.statusRaw != "ignored" },
+            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+        )
+        let footprintDescriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate { $0.endTime <= transportStart && $0.statusValue != "ignored" },
+            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+        )
+        return [
+            (try? modelContext.fetch(transportDescriptor).first?.endTime),
+            (try? modelContext.fetch(footprintDescriptor).first?.endTime),
+            fallback
+        ].compactMap { $0 }.max() ?? fallback
+    }
+
+    private func nextItemStart(defaultingTo fallback: Date) -> Date {
+        let id = transport.id
+        let transportEnd = transport.endTime
+        let transportDescriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate { $0.recordID != id && $0.startTime >= transportEnd && $0.statusRaw != "ignored" },
+            sortBy: [SortDescriptor(\.startTime)]
+        )
+        let footprintDescriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate { $0.startTime >= transportEnd && $0.statusValue != "ignored" },
+            sortBy: [SortDescriptor(\.startTime)]
+        )
+        return [
+            (try? modelContext.fetch(transportDescriptor).first?.startTime),
+            (try? modelContext.fetch(footprintDescriptor).first?.startTime),
+            fallback
+        ].compactMap { $0 }.min() ?? fallback
+    }
+
+    private func saveAdjustment() {
+        guard let record = findRecord() else { dismiss(); return }
+        let start = roundedToMinute(draftStart)
+        let end = roundedToMinute(max(draftEnd, start.addingTimeInterval(minimumDuration)))
+        guard minuteKey(record.startTime) != minuteKey(start) || minuteKey(record.endTime) != minuteKey(end) else {
+            dismiss()
+            return
+        }
+        let oldStart = record.startTime
+        let oldEnd = record.endTime
+        record.startTime = start
+        record.endTime = end
+        record.day = Calendar.current.startOfDay(for: start)
+        refreshMetrics(record)
+        let adjacentDates = adjustAdjacentItems(
+            oldStart: oldStart,
+            oldEnd: oldEnd,
+            newStart: start,
+            newEnd: end,
+            didChangeStart: minuteKey(oldStart) != minuteKey(start),
+            didChangeEnd: minuteKey(oldEnd) != minuteKey(end)
+        )
+        try? modelContext.save()
+        invalidateCaches(oldStart: oldStart, oldEnd: oldEnd, newStart: start, newEnd: end, additionalDates: adjacentDates)
+        onSave(start, end)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        dismiss()
+    }
+
+    private func findRecord() -> TransportRecord? {
+        let id = transport.id
+        let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == id })
+        return try? modelContext.fetch(descriptor).first
+    }
+
+    private func refreshMetrics(_ record: TransportRecord) {
+        if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData) {
+            let filtered = decoded.filter { point in
+                guard let timestamp = point.timestamp else { return point.isSyntheticPadding == true }
+                return timestamp >= record.startTime && timestamp <= record.endTime
+            }
+            if !filtered.isEmpty, let data = try? JSONEncoder().encode(filtered) {
+                record.pointsData = data
+                record.distance = TimelineBuilder.calculatePathDistance(filtered)
+            }
+        }
+        record.averageSpeed = record.distance / record.endTime.timeIntervalSince(record.startTime)
+    }
+
+    /// Keep a connected timeline connected when the edited transport originally
+    /// touched its neighboring item (within the configured 20-minute threshold).
+    /// Items separated by a larger gap are intentionally left untouched.
+    private func adjustAdjacentItems(
+        oldStart: Date,
+        oldEnd: Date,
+        newStart: Date,
+        newEnd: Date,
+        didChangeStart: Bool,
+        didChangeEnd: Bool
+    ) -> Set<Date> {
+        var affectedDates: Set<Date> = []
+        let threshold = AppConfig.shared.transportAlignmentThreshold
+
+        if didChangeStart, let previous = nearestPreviousItem(near: oldStart, threshold: threshold) {
+            affectedDates.formUnion(updateEnd(of: previous, to: newStart))
+        }
+        if didChangeEnd, let next = nearestNextItem(near: oldEnd, threshold: threshold) {
+            affectedDates.formUnion(updateStart(of: next, to: newEnd))
+        }
+        return affectedDates
+    }
+
+    private enum AdjacentItem {
+        case footprint(Footprint)
+        case transport(TransportRecord)
+
+        var startTime: Date {
+            switch self {
+            case .footprint(let record): record.startTime
+            case .transport(let record): record.startTime
+            }
+        }
+
+        var endTime: Date {
+            switch self {
+            case .footprint(let record): record.endTime
+            case .transport(let record): record.endTime
+            }
+        }
+    }
+
+    private func nearestPreviousItem(near date: Date, threshold: TimeInterval) -> AdjacentItem? {
+        let id = transport.id
+        let lower = date.addingTimeInterval(-threshold)
+        let transportDescriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate { $0.recordID != id && $0.endTime >= lower && $0.endTime <= date && $0.statusRaw != "ignored" },
+            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+        )
+        let footprintDescriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate { $0.endTime >= lower && $0.endTime <= date && $0.statusValue != "ignored" },
+            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+        )
+        let candidates = [
+            (try? modelContext.fetch(transportDescriptor).first).map(AdjacentItem.transport),
+            (try? modelContext.fetch(footprintDescriptor).first).map(AdjacentItem.footprint)
+        ].compactMap { $0 }
+        return candidates.max { $0.endTime < $1.endTime }
+    }
+
+    private func nearestNextItem(near date: Date, threshold: TimeInterval) -> AdjacentItem? {
+        let id = transport.id
+        let upper = date.addingTimeInterval(threshold)
+        let transportDescriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate { $0.recordID != id && $0.startTime >= date && $0.startTime <= upper && $0.statusRaw != "ignored" },
+            sortBy: [SortDescriptor(\.startTime)]
+        )
+        let footprintDescriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate { $0.startTime >= date && $0.startTime <= upper && $0.statusValue != "ignored" },
+            sortBy: [SortDescriptor(\.startTime)]
+        )
+        let candidates = [
+            (try? modelContext.fetch(transportDescriptor).first).map(AdjacentItem.transport),
+            (try? modelContext.fetch(footprintDescriptor).first).map(AdjacentItem.footprint)
+        ].compactMap { $0 }
+        return candidates.min { $0.startTime < $1.startTime }
+    }
+
+    private func updateEnd(of item: AdjacentItem, to end: Date) -> Set<Date> {
+        guard end > item.startTime.addingTimeInterval(minimumDuration(for: item)) else { return [] }
+        let oldEnd = item.endTime
+        switch item {
+        case .footprint(let record):
+            record.endTime = end
+            record.status = .manual
+        case .transport(let record):
+            record.endTime = end
+            refreshMetrics(record)
+        }
+        return touchedDates(start: min(oldEnd, end), end: max(oldEnd, end))
+    }
+
+    private func updateStart(of item: AdjacentItem, to start: Date) -> Set<Date> {
+        guard item.endTime > start.addingTimeInterval(minimumDuration(for: item)) else { return [] }
+        let oldStart = item.startTime
+        switch item {
+        case .footprint(let record):
+            record.startTime = start
+            record.date = Calendar.current.startOfDay(for: start)
+            record.status = .manual
+        case .transport(let record):
+            record.startTime = start
+            record.day = Calendar.current.startOfDay(for: start)
+            refreshMetrics(record)
+        }
+        return touchedDates(start: min(oldStart, start), end: max(oldStart, start))
+    }
+
+    private func minimumDuration(for item: AdjacentItem) -> TimeInterval {
+        switch item {
+        case .footprint:
+            max(60, ceil(AppConfig.shared.stayDurationThreshold / 60) * 60)
+        case .transport:
+            minimumDuration
+        }
+    }
+
+    private func invalidateCaches(oldStart: Date, oldEnd: Date, newStart: Date, newEnd: Date, additionalDates: Set<Date>) {
+        for date in touchedDates(start: oldStart, end: oldEnd)
+            .union(touchedDates(start: newStart, end: newEnd))
+            .union(additionalDates) {
+            TimelineBuilder.timelineCache.removeValue(forKey: date)
+        }
+        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil, userInfo: ["date": Calendar.current.startOfDay(for: newStart)])
+    }
+
+    private func touchedDates(start: Date, end: Date) -> Set<Date> {
+        let calendar = Calendar.current
+        var dates: Set<Date> = []
+        var cursor = calendar.startOfDay(for: start)
+        let last = calendar.startOfDay(for: max(start, end.addingTimeInterval(-0.001)))
+        while cursor <= last {
+            dates.insert(cursor)
+            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        return dates
+    }
+
+    private func roundedToMinute(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: (date.timeIntervalSince1970 / 60).rounded() * 60)
+    }
+
+    private func minuteKey(_ date: Date) -> Int {
+        Int((date.timeIntervalSince1970 / 60).rounded())
+    }
+
+    private func timeText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
     }
 }

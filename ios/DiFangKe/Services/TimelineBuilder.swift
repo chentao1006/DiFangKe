@@ -1410,6 +1410,28 @@ class PersistentTimelineBuilder {
         return bikeCount >= ebikeCount ? .bicycle : .ebike
     }
 
+    /// 获取近期最常用的道路交通方式，供没有明确传感器类型的路线做先验判断。
+    /// 步行和长途交通不参与道路交通偏好，避免把它们带入短途分类。
+    private static func getPreferredRoadTransportType(in context: ModelContext, excluding date: Date) -> TransportType? {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+        var descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.statusRaw != "ignored" && ($0.startTime < startOfDay || $0.startTime >= endOfDay)
+        }, sortBy: [SortDescriptor(\.startTime, order: .reverse)])
+        descriptor.fetchLimit = 300
+
+        let roadTypes: Set<TransportType> = [.bicycle, .ebike, .motorcycle, .bus, .car]
+        let records = (try? context.fetch(descriptor)) ?? []
+        var counts: [TransportType: Int] = [:]
+        for record in records {
+            let rawType = record.manualTypeRaw ?? record.typeRaw
+            guard let type = TransportType(rawValue: rawType), roadTypes.contains(type) else { continue }
+            counts[type, default: 0] += 1
+        }
+        return counts.max(by: { $0.value < $1.value })?.key
+    }
+
     private static func fetchDeletedTransportRanges(from start: Date, to end: Date, in context: ModelContext) -> [(start: Date, end: Date)] {
         let descriptor = FetchDescriptor<TransportManualSelection>(
             predicate: #Predicate<TransportManualSelection> {
@@ -1446,6 +1468,7 @@ class PersistentTimelineBuilder {
         
         let preferredAuto = getPreferredAutomotiveType(in: context, excluding: date)
         let preferredCycling = getPreferredCyclingType(in: context, excluding: date)
+        let preferredRoadTransport = getPreferredRoadTransportType(in: context, excluding: date)
         
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
         let isToday = calendar.isDateInToday(date)
@@ -1558,6 +1581,7 @@ class PersistentTimelineBuilder {
                     context: context,
                     preferredAuto: preferredAuto,
                     preferredCycling: preferredCycling,
+                    preferredTransport: preferredRoadTransport,
                     deletedTransportRanges: deletedTransportRanges
                 )
             }
@@ -1568,8 +1592,8 @@ class PersistentTimelineBuilder {
         // 5. 后置清理：合并可能因分片产生的小碎块，补齐微小缝隙
         await splitFootprintsByTransports(for: date, in: context)
         await mergeConsecutiveFootprints(for: date, in: context, allRawPoints: allRawPoints, threshold: AppConfig.shared.mergeDistanceThreshold)
-        await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
-        await fillGapsBetweenItems(for: date, in: context, allRawPoints: allRawPoints, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
+        await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredRoadTransport)
+        await fillGapsBetweenItems(for: date, in: context, allRawPoints: allRawPoints, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredRoadTransport)
         await snapTransportsToFootprints(for: date, in: context, allRawPoints: allRawPoints)
         try? context.save()
         // ----------------------------------------------------
@@ -1665,7 +1689,7 @@ class PersistentTimelineBuilder {
     }
 
     @MainActor
-    private static func mergeConsecutiveTransports(for date: Date, in context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle) async {
+    private static func mergeConsecutiveTransports(for date: Date, in context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle, preferredTransport: TransportType? = nil) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
@@ -1760,7 +1784,8 @@ class PersistentTimelineBuilder {
                         distanceMeters: current.distance,
                         pointCount: mergedPointCount,
                         preferredAutomotive: preferredAuto,
-                        preferredCycling: preferredCycling
+                        preferredCycling: preferredCycling,
+                        preferredTransport: preferredTransport
                     ).rawValue
                 }
                 
@@ -1783,7 +1808,7 @@ class PersistentTimelineBuilder {
                 // try? context.save()
                 
                 // 递归调用时必须透传偏好参数，否则会使用默认值导致类型“乱掉”
-                await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling)
+                await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredTransport)
                 return
             }
             i += 1
@@ -1791,7 +1816,7 @@ class PersistentTimelineBuilder {
     }
 
     @MainActor
-    private static func fillGapsBetweenItems(for date: Date, in context: ModelContext, allRawPoints: [CLLocation] = [], preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle) async {
+    private static func fillGapsBetweenItems(for date: Date, in context: ModelContext, allRawPoints: [CLLocation] = [], preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle, preferredTransport: TransportType? = nil) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
@@ -1967,7 +1992,8 @@ class PersistentTimelineBuilder {
                         distanceMeters: pathDist,
                         pointCount: pts.count,
                         preferredAutomotive: preferredAuto,
-                        preferredCycling: preferredCycling
+                        preferredCycling: preferredCycling,
+                        preferredTransport: preferredTransport
                     )
                     
                     let tp = TransportRecord(
@@ -2456,6 +2482,7 @@ class PersistentTimelineBuilder {
         context: ModelContext,
         preferredAuto: TransportType = .car,
         preferredCycling: TransportType = .bicycle,
+        preferredTransport: TransportType? = nil,
         deletedTransportRanges: [(start: Date, end: Date)] = []
     ) async {
         guard points.count >= 2 else { return }
@@ -2702,7 +2729,8 @@ class PersistentTimelineBuilder {
                         distanceMeters: pathDist,
                         pointCount: augmentedPoints.count,
                         preferredAutomotive: preferredAuto,
-                        preferredCycling: preferredCycling
+                        preferredCycling: preferredCycling,
+                        preferredTransport: preferredTransport
                     )
                     
                     let tp = TransportRecord(
@@ -2763,21 +2791,74 @@ class PersistentTimelineBuilder {
 
         let startDiff = abs(first.startTime.timeIntervalSince(second.startTime))
         let endDiff = abs(first.endTime.timeIntervalSince(second.endTime))
-        guard startDiff <= 15 * 60, endDiff <= 15 * 60,
+        let intervalGap: TimeInterval = {
+            if first.endTime <= second.startTime {
+                return second.startTime.timeIntervalSince(first.endTime)
+            }
+            if second.endTime <= first.startTime {
+                return first.startTime.timeIntervalSince(second.endTime)
+            }
+            return 0
+        }()
+
+        // processPoints 和 gap-fill 可能把同一批原始点切成两个窗口：
+        // 例如 09:58–10:03 与 10:03–10:09。重新打开 App 后，GPS 点集还可能
+        // 因裁剪策略变化而不同，所以不能要求路线点互相覆盖；时间窗口和距离
+        // 才是这段原始行程的持久化所有权。
+        if intervalGap <= 10 * 60,
+           first.distance > 0, second.distance > 0,
+           abs(first.distance - second.distance) <= max(500, max(first.distance, second.distance) * 0.5),
+           abs(first.endTime.timeIntervalSince(first.startTime) - second.endTime.timeIntervalSince(second.startTime)) <= 10 * 60 {
+            return true
+        }
+
+        guard startDiff <= 20 * 60, endDiff <= 20 * 60,
               first.distance > 0, second.distance > 0,
-              abs(first.distance - second.distance) <= max(150, max(first.distance, second.distance) * 0.2),
+              abs(first.distance - second.distance) <= max(300, max(first.distance, second.distance) * 0.25),
               let firstPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: first.pointsData),
               let secondPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: second.pointsData),
-              let firstStart = firstPoints.first, let firstEnd = firstPoints.last,
-              let secondStart = secondPoints.first, let secondEnd = secondPoints.last else {
+              firstPoints.count >= 2, secondPoints.count >= 2 else {
             return false
         }
 
-        let startDistance = CLLocation(latitude: firstStart.lat, longitude: firstStart.lon)
-            .distance(from: CLLocation(latitude: secondStart.lat, longitude: secondStart.lon))
-        let endDistance = CLLocation(latitude: firstEnd.lat, longitude: firstEnd.lon)
-            .distance(from: CLLocation(latitude: secondEnd.lat, longitude: secondEnd.lon))
-        return startDistance <= 250 && endDistance <= 250
+        // 同一段路线可能因为 Health/Motion 的结果变化，被拆成“步行 + 汽车”
+        // 两条相邻记录。仅比较首尾点不可靠：每次识别都会裁掉不同的 GPS 头尾。
+        // 在插入阶段比较整条路线，才能从源头拦住第二条记录。
+        let firstRoute = firstPoints.map { CLLocation(latitude: $0.lat, longitude: $0.lon) }
+        let secondRoute = secondPoints.map { CLLocation(latitude: $0.lat, longitude: $0.lon) }
+
+        func distanceToRoute(_ point: CLLocation, _ route: [CLLocation]) -> CLLocationDistance {
+            guard route.count >= 2 else { return .greatestFiniteMagnitude }
+            var best = CLLocationDistance.greatestFiniteMagnitude
+            for index in 0..<(route.count - 1) {
+                let start = route[index]
+                let end = route[index + 1]
+                let dx = end.coordinate.longitude - start.coordinate.longitude
+                let dy = end.coordinate.latitude - start.coordinate.latitude
+                let lengthSquared = dx * dx + dy * dy
+                let ratio: Double
+                if lengthSquared == 0 {
+                    ratio = 0
+                } else {
+                    ratio = max(0, min(1, ((point.coordinate.longitude - start.coordinate.longitude) * dx
+                        + (point.coordinate.latitude - start.coordinate.latitude) * dy) / lengthSquared))
+                }
+                let projected = CLLocation(latitude: start.coordinate.latitude + (end.coordinate.latitude - start.coordinate.latitude) * ratio,
+                                           longitude: start.coordinate.longitude + (end.coordinate.longitude - start.coordinate.longitude) * ratio)
+                best = min(best, point.distance(from: projected))
+            }
+            return best
+        }
+
+        func routeCoverage(_ route: [CLLocation], by otherRoute: [CLLocation]) -> Double {
+            let tolerance = max(300, min(first.distance, second.distance) * 0.15)
+            let covered = route.filter { distanceToRoute($0, otherRoute) <= tolerance }.count
+            return Double(covered) / Double(route.count)
+        }
+
+        let forwardCoverage = routeCoverage(firstRoute, by: secondRoute)
+        let reverseCoverage = routeCoverage(secondRoute, by: firstRoute)
+        return min(forwardCoverage, reverseCoverage) >= 0.7
     }
     
     private static func departureTailSplitIndex(points: [CLLocation], clusterStartIndex: Int, clusterEndIndex: Int, clusterPoints: [CLLocation]) -> Int? {

@@ -1255,6 +1255,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     /// 强制激活高精度模式（通常由计步器、运动传感器或网络变化触发，早于 GPS 位移）
     private func forceHighAccuracyBoost() {
+        // 省电模式下，运动/围栏/网络回调只能唤醒定位，不能偷偷切回高精度。
+        if currentLocationAccuracyMode == .powerSaving {
+            applyPowerSavingLocationSettings()
+            locationManager.requestLocation()
+            return
+        }
+
         print("🚀 Status change detected! Forcing high accuracy boost...")
         
         // 0. 设置 10 分钟出门保护期，覆盖大多数步行出门的起步阶段，防止过早降频造成直线轨迹
@@ -1275,6 +1282,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 4. 尝试重启持续更新，确保背景任务刷新
         locationManager.stopUpdatingLocation()
         locationManager.startUpdatingLocation()
+    }
+
+    private var currentLocationAccuracyMode: LocationAccuracyMode {
+        let rawValue = UserDefaults.standard.string(forKey: LocationAccuracyMode.userDefaultsKey)
+            ?? LocationAccuracyMode.automatic.rawValue
+        return LocationAccuracyMode(rawValue: rawValue) ?? .automatic
+    }
+
+    private func applyPowerSavingLocationSettings() {
+        locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        locationManager.distanceFilter = 50.0
+        locationManager.activityType = .other
     }
     
     private func setupNetworkMonitoring() {
@@ -1390,9 +1409,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let gapDescription = lastUpdateGap.isFinite ? "\(Int(lastUpdateGap))s" : "unknown duration"
         print("[LocationManager] 🧭 Long stationary stay has no fresh location for \(gapDescription). Requesting departure probe…")
         ensureSignificantMonitoringActive()
-        locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        locationManager.distanceFilter = 5.0
-        locationManager.activityType = .fitness
+        if currentLocationAccuracyMode == .powerSaving {
+            applyPowerSavingLocationSettings()
+        } else {
+            locationManager.desiredAccuracy = kCLLocationAccuracyBest
+            locationManager.distanceFilter = 5.0
+            locationManager.activityType = .fitness
+        }
         locationManager.requestLocation()
         locationManager.startUpdatingLocation()
     }
@@ -1624,6 +1647,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             locationManager.startMonitoringSignificantLocationChanges()
         }
         isTracking = true
+
+        // CLLocationManager 的参数不会跨进程可靠保留；每次恢复记录都重新应用用户选择，
+        // 防止应用重启或系统唤醒后先以初始化时的高精度运行。
+        applyLocationAccuracyMode()
         
         // On app open, ask for a fresh fix, but do not let repeated lifecycle hooks
         // keep waking the GPS chip and heating the device.
@@ -2149,12 +2176,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
                 updateRegionMonitoring(isStationary: true)
             } else if isStationary {
-                // 真正停留了：进入节能模式
-                if manager.desiredAccuracy != kCLLocationAccuracyBest || manager.distanceFilter != 5.0 || manager.activityType != .fitness {
-                    manager.desiredAccuracy = kCLLocationAccuracyBest
-                    // 停留时仍保持 5m 标准更新，确保步行离开时一开始就有点，而不是几百米后才开始。
-                    manager.distanceFilter = 5.0
-                    manager.activityType = .fitness // ⚠️ 不用 .other — iOS 会极度压缩更新频率
+                // 自动模式确认停留后不应继续占用导航级 GPS。围栏、运动传感器和
+                // 后台探测会在离开时调用 forceHighAccuracyBoost，立即恢复高精度。
+                if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters || manager.distanceFilter != 50.0 || manager.activityType != .fitness {
+                    manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+                    manager.distanceFilter = 50.0
+                    manager.activityType = .fitness
                 }
                 updateRegionMonitoring(isStationary: true)
             } else {
@@ -2533,9 +2560,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             locationManager.distanceFilter = 10.0
             locationManager.activityType = .fitness
         case .powerSaving:
-            locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-            locationManager.distanceFilter = 50.0
-            locationManager.activityType = .other
+            applyPowerSavingLocationSettings()
         }
         print("[LocationManager] Applied LocationAccuracyMode: \(mode.rawValue)")
     }
