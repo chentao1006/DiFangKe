@@ -150,7 +150,7 @@ struct FootprintModalView: View {
                         }
                     } label: {
                         Image(systemName: (footprint.isHighlight ?? false) ? "star.fill" : "star")
-                            .foregroundColor((footprint.isHighlight ?? false) ? Color.dfkHighlight : .secondary)
+                            .foregroundColor((footprint.isHighlight ?? false) ? Color.dfkHighlight : Color.dfkMainText)
                             .font(.system(size: 18, weight: .semibold))
                     }
                 }
@@ -160,7 +160,7 @@ struct FootprintModalView: View {
                     } label: {
                         Image(systemName: "square.and.arrow.up")
                             .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.primary)
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -170,9 +170,7 @@ struct FootprintModalView: View {
                         onDismiss?(hasChanged)
                         if !isInline { dismiss() }
                     } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
                     }
                 }
             }

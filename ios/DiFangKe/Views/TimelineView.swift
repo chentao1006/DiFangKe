@@ -386,6 +386,7 @@ private struct ContinuousTimelineView: View {
     private var timelineSheet: some View {
         timelineSidebarContent
             .presentationDetents([.height(88), .medium, .large], selection: $timelineDetent)
+            .presentationBackground(.clear)
             .presentationDragIndicator(.visible)
             .presentationContentInteraction(selectedFootprint != nil ? .resizes : .scrolls)
             .interactiveDismissDisabled()
@@ -2179,18 +2180,13 @@ private struct ContinuousTimelineSheet: View {
                     } // GeometryReader
                 } // ScrollViewReader
             } // NavigationStack
-            .opacity(selectedFutureTripDetail != nil ? 0 : 1)
-            .animation(.default, value: selectedFutureTripDetail == nil)
-            .allowsHitTesting(selectedFutureTripDetail == nil)
+            .opacity(isInitialTimelineLoading ? 0 : 1)
+            .allowsHitTesting(!isInitialTimelineLoading)
 
             if isInitialTimelineLoading {
                 initialTimelineLoadingOverlay
             }
 
-            if let trip = selectedFutureTripDetail {
-                buildFutureTripDetailView(for: trip)
-            }
-            
             resettingIndicator
         } // ZStack
         .fullScreenCover(item: Binding(
@@ -2203,6 +2199,10 @@ private struct ContinuousTimelineSheet: View {
         }
         .sheet(item: $selectedFootprint) { footprint in
             buildFootprintModalView(for: footprint)
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(item: $selectedFutureTripDetail) { trip in
+            buildFutureTripDetailView(for: trip)
                 .presentationDetents([.medium, .large])
         }
     } // body
@@ -2417,7 +2417,6 @@ private struct ContinuousTimelineSheet: View {
         ZStack {
             Rectangle()
                 .fill(.ultraThinMaterial)
-                .ignoresSafeArea()
 
             ProgressView()
                 .controlSize(.large)
@@ -2443,8 +2442,8 @@ private struct ContinuousTimelineSheet: View {
     private func buildFutureTripDetailView(for trip: FutureTrip) -> some View {
         FutureTripDetailView(
             trip: trip,
-            isInline: true,
-            presentationDetent: $timelineDetent,
+            isInline: false,
+            presentationDetent: .constant(.medium),
             showDelayOptionsOnAppear: pendingFutureTripDelayOptionsID == trip.id,
             onDelayOptionsPresented: {
                 pendingFutureTripDelayOptionsID = nil
@@ -2454,16 +2453,13 @@ private struct ContinuousTimelineSheet: View {
                 pendingFutureTripAbandonAlertID = nil
             },
             onDismiss: {
-                withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
-                    selectedFutureTripDetail = nil
-                }
+                selectedFutureTripDetail = nil
             },
             onEdit: {
                 selectedFutureTrip = trip
             }
         )
         .environment(locationManager)
-        .transition(.move(edge: .bottom))
     }
 
     @ToolbarContentBuilder

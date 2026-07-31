@@ -223,6 +223,7 @@ struct FutureTripDetailView: View {
     @State private var showingAbandonAlert = false
     @State private var showingNavigationOptions = false
     @State private var showingDelayOptions = false
+    @State private var sharePayload: DFKShareCardPayload?
     
     private var isSideBySide: Bool {
         horizontalSizeClass == .regular || verticalSizeClass == .compact
@@ -374,6 +375,16 @@ struct FutureTripDetailView: View {
                 
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
+                        prepareTripShare()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
                         onDismiss?()
                         if !isInline { dismiss() }
                     } label: {
@@ -401,6 +412,9 @@ struct FutureTripDetailView: View {
                     }
                 }
                 Button("取消", role: .cancel) { }
+            }
+            .sheet(item: $sharePayload) { payload in
+                DFKShareCardPreviewView(payload: payload)
             }
             .confirmationDialog("选择导航应用", isPresented: $showingNavigationOptions, titleVisibility: .visible) {
                 Button("苹果地图") {
@@ -457,6 +471,41 @@ struct FutureTripDetailView: View {
             }
             .onChange(of: showAbandonAlertOnAppear) { _, _ in
                 presentAbandonAlertIfNeeded()
+            }
+        }
+    }
+
+    private func prepareTripShare() {
+        let rangeText: String
+        if trip.hasPlanDate {
+            rangeText = trip.hasArrivalTime
+                ? trip.arrivalDate.formatted(.dateTime.year().month().day().hour().minute())
+                : trip.arrivalDate.formatted(.dateTime.year().month().day())
+        } else {
+            rangeText = "行程计划"
+        }
+
+        let coordinates = [trip.coordinate]
+        let loadingPayload = DFKShareCardFactory.loadingPayload(kind: .plan, rangeText: rangeText, coordinates: coordinates)
+        sharePayload = loadingPayload
+        let payloadID = loadingPayload.id
+        var payload = DFKShareCardFactory.planPayload(
+            title: "计划行程",
+            rangeText: rangeText,
+            trips: [trip],
+            activities: allActivities
+        )
+        payload.id = payloadID
+
+        DFKShareImageLoader.loadPlanMapImages(plans: payload.plans) { mapImages in
+            DFKShareImageLoader.loadBackgroundMapImages(coordinates: coordinates) { backgroundImages in
+                payload.backgroundMapImage = backgroundImages.light ?? backgroundImages.dark
+                payload.backgroundMapLightImage = backgroundImages.light
+                payload.backgroundMapDarkImage = backgroundImages.dark
+                payload.contentMapImage = mapImages.light ?? mapImages.dark
+                payload.contentMapLightImage = mapImages.light
+                payload.contentMapDarkImage = mapImages.dark
+                sharePayload = payload
             }
         }
     }

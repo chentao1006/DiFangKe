@@ -1432,6 +1432,73 @@ class PersistentTimelineBuilder {
         return counts.max(by: { $0.value < $1.value })?.key
     }
 
+    /// 修正历史上已经落库、但物理上不可能是步行的自动交通记录。
+    /// 手动选择过的记录属于用户事实，绝不能被自动纠正覆盖。
+    private static func repairImpossibleAutomaticTransportTypes(
+        _ transports: [TransportRecord],
+        in context: ModelContext,
+        preferredAuto: TransportType,
+        preferredCycling: TransportType,
+        preferredTransport: TransportType?
+    ) -> Bool {
+        var changed = false
+        for transport in transports {
+            guard transport.manualTypeRaw == nil,
+                  transport.typeRaw == TransportType.slow.rawValue || transport.typeRaw == TransportType.running.rawValue else {
+                continue
+            }
+
+            let hasNearbyNonWalkingTransport = transports.contains { other in
+                guard other.recordID != transport.recordID,
+                      other.manualTypeRaw == nil,
+                      other.typeRaw != TransportType.slow.rawValue,
+                      other.typeRaw != TransportType.running.rawValue,
+                      other.distance > 0 else { return false }
+                let intervalGap: TimeInterval
+                if transport.endTime <= other.startTime {
+                    intervalGap = other.startTime.timeIntervalSince(transport.endTime)
+                } else if other.endTime <= transport.startTime {
+                    intervalGap = transport.startTime.timeIntervalSince(other.endTime)
+                } else {
+                    intervalGap = 0
+                }
+                return intervalGap <= 10 * 60
+                    && abs(transport.distance - other.distance) <= max(500, max(transport.distance, other.distance) * 0.5)
+            }
+
+            if hasNearbyNonWalkingTransport {
+                context.delete(transport)
+                changed = true
+                continue
+            }
+
+            let duration = transport.endTime.timeIntervalSince(transport.startTime)
+            guard duration > 0, transport.distance >= 1_000 else { continue }
+            let kmh = transport.distance / duration * 3.6
+            guard kmh >= 15 else { continue }
+
+            let inferred = TransportType.from(
+                speed: transport.distance / duration,
+                duration: duration,
+                distanceMeters: transport.distance,
+                pointCount: 2,
+                preferredAutomotive: preferredAuto,
+                preferredCycling: preferredCycling,
+                preferredTransport: preferredTransport
+            )
+            let corrected: TransportType
+            if inferred == .slow || inferred == .running {
+                corrected = preferredTransport ?? preferredAuto
+            } else {
+                corrected = inferred
+            }
+            guard corrected != .slow, corrected != .running else { continue }
+            transport.typeRaw = corrected.rawValue
+            changed = true
+        }
+        return changed
+    }
+
     private static func fetchDeletedTransportRanges(from start: Date, to end: Date, in context: ModelContext) -> [(start: Date, end: Date)] {
         let descriptor = FetchDescriptor<TransportManualSelection>(
             predicate: #Predicate<TransportManualSelection> {
@@ -1489,7 +1556,18 @@ class PersistentTimelineBuilder {
         let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
             $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
-        let allTps = (try? context.fetch(tpDesc)) ?? []
+        var allTps = (try? context.fetch(tpDesc)) ?? []
+
+        if repairImpossibleAutomaticTransportTypes(
+            allTps,
+            in: context,
+            preferredAuto: preferredAuto,
+            preferredCycling: preferredCycling,
+            preferredTransport: preferredRoadTransport
+        ) {
+            try? context.save()
+            allTps = (try? context.fetch(tpDesc)) ?? []
+        }
         
         // 合并并排序所有记录的时间区间
         struct TimeRange { let start: Date; let end: Date }
@@ -1560,7 +1638,16 @@ class PersistentTimelineBuilder {
                 }
                 return false
             }
-            return !overlapsIgnored && !overlapsDeletedTransportOverride(start: gap.start, end: gap.end, deletedRanges: deletedTransportRanges)
+            // 已有交通两端的原始点不能再次交给 gap/processPoints 推断。
+            // 否则同一路线会从已有记录的另一侧重新切出第二条交通。
+            let touchesExistingTransport = allTps.contains { transport in
+                let beforeExisting = abs(gap.end.timeIntervalSince(transport.startTime)) <= 10 * 60
+                let afterExisting = abs(gap.start.timeIntervalSince(transport.endTime)) <= 10 * 60
+                return beforeExisting || afterExisting
+            }
+            return !overlapsIgnored
+                && !touchesExistingTransport
+                && !overlapsDeletedTransportOverride(start: gap.start, end: gap.end, deletedRanges: deletedTransportRanges)
         }
 
         for gap in filteredGaps {
@@ -2807,8 +2894,7 @@ class PersistentTimelineBuilder {
         // 才是这段原始行程的持久化所有权。
         if intervalGap <= 10 * 60,
            first.distance > 0, second.distance > 0,
-           abs(first.distance - second.distance) <= max(500, max(first.distance, second.distance) * 0.5),
-           abs(first.endTime.timeIntervalSince(first.startTime) - second.endTime.timeIntervalSince(second.startTime)) <= 10 * 60 {
+           abs(first.distance - second.distance) <= max(500, max(first.distance, second.distance) * 0.5) {
             return true
         }
 
