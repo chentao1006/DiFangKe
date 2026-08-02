@@ -1529,7 +1529,10 @@ class PersistentTimelineBuilder {
         let startOfDay = calendar.startOfDay(for: date)
         
         // 防止重入
-        guard !syncingDates.contains(startOfDay) else { return }
+        guard !syncingDates.contains(startOfDay) else {
+            print("[TimelineAuto] skip \(startOfDay): sync already in progress")
+            return
+        }
         syncingDates.insert(startOfDay)
         defer { syncingDates.remove(startOfDay) }
 
@@ -1590,6 +1593,7 @@ class PersistentTimelineBuilder {
         let allRawPoints = await Task.detached {
             RawLocationStore.shared.loadAllDevicesLocations(for: date)
         }.value
+        print("[TimelineAuto] \(startOfDay): raw=\(allRawPoints.count), footprints=\(allFps.count), transports=\(allTps.count)")
         
         // 3. 核心改进：寻找未覆盖的缺口并填补，而不仅仅是追加
         var gaps: [TimeRange] = []
@@ -1648,9 +1652,13 @@ class PersistentTimelineBuilder {
                 }
                 return false
             }
-            // 已有交通两端的原始点不能再次交给 gap/processPoints 推断。
+            // 已有交通两端的很短边角不能再次交给 gap/processPoints 推断，
             // 否则同一路线会从已有记录的另一侧重新切出第二条交通。
-            let touchesExistingTransport = allTps.contains { transport in
+            // 不能仅因缺口的一端靠近交通就丢弃整个后续缺口：例如 10:11
+            // 的交通结束、10:22 开始的缺口会一直延续到傍晚；旧逻辑会把
+            // 数小时的停留和返程一并跳过，只有手动重生成（先删交通）才出现。
+            let isShortEndpointSliver = gap.end.timeIntervalSince(gap.start) <= 10 * 60
+            let touchesExistingTransport = isShortEndpointSliver && allTps.contains { transport in
                 let beforeExisting = abs(gap.end.timeIntervalSince(transport.startTime)) <= 10 * 60
                 let afterExisting = abs(gap.start.timeIntervalSince(transport.endTime)) <= 10 * 60
                 return beforeExisting || afterExisting
@@ -1659,6 +1667,8 @@ class PersistentTimelineBuilder {
                 && !touchesExistingTransport
                 && !overlapsDeletedTransportOverride(start: gap.start, end: gap.end, deletedRanges: deletedTransportRanges)
         }
+
+        print("[TimelineAuto] \(startOfDay): gaps=\(gaps.count), eligible=\(filteredGaps.count), ignoredFootprints=\(ignoredFps.count), deletedTransportRanges=\(deletedTransportRanges.count)")
 
         for gap in filteredGaps {
             if Task.isCancelled { break }

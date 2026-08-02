@@ -240,6 +240,7 @@ struct DiFangKeApp: App {
                                     
                                     setupDefaultData(context: context)
                                     WidgetDataSyncManager.shared.updateContainer(container)
+                                    WatchSyncManager.shared.start(context: context)
                                     Task {
                                         try? await Task.sleep(nanoseconds: 8_000_000_000)
                                         await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded()
@@ -247,6 +248,14 @@ struct DiFangKeApp: App {
                                 }
                                 .transition(.opacity)
                         }
+                    }
+                    .task {
+                        // Tracking can be active while the splash or onboarding
+                        // is still on screen.  Bind the data context here rather
+                        // than waiting for TimelineView.onAppear, otherwise the
+                        // automatic timeline recovery never starts in that path.
+                        print("[TimelineAuto] binding model context from app root")
+                        locationManager.modelContext = container.mainContext
                     }
                     .modelContainer(container)
                 } else {
@@ -272,6 +281,7 @@ struct DiFangKeApp: App {
                             try? await Task.sleep(nanoseconds: 3_000_000_000)
                             guard !Task.isCancelled else { return }
                             await WidgetDataSyncManager.shared.syncTodayOnly()
+                            WatchSyncManager.shared.syncSnapshot()
                         }
                     }
                 } else if newPhase == .background {
@@ -289,6 +299,7 @@ struct DiFangKeApp: App {
                             
                             await WidgetDataSyncManager.shared.syncTodayOnly()
                             await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded(force: true)
+                            WatchSyncManager.shared.syncSnapshot()
                             
                             if bgTask != .invalid {
                                 UIApplication.shared.endBackgroundTask(bgTask)

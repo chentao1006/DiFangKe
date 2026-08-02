@@ -172,7 +172,7 @@ final class RawLocationStore {
     }
     
     /// 保存单个位置点到当日文件
-    func saveLocation(_ location: CLLocation) {
+    func saveLocation(_ location: CLLocation, completion: (() -> Void)? = nil) {
         saveQueue.async { [weak self] in
             guard let self = self else { return }
             let url = self.getFileURL(for: location.timestamp)
@@ -188,6 +188,14 @@ final class RawLocationStore {
                 } else {
                     try? data.write(to: url)
                 }
+            }
+
+            // Timeline reconstruction reads this file.  Run dependent work only
+            // after the serial write has completed, otherwise a departure or
+            // arrival point can be absent from the automatic pass and will only
+            // appear when the user manually regenerates later.
+            if let completion {
+                DispatchQueue.main.async(execute: completion)
             }
         }
     }
@@ -1056,6 +1064,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             if modelContext != nil {
                 Task {
                     await loadPointsFromStore() // 获得数据库后，后台加载点并同步最后处理时间
+                    // App 被重新启动时，原始轨迹已经在磁盘中，但以前刻意不
+                    // 回补时间线，导致离开后的足迹/交通永远只能靠手动重生成。
+                    // syncDay 只填未覆盖缺口，并有交通去重保护，因此可以安全
+                    // 地补齐当天尚未结算的停留和行程。
+                    await triggerTimelineSift()
                 }
                 checkLiveActivity()
             }
@@ -1470,7 +1483,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     func triggerTimelineSift() async {
         guard let context = modelContext else { return }
-        await PersistentTimelineBuilder.syncDay(date: Date(), in: context, runConsolidation: false)
+        print("[TimelineAuto] start automatic sync for today")
+        // Keep automatic processing on the same complete two-pass path as the
+        // user's "重新生成本日数据" action.  The light first pass can create or
+        // merge an intermediate segment, and only the consolidation follow-up
+        // exposes the remaining gap as the final footprint/transport pair.
+        await PersistentTimelineBuilder.syncDay(date: Date(), in: context)
+        print("[TimelineAuto] finished automatic sync for today")
         NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
         // syncDay may have just persisted transport records.  Refresh after the
         // write so the notification does not retain its earlier 0m snapshot.
@@ -2118,9 +2137,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
         
-        // --- Trigger Sift on location change ---
-        triggerTimelineSiftDebounced()
-        
         // 0. 智能节能：根据速度和停留状态动态调整定位参数
         let place = matchedPlace
         let speed = max(0, location.speed)
@@ -2246,7 +2262,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
         
         // 1. 永久保存原始点（RawLocationStore 内部已实现异步队列写入，不会阻塞主线程）
-        RawLocationStore.shared.saveLocation(location)
+        RawLocationStore.shared.saveLocation(location) { [weak self] in
+            // syncDay loads from RawLocationStore, so triggering it before this
+            // write completes misses exactly the newly received transition point.
+            self?.triggerTimelineSiftDebounced()
+        }
         scheduleLiveFootprintMerge()
         // 同步最后位置给小组件
         let sharedDefaults = widgetSharedDefaults()
@@ -4232,6 +4252,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 analyzeOngoingStay(at: loc)
             }
         } else if let fp = footprint {
+            // A non-manual activity (or no activity at all) belongs to the
+            // previous automatic place match.  Once the user picks a different
+            // place, resolve it again using the new place's history.  A manual,
+            // non-empty activity is an explicit user choice and must survive a
+            // place correction.
+            let shouldRematchActivity = fp.activityTypeValue == nil || fp.status != .manual
+
             if !isDraft {
                 if let context = modelContext {
                     // 确保足迹已受管理 (针对 GAP_STAY 产生的幻影足迹)
@@ -4247,6 +4274,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             fp.address = suggestion.name
             fp.placeID = targetPlace.placeID
             fp.isAddressEditedByHand = true
+
+            if shouldRematchActivity, let context = modelContext {
+                fp.activityTypeValue = findFrequentActivityType(
+                    for: targetPlace.placeID,
+                    at: fp.startTime,
+                    context: context
+                )
+            }
             
             if !isDraft {
                 if let context = modelContext {

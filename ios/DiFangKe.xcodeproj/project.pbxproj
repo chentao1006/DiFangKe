@@ -9,10 +9,13 @@
 /* Begin PBXBuildFile section */
 		06A904412C0FBE70CFD67936 /* HistoryListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C2C5158B30717A490546E3 /* HistoryListView.swift */; };
 		134DBA94706ABB8ACD8C6EF5 /* ExportManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FAF51D5207C3CFEFBEB0667 /* ExportManager.swift */; };
+		167F3466A9C607E0782581EB /* DiFangKeWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */; };
 		19D19D677339112CC0F14ED5 /* Place.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7338D01A9D36898197763A48 /* Place.swift */; };
 		32BD3192C18CDD34C8B5EB24 /* TimelineEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */; };
+		441650B9A8F33BB36DD1822C /* WatchHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6B399C338BB4612145C364B /* WatchHomeView.swift */; };
 		4A0BE9B15A8560F2969D5C2D /* Secrets.plist in Resources */ = {isa = PBXBuildFile; fileRef = AA55D128BD63CB08D5888227 /* Secrets.plist */; };
 		51C5B1CA5308C8B8E9EEDFBC /* FootprintDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DA88C94F7EAC66D28F00A84 /* FootprintDetailView.swift */; };
+		537DA85FA44FBE884BDF342B /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C0E6E94F0AB674372B9577B9 /* Foundation.framework */; };
 		6C8D388180D8BFA81BBF320B /* RecycleBinView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7537D23096CA61CCC79B0405 /* RecycleBinView.swift */; };
 		71F2E5B397A918D6AD287D07 /* OpenAIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */; };
 		7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FECD1239FE04DF703FFB1E6 /* DataManagerView.swift */; };
@@ -30,6 +33,7 @@
 		93AB9A1A347A786C40F60D26 /* MapPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D750760587987B7CCDAB5FF /* MapPickerView.swift */; };
 		988AA12CFD19A21CA1592A1D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A099643BEA06307F4508FC0 /* SettingsView.swift */; };
 		9F3F925B82CF4EEDED4E3AFF /* AddPlaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35E218304D15330402004958 /* AddPlaceSheet.swift */; };
+		A037B11166D8EC00960EEADB /* WatchSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E022A8CC3D9B5C3F524EC0E6 /* WatchSyncManager.swift */; };
 		AA4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */; };
 		AC19D6437C18A309FE001E29 /* Views/TimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */; };
 		B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */; };
@@ -76,12 +80,21 @@
 		CDA3376C04480D9A7C70C2BC /* PlacePickerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F44E7F2A482D33533D342882 /* PlacePickerViewModel.swift */; };
 		D41ABCD1F214C4E81A5F8C0C /* PlacesManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97D09C072C5681826463BD99 /* PlacesManagerView.swift */; };
 		D452A546B9150F52A9DA068F /* LocationAccuracyMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CC7EC170C689C92143E3FF0 /* LocationAccuracyMode.swift */; };
+		D9F2FA2BC5D3F85EF9E1621C /* WatchStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75C47077CF83E07E81527983 /* WatchStore.swift */; };
 		DCF7DA8245034788006DA387 /* Footprint.swift in Sources */ = {isa = PBXBuildFile; fileRef = A49FF8D1053B68159E4D2EEC /* Footprint.swift */; };
 		E59B828958C2254FFEEE593D /* LocationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F466FD610098E71DB17C54D /* LocationManager.swift */; };
 		E5CF6588D5181064FB5CB42D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 76746EBFA55AE24E965803B1 /* Assets.xcassets */; };
+		FE83FA99A0DCD7ACEF34A49F /* DiFangKeWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		07B66A50A3C5E905A8932503 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 22478D1FFB0A8791BF88398D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 11F4AA226D3DCD80D5EBA1FA;
+			remoteInfo = DiFangKeWatch;
+		};
 		C67848252FA24C10002DF823 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 22478D1FFB0A8791BF88398D /* Project object */;
@@ -92,6 +105,17 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		C3EA889BD26EA1368565CBFF /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 16;
+			files = (
+				167F3466A9C607E0782581EB /* DiFangKeWatch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C67848282FA24C10002DF823 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -109,6 +133,7 @@
 		0109B5C3A46C595F984A0148 /* 地方客.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "地方客.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		0DA88C94F7EAC66D28F00A84 /* FootprintDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FootprintDetailView.swift; sourceTree = "<group>"; };
 		0F466FD610098E71DB17C54D /* LocationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationManager.swift; sourceTree = "<group>"; };
+		1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DiFangKeWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1FAF51D5207C3CFEFBEB0667 /* ExportManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportManager.swift; sourceTree = "<group>"; };
 		2A099643BEA06307F4508FC0 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		2C84EEA3EDC02DA770FA555B /* DiFangKeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiFangKeApp.swift; sourceTree = "<group>"; };
@@ -119,6 +144,7 @@
 		66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
 		7338D01A9D36898197763A48 /* Place.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Place.swift; sourceTree = "<group>"; };
 		7537D23096CA61CCC79B0405 /* RecycleBinView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecycleBinView.swift; sourceTree = "<group>"; };
+		75C47077CF83E07E81527983 /* WatchStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchStore.swift; sourceTree = "<group>"; };
 		76746EBFA55AE24E965803B1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		77C2C5158B30717A490546E3 /* HistoryListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryListView.swift; sourceTree = "<group>"; };
 		7D750760587987B7CCDAB5FF /* MapPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapPickerView.swift; sourceTree = "<group>"; };
@@ -132,11 +158,13 @@
 		8F4D2CA36A1B43D0A6C7E2B1 /* ShareCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareCards.swift; sourceTree = "<group>"; };
 		8FECD1239FE04DF703FFB1E6 /* DataManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataManagerView.swift; sourceTree = "<group>"; };
 		97D09C072C5681826463BD99 /* PlacesManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesManagerView.swift; sourceTree = "<group>"; };
+		9F3945441A99914928D9C615 /* DiFangKeWatch.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = DiFangKeWatch.entitlements; sourceTree = "<group>"; };
 		A49FF8D1053B68159E4D2EEC /* Footprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Footprint.swift; sourceTree = "<group>"; };
 		A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/TimelineView.swift; sourceTree = "<group>"; };
 		AA55D128BD63CB08D5888227 /* Secrets.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Secrets.plist; sourceTree = "<group>"; };
 		B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TimelineEditView.swift; sourceTree = "<group>"; };
 		BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoService.swift; sourceTree = "<group>"; };
+		C0E6E94F0AB674372B9577B9 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/WatchOS.platform/Developer/SDKs/WatchOS11.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		C641B0502FE2720C009DC763 /* SafeMKMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeMKMapView.swift; sourceTree = "<group>"; };
 		C64D3D9D2F80058600BB3C3F /* IgnoredPlacesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IgnoredPlacesView.swift; sourceTree = "<group>"; };
 		C64D3D9F2F8111A800BB3C3F /* RawLogsManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawLogsManagerView.swift; sourceTree = "<group>"; };
@@ -164,8 +192,11 @@
 		C685444D2F877C2800C605E9 /* MiniCalendarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniCalendarView.swift; sourceTree = "<group>"; };
 		C68EFC112F8AA05900C1F901 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		C6ACF7662F95110B006D9536 /* RawPointsListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawPointsListView.swift; sourceTree = "<group>"; };
+		C6B399C338BB4612145C364B /* WatchHomeView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchHomeView.swift; sourceTree = "<group>"; };
 		C6D2DE392F90E39800466878 /* HealthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthManager.swift; sourceTree = "<group>"; };
 		C6FC95002F9A67B2004E1FE6 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiFangKeWatchApp.swift; sourceTree = "<group>"; };
+		E022A8CC3D9B5C3F524EC0E6 /* WatchSyncManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = WatchSyncManager.swift; path = Services/WatchSyncManager.swift; sourceTree = "<group>"; };
 		F44E7F2A482D33533D342882 /* PlacePickerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacePickerViewModel.swift; sourceTree = "<group>"; };
 		FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -209,6 +240,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E79705EEDDC8D808C38510D8 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				537DA85FA44FBE884BDF342B /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -217,6 +256,7 @@
 			children = (
 				0109B5C3A46C595F984A0148 /* 地方客.app */,
 				C67848132FA24C0C002DF823 /* DiFangKeWidgetExtension.appex */,
+				1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -236,8 +276,17 @@
 				326C76B5E17E8751B542D30F /* ViewModels */,
 				538DCFE6EA70DBBAA1239C2D /* Views */,
 				AA55D128BD63CB08D5888227 /* Secrets.plist */,
+				E022A8CC3D9B5C3F524EC0E6 /* WatchSyncManager.swift */,
 			);
 			path = DiFangKe;
+			sourceTree = "<group>";
+		};
+		18AF311614905A6515AE8408 /* watchOS */ = {
+			isa = PBXGroup;
+			children = (
+				C0E6E94F0AB674372B9577B9 /* Foundation.framework */,
+			);
+			name = watchOS;
 			sourceTree = "<group>";
 		};
 		326C76B5E17E8751B542D30F /* ViewModels */ = {
@@ -317,6 +366,7 @@
 			children = (
 				C67848152FA24C0C002DF823 /* WidgetKit.framework */,
 				C67848172FA24C0D002DF823 /* SwiftUI.framework */,
+				18AF311614905A6515AE8408 /* watchOS */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -342,12 +392,41 @@
 				C67848192FA24C0D002DF823 /* DiFangKeWidget */,
 				C67848142FA24C0C002DF823 /* Frameworks */,
 				060C5744364D60F6DF54D207 /* Products */,
+				DD08A6A7E588B5B0B2C24C92 /* DiFangKeWatch */,
 			);
+			sourceTree = "<group>";
+		};
+		DD08A6A7E588B5B0B2C24C92 /* DiFangKeWatch */ = {
+			isa = PBXGroup;
+			children = (
+				C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */,
+				C6B399C338BB4612145C364B /* WatchHomeView.swift */,
+				75C47077CF83E07E81527983 /* WatchStore.swift */,
+				9F3945441A99914928D9C615 /* DiFangKeWatch.entitlements */,
+			);
+			path = DiFangKeWatch;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		11F4AA226D3DCD80D5EBA1FA /* DiFangKeWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E1902B97446A9FAA650DFECF /* Build configuration list for PBXNativeTarget "DiFangKeWatch" */;
+			buildPhases = (
+				3A991CCA108EC9D9DCEBFE79 /* Sources */,
+				E79705EEDDC8D808C38510D8 /* Frameworks */,
+				C88A2620765FD3A68CC0B773 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DiFangKeWatch;
+			productName = DiFangKeWatch;
+			productReference = 1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */;
+			productType = "com.apple.product-type.application";
+		};
 		C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = C678482C2FA24C10002DF823 /* Build configuration list for PBXNativeTarget "DiFangKeWidgetExtension" */;
@@ -376,11 +455,13 @@
 				402F6E6DF86D9DE22D1B34EF /* Resources */,
 				C67848282FA24C10002DF823 /* Embed Foundation Extensions */,
 				8F91DE4F3B6FDFF2EB8ECE0A /* Frameworks */,
+				C3EA889BD26EA1368565CBFF /* Embed Watch Content */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				C67848262FA24C10002DF823 /* PBXTargetDependency */,
+				E08820C5983FD6F3115410C8 /* PBXTargetDependency */,
 			);
 			name = DiFangKe;
 			packageProductDependencies = (
@@ -426,6 +507,7 @@
 			targets = (
 				D8BD734948CCEF7A2C9FAA84 /* DiFangKe */,
 				C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */,
+				11F4AA226D3DCD80D5EBA1FA /* DiFangKeWatch */,
 			);
 		};
 /* End PBXProject section */
@@ -450,9 +532,26 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C88A2620765FD3A68CC0B773 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		3A991CCA108EC9D9DCEBFE79 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FE83FA99A0DCD7ACEF34A49F /* DiFangKeWatchApp.swift in Sources */,
+				441650B9A8F33BB36DD1822C /* WatchHomeView.swift in Sources */,
+				D9F2FA2BC5D3F85EF9E1621C /* WatchStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		A23D6FADAE18AE6B2791A4EE /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -508,6 +607,7 @@
 				C6D2DE3A2F90E39800466878 /* HealthManager.swift in Sources */,
 				D452A546B9150F52A9DA068F /* LocationAccuracyMode.swift in Sources */,
 				32BD3192C18CDD34C8B5EB24 /* TimelineEditView.swift in Sources */,
+				A037B11166D8EC00960EEADB /* WatchSyncManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -538,9 +638,36 @@
 			target = C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */;
 			targetProxy = C67848252FA24C10002DF823 /* PBXContainerItemProxy */;
 		};
+		E08820C5983FD6F3115410C8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = DiFangKeWatch;
+			target = 11F4AA226D3DCD80D5EBA1FA /* DiFangKeWatch */;
+			targetProxy = 07B66A50A3C5E905A8932503 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		0474BB3A3494ED831CFD3D26 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_ENTITLEMENTS = DiFangKeWatch/DiFangKeWatch.entitlements;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
+				INFOPLIST_KEY_WKApplication = YES;
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.ct106.difangke;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.watchkitapp;
+				PRODUCT_NAME = DiFangKeWatch;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				VALIDATE_PRODUCT = YES;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
 		5B10AD8112E2603AE6D4DBC2 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -577,6 +704,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -597,6 +725,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.3.7;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -617,7 +746,6 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = DiFangKe/DiFangKe.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = DiFangKe/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
@@ -627,7 +755,6 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke;
 				PRODUCT_NAME = "地方客";
 				SDKROOT = iphoneos;
@@ -676,6 +803,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -690,6 +818,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.3.7;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -711,7 +840,6 @@
 				CODE_SIGN_ENTITLEMENTS = DiFangKeWidgetExtension.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"DEBUG=1",
@@ -728,7 +856,6 @@
 					"@executable_path/../../Frameworks",
 				);
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MARKETING_VERSION = 1.3.6;
 				"OTHER_SWIFT_FLAGS[arch=*]" = "-D WIDGET_EXTENSION";
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.widget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -753,7 +880,6 @@
 				CODE_SIGN_ENTITLEMENTS = DiFangKeWidgetExtension.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = DiFangKeWidget/Info.plist;
@@ -766,7 +892,6 @@
 					"@executable_path/../../Frameworks",
 				);
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MARKETING_VERSION = 1.3.6;
 				"OTHER_SWIFT_FLAGS[arch=*]" = "-D WIDGET_EXTENSION";
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.widget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -781,6 +906,26 @@
 			};
 			name = Release;
 		};
+		F1AA391394212EADE7FD6586 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_ENTITLEMENTS = DiFangKeWatch/DiFangKeWatch.entitlements;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
+				INFOPLIST_KEY_WKApplication = YES;
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.ct106.difangke;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.watchkitapp;
+				PRODUCT_NAME = DiFangKeWatch;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
 		FA24A8DB5BA7B847E494E913 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -789,7 +934,6 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = DiFangKe/DiFangKe.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = DiFangKe/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
@@ -799,7 +943,6 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke;
 				PRODUCT_NAME = "地方客";
 				SDKROOT = iphoneos;
@@ -841,6 +984,15 @@
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
+		};
+		E1902B97446A9FAA650DFECF /* Build configuration list for PBXNativeTarget "DiFangKeWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0474BB3A3494ED831CFD3D26 /* Release */,
+				F1AA391394212EADE7FD6586 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
 
