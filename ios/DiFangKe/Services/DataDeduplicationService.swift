@@ -305,15 +305,24 @@ enum DataDeduplicationService {
             return true
         }
 
-        // Some rebuild paths trim the first/last raw points differently.  Their
-        // records can sit a few minutes apart while still tracing the exact same
-        // trip.  Require matching endpoints and distance so adjacent real trips
-        // are never collapsed merely because they are close in time.
+        // Some rebuild paths consume the same raw route from the two sides of a
+        // gap.  That can leave adjacent records such as 19:03–19:20 and
+        // 19:20–19:24 with identical paths, but with a start-time difference
+        // greater than the old 15-minute cleanup window.  Compare the actual
+        // route endpoints before treating them as one trip, so an immediate
+        // return journey (whose endpoints are reversed) remains intact.
         let startDiff = abs(first.startTime.timeIntervalSince(second.startTime))
         let endDiff = abs(first.endTime.timeIntervalSince(second.endTime))
-        guard startDiff <= 15 * 60, endDiff <= 15 * 60,
-              first.distance > 0, second.distance > 0,
-              abs(first.distance - second.distance) <= max(150, max(first.distance, second.distance) * 0.2),
+        let intervalGap: TimeInterval
+        if first.endTime <= second.startTime {
+            intervalGap = second.startTime.timeIntervalSince(first.endTime)
+        } else if second.endTime <= first.startTime {
+            intervalGap = first.startTime.timeIntervalSince(second.endTime)
+        } else {
+            intervalGap = 0
+        }
+        guard first.distance > 0, second.distance > 0,
+              abs(first.distance - second.distance) <= max(300, max(first.distance, second.distance) * 0.25),
               let firstPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: first.pointsData),
               let secondPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: second.pointsData),
               let firstStart = firstPoints.first, let firstEnd = firstPoints.last,
@@ -325,7 +334,14 @@ enum DataDeduplicationService {
             .distance(from: CLLocation(latitude: secondStart.lat, longitude: secondStart.lon))
         let endDistance = CLLocation(latitude: firstEnd.lat, longitude: firstEnd.lon)
             .distance(from: CLLocation(latitude: secondEnd.lat, longitude: secondEnd.lon))
-        return startDistance <= 250 && endDistance <= 250
+        let hasSameRouteEndpoints = startDistance <= 250 && endDistance <= 250
+        guard hasSameRouteEndpoints else { return false }
+
+        // Normal retries have close boundaries.  The second branch covers the
+        // split-window bug only when the two records touch (or nearly touch),
+        // which is the signature in the reported duplicate route.
+        return (startDiff <= 20 * 60 && endDiff <= 20 * 60)
+            || intervalGap <= 10 * 60
     }
 
     private static func placeKeepScore(_ place: Place, referencedPlaceIDs: Set<UUID>) -> Int {

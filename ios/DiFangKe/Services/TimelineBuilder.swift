@@ -1532,6 +1532,16 @@ class PersistentTimelineBuilder {
         guard !syncingDates.contains(startOfDay) else { return }
         syncingDates.insert(startOfDay)
         defer { syncingDates.remove(startOfDay) }
+
+        // Remove records produced by older builds before using them as occupied
+        // ranges.  Otherwise a duplicate route can both remain visible and
+        // cause gap filling to infer from the same raw points again.
+#if !WIDGET_EXTENSION
+        if DataDeduplicationService.deduplicateTransports(context: context) > 0 {
+            TimelineBuilder.timelineCache.removeAll()
+            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+        }
+#endif
         
         let preferredAuto = getPreferredAutomotiveType(in: context, excluding: date)
         let preferredCycling = getPreferredCyclingType(in: context, excluding: date)
@@ -2143,8 +2153,6 @@ class PersistentTimelineBuilder {
             
             var alignedPreviousFootprint: Footprint?
             var alignedNextFootprint: Footprint?
-            var routeSearchStart = tp.startTime
-            var routeSearchEnd = tp.endTime
             
             if let prevFp = fps.last(where: { $0.endTime <= tp.startTime + AppConfig.shared.snapTimeBuffer }) {
                 let gap = tp.startTime.timeIntervalSince(prevFp.endTime)
@@ -2156,7 +2164,6 @@ class PersistentTimelineBuilder {
                         tp.startLocation = locName
                     }
                     alignedPreviousFootprint = prevFp
-                    routeSearchStart = min(routeSearchStart, prevFp.endTime.addingTimeInterval(-5 * 60))
                     changed = true
                 }
             }
@@ -2171,15 +2178,18 @@ class PersistentTimelineBuilder {
                         tp.endLocation = locName
                     }
                     alignedNextFootprint = nextFp
-                    routeSearchEnd = max(routeSearchEnd, nextFp.startTime)
                     changed = true
                 }
             }
             
             let rawRoute = repairedTransportRoute(
                 from: allRawPoints,
-                start: routeSearchStart,
-                end: routeSearchEnd,
+                // A record owns only the raw points inside its displayed time
+                // interval.  Footprints may contribute a synthetic endpoint
+                // below, but must never expand this query: doing so made a
+                // 19:20–19:24 record redraw the whole 19:03–19:20 route.
+                start: tp.startTime,
+                end: tp.endTime,
                 previousFootprint: alignedPreviousFootprint
             )
             if rawRoute.count >= 2 {

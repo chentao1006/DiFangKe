@@ -301,12 +301,203 @@ struct DFKFootprintWidget: Widget {
 }
 
 #if canImport(ActivityKit)
-@available(iOS 16.1, *)
+@available(iOS 18.0, *)
 struct TripLiveActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: TripActivityAttributes.self) { context in
-            // Lock screen / Banner UI
-            VStack(alignment: .leading, spacing: 8) {
+            TripLiveActivityContent(context: context)
+        } dynamicIsland: { context in
+            DynamicIsland {
+                DynamicIslandExpandedRegion(.leading) {
+                    HStack {
+                        Image(systemName: context.state.icon)
+                            .foregroundColor(.blue)
+                    }
+                    .padding(.leading, 8)
+                }
+                DynamicIslandExpandedRegion(.trailing) {
+                    // Empty
+                }
+                DynamicIslandExpandedRegion(.center) {
+                    // Empty
+                }
+                DynamicIslandExpandedRegion(.bottom) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        (Text("下一站 ").font(.subheadline).foregroundColor(.secondary) + Text(context.state.placeName).font(.headline).bold())
+                            .lineLimit(2)
+                            .padding(.horizontal, 8)
+
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text("距离")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(formatTripDistance(context.state.currentDistance))
+                                .font(.subheadline.bold())
+
+                            Spacer()
+
+                            Text("计划到达")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            if context.state.hasArrivalTime {
+                                Text(context.state.arrivalDate, style: .time)
+                                    .font(.subheadline.bold())
+                            } else {
+                                Text("今天")
+                                    .font(.subheadline.bold())
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        HStack(spacing: 12) {
+                            if context.state.currentDistance < 500 {
+                                Link(destination: URL(string: "difangke://trip/action?type=arrive&id=\(context.attributes.tripId)")!) {
+                                    Text("已到达")
+                                        .font(.subheadline.bold())
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 6)
+                                        .background(Color.green)
+                                        .foregroundColor(.white)
+                                        .cornerRadius(8)
+                                }
+
+                                if !context.state.isOrdered && Date() > context.state.arrivalDate {
+                                    Link(destination: URL(string: "difangke://trip/action?type=delay&id=\(context.attributes.tripId)")!) {
+                                        Text("推迟")
+                                            .font(.subheadline.bold())
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 6)
+                                            .background(Color.orange)
+                                            .foregroundColor(.white)
+                                            .cornerRadius(8)
+                                    }
+                                }
+
+                                Link(destination: URL(string: "difangke://trip/action?type=abandon&id=\(context.attributes.tripId)")!) {
+                                    Text("放弃")
+                                        .font(.subheadline.bold())
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 6)
+                                        .background(Color.red)
+                                        .foregroundColor(.white)
+                                        .cornerRadius(8)
+                                }
+                            } else {
+                                let actionType = context.state.shouldOfferCompletion ? "complete" : "navigate"
+                                Link(destination: URL(string: "difangke://trip/action?type=\(actionType)&id=\(context.attributes.tripId)")!) {
+                                    Text(context.state.shouldOfferCompletion ? "已完成" : "导航")
+                                        .font(.subheadline.bold())
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 6)
+                                        .background(Color.green)
+                                        .foregroundColor(.white)
+                                        .cornerRadius(8)
+                                }
+
+                                if !context.state.isOrdered && Date() > context.state.arrivalDate {
+                                    Link(destination: URL(string: "difangke://trip/action?type=delay&id=\(context.attributes.tripId)")!) {
+                                        Text("推迟")
+                                            .font(.subheadline.bold())
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 6)
+                                            .background(Color.orange)
+                                            .foregroundColor(.white)
+                                            .cornerRadius(8)
+                                    }
+
+                                    Link(destination: URL(string: "difangke://trip/action?type=abandon&id=\(context.attributes.tripId)")!) {
+                                        Text("放弃")
+                                            .font(.subheadline.bold())
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 6)
+                                            .background(Color.red)
+                                            .foregroundColor(.white)
+                                            .cornerRadius(8)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                    .padding(.top, 8)
+                }
+            } compactLeading: {
+                Image(systemName: context.state.icon)
+                    .foregroundColor(.blue)
+            } compactTrailing: {
+                Text(String(format: "%.1fkm", context.state.currentDistance / 1000))
+                    .font(.caption.bold())
+            } minimal: {
+                Image(systemName: context.state.icon)
+                    .foregroundColor(.blue)
+            }
+            .widgetURL(URL(string: "difangke://trip/detail?id=\(context.attributes.tripId)"))
+        }
+        .supplementalActivityFamilies([.small])
+    }
+}
+
+@available(iOS 16.1, *)
+private struct TripLiveActivityContent: View {
+    let context: ActivityViewContext<TripActivityAttributes>
+
+    @ViewBuilder
+    var body: some View {
+        if #available(iOS 18.0, *) {
+            TripLiveActivityAdaptiveContent(context: context)
+        } else {
+            TripLiveActivityLockScreenContent(context: context)
+        }
+    }
+}
+
+@available(iOS 18.0, *)
+private struct TripLiveActivityAdaptiveContent: View {
+    @Environment(\.activityFamily) private var activityFamily
+    let context: ActivityViewContext<TripActivityAttributes>
+
+    @ViewBuilder
+    var body: some View {
+        switch activityFamily {
+        case .small:
+            // The Watch Smart Stack is intentionally glanceable: name first,
+            // then the two details that matter while travelling.
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Image(systemName: context.state.icon)
+                        .foregroundColor(.blue)
+                    Text(context.state.placeName)
+                        .font(.headline)
+                        .lineLimit(1)
+                }
+
+                HStack(spacing: 4) {
+                    Text("距离 \(formatTripDistance(context.state.currentDistance))")
+                    if context.state.hasArrivalTime {
+                        Text("·")
+                        Text(context.state.arrivalDate, style: .time)
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
+            .widgetURL(URL(string: "difangke://trip/detail?id=\(context.attributes.tripId)"))
+        case .medium:
+            TripLiveActivityLockScreenContent(context: context)
+        @unknown default:
+            TripLiveActivityLockScreenContent(context: context)
+        }
+    }
+}
+
+@available(iOS 16.1, *)
+private struct TripLiveActivityLockScreenContent: View {
+    let context: ActivityViewContext<TripActivityAttributes>
+
+    var body: some View {
+        // Lock screen / Banner UI
+        VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Image(systemName: context.state.icon)
                         .foregroundColor(.blue)
@@ -319,7 +510,7 @@ struct TripLiveActivityWidget: Widget {
                         Text("距离")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text(formatDistance(context.state.currentDistance))
+                        Text(formatTripDistance(context.state.currentDistance))
                             .font(.title3)
                             .bold()
                     }
@@ -419,141 +610,14 @@ struct TripLiveActivityWidget: Widget {
                     .opacity(0.4)
             }
             .widgetURL(URL(string: "difangke://trip/detail?id=\(context.attributes.tripId)"))
-        } dynamicIsland: { context in
-            DynamicIsland {
-                DynamicIslandExpandedRegion(.leading) {
-                    HStack {
-                        Image(systemName: context.state.icon)
-                            .foregroundColor(.blue)
-                    }
-                    .padding(.leading, 8)
-                }
-                DynamicIslandExpandedRegion(.trailing) {
-                    // Empty
-                }
-                DynamicIslandExpandedRegion(.center) {
-                    // Empty
-                }
-                DynamicIslandExpandedRegion(.bottom) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        (Text("下一站 ").font(.subheadline).foregroundColor(.secondary) + Text(context.state.placeName).font(.headline).bold())
-                            .lineLimit(2)
-                            .padding(.horizontal, 8)
-
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text("距离")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text(formatDistance(context.state.currentDistance))
-                                .font(.subheadline.bold())
-
-                            Spacer()
-
-                            Text("计划到达")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            if context.state.hasArrivalTime {
-                                Text(context.state.arrivalDate, style: .time)
-                                    .font(.subheadline.bold())
-                            } else {
-                                Text("今天")
-                                    .font(.subheadline.bold())
-                            }
-                        }
-                        .padding(.horizontal, 8)
-
-                        HStack(spacing: 12) {
-                            if context.state.currentDistance < 500 {
-                                Link(destination: URL(string: "difangke://trip/action?type=arrive&id=\(context.attributes.tripId)")!) {
-                                    Text("已到达")
-                                        .font(.subheadline.bold())
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 6)
-                                        .background(Color.green)
-                                        .foregroundColor(.white)
-                                        .cornerRadius(8)
-                                }
-
-                                if !context.state.isOrdered && Date() > context.state.arrivalDate {
-                                    Link(destination: URL(string: "difangke://trip/action?type=delay&id=\(context.attributes.tripId)")!) {
-                                        Text("推迟")
-                                            .font(.subheadline.bold())
-                                            .frame(maxWidth: .infinity)
-                                            .padding(.vertical, 6)
-                                            .background(Color.orange)
-                                            .foregroundColor(.white)
-                                            .cornerRadius(8)
-                                    }
-                                }
-
-                                Link(destination: URL(string: "difangke://trip/action?type=abandon&id=\(context.attributes.tripId)")!) {
-                                    Text("放弃")
-                                        .font(.subheadline.bold())
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 6)
-                                        .background(Color.red)
-                                        .foregroundColor(.white)
-                                        .cornerRadius(8)
-                                }
-                            } else {
-                                let actionType = context.state.shouldOfferCompletion ? "complete" : "navigate"
-                                Link(destination: URL(string: "difangke://trip/action?type=\(actionType)&id=\(context.attributes.tripId)")!) {
-                                    Text(context.state.shouldOfferCompletion ? "已完成" : "导航")
-                                        .font(.subheadline.bold())
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 6)
-                                        .background(Color.green)
-                                        .foregroundColor(.white)
-                                        .cornerRadius(8)
-                                }
-
-                                if !context.state.isOrdered && Date() > context.state.arrivalDate {
-                                    Link(destination: URL(string: "difangke://trip/action?type=delay&id=\(context.attributes.tripId)")!) {
-                                        Text("推迟")
-                                            .font(.subheadline.bold())
-                                            .frame(maxWidth: .infinity)
-                                            .padding(.vertical, 6)
-                                            .background(Color.orange)
-                                            .foregroundColor(.white)
-                                            .cornerRadius(8)
-                                    }
-
-                                    Link(destination: URL(string: "difangke://trip/action?type=abandon&id=\(context.attributes.tripId)")!) {
-                                        Text("放弃")
-                                            .font(.subheadline.bold())
-                                            .frame(maxWidth: .infinity)
-                                            .padding(.vertical, 6)
-                                            .background(Color.red)
-                                            .foregroundColor(.white)
-                                            .cornerRadius(8)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                    }
-                    .padding(.top, 8)
-                }
-            } compactLeading: {
-                Image(systemName: context.state.icon)
-                    .foregroundColor(.blue)
-            } compactTrailing: {
-                Text(String(format: "%.1fkm", context.state.currentDistance / 1000))
-                    .font(.caption.bold())
-            } minimal: {
-                Image(systemName: context.state.icon)
-                    .foregroundColor(.blue)
-            }
-            .widgetURL(URL(string: "difangke://trip/detail?id=\(context.attributes.tripId)"))
         }
     }
 
-    func formatDistance(_ distance: Double) -> String {
-        if distance < 1000 {
-            return String(format: "%.0f米", distance)
-        } else {
-            return String(format: "%.1f公里", distance / 1000)
-        }
+private func formatTripDistance(_ distance: Double) -> String {
+    if distance < 1000 {
+        return String(format: "%.0f米", distance)
+    } else {
+        return String(format: "%.1f公里", distance / 1000)
     }
 }
 

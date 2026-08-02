@@ -1435,7 +1435,7 @@ struct DFKShareCardView: View {
     private func entryList(_ entries: [DFKShareEntry], isTimeline: Bool = false) -> some View {
         let markerSide = isTimeline ? s(48) : s(36)
         let timeFont = isTimeline ? fs(36) : fs(30)
-        let titleFont = isTimeline ? fs(60) : fs(50)
+        let titleFont = isTimeline ? fs(60) : fs(72)
         let detailFont = isTimeline ? fs(42) : fs(36)
         return VStack(alignment: .leading, spacing: 0) {
             ForEach(entries) { entry in
