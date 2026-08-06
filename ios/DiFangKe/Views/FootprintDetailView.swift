@@ -1214,17 +1214,22 @@ private struct FootprintTimeAdjustmentView: View {
         let calendar = Calendar.current
         let dayStart = calendar.startOfDay(for: footprint.date)
         let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(24 * 3600)
+        let latestAllowedTime = min(dayEnd, currentMinute())
         rangeStart = max(previousFootprintEnd(defaultingTo: dayStart), dayStart)
-        rangeEnd = min(nextFootprintStart(defaultingTo: dayEnd), dayEnd)
+        rangeEnd = min(nextFootprintStart(defaultingTo: latestAllowedTime), latestAllowedTime)
 
         if rangeEnd <= rangeStart {
             rangeStart = dayStart
-            rangeEnd = dayEnd
+            rangeEnd = latestAllowedTime
         }
 
         draftStart = min(max(footprint.startTime, rangeStart), rangeEnd.addingTimeInterval(-minimumFootprintDuration))
         draftEnd = max(min(footprint.endTime, rangeEnd), draftStart.addingTimeInterval(minimumFootprintDuration))
         hasInitializedRange = true
+    }
+
+    private func currentMinute() -> Date {
+        Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 60) * 60)
     }
 
     private func loadRawPoints() {

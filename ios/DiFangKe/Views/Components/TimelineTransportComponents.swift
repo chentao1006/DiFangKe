@@ -693,15 +693,20 @@ private struct TransportTimeAdjustmentView: View {
         let calendar = Calendar.current
         let dayStart = calendar.startOfDay(for: transport.startTime)
         let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(24 * 3600)
+        let latestAllowedTime = min(dayEnd, currentMinute())
         rangeStart = editableRangeStart(dayStart: dayStart)
-        rangeEnd = editableRangeEnd(dayEnd: dayEnd)
+        rangeEnd = min(editableRangeEnd(dayEnd: dayEnd), latestAllowedTime)
         if rangeEnd.timeIntervalSince(rangeStart) < minimumDuration {
             rangeStart = dayStart
-            rangeEnd = dayEnd
+            rangeEnd = latestAllowedTime
         }
         draftStart = min(max(transport.startTime, rangeStart), rangeEnd.addingTimeInterval(-minimumDuration))
         draftEnd = max(min(transport.endTime, rangeEnd), draftStart.addingTimeInterval(minimumDuration))
         hasInitializedRange = true
+    }
+
+    private func currentMinute() -> Date {
+        Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 60) * 60)
     }
 
     /// A connected neighbor can donate up to the alignment threshold to this
@@ -791,6 +796,10 @@ private struct TransportTimeAdjustmentView: View {
         record.startTime = start
         record.endTime = end
         record.day = Calendar.current.startOfDay(for: start)
+        // Time boundaries are user-authored facts too.  Mark this record as
+        // manual so periodic automatic consolidation cannot replace the
+        // adjusted interval with a newly inferred one.
+        record.manualTypeRaw = record.manualTypeRaw ?? transport.manualType?.rawValue ?? transport.type.rawValue
         refreshMetrics(record)
         let adjacentDates = adjustAdjacentItems(
             oldStart: oldStart,
@@ -914,6 +923,7 @@ private struct TransportTimeAdjustmentView: View {
             record.status = .manual
         case .transport(let record):
             record.endTime = end
+            record.manualTypeRaw = record.manualTypeRaw ?? record.typeRaw
             refreshMetrics(record)
         }
         return touchedDates(start: min(oldEnd, end), end: max(oldEnd, end))
@@ -930,6 +940,7 @@ private struct TransportTimeAdjustmentView: View {
         case .transport(let record):
             record.startTime = start
             record.day = Calendar.current.startOfDay(for: start)
+            record.manualTypeRaw = record.manualTypeRaw ?? record.typeRaw
             refreshMetrics(record)
         }
         return touchedDates(start: min(oldStart, start), end: max(oldStart, start))

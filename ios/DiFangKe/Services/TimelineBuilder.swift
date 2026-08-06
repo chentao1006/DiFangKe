@@ -1839,8 +1839,10 @@ class PersistentTimelineBuilder {
             let currentType = TransportType(rawValue: current.typeRaw) ?? .slow
             let nextType = TransportType(rawValue: next.typeRaw) ?? .slow
             
-            // --- 铁律保护：如果其中任一段是手动设置的，且两段类型不同，严禁自动合并 ---
-            if (current.manualTypeRaw != nil || next.manualTypeRaw != nil) && current.typeRaw != next.typeRaw {
+            // A manual transport owns its entire interval, not merely its
+            // vehicle type.  Do not let periodic consolidation merge it with
+            // an adjacent automatic segment, even when their types match.
+            if current.manualTypeRaw != nil || next.manualTypeRaw != nil {
                 i += 1
                 continue
             }

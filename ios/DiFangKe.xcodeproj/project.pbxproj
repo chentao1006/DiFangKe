@@ -13,6 +13,8 @@
 		19D19D677339112CC0F14ED5 /* Place.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7338D01A9D36898197763A48 /* Place.swift */; };
 		32BD3192C18CDD34C8B5EB24 /* TimelineEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */; };
 		441650B9A8F33BB36DD1822C /* WatchHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6B399C338BB4612145C364B /* WatchHomeView.swift */; };
+		A1D3F500AA001001AA001001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F501AA001001AA001001 /* Assets.xcassets */; };
+		A1D3F502AA001001AA001001 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F503AA001001AA001001 /* AppIcon.icon */; };
 		4A0BE9B15A8560F2969D5C2D /* Secrets.plist in Resources */ = {isa = PBXBuildFile; fileRef = AA55D128BD63CB08D5888227 /* Secrets.plist */; };
 		51C5B1CA5308C8B8E9EEDFBC /* FootprintDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DA88C94F7EAC66D28F00A84 /* FootprintDetailView.swift */; };
 		537DA85FA44FBE884BDF342B /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C0E6E94F0AB674372B9577B9 /* Foundation.framework */; };
@@ -108,7 +110,7 @@
 		C3EA889BD26EA1368565CBFF /* Embed Watch Content */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = "";
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
 			dstSubfolderSpec = 16;
 			files = (
 				167F3466A9C607E0782581EB /* DiFangKeWatch.app in Embed Watch Content */,
@@ -160,6 +162,8 @@
 		97D09C072C5681826463BD99 /* PlacesManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesManagerView.swift; sourceTree = "<group>"; };
 		9F3945441A99914928D9C615 /* DiFangKeWatch.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = DiFangKeWatch.entitlements; sourceTree = "<group>"; };
 		A49FF8D1053B68159E4D2EEC /* Footprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Footprint.swift; sourceTree = "<group>"; };
+		A1D3F501AA001001AA001001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A1D3F503AA001001AA001001 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/TimelineView.swift; sourceTree = "<group>"; };
 		AA55D128BD63CB08D5888227 /* Secrets.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Secrets.plist; sourceTree = "<group>"; };
 		B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TimelineEditView.swift; sourceTree = "<group>"; };
@@ -399,6 +403,8 @@
 		DD08A6A7E588B5B0B2C24C92 /* DiFangKeWatch */ = {
 			isa = PBXGroup;
 			children = (
+				A1D3F501AA001001AA001001 /* Assets.xcassets */,
+				A1D3F503AA001001AA001001 /* AppIcon.icon */,
 				C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */,
 				C6B399C338BB4612145C364B /* WatchHomeView.swift */,
 				75C47077CF83E07E81527983 /* WatchStore.swift */,
@@ -536,6 +542,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1D3F500AA001001AA001001 /* Assets.xcassets in Resources */,
+				A1D3F502AA001001AA001001 /* AppIcon.icon in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -650,7 +658,7 @@
 		0474BB3A3494ED831CFD3D26 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = DiFangKeWatch/DiFangKeWatch.entitlements;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
@@ -704,7 +712,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -760,7 +768,7 @@
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
-				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_VERSION = 5.9;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -803,7 +811,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -909,7 +917,7 @@
 		F1AA391394212EADE7FD6586 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = DiFangKeWatch/DiFangKeWatch.entitlements;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
@@ -948,7 +956,7 @@
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
-				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_VERSION = 5.9;
 				TARGETED_DEVICE_FAMILY = "1,2";

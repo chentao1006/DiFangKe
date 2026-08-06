@@ -522,6 +522,12 @@ private struct ContinuousTimelineView: View {
                             timelineDetent = .medium
                             activeTimelineDate = targetDate
                             updateVisibleTimelineDates([targetDate])
+
+                            // During cold launch, the initial loader owns the fetch.
+                            // Starting a second date load here races it and lets the
+                            // initial loader overwrite the widget's target with today.
+                            guard hasCompletedInitialTimelineLoad else { return }
+
                             _ = await refreshAvailableTimelineDateCache()
                             _ = await loadTimelineDate(targetDate)
                             targetScrollDate = targetDate
@@ -724,11 +730,23 @@ private struct ContinuousTimelineView: View {
         guard !didRequestInitialTimeline else { return }
         didRequestInitialTimeline = true
 
-        let targetDate = initialDate ?? Calendar.current.startOfDay(for: Date())
+        let calendar = Calendar.current
+        var targetDate = calendar.startOfDay(for: initialDate ?? activeTimelineDate)
         activeTimelineDate = targetDate
         updateVisibleTimelineDates([targetDate])
 
-        var initialDates = await refreshAvailableTimelineDateCache()
+        let availableDates = await refreshAvailableTimelineDateCache()
+        // A widget URL can arrive while the availability query is in flight.
+        // Honor that selected day rather than resetting the initial timeline to today.
+        if initialDate == nil {
+            let requestedDate = calendar.startOfDay(for: activeTimelineDate)
+            if requestedDate != targetDate {
+                targetDate = requestedDate
+                updateVisibleTimelineDates([targetDate])
+            }
+        }
+
+        var initialDates = availableDates
             .filter { $0 <= targetDate }
         if !initialDates.contains(targetDate) {
             initialDates.append(targetDate)
@@ -744,7 +762,7 @@ private struct ContinuousTimelineView: View {
         handleColdLaunchDeepLink()
         NotificationCenter.default.post(name: NSNotification.Name("TimelineInitialLoadCompleted"), object: nil)
     }
-    
+
     private func handleDeepLink(userInfo: [AnyHashable: Any]?) {
         guard let userInfo = userInfo else { return }
         
@@ -1868,6 +1886,8 @@ private struct ContinuousTimelineSheet: View {
     @State private var latestViewportHeight: CGFloat = 0
     @State private var calendarBackfillTask: Task<Void, Never>?
     @State private var initialTodayScrollTask: Task<Void, Never>?
+    @State private var initialLoadingFallbackTask: Task<Void, Never>?
+    @State private var allowsInitialLoadingFallback = false
     @State private var timelineScrollPosition: ScrollTarget?
     @State private var lastUserInteractionTime = Date.distantPast
     @State private var isLoadingMoreEarlier = false
@@ -2180,13 +2200,20 @@ private struct ContinuousTimelineSheet: View {
                     } // GeometryReader
                 } // ScrollViewReader
             } // NavigationStack
-            .opacity(isInitialTimelineLoading ? 0 : 1)
-            .allowsHitTesting(!isInitialTimelineLoading)
-
             if isInitialTimelineLoading {
-                initialTimelineLoadingOverlay
+                // This is outside the scroll view so its material reaches the
+                // sheet's bottom edge. Keep the navigation bar's 52pt band clear.
+                GeometryReader { viewport in
+                    initialTimelineLoadingOverlay
+                        .frame(
+                            width: viewport.size.width,
+                            height: max(0, viewport.size.height - 52)
+                        )
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .ignoresSafeArea(.container, edges: .bottom)
+                }
+                .allowsHitTesting(false)
             }
-
             resettingIndicator
         } // ZStack
         .fullScreenCover(item: Binding(
@@ -2371,6 +2398,7 @@ private struct ContinuousTimelineSheet: View {
                     }
                     .onAppear {
                         scheduleInitialScrollToTodayIfNeeded(using: proxy)
+                        scheduleInitialLoadingFallback()
                     }
                     .onChange(of: initialTimelineLoadCompleted) { _, _ in
                         scheduleInitialScrollToTodayIfNeeded(using: proxy)
@@ -2383,6 +2411,7 @@ private struct ContinuousTimelineSheet: View {
                     }
                     .onDisappear {
                         initialTodayScrollTask?.cancel()
+                        initialLoadingFallbackTask?.cancel()
                         calendarScrollRetryTask?.cancel()
                         calendarBackfillPinTask?.cancel()
                         calendarBackfillTask?.cancel()
@@ -2410,7 +2439,17 @@ private struct ContinuousTimelineSheet: View {
     }
 
     private var isInitialTimelineLoading: Bool {
-        !initialTimelineLoadCompleted || !hasCompletedInitialTimelinePositioning
+        !initialTimelineLoadCompleted
+            || (!hasCompletedInitialTimelinePositioning && !allowsInitialLoadingFallback)
+    }
+
+    private func scheduleInitialLoadingFallback() {
+        guard initialLoadingFallbackTask == nil, !allowsInitialLoadingFallback else { return }
+        initialLoadingFallbackTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            allowsInitialLoadingFallback = true
+        }
     }
 
     private var initialTimelineLoadingOverlay: some View {
@@ -2418,9 +2457,15 @@ private struct ContinuousTimelineSheet: View {
             Rectangle()
                 .fill(.ultraThinMaterial)
 
-            ProgressView()
-                .controlSize(.large)
+            VStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.large)
+
+                Text("正在加载时间轴")
+                    .font(.headline)
+            }
         }
+        .allowsHitTesting(false)
         .accessibilityLabel("正在加载时间轴")
     }
     @ViewBuilder
@@ -3289,6 +3334,9 @@ private struct ContinuousTimelineSheet: View {
         if let target = targetScrollDate {
             scrollToDate(target, using: proxy)
             targetScrollDate = nil
+            // Widget deep links arrive before the sheet's first positioning pass.
+            // Keep the normal pass so the initial-position state also settles.
+            scheduleInitialScrollToToday(using: proxy)
         } else if todayScrollRequest == 0 {
             scheduleInitialScrollToToday(using: proxy)
         }
@@ -4089,12 +4137,15 @@ private struct ContinuousTimelineSheet: View {
         base.averageSpeed = mergedDuration > 0 ? base.distance / mergedDuration : 0
         base.stepCount = combinedOptionalSum(base.stepCount, other.stepCount)
 
-        if base.manualTypeRaw == nil, let otherManualType = other.manualTypeRaw {
-            base.manualTypeRaw = otherManualType
-            base.typeRaw = otherManualType
-        } else if base.manualTypeRaw == nil {
-            base.typeRaw = baseDurationBeforeMerge >= otherDurationBeforeMerge ? base.typeRaw : other.typeRaw
-        }
+        // A user-initiated merge owns the resulting interval.  Persist that
+        // ownership even if neither source segment had its type edited before;
+        // otherwise the periodic timeline sifter treats the merged record as
+        // automatic data and can split/reclassify it on a later launch.
+        let selectedType = base.manualTypeRaw
+            ?? other.manualTypeRaw
+            ?? (baseDurationBeforeMerge >= otherDurationBeforeMerge ? base.typeRaw : other.typeRaw)
+        base.manualTypeRaw = selectedType
+        base.typeRaw = selectedType
 
         if !other.endLocation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            other.endLocation != "终点",

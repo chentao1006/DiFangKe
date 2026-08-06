@@ -274,13 +274,15 @@ struct DiFangKeApp: App {
                         locationManager.startTracking()
                     }
                     
-                    // 前台恢复只做轻量同步，避免切回 App 时生成 7 天地图快照抢占主线程。
+                    // Do not generate MapKit widget snapshots on every foreground
+                    // transition: a snapshot still tearing down can overlap an
+                    // in-app map and trigger Metal's lifetime assertion. Location
+                    // changes and the background refresh still update the widget.
                     if modelContainer != nil {
                         foregroundWidgetSyncTask?.cancel()
                         foregroundWidgetSyncTask = Task {
                             try? await Task.sleep(nanoseconds: 3_000_000_000)
                             guard !Task.isCancelled else { return }
-                            await WidgetDataSyncManager.shared.syncTodayOnly()
                             WatchSyncManager.shared.syncSnapshot()
                         }
                     }

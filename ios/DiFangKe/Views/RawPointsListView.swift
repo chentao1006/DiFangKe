@@ -670,7 +670,9 @@ private struct RawPointsMapView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> MKMapView {
-        let mapView = SafeMKMapView(frame: .zero)
+        // Avoid passing a zero-sized drawable to MapKit before SwiftUI applies the
+        // final 220pt layout; it otherwise reaches CAMetalLayer during transitions.
+        let mapView = SafeMKMapView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
         mapView.delegate = context.coordinator
         mapView.mapType = .standard
         mapView.pointOfInterestFilter = .excludingAll
@@ -698,8 +700,9 @@ private struct RawPointsMapView: UIViewRepresentable {
         coordinator.multiSelectedAnnotations.removeAll()
 
         mapView.delegate = nil
-        mapView.removeAnnotations(mapView.annotations.filter { !($0 is MKUserLocation) })
-        mapView.removeOverlays(mapView.overlays)
+        // MKMapView renders its overlays asynchronously. It owns the annotations and
+        // overlays until the in-flight Metal command buffer completes, so do not tear
+        // them down synchronously from SwiftUI's view dismantling callback.
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {

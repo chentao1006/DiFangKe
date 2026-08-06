@@ -1114,6 +1114,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private let openAIService = OpenAIService.shared
     private let geocoder = CLGeocoder()
     private var lastGeocodedLocation: CLLocation?
+    /// 原始轨迹是后续重建足迹的源数据；定位回调可能在静止时按秒到达，
+    /// 因此不论系统回调频率如何，最多每五秒持久化一个原始点。
+    private var lastRawLocationSaveTimestamp: Date = .distantPast
+    private let rawLocationMinimumSaveInterval: TimeInterval = 5
     
     // 标签继承距离阈值
     private var tagInheritanceDistance: CLLocationDistance { AppConfig.shared.tagInheritanceDistance }
@@ -2261,13 +2265,19 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
         
-        // 1. 永久保存原始点（RawLocationStore 内部已实现异步队列写入，不会阻塞主线程）
-        RawLocationStore.shared.saveLocation(location) { [weak self] in
-            // syncDay loads from RawLocationStore, so triggering it before this
-            // write completes misses exactly the newly received transition point.
-            self?.triggerTimelineSiftDebounced()
+        // 1. 永久保存原始点（RawLocationStore 内部已实现异步队列写入，不会阻塞主线程）。
+        // CLLocationManager 在静止时也可能连续按秒回调；原始轨迹、内存轨迹和实时
+        // 足迹分析必须共享同一个节流条件，避免 CSV 虽节流但内存/分析仍堆积秒级点。
+        let shouldSaveRawLocation = location.timestamp.timeIntervalSince(lastRawLocationSaveTimestamp) >= rawLocationMinimumSaveInterval
+        if shouldSaveRawLocation {
+            lastRawLocationSaveTimestamp = location.timestamp
+            RawLocationStore.shared.saveLocation(location) { [weak self] in
+                // syncDay loads from RawLocationStore, so triggering it before this
+                // write completes misses exactly the newly received transition point.
+                self?.triggerTimelineSiftDebounced()
+            }
+            scheduleLiveFootprintMerge()
         }
-        scheduleLiveFootprintMerge()
         // 同步最后位置给小组件
         let sharedDefaults = widgetSharedDefaults()
         sharedDefaults.set(location.coordinate.latitude, forKey: "lastLat")
@@ -2283,7 +2293,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let preferredID = RawLocationStore.shared.preferredRecordingDeviceID()
         let isPrimary = preferredID.isEmpty || preferredID == RawLocationStore.shared.currentDeviceIdentifier
         
-        if isPrimary {
+        if isPrimary, shouldSaveRawLocation {
             // 2. 更新内存数据并处理足迹分析
             self.updateTodayTotalPoints()
             self.allTodayPoints.append(location)
