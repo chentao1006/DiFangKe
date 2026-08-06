@@ -71,6 +71,18 @@ class NotificationManager {
         }
     }
     
+    func claimDailySummaryAIRequestIfNeeded() -> Bool {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true,
+              defaults.bool(forKey: "isAiAssistantEnabled") else { return false }
+
+        let now = Date()
+        let lastRequest = defaults.object(forKey: "lastDailySummaryAIRequestAt") as? Date ?? .distantPast
+        guard now.timeIntervalSince(lastRequest) >= 60 * 60 else { return false }
+        defaults.set(now, forKey: "lastDailySummaryAIRequestAt")
+        return true
+    }
+
     func refreshDailySummary(footprintCount: Int, pointsCount: Int, mileage: Double, transportCount: Int = 0, overviewSummary: String? = nil) {
         let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }

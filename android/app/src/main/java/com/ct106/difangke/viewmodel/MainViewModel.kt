@@ -491,9 +491,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             //     openAI.analyzeFootprint(fp)
             // }
 
-            // 如果是今天或强制，生成每日摘要
-            openAI.generateDailySummary(date, footprints, transports)
-            
+            if ((footprints.isNotEmpty() || transports.isNotEmpty()) &&
+                DiFangKeApp.instance.preferences.isAiEnabled.first()) {
+                val preferences = getApplication<Application>()
+                    .getSharedPreferences("daily_summary_ai", Application.MODE_PRIVATE)
+                val now = System.currentTimeMillis()
+                val lastRequest = preferences.getLong("last_request_at", 0L)
+                if (now - lastRequest >= 60 * 60 * 1000L) {
+                    preferences.edit().putLong("last_request_at", now).apply()
+                    openAI.generateDailySummary(date, footprints, transports, force = true)
+                }
+            }
+
             // 重新加载数据刷新 UI
             val cal = Calendar.getInstance().apply {
                 time = date

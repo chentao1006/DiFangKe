@@ -3328,6 +3328,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         )
         let todayTransports = (try? context.fetch(transportDescriptor)) ?? []
         
+        let shouldGenerateOverview = (!validFootprints.isEmpty || !todayTransports.isEmpty)
+            && NotificationManager.shared.claimDailySummaryAIRequestIfNeeded()
+
         // Calculate points and mileage using TimelineBuilder logic
         Task.detached(priority: .background) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
@@ -3345,7 +3348,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             let mileage = max(transportDistance, inferredFootprintDistance)
 
             let resolvedOverview: String?
-            if !validFootprints.isEmpty || !todayTransports.isEmpty {
+            if shouldGenerateOverview, (!validFootprints.isEmpty || !todayTransports.isEmpty) {
                 resolvedOverview = await withCheckedContinuation { continuation in
                     Task { @MainActor in
                         OpenAIService.shared.currentDailyOverviewSummary(
