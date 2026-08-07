@@ -2226,7 +2226,7 @@ private struct ContinuousTimelineSheet: View {
         }
         .sheet(item: $selectedFootprint) { footprint in
             buildFootprintModalView(for: footprint)
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.large])
         }
         .sheet(item: $selectedFutureTripDetail) { trip in
             buildFutureTripDetailView(for: trip)

@@ -71,7 +71,7 @@ struct FootprintModalView: View {
     private var isMinimized: Bool {
         isInline && presentationDetent == .height(88)
     }
-    
+
     private func ensureFootprintManaged() {
         if isDraft { return }
         if footprint.modelContext == nil {
@@ -97,18 +97,36 @@ struct FootprintModalView: View {
     
     var body: some View {
         NavigationStack {
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    headerContent
-                    
-                    footerContent
-                    
-                    Spacer().frame(height: 30)
-                }
-                .contentShape(Rectangle())
-                .onTapGesture { 
-                    addressFocused = false
-                    reasonFocused = false
+            GeometryReader { geometry in
+                let mapHeight = geometry.size.height / 3
+
+                VStack(spacing: 0) {
+                    FootprintDetailMapView(
+                        footprint: footprint,
+                        photoAssets: mapPhotos,
+                        isInteractive: true,
+                        showsStandalonePhotos: true,
+                        prefersActivityIcons: false,
+                        selectedFootprintID: footprint.footprintID,
+                        centersFootprintInVisibleTopArea: true,
+                        visibleMapFraction: 1
+                    )
+                    .opacity(showMap ? 1 : 0)
+                    .frame(height: mapHeight)
+
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            headerContent
+                            footerContent
+
+                            Spacer().frame(height: 30)
+                        }
+                    }
+                    .background(Color.dfkBackground)
+                    .onTapGesture {
+                        addressFocused = false
+                        reasonFocused = false
+                    }
                 }
             }
             .scrollDismissesKeyboard(.interactively)
@@ -322,6 +340,7 @@ struct FootprintModalView: View {
             }
         }
     }
+
 }
 }
 
@@ -1087,6 +1106,7 @@ struct FullFrameMapView: View {
                 }
         }
     }
+
 }
 
 private struct FootprintTimeAdjustmentView: View {
@@ -3237,6 +3257,11 @@ struct FootprintDetailMapView: View {
     var isInteractive: Bool = false
     var showsStandalonePhotos: Bool = true
     var prefersActivityIcons: Bool = true
+    var selectedFootprintID: UUID? = nil
+    /// The detail card covers the lower map area, so its marker needs an
+    /// upward screen offset while a full-frame map should remain normally centered.
+    var centersFootprintInVisibleTopArea: Bool = false
+    var visibleMapFraction: CGFloat = 1
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var selectedPhotoAsset: IdentifiableString?
 
@@ -3250,17 +3275,18 @@ struct FootprintDetailMapView: View {
             photoAssets: photoAssets,
             showsStandalonePhotos: showsStandalonePhotos,
             prefersActivityIcons: prefersActivityIcons,
+            selectedFootprintID: selectedFootprintID,
             onPhotoTap: { asset in
                 self.selectedPhotoAsset = IdentifiableString(value: asset.localIdentifier)
             }
         )
         .onAppear {
-            if let region = footprint.calculateRegion(with: photoAssets) {
+            if let region = displayRegion(with: photoAssets) {
                 cameraPosition = .region(region)
             }
         }
         .onChange(of: photoAssets) { _, newAssets in
-             if let region = footprint.calculateRegion(with: newAssets) {
+             if let region = displayRegion(with: newAssets) {
                 withAnimation {
                     cameraPosition = .region(region)
                 }
@@ -3271,6 +3297,21 @@ struct FootprintDetailMapView: View {
             let index = assetIDs.firstIndex(of: item.value) ?? 0
             PhotoFullscreenView(assetIDs: assetIDs, currentIndex: index)
         }
+    }
+
+    private func displayRegion(with photos: [PHAsset]) -> MKCoordinateRegion? {
+        guard var region = footprint.calculateRegion(with: photos) else { return nil }
+        guard centersFootprintInVisibleTopArea else { return region }
+
+        let marker = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+        guard marker.isRenderableMapCoordinate else { return region }
+
+        // This is the real, interactive upper map viewport. Center on the same
+        // coordinate used by the shared footprint marker.
+        region.center = marker
+        let visibleFraction = min(max(visibleMapFraction, 0.05), 1)
+        region.center.latitude -= region.span.latitudeDelta * (1 - visibleFraction) / 2
+        return region
     }
 }
 

@@ -13,8 +13,6 @@
 		19D19D677339112CC0F14ED5 /* Place.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7338D01A9D36898197763A48 /* Place.swift */; };
 		32BD3192C18CDD34C8B5EB24 /* TimelineEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */; };
 		441650B9A8F33BB36DD1822C /* WatchHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6B399C338BB4612145C364B /* WatchHomeView.swift */; };
-		A1D3F500AA001001AA001001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F501AA001001AA001001 /* Assets.xcassets */; };
-		A1D3F502AA001001AA001001 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F503AA001001AA001001 /* AppIcon.icon */; };
 		4A0BE9B15A8560F2969D5C2D /* Secrets.plist in Resources */ = {isa = PBXBuildFile; fileRef = AA55D128BD63CB08D5888227 /* Secrets.plist */; };
 		51C5B1CA5308C8B8E9EEDFBC /* FootprintDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DA88C94F7EAC66D28F00A84 /* FootprintDetailView.swift */; };
 		537DA85FA44FBE884BDF342B /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C0E6E94F0AB674372B9577B9 /* Foundation.framework */; };
@@ -36,6 +34,8 @@
 		988AA12CFD19A21CA1592A1D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A099643BEA06307F4508FC0 /* SettingsView.swift */; };
 		9F3F925B82CF4EEDED4E3AFF /* AddPlaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35E218304D15330402004958 /* AddPlaceSheet.swift */; };
 		A037B11166D8EC00960EEADB /* WatchSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E022A8CC3D9B5C3F524EC0E6 /* WatchSyncManager.swift */; };
+		A1D3F500AA001001AA001001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F501AA001001AA001001 /* Assets.xcassets */; };
+		A1D3F502AA001001AA001001 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F503AA001001AA001001 /* AppIcon.icon */; };
 		AA4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */; };
 		AC19D6437C18A309FE001E29 /* Views/TimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */; };
 		B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */; };
@@ -161,9 +161,9 @@
 		8FECD1239FE04DF703FFB1E6 /* DataManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataManagerView.swift; sourceTree = "<group>"; };
 		97D09C072C5681826463BD99 /* PlacesManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesManagerView.swift; sourceTree = "<group>"; };
 		9F3945441A99914928D9C615 /* DiFangKeWatch.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = DiFangKeWatch.entitlements; sourceTree = "<group>"; };
-		A49FF8D1053B68159E4D2EEC /* Footprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Footprint.swift; sourceTree = "<group>"; };
 		A1D3F501AA001001AA001001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1D3F503AA001001AA001001 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		A49FF8D1053B68159E4D2EEC /* Footprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Footprint.swift; sourceTree = "<group>"; };
 		A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/TimelineView.swift; sourceTree = "<group>"; };
 		AA55D128BD63CB08D5888227 /* Secrets.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Secrets.plist; sourceTree = "<group>"; };
 		B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TimelineEditView.swift; sourceTree = "<group>"; };
