@@ -467,7 +467,7 @@ struct OnboardingView: View {
                     description: "结合您的运动状态（步行、骑行等），地方客可以更准确地判断您何时停留或离开，极大节省电量并提高记录准确度。",
                     image: "figure.walk",
                     color: .orange,
-                    buttonText: "授权运动与健康"
+                    buttonText: "继续"
                 ) {
                     HealthManager.shared.requestAuthorization { _ in
                         withAnimation {
@@ -475,14 +475,6 @@ struct OnboardingView: View {
                         }
                     }
                 }
-                
-                Button("跳过") {
-                    withAnimation {
-                        step = 2
-                    }
-                }
-                .padding(.top, 10)
-                .foregroundColor(.secondary)
                 
             } else if step == 2 {
                 onboardingStep(
