@@ -99,33 +99,22 @@ struct FootprintModalView: View {
         NavigationStack {
             GeometryReader { geometry in
                 let mapHeight = geometry.size.height / 3
+                let isPhoneLandscape = UIDevice.current.userInterfaceIdiom == .phone && geometry.size.width > geometry.size.height
 
-                VStack(spacing: 0) {
-                    FootprintDetailMapView(
-                        footprint: footprint,
-                        photoAssets: mapPhotos,
-                        isInteractive: true,
-                        showsStandalonePhotos: true,
-                        prefersActivityIcons: false,
-                        selectedFootprintID: footprint.footprintID,
-                        centersFootprintInVisibleTopArea: true,
-                        visibleMapFraction: 1
-                    )
-                    .opacity(showMap ? 1 : 0)
-                    .frame(height: mapHeight)
+                if isPhoneLandscape {
+                    HStack(spacing: 0) {
+                        footprintDetailContent
+                            .frame(width: geometry.size.width / 2)
 
-                    ScrollView(showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            headerContent
-                            footerContent
-
-                            Spacer().frame(height: 30)
-                        }
+                        footprintMap
+                            .frame(width: geometry.size.width / 2)
                     }
-                    .background(Color.dfkBackground)
-                    .onTapGesture {
-                        addressFocused = false
-                        reasonFocused = false
+                } else {
+                    VStack(spacing: 0) {
+                        footprintMap
+                            .frame(height: mapHeight)
+
+                        footprintDetailContent
                     }
                 }
             }
@@ -345,6 +334,36 @@ struct FootprintModalView: View {
 }
 
 extension FootprintModalView {
+    private var footprintMap: some View {
+        FootprintDetailMapView(
+            footprint: footprint,
+            photoAssets: mapPhotos,
+            isInteractive: true,
+            showsStandalonePhotos: true,
+            prefersActivityIcons: false,
+            selectedFootprintID: footprint.footprintID,
+            centersFootprintInVisibleTopArea: true,
+            visibleMapFraction: 1
+        )
+        .opacity(showMap ? 1 : 0)
+    }
+
+    private var footprintDetailContent: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                headerContent
+                footerContent
+
+                Spacer().frame(height: 30)
+            }
+        }
+        .background(Color.dfkBackground)
+        .onTapGesture {
+            addressFocused = false
+            reasonFocused = false
+        }
+    }
+
     private func prepareMomentShare() {
         saveDraftReasonIfNeeded()
         let loadingPayload = DFKShareCardFactory.loadingPayload(
