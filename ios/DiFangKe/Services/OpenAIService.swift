@@ -461,6 +461,46 @@ class OpenAIService {
             }
         }
     }
+
+    /// Checks whether the current facts differ from the persisted AI result
+    /// without making a network request.  Callers use this before claiming a
+    /// rate-limit window, so unchanged timeline refreshes do not consume it.
+    func dailyOverviewStatus(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], completion: @escaping (_ needsNetworkRequest: Bool, _ savedSummary: String?) -> Void) {
+        guard let container = modelContainer else {
+            completion(false, nil)
+            return
+        }
+
+        let startOfDate = Calendar.current.startOfDay(for: date)
+        let fpIds = footprints.map(\.footprintID)
+        let tpIds = transports.map(\.recordID)
+
+        Task {
+            let context = ModelContext(container)
+            guard let profile = buildDailySummaryProfile(
+                fpIds: fpIds,
+                tpIds: tpIds,
+                context: context,
+                includeTodayData: true
+            ) else {
+                await MainActor.run { completion(false, nil) }
+                return
+            }
+
+            let descriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate {
+                $0.date == startOfDate
+            })
+            let existing = (try? context.fetch(descriptor))?.first
+            let existingContent = existing?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isCurrent = existing?.aiGenerated == true
+                && existing?.dataFingerprint == profile.fingerprint
+                && !(existingContent?.isEmpty ?? true)
+
+            await MainActor.run {
+                completion(!isCurrent, isCurrent ? existingContent : nil)
+            }
+        }
+    }
     
     private func processDailySummaryTask(date: Date, fpIds: [UUID], tpIds: [UUID], context: ModelContext, force: Bool = false) async {
         let startOfDate = Calendar.current.startOfDay(for: date)

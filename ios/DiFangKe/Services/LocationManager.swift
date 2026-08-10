@@ -3328,9 +3328,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         )
         let todayTransports = (try? context.fetch(transportDescriptor)) ?? []
         
-        let shouldGenerateOverview = (!validFootprints.isEmpty || !todayTransports.isEmpty)
-            && NotificationManager.shared.claimDailySummaryAIRequestIfNeeded()
-
         // Calculate points and mileage using TimelineBuilder logic
         Task.detached(priority: .background) {
             let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
@@ -3347,8 +3344,21 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
             let mileage = max(transportDistance, inferredFootprintDistance)
 
+            let overviewStatus = await withCheckedContinuation { continuation in
+                Task { @MainActor in
+                    OpenAIService.shared.dailyOverviewStatus(
+                        for: targetDate,
+                        footprints: validFootprints,
+                        transports: todayTransports
+                    ) { needsNetworkRequest, savedSummary in
+                        continuation.resume(returning: (needsNetworkRequest, savedSummary))
+                    }
+                }
+            }
+
             let resolvedOverview: String?
-            if shouldGenerateOverview, (!validFootprints.isEmpty || !todayTransports.isEmpty) {
+            if overviewStatus.0,
+               NotificationManager.shared.claimDailySummaryAIRequestIfNeeded() {
                 resolvedOverview = await withCheckedContinuation { continuation in
                     Task { @MainActor in
                         OpenAIService.shared.currentDailyOverviewSummary(
@@ -3361,7 +3371,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     }
                 }
             } else {
-                resolvedOverview = nil
+                // The persisted result is already based on the same facts.
+                // Reuse it for notification scheduling without contacting AI.
+                resolvedOverview = overviewStatus.1
             }
 
             await MainActor.run {
