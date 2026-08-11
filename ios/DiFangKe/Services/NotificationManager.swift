@@ -4,6 +4,7 @@ import BackgroundTasks
 
 class NotificationManager {
     static let shared = NotificationManager()
+    private let newFootprintActivityCategoryID = "dfk.newFootprintActivity"
 
     // Keep this in the app's normal defaults, not an in-memory LocationManager
     // property: notification refresh is entered from location updates, timeline
@@ -15,6 +16,21 @@ class NotificationManager {
     private let dailySummaryAIRequestLock = NSLock()
     
     private init() {}
+
+    func registerNotificationCategories() {
+        let chooseAction = UNNotificationAction(identifier: "dfk.chooseActivity", title: "选择活动类型", options: [.foreground])
+        let category = UNNotificationCategory(
+            identifier: newFootprintActivityCategoryID,
+            actions: [chooseAction],
+            intentIdentifiers: [],
+            options: []
+        )
+        UNUserNotificationCenter.current().getNotificationCategories { categories in
+            var updated = categories.filter { $0.identifier != self.newFootprintActivityCategoryID }
+            updated.insert(category)
+            UNUserNotificationCenter.current().setNotificationCategories(updated)
+        }
+    }
     
     func requestAuthorization(completion: ((Bool) -> Void)? = nil) {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
@@ -195,6 +211,24 @@ class NotificationManager {
             if let error = error {
                 print("Failed to send highlight notification: \(error)")
             }
+        }
+    }
+
+    /// The notification is mirrored to the paired Watch. Its action opens the Watch app's
+    /// complete activity picker, so custom activity types are never truncated.
+    func sendNewFootprintActivityNotification(title: String, body: String, footprintID: UUID) {
+        let isEnabled = UserDefaults.standard.object(forKey: "isHighlightNotificationEnabled") as? Bool ?? true
+        guard isEnabled else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body + " 点此选择这次的活动类型。"
+        content.sound = .default
+        content.categoryIdentifier = newFootprintActivityCategoryID
+        content.userInfo = ["type": "new_footprint_activity", "footprintID": footprintID.uuidString]
+        let request = UNNotificationRequest(identifier: "newFootprintActivity.\(footprintID.uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error { print("Failed to send new-footprint activity notification: \(error)") }
         }
     }
 

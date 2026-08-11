@@ -25,28 +25,43 @@ private struct CurrentPlaceView: View {
                 .font(.title3.bold())
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
-            if let startedAt = snapshot.startedAt {
+            if !store.hasReceivedSnapshot {
+                Text(snapshot.address ?? "")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else if let startedAt = snapshot.startedAt {
                 Text("已停留 \(startedAt, style: .relative)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if let address = snapshot.address, !address.isEmpty {
                 Text(address).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
-            Button {
-                showingActivityPicker = true
-            } label: {
-                Label(store.currentActivity?.name ?? "选择活动", systemImage: store.currentActivity?.icon ?? "figure.walk")
+            if store.hasReceivedSnapshot {
+                Button {
+                    showingActivityPicker = true
+                } label: {
+                    Label(store.currentActivity?.name ?? "选择活动", systemImage: store.currentActivity?.icon ?? "figure.walk")
+                }
+                .tint(activityColor(store.currentActivity?.colorHex))
             }
-            .tint(.blue)
-            Text(snapshot.isTracking ? "正在记录" : "记录已暂停")
-                .font(.caption2)
-                .foregroundStyle(snapshot.isTracking ? .green : .secondary)
         }
         .scenePadding()
         .sheet(isPresented: $showingActivityPicker) {
             ActivityPickerView()
         }
+        .onChange(of: store.requestedActivityPickerFootprintID) { _, footprintID in
+            guard footprintID == snapshot.currentFootprintID else { return }
+            showingActivityPicker = true
+        }
     }
+}
+
+private func activityColor(_ hex: String?) -> Color {
+    guard let hex else { return .blue }
+    let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+    guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .blue }
+    return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
 }
 
 private struct ActivityPickerView: View {
@@ -62,10 +77,12 @@ private struct ActivityPickerView: View {
                         dismiss()
                     } label: {
                         HStack {
-                            Image(systemName: activity.icon).frame(width: 20)
+                            Image(systemName: activity.icon)
+                                .foregroundStyle(activityColor(activity.colorHex))
+                                .frame(width: 20)
                             Text(activity.name)
                             Spacer()
-                            if store.snapshot.currentActivityID == activity.id { Image(systemName: "checkmark").foregroundStyle(.blue) }
+                            if store.snapshot.currentActivityID == activity.id { Image(systemName: "checkmark").foregroundStyle(activityColor(activity.colorHex)) }
                         }
                     }
                 }

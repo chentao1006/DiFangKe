@@ -45,6 +45,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         
         // 设置通知代理以响应通知点击
         UNUserNotificationCenter.current().delegate = self
+        NotificationManager.shared.registerNotificationCategories()
         
         // ── 核心修复：无论前台还是后台启动，都立即激活 Significant Location Monitoring ──
         // 这是 iOS 唯一可以在 App 被系统杀死后自动重新启动的机制之一。
@@ -119,6 +120,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 LocationManager.shared.requestSingleLocation()
                 await WidgetDataSyncManager.shared.syncTodayOnly()
                 await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded()
+                WatchSyncManager.shared.syncHourlyIfNeeded()
                 
                 task.setTaskCompleted(success: true)
             }
@@ -137,6 +139,18 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // 处理用户点击通知进入 App 的行为
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let userInfo = response.notification.request.content.userInfo
+
+        if userInfo["type"] as? String == "new_footprint_activity",
+           let footprintID = userInfo["footprintID"] as? String {
+            Task { @MainActor in
+                if response.actionIdentifier == "dfk.chooseActivity" {
+                    WatchSyncManager.shared.requestActivityPicker(for: footprintID)
+                } else if response.actionIdentifier.hasPrefix("dfk.activity.") {
+                    let activityID = String(response.actionIdentifier.dropFirst("dfk.activity.".count))
+                    WatchSyncManager.shared.applyActivityChange(footprintID: footprintID, activityID: activityID)
+                }
+            }
+        }
         
         if let type = userInfo["type"] as? String {
             if type == "highlight_footprint",
@@ -195,6 +209,7 @@ struct DiFangKeApp: App {
     @State private var modelContainer: ModelContainer?
     @State private var foregroundWidgetSyncTask: Task<Void, Never>?
     @State private var backgroundWidgetSyncTask: Task<Void, Never>?
+    @State private var watchHourlySyncTask: Task<Void, Never>?
     
     init() {
         // We move the heavy ModelContainer initialization to a background task
@@ -268,6 +283,13 @@ struct DiFangKeApp: App {
                 if newPhase == .active {
                     backgroundWidgetSyncTask?.cancel()
                     backgroundWidgetSyncTask = nil
+                    watchHourlySyncTask?.cancel()
+                    watchHourlySyncTask = Task {
+                        while !Task.isCancelled {
+                            WatchSyncManager.shared.syncHourlyIfNeeded()
+                            try? await Task.sleep(nanoseconds: 60 * 60 * 1_000_000_000)
+                        }
+                    }
 
                     let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
                     if isEnabled {
@@ -281,7 +303,9 @@ struct DiFangKeApp: App {
                     if modelContainer != nil {
                         foregroundWidgetSyncTask?.cancel()
                         foregroundWidgetSyncTask = Task {
-                            try? await Task.sleep(nanoseconds: 3_000_000_000)
+                            // Give location/data recovery enough time after an app open before
+                            // publishing the Watch snapshot.
+                            try? await Task.sleep(nanoseconds: 30_000_000_000)
                             guard !Task.isCancelled else { return }
                             WatchSyncManager.shared.syncSnapshot()
                         }
@@ -289,6 +313,8 @@ struct DiFangKeApp: App {
                 } else if newPhase == .background {
                     foregroundWidgetSyncTask?.cancel()
                     foregroundWidgetSyncTask = nil
+                    watchHourlySyncTask?.cancel()
+                    watchHourlySyncTask = nil
 
                     if modelContainer != nil {
                         backgroundWidgetSyncTask?.cancel()
@@ -301,7 +327,7 @@ struct DiFangKeApp: App {
                             
                             await WidgetDataSyncManager.shared.syncTodayOnly()
                             await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded(force: true)
-                            WatchSyncManager.shared.syncSnapshot()
+                            WatchSyncManager.shared.syncHourlyIfNeeded()
                             
                             if bgTask != .invalid {
                                 UIApplication.shared.endBackgroundTask(bgTask)

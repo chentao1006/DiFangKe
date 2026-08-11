@@ -28,11 +28,12 @@ struct WatchSnapshot: Codable, Hashable {
     let nextTrip: WatchTripSnapshot?
     let activities: [WatchActivityOption]
 
-    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "等待 iPhone 数据", address: nil, startedAt: nil, isTracking: false, currentActivityID: nil, todayFootprintCount: 0, todayDistance: 0, nextTrip: nil, activities: [])
+    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, todayFootprintCount: 0, todayDistance: 0, nextTrip: nil, activities: [])
 }
 
 final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     @Published private(set) var snapshot = WatchSnapshot.placeholder
+    @Published private(set) var requestedActivityPickerFootprintID: String?
 
     override init() {
         super.init()
@@ -43,6 +44,10 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
 
     var currentActivity: WatchActivityOption? {
         snapshot.activities.first { $0.id == snapshot.currentActivityID }
+    }
+
+    var hasReceivedSnapshot: Bool {
+        snapshot.currentFootprintID != nil || !snapshot.activities.isEmpty
     }
 
     func selectActivity(_ activity: WatchActivityOption?) {
@@ -61,11 +66,28 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         apply(session.receivedApplicationContext)
     }
 
+#if os(iOS)
+    func sessionDidBecomeInactive(_ session: WCSession) {}
+
+    func sessionDidDeactivate(_ session: WCSession) {
+        session.activate()
+    }
+#endif
+
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) { apply(applicationContext) }
 
     private func apply(_ context: [String: Any]) {
+        let requestedPickerID = context["activityPickerFootprintID"] as? String
         guard let data = context["snapshot"] as? Data,
-              let decoded = try? JSONDecoder().decode(WatchSnapshot.self, from: data) else { return }
-        DispatchQueue.main.async { self.snapshot = decoded }
+              let decoded = try? JSONDecoder().decode(WatchSnapshot.self, from: data) else {
+            if let requestedPickerID {
+                DispatchQueue.main.async { self.requestedActivityPickerFootprintID = requestedPickerID }
+            }
+            return
+        }
+        DispatchQueue.main.async {
+            self.snapshot = decoded
+            self.requestedActivityPickerFootprintID = requestedPickerID
+        }
     }
 }

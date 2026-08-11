@@ -35,6 +35,9 @@ struct WatchTripSnapshot: Codable {
 final class WatchSyncManager: NSObject, WCSessionDelegate {
     static let shared = WatchSyncManager()
     private var modelContext: ModelContext?
+    private let pendingActivityFootprintKey = "pendingWatchActivityFootprintID"
+    private let pendingActivityIDKey = "pendingWatchActivityID"
+    private let lastHourlySyncKey = "lastWatchHourlySyncTimestamp"
 
     func start(context: ModelContext) {
         modelContext = context
@@ -42,15 +45,39 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
         let session = WCSession.default
         session.delegate = self
         session.activate()
+        applyPendingActivityChangeIfNeeded()
         syncSnapshot()
     }
 
     func syncSnapshot() {
         guard let context = modelContext,
               WCSession.isSupported(),
-              WCSession.default.activationState == .activated else { return }
+              WCSession.default.activationState == .activated,
+              WCSession.default.isWatchAppInstalled else { return }
         guard let data = try? JSONEncoder().encode(makeSnapshot(context: context)) else { return }
         try? WCSession.default.updateApplicationContext(["snapshot": data])
+    }
+
+    /// A best-effort hourly catch-up for the installed companion app. Location-triggered
+    /// sync remains immediate; this covers changes that otherwise have no location event.
+    func syncHourlyIfNeeded(now: Date = Date()) {
+        guard WCSession.isSupported(),
+              WCSession.default.isWatchAppInstalled,
+              now.timeIntervalSince1970 - UserDefaults.standard.double(forKey: lastHourlySyncKey) >= 60 * 60 else { return }
+        syncSnapshot()
+        UserDefaults.standard.set(now.timeIntervalSince1970, forKey: lastHourlySyncKey)
+    }
+
+    func requestActivityPicker(for footprintID: String) {
+        guard let context = modelContext,
+              WCSession.isSupported(),
+              WCSession.default.activationState == .activated,
+              WCSession.default.isWatchAppInstalled,
+              let data = try? JSONEncoder().encode(makeSnapshot(context: context)) else { return }
+        try? WCSession.default.updateApplicationContext([
+            "snapshot": data,
+            "activityPickerFootprintID": footprintID
+        ])
     }
 
     private func makeSnapshot(context: ModelContext) -> WatchSnapshot {
@@ -84,14 +111,27 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
         )
     }
 
-    private func applyActivityChange(footprintID: String, activityID: String?) {
-        guard let context = modelContext, let id = UUID(uuidString: footprintID) else { return }
+    func applyActivityChange(footprintID: String, activityID: String?) {
+        guard let context = modelContext else {
+            UserDefaults.standard.set(footprintID, forKey: pendingActivityFootprintKey)
+            UserDefaults.standard.set(activityID, forKey: pendingActivityIDKey)
+            return
+        }
+        guard let id = UUID(uuidString: footprintID) else { return }
         let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
         guard let footprint = try? context.fetch(descriptor).first else { return }
         footprint.updateActivityType(to: activityID, in: context)
         try? context.save()
         syncSnapshot()
         NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+    }
+
+    private func applyPendingActivityChangeIfNeeded() {
+        guard let footprintID = UserDefaults.standard.string(forKey: pendingActivityFootprintKey),
+              let activityID = UserDefaults.standard.string(forKey: pendingActivityIDKey) else { return }
+        UserDefaults.standard.removeObject(forKey: pendingActivityFootprintKey)
+        UserDefaults.standard.removeObject(forKey: pendingActivityIDKey)
+        applyActivityChange(footprintID: footprintID, activityID: activityID)
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {

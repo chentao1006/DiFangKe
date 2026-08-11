@@ -2714,12 +2714,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 body = "你已经有 \(absenceDuration) 没来「\(placeName)」了，欢迎回来。"
             }
             
-            NotificationManager.shared.sendHighlightNotification(
-                title: title,
-                body: body,
-                footprintID: footprint.footprintID,
-                date: footprint.startTime
-            )
+            if isNewPlace {
+                NotificationManager.shared.sendNewFootprintActivityNotification(
+                    title: title, body: body, footprintID: footprint.footprintID
+                )
+            } else {
+                NotificationManager.shared.sendHighlightNotification(
+                    title: title, body: body, footprintID: footprint.footprintID, date: footprint.startTime
+                )
+            }
         }
     }
 
@@ -3060,8 +3063,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 clearOngoingPlaceOverride()
             }
         }
-        
+
         try? context.save()
+
+        // Location updates can keep the iPhone app running in the background. Publish the
+        // saved footprint here instead of waiting for an app lifecycle change.
+        if !isHistorical {
+            WatchSyncManager.shared.syncSnapshot()
+        }
 
         if !isHistorical {
             let syncDate = Calendar.current.startOfDay(for: boundedCandidate.startTime)
