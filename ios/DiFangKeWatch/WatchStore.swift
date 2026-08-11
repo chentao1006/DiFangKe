@@ -1,5 +1,6 @@
 import Foundation
 import WatchConnectivity
+import WidgetKit
 
 struct WatchActivityOption: Codable, Hashable, Identifiable {
     let id: String
@@ -23,15 +24,19 @@ struct WatchSnapshot: Codable, Hashable {
     let startedAt: Date?
     let isTracking: Bool
     let currentActivityID: String?
+    let currentTransportType: String?
+    let currentTransportStartedAt: Date?
     let todayFootprintCount: Int
     let todayDistance: Double
     let nextTrip: WatchTripSnapshot?
     let activities: [WatchActivityOption]
 
-    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, todayFootprintCount: 0, todayDistance: 0, nextTrip: nil, activities: [])
+    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, currentTransportType: nil, currentTransportStartedAt: nil, todayFootprintCount: 0, todayDistance: 0, nextTrip: nil, activities: [])
 }
 
 final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
+    private let complicationSnapshotKey = "watchComplicationSnapshot"
+    private let complicationGroupID = "group.com.ct106.difangke"
     @Published private(set) var snapshot = WatchSnapshot.placeholder
     @Published private(set) var requestedActivityPickerFootprintID: String?
 
@@ -59,7 +64,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         } else {
             session.transferUserInfo(payload)
         }
-        snapshot = WatchSnapshot(currentFootprintID: snapshot.currentFootprintID, placeName: snapshot.placeName, address: snapshot.address, startedAt: snapshot.startedAt, isTracking: snapshot.isTracking, currentActivityID: activity?.id, todayFootprintCount: snapshot.todayFootprintCount, todayDistance: snapshot.todayDistance, nextTrip: snapshot.nextTrip, activities: snapshot.activities)
+        snapshot = WatchSnapshot(currentFootprintID: snapshot.currentFootprintID, placeName: snapshot.placeName, address: snapshot.address, startedAt: snapshot.startedAt, isTracking: snapshot.isTracking, currentActivityID: activity?.id, currentTransportType: snapshot.currentTransportType, currentTransportStartedAt: snapshot.currentTransportStartedAt, todayFootprintCount: snapshot.todayFootprintCount, todayDistance: snapshot.todayDistance, nextTrip: snapshot.nextTrip, activities: snapshot.activities)
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
@@ -87,7 +92,16 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         }
         DispatchQueue.main.async {
             self.snapshot = decoded
+            self.persistForComplications(decoded)
             self.requestedActivityPickerFootprintID = requestedPickerID
         }
+    }
+
+    /// A Watch complication extension cannot receive WatchConnectivity messages
+    /// itself. The companion app is the receiver and shares this compact copy.
+    private func persistForComplications(_ snapshot: WatchSnapshot) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        UserDefaults(suiteName: complicationGroupID)?.set(data, forKey: complicationSnapshotKey)
+        WidgetCenter.shared.reloadAllTimelines()
     }
 }

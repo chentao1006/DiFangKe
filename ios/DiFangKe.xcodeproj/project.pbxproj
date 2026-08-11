@@ -36,6 +36,7 @@
 		A037B11166D8EC00960EEADB /* WatchSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E022A8CC3D9B5C3F524EC0E6 /* WatchSyncManager.swift */; };
 		A1D3F500AA001001AA001001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F501AA001001AA001001 /* Assets.xcassets */; };
 		A1D3F502AA001001AA001001 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F503AA001001AA001001 /* AppIcon.icon */; };
+		A71100000000000000000001 /* DiFangKeWatchWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A71100000000000000000002 /* DiFangKeWatchWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		AA4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */; };
 		AC19D6437C18A309FE001E29 /* Views/TimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */; };
 		B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */; };
@@ -97,6 +98,13 @@
 			remoteGlobalIDString = 11F4AA226D3DCD80D5EBA1FA;
 			remoteInfo = DiFangKeWatch;
 		};
+		A71100000000000000000003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 22478D1FFB0A8791BF88398D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A71100000000000000000004;
+			remoteInfo = DiFangKeWatchWidget;
+		};
 		C67848252FA24C10002DF823 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 22478D1FFB0A8791BF88398D /* Project object */;
@@ -107,6 +115,17 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		A71100000000000000000005 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A71100000000000000000001 /* DiFangKeWatchWidget.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C3EA889BD26EA1368565CBFF /* Embed Watch Content */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -165,6 +184,7 @@
 		A1D3F503AA001001AA001001 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		A49FF8D1053B68159E4D2EEC /* Footprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Footprint.swift; sourceTree = "<group>"; };
 		A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/TimelineView.swift; sourceTree = "<group>"; };
+		A71100000000000000000002 /* DiFangKeWatchWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = DiFangKeWatchWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA55D128BD63CB08D5888227 /* Secrets.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Secrets.plist; sourceTree = "<group>"; };
 		B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TimelineEditView.swift; sourceTree = "<group>"; };
 		BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoService.swift; sourceTree = "<group>"; };
@@ -206,6 +226,13 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A7110000000000000000000F /* Exceptions for "DiFangKeWatchWidget" folder in "DiFangKeWatchWidget" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A71100000000000000000004 /* DiFangKeWatchWidget */;
+		};
 		C678482B2FA24C10002DF823 /* Exceptions for "DiFangKeWidget" folder in "DiFangKeWidgetExtension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -216,6 +243,14 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		A71100000000000000000007 /* DiFangKeWatchWidget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A7110000000000000000000F /* Exceptions for "DiFangKeWatchWidget" folder in "DiFangKeWatchWidget" target */,
+			);
+			path = DiFangKeWatchWidget;
+			sourceTree = "<group>";
+		};
 		C67848192FA24C0D002DF823 /* DiFangKeWidget */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -232,6 +267,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				923B7C1655C4BB80D929DDCF /* Aptabase in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A7110000000000000000000B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -258,6 +300,7 @@
 		060C5744364D60F6DF54D207 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				A71100000000000000000002 /* DiFangKeWatchWidget.appex */,
 				0109B5C3A46C595F984A0148 /* 地方客.app */,
 				C67848132FA24C0C002DF823 /* DiFangKeWidgetExtension.appex */,
 				1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */,
@@ -397,6 +440,7 @@
 				C67848142FA24C0C002DF823 /* Frameworks */,
 				060C5744364D60F6DF54D207 /* Products */,
 				DD08A6A7E588B5B0B2C24C92 /* DiFangKeWatch */,
+				A71100000000000000000007 /* DiFangKeWatchWidget */,
 			);
 			sourceTree = "<group>";
 		};
@@ -423,15 +467,37 @@
 				3A991CCA108EC9D9DCEBFE79 /* Sources */,
 				E79705EEDDC8D808C38510D8 /* Frameworks */,
 				C88A2620765FD3A68CC0B773 /* Resources */,
+				A71100000000000000000005 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A71100000000000000000008 /* PBXTargetDependency */,
 			);
 			name = DiFangKeWatch;
 			productName = DiFangKeWatch;
 			productReference = 1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */;
 			productType = "com.apple.product-type.application";
+		};
+		A71100000000000000000004 /* DiFangKeWatchWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A71100000000000000000009 /* Build configuration list for PBXNativeTarget "DiFangKeWatchWidget" */;
+			buildPhases = (
+				A7110000000000000000000A /* Sources */,
+				A7110000000000000000000B /* Frameworks */,
+				A7110000000000000000000C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A71100000000000000000007 /* DiFangKeWatchWidget */,
+			);
+			name = DiFangKeWatchWidget;
+			productName = DiFangKeWatchWidget;
+			productReference = A71100000000000000000002 /* DiFangKeWatchWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */ = {
 			isa = PBXNativeTarget;
@@ -514,6 +580,7 @@
 				D8BD734948CCEF7A2C9FAA84 /* DiFangKe */,
 				C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */,
 				11F4AA226D3DCD80D5EBA1FA /* DiFangKeWatch */,
+				A71100000000000000000004 /* DiFangKeWatchWidget */,
 			);
 		};
 /* End PBXProject section */
@@ -527,6 +594,13 @@
 				E5CF6588D5181064FB5CB42D /* Assets.xcassets in Resources */,
 				C199604340369E777F064D7B /* Config.plist in Resources */,
 				4A0BE9B15A8560F2969D5C2D /* Secrets.plist in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A7110000000000000000000C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -619,6 +693,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A7110000000000000000000A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C678480F2FA24C0C002DF823 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -641,6 +722,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		A71100000000000000000008 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A71100000000000000000004 /* DiFangKeWatchWidget */;
+			targetProxy = A71100000000000000000003 /* PBXContainerItemProxy */;
+		};
 		C67848262FA24C10002DF823 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */;
@@ -713,7 +799,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -734,7 +820,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.3.7;
+				MARKETING_VERSION = 1.3.8;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -746,6 +832,42 @@
 				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
+		};
+		A7110000000000000000000D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = DiFangKeWatchWidget/DiFangKeWatchWidget.entitlements;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = DiFangKeWatchWidget/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.watchkitapp.widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		A7110000000000000000000E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = DiFangKeWatchWidget/DiFangKeWatchWidget.entitlements;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = DiFangKeWatchWidget/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.watchkitapp.widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
 		};
 		B7E440CFC1E1076A922BEDB4 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -812,7 +934,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -827,7 +949,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.3.7;
+				MARKETING_VERSION = 1.3.8;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -982,6 +1104,15 @@
 			buildConfigurations = (
 				5B10AD8112E2603AE6D4DBC2 /* Debug */,
 				C090984780C0D1C0ECE0B719 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A71100000000000000000009 /* Build configuration list for PBXNativeTarget "DiFangKeWatchWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A7110000000000000000000D /* Debug */,
+				A7110000000000000000000E /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

@@ -17,6 +17,8 @@ struct WatchSnapshot: Codable {
     let startedAt: Date?
     let isTracking: Bool
     let currentActivityID: String?
+    let currentTransportType: String?
+    let currentTransportStartedAt: Date?
     let todayFootprintCount: Int
     let todayDistance: Double
     let nextTrip: WatchTripSnapshot?
@@ -38,6 +40,8 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
     private let pendingActivityFootprintKey = "pendingWatchActivityFootprintID"
     private let pendingActivityIDKey = "pendingWatchActivityID"
     private let lastHourlySyncKey = "lastWatchHourlySyncTimestamp"
+    private var footprintDataChangedObserver: NSObjectProtocol?
+    private var pendingSnapshotSync: Task<Void, Never>?
 
     func start(context: ModelContext) {
         modelContext = context
@@ -46,7 +50,29 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
         session.delegate = self
         session.activate()
         applyPendingActivityChangeIfNeeded()
+        if footprintDataChangedObserver == nil {
+            footprintDataChangedObserver = NotificationCenter.default.addObserver(
+                forName: NSNotification.Name("FootprintDataChanged"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.scheduleImmediateSnapshotSync()
+                }
+            }
+        }
         syncSnapshot()
+    }
+
+    /// Timeline reconstruction may emit several changes for one location update.
+    /// Coalesce them briefly, then publish the final activity/transport state to Watch.
+    private func scheduleImmediateSnapshotSync() {
+        pendingSnapshotSync?.cancel()
+        pendingSnapshotSync = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.syncSnapshot()
+        }
     }
 
     func syncSnapshot() {
@@ -92,6 +118,12 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
         let activities = ((try? context.fetch(FetchDescriptor<ActivityType>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? [])
             .map { WatchActivityOption(id: $0.id.uuidString, name: $0.name, icon: $0.icon, colorHex: $0.colorHex) }
         let latest = footprints.first
+        let recentTransportEndThreshold = now.addingTimeInterval(-5 * 60)
+        let transports = (try? context.fetch(FetchDescriptor<TransportRecord>(
+            predicate: #Predicate { $0.statusRaw == "active" && $0.startTime <= now && $0.endTime >= recentTransportEndThreshold },
+            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+        ))) ?? []
+        let currentTransport = transports.first
         let nextTrip = FutureTrip.dayOrdered((try? context.fetch(FetchDescriptor<FutureTrip>())) ?? [])
             .first(where: { !$0.isCompleted && $0.hasPlanDate && ($0.isOrdered ? calendar.isDateInToday($0.arrivalDate) : $0.effectiveArrivalDate(now: now) >= now) })
         let distance = nextTrip.map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
@@ -104,6 +136,8 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
             startedAt: latest?.startTime,
             isTracking: LocationManager.shared.isTracking,
             currentActivityID: latest?.activityTypeValue,
+            currentTransportType: currentTransport.map { $0.manualTypeRaw ?? $0.typeRaw },
+            currentTransportStartedAt: currentTransport?.startTime,
             todayFootprintCount: footprints.count,
             todayDistance: footprints.compactMap(\.walkingDistance).reduce(0, +),
             nextTrip: nextTrip.map { WatchTripSnapshot(id: $0.id.uuidString, placeName: $0.placeName, distance: distance, arrivalDate: $0.arrivalDate, hasArrivalTime: $0.hasArrivalTime) },
