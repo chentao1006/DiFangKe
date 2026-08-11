@@ -46,6 +46,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // 设置通知代理以响应通知点击
         UNUserNotificationCenter.current().delegate = self
         NotificationManager.shared.registerNotificationCategories()
+        // The initial install path does not necessarily visit Settings or
+        // receive a cloud-settings update.  Ensure the user's persisted daily
+        // reminder is always present after launch.
+        NotificationManager.shared.refreshSettings()
         
         // ── 核心修复：无论前台还是后台启动，都立即激活 Significant Location Monitoring ──
         // 这是 iOS 唯一可以在 App 被系统杀死后自动重新启动的机制之一。

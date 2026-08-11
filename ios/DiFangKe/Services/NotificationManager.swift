@@ -68,7 +68,11 @@ class NotificationManager {
     
     // Dynamic scheduling based on Settings
     func updateDailySummary(isEnabled: Bool, hour: Int, minute: Int, title: String? = nil, body: String? = nil) {
-        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+        // A refreshed daily summary must not cancel other scheduled reminders
+        // (past memories, future trips, etc.).  More importantly, cancelling
+        // every request while the configured time is being reached can make
+        // today's summary disappear before the system presents it.
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["dailySummary"])
         
         guard isEnabled else { 
             print("Notifications disabled by user.")
