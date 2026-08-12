@@ -285,6 +285,7 @@ struct DiFangKeApp: App {
             .animation(.easeInOut(duration: 0.8), value: showSplash)
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
+                    locationManager.refreshAuthorizationStatus()
                     backgroundWidgetSyncTask?.cancel()
                     backgroundWidgetSyncTask = nil
                     watchHourlySyncTask?.cancel()
@@ -453,6 +454,7 @@ struct OnboardingView: View {
     var onRebuildContainer: () async -> Void
     @State private var step = 0
     @State private var isRestoringData = false
+    @State private var showLocationSettingsAlert = false
     
     var body: some View {
         VStack {
@@ -461,12 +463,13 @@ struct OnboardingView: View {
             if step == 0 {
                 onboardingStep(
                     title: "记录走过的足迹",
-                    description: "为了能在后台自动为您记录走过的足迹，地方客需要获取完整的位置权限。\n\n接下来的授权分为两步：请您在此次弹窗中选择「使用 App 时允许」。在之后的使用中，如果系统再次弹窗询问，请务必选择「更改为始终允许」，以确保后台记录不会中断。",
+                    description: "为了能在后台自动为您记录走过的足迹，地方客需要位置权限。请先在系统弹窗中选择「使用 App 时允许」；完成初始设置后，地方客会再询问您是否允许「始终」定位，以便离开 App 后仍能持续记录。",
                     image: "location.circle.fill",
                     color: Color.dfkAccent,
                     buttonText: "继续"
                 ) {
-                    if locationManager.authStatus == .authorizedWhenInUse && !locationManager.isAlwaysAuthorized {
+                    if locationManager.authStatus == .denied
+                        || locationManager.authStatus == .restricted {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             UIApplication.shared.open(url)
                         }
@@ -475,19 +478,22 @@ struct OnboardingView: View {
                     }
                 }
                 .onAppear {
-                    if locationManager.isAlwaysAuthorized {
+                    scheduleLocationSettingsAlertIfNeeded()
+                    if locationManager.isAuthorized {
                         withAnimation {
                             step = 1
                         }
                     }
                 }
-                .onChange(of: locationManager.isAuthorized) { _, newValue in
-                    if newValue {
+                .onChange(of: locationManager.authStatus) { _, newValue in
+                    if newValue == .authorizedAlways || newValue == .authorizedWhenInUse {
                         UserDefaults.standard.set(true, forKey: "isTrackingEnabled")
                         locationManager.startTracking()
                         withAnimation {
                             step = 1
                         }
+                    } else if newValue == .denied || newValue == .restricted {
+                        scheduleLocationSettingsAlertIfNeeded()
                     }
                 }
                 
@@ -619,8 +625,32 @@ struct OnboardingView: View {
             
             Spacer()
         }
+        .alert("定位权限已关闭", isPresented: $showLocationSettingsAlert) {
+            Button("前往系统设置") {
+                guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                UIApplication.shared.open(url)
+            }
+            Button("稍后", role: .cancel) {}
+        } message: {
+            Text("地方客无法记录足迹、停留与行程。请在系统设置中允许定位。")
+        }
         .padding(30)
         .background(Color.dfkBackground)
+    }
+
+    private func scheduleLocationSettingsAlertIfNeeded() {
+        let status = locationManager.authStatus
+        guard status == .denied || status == .restricted else { return }
+
+        // Core Location calls this while its own permission sheet is dismissing.
+        // Presenting a SwiftUI alert in the same turn is ignored by UIKit, so wait
+        // for that system presentation to finish, then verify the status again.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            let currentStatus = locationManager.authStatus
+            guard currentStatus == .denied || currentStatus == .restricted else { return }
+            showLocationSettingsAlert = true
+        }
     }
     
     private func checkCloudDataAndProceed() {

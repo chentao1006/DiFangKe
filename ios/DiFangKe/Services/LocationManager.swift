@@ -1131,21 +1131,22 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var lastStationaryProbeTime: Date = .distantPast
     private var lastStartTrackingAt: Date = .distantPast
     private var lastStartTrackingLocationRequestAt: Date = .distantPast
+    private var isRequestingAlwaysAuthorization = false
     
     override init() {
         super.init()
         self.locationManager.delegate = self
+        // CLLocationManager 的授权状态在进程重启后需要重新读取。必须先更新它，
+        // 再恢复后台定位配置；否则这里永远看到默认的 false，后台回调会在一次
+        // 冷启动后悄悄断掉。
+        refreshAuthorizationStatus()
         self.locationManager.desiredAccuracy = kCLLocationAccuracyBest // 初次启动使用最高精度，确保冷启动位置快速锁定
         self.locationManager.distanceFilter = 5.0 // 初始高频记录 (5米)
-        if isAuthorized {
-            self.locationManager.allowsBackgroundLocationUpdates = true
-        }
+        self.locationManager.allowsBackgroundLocationUpdates = isAlwaysAuthorized
         self.locationManager.pausesLocationUpdatesAutomatically = false // 核心修复：禁止自动暂停，防止丢点
         self.locationManager.showsBackgroundLocationIndicator = false // 保持静默记录，不显示蓝色状态栏（响应用户反馈）
         self.locationManager.activityType = .fitness // 默认为健身/步行模式
         
-        // Initialize basic status
-        updateAuthStatus()
         loadPotentialStop()
         
         setupTimers()
@@ -1514,7 +1515,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         */
     }
     
-    private func updateAuthStatus() {
+    /// Re-read the system setting whenever the app becomes active.  The user can
+    /// change Location Services in Settings while our process is suspended, in
+    /// which case Core Location may not deliver a delegate callback until after
+    /// the next request.
+    func refreshAuthorizationStatus() {
         authStatus = locationManager.authorizationStatus
         isAuthorized = (authStatus == .authorizedAlways || authStatus == .authorizedWhenInUse)
         isAlwaysAuthorized = (authStatus == .authorizedAlways)
@@ -1576,6 +1581,28 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     func requestPermission() {
         locationManager.requestAlwaysAuthorization()
+    }
+
+    /// iOS only grants the initial "When In Use" choice first. Once that real
+    /// system callback arrives, make the separate Core Location request for the
+    /// "Always" upgrade. This does not fabricate an app-side authorization UI.
+    private func requestAlwaysAuthorizationUpgrade() {
+        let isTrackingEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
+        guard isTrackingEnabled, authStatus == .authorizedWhenInUse, !isRequestingAlwaysAuthorization else { return }
+        isRequestingAlwaysAuthorization = true
+
+        Task { @MainActor [weak self] in
+            // Let the first system authorization sheet fully dismiss before
+            // requesting the real follow-up sheet.
+            try? await Task.sleep(nanoseconds: 750_000_000)
+            let isTrackingEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
+            guard let self, isTrackingEnabled, self.authStatus == .authorizedWhenInUse else {
+                self?.isRequestingAlwaysAuthorization = false
+                return
+            }
+            self.locationManager.requestAlwaysAuthorization()
+            self.isRequestingAlwaysAuthorization = false
+        }
     }
 
     func forceRefreshOngoingAnalysis() {
@@ -1650,14 +1677,24 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             return
         }
 
-        // Prevent automatic system prompt on first launch before user clicks the button
-        if locationManager.authorizationStatus == .notDetermined {
+        // Permission prompts are owned by the visible authorization flow. Do not
+        // start a fake tracking session without access. For a previously
+        // installed app with no decision yet, this is the real Core Location
+        // request that starts the system authorization flow.
+        refreshAuthorizationStatus()
+        guard isAuthorized else {
+            if authStatus == .notDetermined {
+                locationManager.requestAlwaysAuthorization()
+            }
+            stopTracking()
             return
         }
 
-        if locationManager.authorizationStatus != .authorizedAlways {
-            locationManager.requestAlwaysAuthorization()
-        }
+        // 这个值不应依赖上一次进程存活时的 CLLocationManager 配置。若用户仍
+        // 授予“始终允许”，每次恢复采集都明确打开后台回调；若被降级为“使用
+        // App 期间”，则只允许前台采集，避免留下看似开启、实际无法后台记录的状态。
+        locationManager.allowsBackgroundLocationUpdates = isAlwaysAuthorized
+        locationManager.pausesLocationUpdatesAutomatically = false
 
         let now = Date()
         let shouldRestartUpdates = !isTracking || now.timeIntervalSince(lastStartTrackingAt) > 30
@@ -2519,13 +2556,21 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        updateAuthStatus()
+        refreshAuthorizationStatus()
         print("Location authorization changed: \(authStatus.rawValue)")
         if authStatus == .authorizedAlways {
             ensureSignificantMonitoringActive()
+        } else if authStatus == .authorizedWhenInUse {
+            requestAlwaysAuthorizationUpgrade()
+        }
+
+        if authStatus == .authorizedAlways || authStatus == .authorizedWhenInUse {
             if UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true {
                 startTracking()
             }
+        } else {
+            // 权限被系统或用户收回后，别把 UI 保持在“正在记录”的假状态。
+            stopTracking()
         }
     }
 

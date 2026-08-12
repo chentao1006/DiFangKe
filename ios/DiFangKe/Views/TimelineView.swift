@@ -67,6 +67,22 @@ private struct TimelineBackfillSnapshot: Sendable {
     let places: [PlaceLite]
 }
 
+private struct LocationSettingsAlertModifier: ViewModifier {
+    @Binding var isPresented: Bool
+
+    func body(content: Content) -> some View {
+        content.alert("定位权限已关闭", isPresented: $isPresented) {
+            Button("前往系统设置") {
+                guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                UIApplication.shared.open(url)
+            }
+            Button("稍后", role: .cancel) {}
+        } message: {
+            Text("地方客无法记录足迹、停留与行程。请在系统设置中允许定位。")
+        }
+    }
+}
+
 @MainActor
 private final class ContinuousTimelineCache {
     private var timelinesByDate: [Date: [TimelineItem]] = [:]
@@ -113,10 +129,12 @@ private struct ContinuousTimelineView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.scenePhase) private var scenePhase
     @Environment(LocationManager.self) private var locationManager
+    @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: \FutureTrip.arrivalDate) private var futureTrips: [FutureTrip]
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var isTimelinePresented = true
+    @State private var showLocationSettingsAlert = false
     @State private var loadedDates: [Date] = []
     @State private var timelinesByDate: [Date: [TimelineItem]] = [:]
     @State private var isLoadingEarlierDates = false
@@ -334,6 +352,11 @@ private struct ContinuousTimelineView: View {
             pendingFutureTripAbandonAlertID: $pendingFutureTripAbandonAlertID,
             selectedMapPhotoAssetID: $selectedMapPhotoAssetID
         )
+        // This content is the iPhone bottom timeline sheet and the iPad sidebar.
+        // It is therefore the common presenter for a persisted denied location
+        // permission on every layout.
+        .modifier(LocationSettingsAlertModifier(isPresented: $showLocationSettingsAlert))
+        .onAppear(perform: handleTimelinePermissionPresenterAppear)
         .confirmationDialog("选择导航应用", isPresented: $showingNavigationOptions, titleVisibility: .visible) {
             if let trip = navigatingTrip {
                 Button("苹果地图") {
@@ -416,7 +439,8 @@ private struct ContinuousTimelineView: View {
         return "地方客"
     }
 
-    var body: some View {
+    @ViewBuilder
+    private var responsiveTimelineLayout: some View {
         Group {
             if horizontalSizeClass == .regular {
                 NavigationSplitView {
@@ -463,26 +487,14 @@ private struct ContinuousTimelineView: View {
                 }
             }
         }
-        .onAppear {
-            setupLocationManager()
-            enableMapInteractionCollapseAfterInitialLayout()
-            scheduleMidnightTimelineRefresh()
-            Task { await refreshAvailableTimelineDateCache() }
-        }
-        .onDisappear {
-            midnightTimelineRefreshTask?.cancel()
-            visibleMapUpdateTask?.cancel()
-            visibleTimelineFillTask?.cancel()
-            mapCameraTransitionTask?.cancel()
-            mapInteractionEnableTask?.cancel()
-            selectedFootprintPhotoFetchTask?.cancel()
-            selectedFootprintPhotos = []
-        }
+    }
+
+    var body: some View {
+        responsiveTimelineLayout
+        .onAppear(perform: handleTimelineAppear)
+        .onDisappear(perform: handleTimelineDisappear)
         .task { await loadInitialTimeline() }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
-            reloadLoadedTimeline()
-            Task { await refreshAvailableTimelineDateCache() }
-        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged")), perform: handleFootprintDataChanged)
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DFKDeepLinkNotification"))) { notification in
             handleDeepLink(userInfo: notification.userInfo)
         }
@@ -506,45 +518,107 @@ private struct ContinuousTimelineView: View {
         .onChange(of: futureTrips) { _, _ in
             refreshVisibleTimelineMap(delayNanoseconds: 0)
         }
+        .onChange(of: locationManager.authStatus) { _, _ in
+            scheduleLocationSettingsAlertIfNeeded()
+        }
+        .onChange(of: isTrackingEnabled) { _, _ in
+            scheduleLocationSettingsAlertIfNeeded()
+        }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
+            locationManager.refreshAuthorizationStatus()
+            scheduleLocationSettingsAlertIfNeeded()
             Task { await refreshTimelineForCurrentDayIfNeeded() }
         }
-        .onOpenURL { url in
-            guard url.scheme == "difangke" else { return }
-            
-            if url.host == "timeline" {
-                if let offsetString = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "offset" })?.value,
-                   let offset = Int(offsetString) {
-                    let startOfToday = Calendar.current.startOfDay(for: Date())
-                    if let targetDate = Calendar.current.date(byAdding: .day, value: offset, to: startOfToday) {
-                        Task { @MainActor in
-                            timelineDetent = .medium
-                            activeTimelineDate = targetDate
-                            updateVisibleTimelineDates([targetDate])
+        .onOpenURL(perform: handleDeepLinkURL)
+    }
 
-                            // During cold launch, the initial loader owns the fetch.
-                            // Starting a second date load here races it and lets the
-                            // initial loader overwrite the widget's target with today.
-                            guard hasCompletedInitialTimelineLoad else { return }
+    private func handleDeepLinkURL(_ url: URL) {
+        guard url.scheme == "difangke" else { return }
 
-                            _ = await refreshAvailableTimelineDateCache()
-                            _ = await loadTimelineDate(targetDate)
-                            targetScrollDate = targetDate
-                            todayScrollRequest += 1
-                        }
-                    }
-                }
-            } else if url.host == "trip", url.path == "/action" {
-                handleTripAction(url: url)
-            } else if url.host == "trip", url.path == "/detail" {
-                if let tripIdString = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value,
-                   let tripId = UUID(uuidString: tripIdString),
-                   let trip = futureTrips.first(where: { $0.id == tripId }) {
-                    selectedFutureTripDetail = trip
-                }
-            }
+        if url.host == "timeline" {
+            openTimelineDeepLink(url)
+        } else if url.host == "trip", url.path == "/action" {
+            handleTripAction(url: url)
+        } else if url.host == "trip", url.path == "/detail" {
+            openTripDetailDeepLink(url)
         }
+    }
+
+    private func handleTimelineAppear() {
+        setupLocationManager()
+        enableMapInteractionCollapseAfterInitialLayout()
+        scheduleMidnightTimelineRefresh()
+        Task { await refreshAvailableTimelineDateCache() }
+    }
+
+    private func handleTimelinePermissionPresenterAppear() {
+        locationManager.refreshAuthorizationStatus()
+        scheduleLocationSettingsAlertIfNeeded()
+    }
+
+    private func handleTimelineDisappear() {
+        midnightTimelineRefreshTask?.cancel()
+        visibleMapUpdateTask?.cancel()
+        visibleTimelineFillTask?.cancel()
+        mapCameraTransitionTask?.cancel()
+        mapInteractionEnableTask?.cancel()
+        selectedFootprintPhotoFetchTask?.cancel()
+        selectedFootprintPhotos = []
+    }
+
+    private func handleFootprintDataChanged(_: Notification) {
+        reloadLoadedTimeline()
+        Task { await refreshAvailableTimelineDateCache() }
+    }
+
+    private func scheduleLocationSettingsAlertIfNeeded() {
+        guard isTrackingEnabled else {
+            showLocationSettingsAlert = false
+            return
+        }
+        let status = locationManager.authStatus
+        guard status == .denied || status == .restricted else {
+            showLocationSettingsAlert = false
+            return
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard isTrackingEnabled else { return }
+            let currentStatus = locationManager.authStatus
+            guard currentStatus == .denied || currentStatus == .restricted else { return }
+            showLocationSettingsAlert = true
+        }
+    }
+
+    private func openTimelineDeepLink(_ url: URL) {
+        guard let offsetString = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "offset" })?.value,
+              let offset = Int(offsetString),
+              let targetDate = Calendar.current.date(byAdding: .day, value: offset, to: Calendar.current.startOfDay(for: Date())) else {
+            return
+        }
+
+        Task { @MainActor in
+            timelineDetent = .medium
+            activeTimelineDate = targetDate
+            updateVisibleTimelineDates([targetDate])
+
+            guard hasCompletedInitialTimelineLoad else { return }
+            _ = await refreshAvailableTimelineDateCache()
+            _ = await loadTimelineDate(targetDate)
+            targetScrollDate = targetDate
+            todayScrollRequest += 1
+        }
+    }
+
+    private func openTripDetailDeepLink(_ url: URL) {
+        guard let tripIDString = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value,
+              let tripID = UUID(uuidString: tripIDString),
+              let trip = futureTrips.first(where: { $0.id == tripID }) else {
+            return
+        }
+        selectedFutureTripDetail = trip
     }
 
     private func handleTripAction(url: URL) {
