@@ -53,6 +53,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         // 计算偏好（排除目标日期，保证稳定性）
         val preferredAuto = getPreferredAutomotiveType(startOfDay)
         val preferredCycling = getPreferredCyclingType(startOfDay)
+        val preferredTransport = getPreferredTransportType(startOfDay)
 
         // 2. 加载轨迹点
         val filteredRawPoints = rawStore.loadLocations(date, filtered = true)
@@ -114,7 +115,7 @@ class PersistentTimelineBuilder(private val context: Context) {
                         // 保存新的
                         db.footprintDao().insert(currentFp)
                         // 生成交通段
-                        generateTransportSegment(lastFp!!, currentFp, points, preferredAuto, preferredCycling, deletedTransports)
+                        generateTransportSegment(lastFp!!, currentFp, points, preferredAuto, preferredCycling, preferredTransport, deletedTransports)
                         lastFp = currentFp
                         footprints.add(currentFp)
                     }
@@ -122,7 +123,7 @@ class PersistentTimelineBuilder(private val context: Context) {
                     db.footprintDao().insert(currentFp)
                     // 如果 lastFp 非空且不合并（比如 lastFp 是 retained），也要生成交通段
                     if (lastFp != null) {
-                        generateTransportSegment(lastFp!!, currentFp, points, preferredAuto, preferredCycling, deletedTransports)
+                        generateTransportSegment(lastFp!!, currentFp, points, preferredAuto, preferredCycling, preferredTransport, deletedTransports)
                     }
                     lastFp = currentFp
                     footprints.add(currentFp)
@@ -142,7 +143,7 @@ class PersistentTimelineBuilder(private val context: Context) {
             if (overlap == null) {
                 val finalEntity = createFootprintEntity(lastCandidate)
                 db.footprintDao().insert(finalEntity)
-                lastFp?.let { generateTransportSegment(it, finalEntity, points, preferredAuto, preferredCycling, deletedTransports) }
+                lastFp?.let { generateTransportSegment(it, finalEntity, points, preferredAuto, preferredCycling, preferredTransport, deletedTransports) }
                 lastFp = finalEntity
             } else {
                 // 如果最后一段也重叠了，直接将 lastFp 指向重叠的足迹，放弃这段候选
@@ -163,10 +164,10 @@ class PersistentTimelineBuilder(private val context: Context) {
             }
         }
 
-        generateMissingTransportSegmentsForFootprints(startOfDay, endOfDay, transportPoints.ifEmpty { points }, preferredAuto, preferredCycling, deletedTransports)
+        generateMissingTransportSegmentsForFootprints(startOfDay, endOfDay, transportPoints.ifEmpty { points }, preferredAuto, preferredCycling, preferredTransport, deletedTransports)
 
         // 5. 合并连续交通段 (iOS Parity: mergeConsecutiveTransports)
-        mergeConsecutiveTransports(date, preferredAuto, preferredCycling, deletedTransports)
+        mergeConsecutiveTransports(date, preferredAuto, preferredCycling, preferredTransport, deletedTransports)
 
         Log.i(TAG, "Finished rebuilding timeline for $date. Found ${footprints.size} footprints.")
     }
@@ -193,6 +194,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         if (anyDeleted) {
             val preferredAuto = getPreferredAutomotiveType(startOfDay)
             val preferredCycling = getPreferredCyclingType(startOfDay)
+            val preferredTransport = getPreferredTransportType(startOfDay)
             val deletedTransports = db.transportManualSelectionDao().getDeletedBetween(startOfDay, endOfDay)
 
             val filteredRawPoints = rawStore.loadLocations(date, filtered = true)
@@ -205,10 +207,11 @@ class PersistentTimelineBuilder(private val context: Context) {
                 transportPoints,
                 preferredAuto,
                 preferredCycling,
+                preferredTransport,
                 deletedTransports
             )
 
-            mergeConsecutiveTransports(date, preferredAuto, preferredCycling, deletedTransports)
+            mergeConsecutiveTransports(date, preferredAuto, preferredCycling, preferredTransport, deletedTransports)
         }
     }
 
@@ -235,6 +238,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         allDayPoints: List<RawLocationStore.RawPoint>,
         preferredAuto: TransportType,
         preferredCycling: TransportType,
+        preferredTransport: TransportType?,
         deletedTransports: List<TransportManualSelectionEntity>
     ) {
         val allFootprints = db.footprintDao().getBetween(startOfDay, endOfDay).sortedBy { it.startTime }
@@ -248,7 +252,7 @@ class PersistentTimelineBuilder(private val context: Context) {
             val existingTransport = db.transportRecordDao().getActiveBetween(previous.endTime, next.startTime)
             if (existingTransport.isNotEmpty()) continue
 
-            generateTransportSegment(previous, next, allDayPoints, preferredAuto, preferredCycling, deletedTransports)
+            generateTransportSegment(previous, next, allDayPoints, preferredAuto, preferredCycling, preferredTransport, deletedTransports)
         }
     }
 
@@ -256,6 +260,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         date: Date,
         preferredAuto: TransportType,
         preferredCycling: TransportType,
+        preferredTransport: TransportType?,
         deletedTransports: List<TransportManualSelectionEntity>
     ) {
         val startOfDay = getStartOfDay(date)
@@ -325,7 +330,8 @@ class PersistentTimelineBuilder(private val context: Context) {
                             distanceMeters = merged.distance,
                             pointCount = try { JSONArray(merged.pointsJson).length() } catch (e: Exception) { 0 },
                             preferredAuto = preferredAuto,
-                            preferredCycling = preferredCycling
+                            preferredCycling = preferredCycling,
+                            preferredTransport = preferredTransport
                         )
                     }
                     val finalMerged = merged.copy(averageSpeed = newAvgSpeed, typeRaw = newType.raw)
@@ -384,6 +390,7 @@ class PersistentTimelineBuilder(private val context: Context) {
         allDayPoints: List<RawLocationStore.RawPoint>,
         preferredAuto: TransportType,
         preferredCycling: TransportType,
+        preferredTransport: TransportType?,
         deletedTransports: List<TransportManualSelectionEntity>
     ) {
         val gapSec = (newFp.startTime.time - prevFp.endTime.time) / 1000L
@@ -432,7 +439,8 @@ class PersistentTimelineBuilder(private val context: Context) {
             distanceMeters = totalDist,
             pointCount = pts.size,
             preferredAuto = preferredAuto,
-            preferredCycling = preferredCycling
+            preferredCycling = preferredCycling,
+            preferredTransport = preferredTransport
         )
 
         val record = TransportRecordEntity(
@@ -497,6 +505,20 @@ class PersistentTimelineBuilder(private val context: Context) {
         val ebikeCount = recent.count { it.typeRaw == TransportType.EBIKE.raw || it.manualTypeRaw == TransportType.EBIKE.raw }
         
         return if (bikeCount >= ebikeCount) TransportType.BICYCLE else TransportType.EBIKE
+    }
+
+    /** The most-used non-foot transport wins only when its speed range overlaps the trip. */
+    private suspend fun getPreferredTransportType(excludingDate: Date): TransportType? {
+        val recent = db.transportRecordDao().getRecentExcluding(excludingDate, 300)
+        val counts = mutableMapOf<TransportType, Int>()
+        for (record in recent) {
+            val type = TransportType.from(record.manualTypeRaw ?: record.typeRaw)
+            if (TransportType.getCategory(type) > 1) {
+                counts[type] = (counts[type] ?: 0) + 1
+            }
+        }
+        val highestCount = counts.values.maxOrNull() ?: return null
+        return TransportType.entries.firstOrNull { counts[it] == highestCount }
     }
 
     private fun getStartOfDay(date: Date): Date {

@@ -321,6 +321,13 @@ enum DataDeduplicationService {
         } else {
             intervalGap = 0
         }
+        // Route geometry is intentionally a fallback for rebuild artifacts,
+        // not a comparison for every pair of historical trips.  An unrelated
+        // trip cannot be a duplicate when its boundaries are neither close nor
+        // adjacent, so avoid decoding and comparing its full polyline.
+        guard startDiff <= 20 * 60 || intervalGap <= 10 * 60 else {
+            return false
+        }
         guard first.distance > 0, second.distance > 0,
               abs(first.distance - second.distance) <= max(300, max(first.distance, second.distance) * 0.25),
               let firstPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: first.pointsData),
@@ -335,7 +342,39 @@ enum DataDeduplicationService {
         let endDistance = CLLocation(latitude: firstEnd.lat, longitude: firstEnd.lon)
             .distance(from: CLLocation(latitude: secondEnd.lat, longitude: secondEnd.lon))
         let hasSameRouteEndpoints = startDistance <= 250 && endDistance <= 250
-        guard hasSameRouteEndpoints else { return false }
+        // Different rebuild passes can trim a different amount from the two
+        // ends of the same raw route.  In that case endpoint-only matching
+        // misses the walking/car shadow shown as two adjacent trips.  Require
+        // substantial polyline overlap as the alternative: time and distance
+        // alone must never collapse a real walk followed by a real drive.
+        let hasSubstantialRouteOverlap: Bool = {
+            guard firstPoints.count >= 2, secondPoints.count >= 2 else { return false }
+            let firstRoute = firstPoints.map { CLLocation(latitude: $0.lat, longitude: $0.lon) }
+            let secondRoute = secondPoints.map { CLLocation(latitude: $0.lat, longitude: $0.lon) }
+            let tolerance = max(300, min(first.distance, second.distance) * 0.15)
+
+            func distanceToRoute(_ point: CLLocation, _ route: [CLLocation]) -> CLLocationDistance {
+                var best = CLLocationDistance.greatestFiniteMagnitude
+                for index in 0..<(route.count - 1) {
+                    let start = route[index]
+                    let end = route[index + 1]
+                    let dx = end.coordinate.longitude - start.coordinate.longitude
+                    let dy = end.coordinate.latitude - start.coordinate.latitude
+                    let lengthSquared = dx * dx + dy * dy
+                    let ratio = lengthSquared == 0 ? 0 : max(0, min(1, ((point.coordinate.longitude - start.coordinate.longitude) * dx + (point.coordinate.latitude - start.coordinate.latitude) * dy) / lengthSquared))
+                    let projected = CLLocation(latitude: start.coordinate.latitude + (end.coordinate.latitude - start.coordinate.latitude) * ratio,
+                                               longitude: start.coordinate.longitude + (end.coordinate.longitude - start.coordinate.longitude) * ratio)
+                    best = min(best, point.distance(from: projected))
+                }
+                return best
+            }
+
+            func coverage(_ route: [CLLocation], by otherRoute: [CLLocation]) -> Double {
+                Double(route.filter { distanceToRoute($0, otherRoute) <= tolerance }.count) / Double(route.count)
+            }
+            return min(coverage(firstRoute, by: secondRoute), coverage(secondRoute, by: firstRoute)) >= 0.7
+        }()
+        guard hasSameRouteEndpoints || hasSubstantialRouteOverlap else { return false }
 
         // Normal retries have close boundaries.  The second branch covers the
         // split-window bug only when the two records touch (or nearly touch),

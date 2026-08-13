@@ -1151,7 +1151,8 @@ class LocationTrackingService : Service() {
                                 speedMs = avgSpeed,
                                 durationSec = gapSec.toLong(),
                                 distanceMeters = totalDist,
-                                pointCount = pts.size
+                                pointCount = pts.size,
+                                preferredTransport = getPreferredTransportType(getStartOfDay(prevFp.endTime))
                         )
 
                 val record =
@@ -1179,6 +1180,19 @@ class LocationTrackingService : Service() {
                                 statusRaw = "active"
                         )
                 db.transportRecordDao().insert(record)
+        }
+
+        private suspend fun getPreferredTransportType(excludingDate: Date): TransportType? {
+                val recent = db.transportRecordDao().getRecentExcluding(excludingDate, 300)
+                val counts = mutableMapOf<TransportType, Int>()
+                for (record in recent) {
+                        val type = TransportType.from(record.manualTypeRaw ?: record.typeRaw)
+                        if (TransportType.getCategory(type) > 1) {
+                                counts[type] = (counts[type] ?: 0) + 1
+                        }
+                }
+                val highestCount = counts.values.maxOrNull() ?: return null
+                return TransportType.entries.firstOrNull { counts[it] == highestCount }
         }
 
         private fun getStartOfDay(date: Date): Date {

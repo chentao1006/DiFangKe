@@ -1410,8 +1410,8 @@ class PersistentTimelineBuilder {
         return bikeCount >= ebikeCount ? .bicycle : .ebike
     }
 
-    /// 获取近期最常用的道路交通方式，供没有明确传感器类型的路线做先验判断。
-    /// 步行和长途交通不参与道路交通偏好，避免把它们带入短途分类。
+    /// 获取近期最常用的非步行交通方式，供没有明确传感器类型的路线做先验判断。
+    /// 实际分配前仍会按当前速度和距离筛掉不可能的候选类型。
     private static func getPreferredRoadTransportType(in context: ModelContext, excluding date: Date) -> TransportType? {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -1421,7 +1421,7 @@ class PersistentTimelineBuilder {
         }, sortBy: [SortDescriptor(\.startTime, order: .reverse)])
         descriptor.fetchLimit = 300
 
-        let roadTypes: Set<TransportType> = [.bicycle, .ebike, .motorcycle, .bus, .car]
+        let roadTypes = Set(TransportType.allCases).subtracting([.slow, .running])
         let records = (try? context.fetch(descriptor)) ?? []
         var counts: [TransportType: Int] = [:]
         for record in records {
@@ -1429,7 +1429,10 @@ class PersistentTimelineBuilder {
             guard let type = TransportType(rawValue: rawType), roadTypes.contains(type) else { continue }
             counts[type, default: 0] += 1
         }
-        return counts.max(by: { $0.value < $1.value })?.key
+        guard let highestCount = counts.values.max() else { return nil }
+        // CaseIterable provides a stable tie break, so a rebuild does not flip
+        // between equally common modes merely because dictionary order changed.
+        return TransportType.allCases.first { counts[$0] == highestCount }
     }
 
     /// 修正历史上已经落库、但物理上不可能是步行的自动交通记录。
@@ -1500,12 +1503,23 @@ class PersistentTimelineBuilder {
     }
 
     private static func fetchDeletedTransportRanges(from start: Date, to end: Date, in context: ModelContext) -> [(start: Date, end: Date)] {
+        // Raw-point segmentation can move a deleted trip's boundary by several
+        // minutes after a cold launch.  Keep a narrow buffer around the user's
+        // deletion so the same route cannot reappear as its adjacent slice.
+        let reconstructionBoundaryTolerance: TimeInterval = 10 * 60
+        let searchStart = start.addingTimeInterval(-reconstructionBoundaryTolerance)
+        let searchEnd = end.addingTimeInterval(reconstructionBoundaryTolerance)
         let descriptor = FetchDescriptor<TransportManualSelection>(
             predicate: #Predicate<TransportManualSelection> {
-                $0.isDeleted && $0.startTime < end && $0.endTime > start
+                $0.isDeleted && $0.startTime < searchEnd && $0.endTime > searchStart
             }
         )
-        return ((try? context.fetch(descriptor)) ?? []).map { ($0.startTime, $0.endTime) }
+        return ((try? context.fetch(descriptor)) ?? []).map {
+            (
+                $0.startTime.addingTimeInterval(-reconstructionBoundaryTolerance),
+                $0.endTime.addingTimeInterval(reconstructionBoundaryTolerance)
+            )
+        }
     }
 
     private static func overlapsDeletedTransportOverride(start: Date, end: Date, deletedRanges: [(start: Date, end: Date)]) -> Bool {
@@ -1536,16 +1550,6 @@ class PersistentTimelineBuilder {
         syncingDates.insert(startOfDay)
         defer { syncingDates.remove(startOfDay) }
 
-        // Remove records produced by older builds before using them as occupied
-        // ranges.  Otherwise a duplicate route can both remain visible and
-        // cause gap filling to infer from the same raw points again.
-#if !WIDGET_EXTENSION
-        if DataDeduplicationService.deduplicateTransports(context: context) > 0 {
-            TimelineBuilder.timelineCache.removeAll()
-            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
-        }
-#endif
-        
         let preferredAuto = getPreferredAutomotiveType(in: context, excluding: date)
         let preferredCycling = getPreferredCyclingType(in: context, excluding: date)
         let preferredRoadTransport = getPreferredRoadTransportType(in: context, excluding: date)
@@ -2121,9 +2125,7 @@ class PersistentTimelineBuilder {
                     // point segmentation below.  It must use the same overlap
                     // guard, otherwise the two paths can save the same route
                     // under different inferred transport modes.
-                    if !hasEquivalentTransport(tp, startOfDay: startOfDay, context: context) {
-                        context.insert(tp)
-                    }
+                    insertAutomaticallyDetectedTransport(tp, startOfDay: startOfDay, context: context)
                 }
             }
         }
@@ -2859,9 +2861,7 @@ class PersistentTimelineBuilder {
                     // Health/Motion data is still changing.  Do not persist the
                     // same time interval again just because its inferred vehicle
                     // type changed (car/subway/etc.).
-                    if !hasEquivalentTransport(tp, startOfDay: startOfDay, context: context) {
-                        context.insert(tp)
-                    }
+                    insertAutomaticallyDetectedTransport(tp, startOfDay: startOfDay, context: context)
                 }
                 i = k // 移动到下一个可能的停留点或末尾
             }
@@ -2888,6 +2888,25 @@ class PersistentTimelineBuilder {
         }
     }
 
+    /// Both automatic builders can propose the same route during one sync.
+    /// Saving the accepted record here makes it visible to the next proposal;
+    /// a later end-of-sync cleanup is only a repair for records from old builds.
+    @MainActor
+    private static func insertAutomaticallyDetectedTransport(
+        _ candidate: TransportRecord,
+        startOfDay: Date,
+        context: ModelContext
+    ) {
+        guard !hasEquivalentTransport(candidate, startOfDay: startOfDay, context: context) else { return }
+        context.insert(candidate)
+        do {
+            try context.save()
+        } catch {
+            context.delete(candidate)
+            print("[TimelineAuto] failed to persist automatic transport: \(error)")
+        }
+    }
+
     private static func isSameAutomaticTrip(_ first: TransportRecord, _ second: TransportRecord) -> Bool {
         let overlap = max(0, min(first.endTime, second.endTime).timeIntervalSince(max(first.startTime, second.startTime)))
         let shorterDuration = min(
@@ -2900,26 +2919,6 @@ class PersistentTimelineBuilder {
 
         let startDiff = abs(first.startTime.timeIntervalSince(second.startTime))
         let endDiff = abs(first.endTime.timeIntervalSince(second.endTime))
-        let intervalGap: TimeInterval = {
-            if first.endTime <= second.startTime {
-                return second.startTime.timeIntervalSince(first.endTime)
-            }
-            if second.endTime <= first.startTime {
-                return first.startTime.timeIntervalSince(second.endTime)
-            }
-            return 0
-        }()
-
-        // processPoints 和 gap-fill 可能把同一批原始点切成两个窗口：
-        // 例如 09:58–10:03 与 10:03–10:09。重新打开 App 后，GPS 点集还可能
-        // 因裁剪策略变化而不同，所以不能要求路线点互相覆盖；时间窗口和距离
-        // 才是这段原始行程的持久化所有权。
-        if intervalGap <= 10 * 60,
-           first.distance > 0, second.distance > 0,
-           abs(first.distance - second.distance) <= max(500, max(first.distance, second.distance) * 0.5) {
-            return true
-        }
-
         guard startDiff <= 20 * 60, endDiff <= 20 * 60,
               first.distance > 0, second.distance > 0,
               abs(first.distance - second.distance) <= max(300, max(first.distance, second.distance) * 0.25),

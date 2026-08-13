@@ -35,6 +35,29 @@ enum TransportType: String, CaseIterable, Codable {
     case train = "train"               // 火车/高铁
     case airplane = "airplane"         // 飞机
     case ship = "ship"                 // 轮船
+
+    /// GPS average speed is affected by stops and congestion.  Keep vehicle
+    /// ranges deliberately overlapping, then use the user's history to break
+    /// ties instead of treating a boundary as a hard mode switch.
+    var automaticSpeedRange: ClosedRange<Double>? {
+        switch self {
+        case .slow, .running: return nil
+        case .bicycle: return 0...30
+        case .ebike: return 8...50
+        case .motorcycle: return 20...110
+        case .bus: return 15...100
+        case .car: return 15...150
+        case .subway: return 25...120
+        case .train: return 60...350
+        case .airplane: return 180...1_200
+        case .ship: return 3...60
+        }
+    }
+
+    func canBeAutomaticallyInferred(at speedKmh: Double, maxCategory: Int) -> Bool {
+        guard category <= maxCategory, let automaticSpeedRange else { return false }
+        return automaticSpeedRange.contains(speedKmh)
+    }
     
     var icon: String {
         switch self {
@@ -100,13 +123,6 @@ enum TransportType: String, CaseIterable, Codable {
         let hasMeaningfulTrip =
             effectiveDistance >= max(800, AppConfig.shared.transportMinDistanceThreshold) &&
             duration >= 3 * 60
-        let habitualRoadTransport: TransportType? = {
-            guard let preferredTransport,
-                  preferredTransport.category == 2 || preferredTransport.category == 3 else {
-                return nil
-            }
-            return preferredTransport
-        }()
         // 跑步不能只由 GPS 速度或单一传感器决定：同时要求 Core Motion 跑步、
         // 高步频、HealthKit 的步行/跑步距离覆盖，以及合理的 GPS 速度。
         let hasCorroboratedRunningEvidence =
@@ -155,6 +171,16 @@ enum TransportType: String, CaseIterable, Codable {
         if maxAllowedTypeCategory < 3 && safePreferredAuto.category >= 3 {
             safePreferredAuto = preferredCycling
         }
+        let habitualTransport: TransportType? = {
+            guard let preferredTransport,
+                  preferredTransport.canBeAutomaticallyInferred(
+                    at: kmh,
+                    maxCategory: maxAllowedTypeCategory
+                  ) else {
+                return nil
+            }
+            return preferredTransport
+        }()
 
         let longPublicTransitType = inferLongPublicTransitType(
             kmh: kmh,
@@ -201,17 +227,14 @@ enum TransportType: String, CaseIterable, Codable {
             // 平均速度很低不等于步行：电动车在红灯和拥堵中同样会降到这个区间。
             // 有足够位移且没有占主导的步行证据时，优先保留骑行/电动车类型。
             if hasMeaningfulTrip && !hasDominantOnFootEvidence {
-                if let habitualRoadTransport,
-                   habitualRoadTransport.category == 3,
-                   effectiveDistance >= 3000,
-                   duration >= 10 * 60 {
-                    return habitualRoadTransport
+                if let habitualTransport {
+                    return habitualTransport
                 }
                 return preferredCycling
             }
             // 如果速度极低，但步数也很少（每分钟不到 5 步），说明大概率是在车里堵车，而不是真的在走
             if stepsPerMinute < 5 && stepCount < 20 && walkingDistance < 80 {
-                return safePreferredAuto 
+                return habitualTransport ?? safePreferredAuto
             }
             return .slow 
         }
@@ -225,16 +248,18 @@ enum TransportType: String, CaseIterable, Codable {
         // 不按常规巡航速度判断：短途电动车经常被红灯、路口和拥堵拉低均速。
         // 低于 35 km/h 且没有明确汽车/轨道证据时，优先归入用户偏好的骑行方式。
         if effectiveKmh < 35 {
-            if let habitualRoadTransport {
+            if let habitualTransport {
                 let isPlausibleHabitualTrip =
-                    (habitualRoadTransport.category == 2 && effectiveDistance <= 20_000) ||
-                    (habitualRoadTransport.category == 3 && hasMeaningfulTrip)
+                    (habitualTransport.category == 2 && effectiveDistance <= 20_000) ||
+                    (habitualTransport.category == 3 && hasMeaningfulTrip) ||
+                    (habitualTransport.category == 4 && effectiveDistance >= 10_000)
                 if isPlausibleHabitualTrip {
-                    return habitualRoadTransport
+                    return habitualTransport
                 }
             }
             return preferredCycling
         }
+        if let habitualTransport { return habitualTransport }
         if effectiveKmh < 120 { return safePreferredAuto }
         if effectiveKmh < 350 { return .train }
         return .airplane

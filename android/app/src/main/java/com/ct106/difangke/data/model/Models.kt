@@ -58,6 +58,19 @@ enum class TransportType(val raw: String) {
     }
 
     companion object {
+        private fun automaticSpeedRange(type: TransportType): ClosedFloatingPointRange<Double>? = when (type) {
+            SLOW, RUNNING -> null
+            BICYCLE -> 0.0..30.0
+            EBIKE -> 8.0..50.0
+            MOTORCYCLE -> 20.0..110.0
+            BUS -> 15.0..100.0
+            CAR -> 15.0..150.0
+            SUBWAY -> 25.0..120.0
+            TRAIN -> 60.0..350.0
+            AIRPLANE -> 180.0..1200.0
+            SHIP -> 3.0..60.0
+        }
+
         fun from(
             speedMs: Double,
             motionType: Int = 4, // 对应 Android DetectedActivity 类型 (4 = UNKNOWN)
@@ -66,7 +79,8 @@ enum class TransportType(val raw: String) {
             distanceMeters: Double = 0.0,
             pointCount: Int = 0,
             preferredAuto: TransportType = CAR,
-            preferredCycling: TransportType = BICYCLE
+            preferredCycling: TransportType = BICYCLE,
+            preferredTransport: TransportType? = null
         ): TransportType {
             val kmh = speedMs * 3.6
             val effectiveDistance = if (distanceMeters > 0) distanceMeters else (speedMs * durationSec)
@@ -99,6 +113,10 @@ enum class TransportType(val raw: String) {
             if (maxAllowedTypeCategory < 3 && getCategory(safePreferredAuto) >= 3) {
                 safePreferredAuto = preferredCycling
             }
+            val habitualTransport = preferredTransport?.takeIf { type ->
+                getCategory(type) <= maxAllowedTypeCategory &&
+                    automaticSpeedRange(type)?.contains(kmh) == true
+            }
 
             inferLongPublicTransitType(
                 kmh = kmh,
@@ -130,7 +148,7 @@ enum class TransportType(val raw: String) {
             if (kmh < 4.5) {
                 val stepsPerMin = if (durationSec > 0L) stepCount / (durationSec / 60.0) else 0.0
                 // 如果速度极低但步数很少，判定为车载堵车
-                if (stepsPerMin < 5.0 && stepCount < 20) return safePreferredAuto
+                if (stepsPerMin < 5.0 && stepCount < 20) return habitualTransport ?: safePreferredAuto
                 return SLOW
             }
             
@@ -139,8 +157,9 @@ enum class TransportType(val raw: String) {
             if (maxAllowedTypeCategory < 3 && effectiveKmh >= 25.0) effectiveKmh = 24.0 // 强行拉回自行车区间
 
             return when {
-                effectiveKmh < 12.0 -> BICYCLE
-                effectiveKmh < 25.0 -> preferredCycling
+                effectiveKmh < 12.0 -> habitualTransport?.takeIf { getCategory(it) == 2 } ?: preferredCycling
+                effectiveKmh < 35.0 -> habitualTransport ?: preferredCycling
+                habitualTransport != null -> habitualTransport
                 effectiveKmh < 120.0 -> safePreferredAuto
                 effectiveKmh < 350.0 -> TRAIN
                 else -> AIRPLANE
