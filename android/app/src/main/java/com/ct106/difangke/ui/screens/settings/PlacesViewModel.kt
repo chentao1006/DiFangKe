@@ -67,6 +67,13 @@ class PlacesViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun restoreIgnoredPlace(place: PlaceEntity) {
+        viewModelScope.launch {
+            db.placeDao().update(place.copy(isIgnored = false))
+            Aptabase.instance.trackEvent("ignored_place_restored")
+        }
+    }
+
     fun savePlace(id: String?, name: String, address: String, lat: Double, lon: Double, radius: Float = 50f) {
         Aptabase.instance.trackEvent("place_added")
         viewModelScope.launch {

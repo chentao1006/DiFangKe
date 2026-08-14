@@ -30,6 +30,9 @@ class LocationTrackingService : Service() {
                 private const val TAG = "LocationTrackingService"
                 const val ACTION_START = "START_TRACKING"
                 const val ACTION_STOP = "STOP_TRACKING"
+                const val ACTION_SET_ONGOING_PLACE = "SET_ONGOING_PLACE"
+                private const val EXTRA_ONGOING_PLACE_ID = "ongoing_place_id"
+                private const val EXTRA_ONGOING_PLACE_NAME = "ongoing_place_name"
 
                 val stateFlow =
                         kotlinx.coroutines.flow.MutableStateFlow<TrackingState>(TrackingState.Idle)
@@ -49,8 +52,30 @@ class LocationTrackingService : Service() {
                 }
 
                 fun stop(context: Context) {
-                        context.stopService(Intent(context, LocationTrackingService::class.java))
+                        // Go through ACTION_STOP so the service clears its
+                        // persisted active-stay state before stopping. A direct
+                        // stopService() bypasses that cleanup and could revive
+                        // an old stay when tracking is enabled again.
+                        val intent = Intent(context, LocationTrackingService::class.java).apply {
+                                action = ACTION_STOP
+                        }
+                        runCatching { context.startService(intent) }
+                                .onFailure { context.stopService(intent) }
                         stateFlow.value = TrackingState.Idle
+                }
+
+                /** Assign the active stay to a user-selected place without waiting for a new GPS sample. */
+                fun setOngoingPlace(context: Context, placeID: String?, placeName: String) {
+                        val intent = Intent(context, LocationTrackingService::class.java).apply {
+                                action = ACTION_SET_ONGOING_PLACE
+                                placeID?.let { putExtra(EXTRA_ONGOING_PLACE_ID, it) }
+                                putExtra(EXTRA_ONGOING_PLACE_NAME, placeName)
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                context.startForegroundService(intent)
+                        } else {
+                                context.startService(intent)
+                        }
                 }
         }
 
@@ -84,6 +109,9 @@ class LocationTrackingService : Service() {
         private var ongoingStayStart: RawLocationStore.RawPoint? = null
         private var ongoingStayAddress: String? = null
         private var ongoingFootprintID: String? = null
+        private var ongoingPlaceOverrideID: String? = null
+        private var ongoingPlaceOverrideName: String? = null
+        private var hasAttemptedPersistedStayRestore = false
         private var lastNotificationText: String? = null
         private var lastNotifiedStayStart: Long? = null
         private var currentIntervalTier = -1 // -1: initial, 0: stationary, 1: moving, 2: fast
@@ -141,6 +169,17 @@ class LocationTrackingService : Service() {
         }
 
         private fun updateLocationClientOption(tier: Int) {
+                // TencentLocationManager creates a Handler internally and
+                // therefore must only be touched from a thread with the main
+                // Looper. Preference collection runs on serviceScope (IO),
+                // which previously made selecting a stay able to crash the
+                // whole process with "looper is null".
+                if (Looper.myLooper() != Looper.getMainLooper()) {
+                        Handler(Looper.getMainLooper()).post {
+                                updateLocationClientOption(tier)
+                        }
+                        return
+                }
                 // 在同一地点持续使用 GPS 会让定位芯片无法休眠。静止时只保留低功耗的网络
                 // 定位作离开检测；一旦速度表明正在移动，下面的分级策略会立即恢复精确定位。
                 val useLowPowerStationaryMode =
@@ -282,6 +321,7 @@ class LocationTrackingService : Service() {
 
         override fun onCreate() {
                 super.onCreate()
+                loadPersistedStayState()
 
                 serviceScope.launch {
                         prefs.locationAccuracyMode.collect { mode ->
@@ -327,7 +367,13 @@ class LocationTrackingService : Service() {
                                         NotificationHelper.TRACKING_NOTIFICATION_ID,
                                         notification
                                 )
-                                stateFlow.value = TrackingState.Tracking()
+                                // A fast DataStore restore may already have
+                                // published an active stay before this start
+                                // command runs. Do not replace it with a blank
+                                // moving state during cold launch.
+                                if (stateFlow.value !is TrackingState.OngoingStay) {
+                                        stateFlow.value = TrackingState.Tracking()
+                                }
                                 Log.i(
                                         TAG,
                                         "Tracking service successfully started and transitioned to Tracking state"
@@ -342,6 +388,7 @@ class LocationTrackingService : Service() {
                                 // 清理持久化的停留状态
                                 serviceScope.launch {
                                         prefs.savePendingStay(null, null, null, null)
+                                        prefs.setPendingStayPlaceOverride(null)
                                 }
 
                                 stopSelf()
@@ -350,8 +397,50 @@ class LocationTrackingService : Service() {
                                 Log.i(TAG, "Tencent Tracking stopped")
                                 return START_NOT_STICKY
                         }
+                        ACTION_SET_ONGOING_PLACE -> {
+                                val placeID = intent?.getStringExtra(EXTRA_ONGOING_PLACE_ID)
+                                val placeName = intent?.getStringExtra(EXTRA_ONGOING_PLACE_NAME)
+                                if (!placeName.isNullOrBlank()) {
+                                        applyOngoingPlaceOverride(placeID, placeName)
+                                }
+                        }
                 }
                 return START_STICKY
+        }
+
+        private fun applyOngoingPlaceOverride(placeID: String?, placeName: String) {
+                ongoingPlaceOverrideID = placeID
+                ongoingPlaceOverrideName = placeName
+                ongoingStayAddress = placeName
+
+                val state = stateFlow.value as? TrackingState.OngoingStay
+                if (state != null) {
+                        stateFlow.value = state.copy(address = placeName)
+                        serviceScope.launch {
+                                prefs.savePendingStay(state.lat, state.lon, state.since.time, placeName)
+                                prefs.setPendingStayPlaceOverride(placeID)
+                                val footprint = ongoingFootprintID?.let { db.footprintDao().getById(it) }
+                                if (footprint != null) {
+                                        db.footprintDao().update(
+                                                footprint.copy(
+                                                        placeID = placeID,
+                                                        address = placeName,
+                                                        title = FootprintTitles.generate(placeName, footprint.startTime.time / 1000),
+                                                        // This is an explicit user location choice. Preserve it
+                                                        // through subsequent automatic timeline rebuilds.
+                                                        isTitleEditedByHand = true,
+                                                        statusValue = "manual"
+                                                )
+                                        )
+                                }
+                        }
+                }
+        }
+
+        private fun clearOngoingPlaceOverride() {
+                ongoingPlaceOverrideID = null
+                ongoingPlaceOverrideName = null
+                serviceScope.launch { prefs.setPendingStayPlaceOverride(null) }
         }
 
         private suspend fun handleNewLocation(
@@ -388,11 +477,40 @@ class LocationTrackingService : Service() {
                 }
                 updateOngoingState(point, address)
 
+                // 与 iOS 保持一致：抵达当天计划或未定日期计划的地点后自动完成。
+                // 只在服务收到真实定位点时执行，避免 UI 打开地图时误触发状态变化。
+                completeArrivedFutureTrips(lat, lon, time)
+
                 // 3. 候选停留保存
                 candidate?.let {
                         saveFootprint(it)
                         trackingQueue.clear()
                         trackingQueue.add(point)
+                }
+        }
+
+        private suspend fun completeArrivedFutureTrips(lat: Double, lon: Double, time: Date) {
+                val calendar = Calendar.getInstance().apply { this.time = time }
+                val dayStart = calendar.apply {
+                        set(Calendar.HOUR_OF_DAY, 0)
+                        set(Calendar.MINUTE, 0)
+                        set(Calendar.SECOND, 0)
+                        set(Calendar.MILLISECOND, 0)
+                }.time
+                val dayEnd = Calendar.getInstance().apply {
+                        this.time = dayStart
+                        add(Calendar.DAY_OF_YEAR, 1)
+                }.time
+                val arrived = db.futureTripDao().getAutoCompletableForDay(dayStart, dayEnd)
+                        .filter { trip ->
+                                trip.latitude.isFinite() && trip.longitude.isFinite() &&
+                                        trip.latitude != 0.0 && trip.longitude != 0.0 &&
+                                        processor.haversineMeters(lat, lon, trip.latitude, trip.longitude) < 200.0
+                        }
+                arrived.forEach { trip ->
+                        db.futureTripDao().update(trip.copy(isCompleted = true, completedAt = time))
+                        FutureTripReminderWorker.cancel(applicationContext, trip.tripID)
+                        Log.i(TAG, "Auto-completed future trip ${trip.tripID} after arrival")
                 }
         }
 
@@ -415,6 +533,9 @@ class LocationTrackingService : Service() {
                         if (distFromCenter < AppConfig.STAY_DISTANCE_THRESHOLD) {
                                 // 如果当前已经在 OngoingStay 且中心位移不大，不要重设 start 时间
                                 if (ongoingStayStart == null) {
+                                        // A user-selected place belongs only to the prior
+                                        // active stay. Never carry it into a new stop.
+                                        clearOngoingPlaceOverride()
                                         ongoingStayStart =
                                                 resolveOngoingStayStart(
                                                         centerLat,
@@ -476,6 +597,7 @@ class LocationTrackingService : Service() {
                                                                 trackingQueue.first(),
                                                                 current
                                                         )
+                                                clearOngoingPlaceOverride()
                                                 ongoingStayAddress = null
                                                 serviceScope.launch {
                                                         prefs.savePendingStay(
@@ -505,12 +627,13 @@ class LocationTrackingService : Service() {
                                                 )
                                         }
 
+                                        val displayAddress = ongoingPlaceOverrideName ?: address ?: ongoingStayAddress
                                         stateFlow.value =
                                                 TrackingState.OngoingStay(
                                                         since = ongoingStayStart!!.timestamp,
                                                         lat = centerLat,
                                                         lon = centerLon,
-                                                        address = address ?: ongoingStayAddress,
+                                                        address = displayAddress,
                                                         speed = current.speed
                                                 )
 
@@ -518,7 +641,7 @@ class LocationTrackingService : Service() {
                                                 centerLat,
                                                 centerLon,
                                                 current,
-                                                address ?: ongoingStayAddress
+                                                displayAddress
                                         )
 
                                         val stayStart = ongoingStayStart!!.timestamp.time
@@ -527,7 +650,8 @@ class LocationTrackingService : Service() {
                                                         centerLat,
                                                         centerLon,
                                                         stayStart,
-                                                        address ?: ongoingStayAddress
+                                                        address ?: ongoingStayAddress,
+                                                        ongoingFootprintID
                                                 )
                                                 lastNotifiedStayStart = stayStart
                                         }
@@ -547,6 +671,7 @@ class LocationTrackingService : Service() {
                                         ongoingStayStart = null
                                         ongoingStayAddress = null
                                         ongoingFootprintID = null
+                                        clearOngoingPlaceOverride()
                                         serviceScope.launch {
                                                 prefs.savePendingStay(null, null, null, null)
                                         }
@@ -678,9 +803,14 @@ class LocationTrackingService : Service() {
                 val lonJson = gson.toJson(rawPoints.map { it.longitude })
                 val locationHash = FootprintEntity.generateLocationHash(centerLat, centerLon)
                 val places = db.placeDao().getAll()
-                val matchedPlace =
-                        PlaceMatcher.bestPlaceForCoordinate(centerLat, centerLon, places, processor)
-                val resolvedAddress = address ?: geocoder.reverseGeocode(centerLat, centerLon)
+                if (PlaceMatcher.ignoredPlaceForCoordinate(centerLat, centerLon, places, processor) != null) {
+                        ongoingFootprintID = null
+                        return
+                }
+                val matchedPlace = ongoingPlaceOverrideID?.let { overrideID ->
+                        places.firstOrNull { it.placeID == overrideID && !it.isIgnored }
+                } ?: PlaceMatcher.bestPlaceForCoordinate(centerLat, centerLon, places, processor)
+                val resolvedAddress = ongoingPlaceOverrideName ?: address ?: geocoder.reverseGeocode(centerLat, centerLon)
 
                 val existing =
                         ongoingFootprintID?.let { db.footprintDao().getById(it) }
@@ -789,7 +919,8 @@ class LocationTrackingService : Service() {
                 lat: Double,
                 lon: Double,
                 startTime: Long,
-                address: String?
+                address: String?,
+                footprintID: String?
         ) {
                 serviceScope.launch {
                         val isEnabled = prefs.isHighlightNotificationEnabled.first()
@@ -845,18 +976,23 @@ class LocationTrackingService : Service() {
                                         this@LocationTrackingService,
                                         title,
                                         body,
-                                        startTime.hashCode()
+                                        startTime.hashCode(),
+                                        timestamp = startTime,
+                                        footprintId = footprintID
                                 )
                         }
                 }
         }
 
         private fun loadPersistedStayState() {
+                if (hasAttemptedPersistedStayRestore) return
+                hasAttemptedPersistedStayRestore = true
                 serviceScope.launch {
                         val lat = prefs.getPendingStayLat()
                         val lon = prefs.getPendingStayLon()
                         val time = prefs.getPendingStayStartTime()
                         val addr = prefs.getPendingStayAddress()
+                        val placeOverrideID = prefs.getPendingStayPlaceOverride()
 
                         if (lat != null && lon != null && time != null) {
                                 // 校验时间是否在 24 小时内（防止跨天且没结算的错误状态）
@@ -871,20 +1007,27 @@ class LocationTrackingService : Service() {
                                                         accuracy = 50.0,
                                                         speed = 0.0
                                                 )
+                                        val overridePlace = placeOverrideID?.let { db.placeDao().getById(it) }
+                                            ?.takeIf { !it.isIgnored }
+                                        if (placeOverrideID != null && overridePlace == null) {
+                                                prefs.setPendingStayPlaceOverride(null)
+                                        }
                                         ongoingStayStart = recoveredPoint
-                                        ongoingStayAddress = addr
+                                        ongoingStayAddress = overridePlace?.name ?: addr
+                                        ongoingPlaceOverrideID = overridePlace?.placeID
+                                        ongoingPlaceOverrideName = overridePlace?.name
 
                                         stateFlow.value =
                                                 TrackingState.OngoingStay(
                                                         since = Date(time as Long),
                                                         lat = lat,
                                                         lon = lon,
-                                                        address = addr,
+                                                        address = ongoingStayAddress,
                                                         speed = 0.0
                                                 )
                                         Log.i(
                                                 TAG,
-                                                "Successfully recovered ongoing stay from storage: $addr"
+                                                "Successfully recovered ongoing stay from storage: $ongoingStayAddress"
                                         )
                                 }
                         }
@@ -1004,6 +1147,10 @@ class LocationTrackingService : Service() {
                                 candidate.longitude
                         )
                 val places = db.placeDao().getAll()
+                if (PlaceMatcher.ignoredPlaceForCoordinate(candidate.latitude, candidate.longitude, places, processor) != null) {
+                        ongoingFootprintID = null
+                        return
+                }
                 val matchedPlace =
                         PlaceMatcher.bestPlaceForCoordinate(
                                 candidate.latitude,
@@ -1013,6 +1160,9 @@ class LocationTrackingService : Service() {
                         )
 
                 val finalId = ongoingFootprintID ?: UUID.randomUUID().toString()
+                val healthMetrics =
+                        HealthConnectService.getInstance(applicationContext)
+                                .metricsBetween(candidate.startTime, candidate.endTime)
                 val entity =
                         FootprintEntity(
                                 footprintID = finalId,
@@ -1042,15 +1192,22 @@ class LocationTrackingService : Service() {
                                         },
                                 statusValue = "candidate",
                                 placeID = matchedPlace?.placeID,
-                                address = address
+                                address = address,
+                                stepCount = healthMetrics?.steps?.takeIf { it > 0 },
+                                walkingDistance = healthMetrics?.walkingDistanceMeters?.takeIf { it > 0 },
+                                floorsAscended = healthMetrics?.floorsAscended?.takeIf { it > 0 }
                         )
 
-                // 自动关联照片逻辑
-                val photoUris =
+                // 自动关联照片逻辑。关闭此偏好后，实时足迹与离线重建
+                // 都不能再写入新的相册关联；用户手动添加照片仍然可用。
+                val photoUris = if (prefs.isAutoPhotoLinkEnabled.first()) {
                         com.ct106.difangke.util.PhotoLinker.linkPhotosToFootprint(
                                 applicationContext,
                                 entity
                         )
+                } else {
+                        emptyList()
+                }
                 val finalEntity =
                         if (photoUris.isNotEmpty()) {
                                 entity.copy(
@@ -1146,15 +1303,17 @@ class LocationTrackingService : Service() {
                         pointsJson = gson.toJson(pts)
                 }
 
+                val healthMetrics = HealthConnectService.getInstance(applicationContext)
+                        .metricsBetween(prevFp.endTime, newFp.startTime)
                 val transportType =
                         TransportType.from(
                                 speedMs = avgSpeed,
+                                stepCount = healthMetrics?.steps ?: 0,
                                 durationSec = gapSec.toLong(),
                                 distanceMeters = totalDist,
                                 pointCount = pts.size,
                                 preferredTransport = getPreferredTransportType(getStartOfDay(prevFp.endTime))
                         )
-
                 val record =
                         TransportRecordEntity(
                                 recordID = UUID.randomUUID().toString(),
@@ -1177,7 +1336,8 @@ class LocationTrackingService : Service() {
                                 distance = totalDist,
                                 averageSpeed = avgSpeed,
                                 pointsJson = pointsJson,
-                                statusRaw = "active"
+                                statusRaw = "active",
+                                stepCount = healthMetrics?.steps?.takeIf { it > 0 }
                         )
                 db.transportRecordDao().insert(record)
         }

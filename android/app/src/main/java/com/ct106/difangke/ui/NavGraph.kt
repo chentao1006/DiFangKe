@@ -2,6 +2,7 @@ package com.ct106.difangke.ui
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.compose.NavHost
@@ -20,7 +21,7 @@ import kotlinx.coroutines.runBlocking
 
 object NavRoutes {
     const val ONBOARDING = "onboarding"
-    const val MAIN = "main?date={date}"
+    const val MAIN = "main?date={date}&tripID={tripID}"
     const val HISTORY = "history?date={date}"
     const val SETTINGS = "settings"
     const val MAP = "map?date={date}"
@@ -33,13 +34,18 @@ object NavRoutes {
     const val ACTIVITY_TYPE_SETTINGS = "settings/activities"
     const val AI_SETTINGS = "settings/ai"
     const val DATA_MANAGER = "settings/data"
+    const val RECYCLE_BIN = "settings/recycle_bin"
     const val DAILY_TIMELINE = "daily_timeline/{date}"
     const val RAW_POINTS = "raw_points?date={date}"
 }
 
 
 @Composable
-fun NavGraph(initialDate: Long? = null) {
+fun NavGraph(
+    initialDate: Long? = null,
+    initialFutureTripID: String? = null,
+    initialFootprintID: String? = null
+) {
     val navController = rememberNavController()
     val context = LocalContext.current
     val prefs = remember { AppPreferences(context) }
@@ -49,7 +55,10 @@ fun NavGraph(initialDate: Long? = null) {
     LaunchedEffect(Unit) {
         val hasLaunched = prefs.getHasLaunchedBefore()
         startDestination = if (hasLaunched) {
-            if (initialDate != null) "main?date=$initialDate" else NavRoutes.MAIN
+            // Keep a real root destination at all times. Starting directly at
+            // a detail route lets a fast Back press pop the NavHost completely
+            // while MainActivity remains visible, which is the white screen.
+            NavRoutes.MAIN
         } else {
             NavRoutes.ONBOARDING
         }
@@ -64,9 +73,15 @@ fun NavGraph(initialDate: Long? = null) {
     DisposableEffect(activity, navController) {
         val listener = androidx.core.util.Consumer<android.content.Intent> { intent ->
             val date = intent.getLongExtra("date", -1L)
-            if (date != -1L) {
+            val tripID = intent.getStringExtra("futureTripID")
+            val footprintID = intent.getStringExtra("footprintID")
+            if (footprintID != null) {
+                intent.removeExtra("footprintID")
+                navController.navigate("footprint_detail/$footprintID")
+            } else if (date != -1L || tripID != null) {
                 intent.removeExtra("date")
-                navController.navigate("main?date=$date") {
+                intent.removeExtra("futureTripID")
+                navController.navigate("main?date=${if (date == -1L) "" else date}&tripID=${tripID ?: ""}") {
                     popUpTo(NavRoutes.MAIN) { inclusive = true }
                 }
             }
@@ -74,6 +89,20 @@ fun NavGraph(initialDate: Long? = null) {
         activity?.addOnNewIntentListener(listener)
         onDispose {
             activity?.removeOnNewIntentListener(listener)
+        }
+    }
+
+    // Do not delegate the root case to NavController's default callback.
+    // During a rapid sequence of Back presses its callback can receive a
+    // second event before composition has disabled it, popping MAIN and
+    // leaving NavHost with no destination (a white MainActivity). The stack
+    // itself updates synchronously, so checking the previous entry makes each
+    // press deterministic: pop a child, otherwise close the activity.
+    BackHandler(enabled = startDestination != null) {
+        if (navController.previousBackStackEntry != null) {
+            navController.popBackStack()
+        } else {
+            activity?.finish()
         }
     }
 
@@ -95,9 +124,11 @@ fun NavGraph(initialDate: Long? = null) {
         composable(NavRoutes.MAIN) { backStackEntry ->
             val initialDateStr = backStackEntry.arguments?.getString("date")
             val initialDate = initialDateStr?.toLongOrNull()?.let { java.util.Date(it) }
+            val initialFutureTripID = backStackEntry.arguments?.getString("tripID")?.takeIf { it.isNotBlank() }
             
             MainScreen(
                 initialDate = initialDate,
+                initialFutureTripID = initialFutureTripID,
                 onNavigateToHistory = { date -> navController.navigate("history?date=${date.time}") },
                 onNavigateToStatistics = { navController.navigate(NavRoutes.STATISTICS) },
                 onNavigateToSettings = { navController.navigate(NavRoutes.SETTINGS) },
@@ -117,7 +148,8 @@ fun NavGraph(initialDate: Long? = null) {
                 },
                 onNavigateToRawPoints = { date ->
                     navController.navigate("raw_points?date=${date.time}")
-                }
+                },
+                onNavigateToPlaces = { navController.navigate(NavRoutes.PLACES_MANAGER) }
             )
         }
         composable(NavRoutes.HISTORY) { backStackEntry ->
@@ -167,12 +199,23 @@ fun NavGraph(initialDate: Long? = null) {
             com.ct106.difangke.ui.screens.settings.AiSettingsScreen(onBack = { navController.popBackStack() })
         }
         composable(NavRoutes.DATA_MANAGER) {
-            com.ct106.difangke.ui.screens.settings.DataManagerScreen(onBack = { navController.popBackStack() })
+            com.ct106.difangke.ui.screens.settings.DataManagerScreen(
+                onBack = { navController.popBackStack() },
+                onNavigateToRecycleBin = { navController.navigate(NavRoutes.RECYCLE_BIN) },
+                onNavigateToRawPoints = { navController.navigate("raw_points?date=${System.currentTimeMillis()}") }
+            )
+        }
+        composable(NavRoutes.RECYCLE_BIN) {
+            com.ct106.difangke.ui.screens.settings.RecycleBinScreen(onBack = { navController.popBackStack() })
         }
         composable(NavRoutes.MAP) { backStackEntry ->
             val dateTimestamp = backStackEntry.arguments?.getString("date")?.toLongOrNull()
             DFKMapScreen(
                 onBack = { navController.popBackStack() },
+                onNavigateToDetail = { id ->
+                    if (id.startsWith("t_")) navController.navigate("transport_detail/${id.substring(2)}")
+                    else navController.navigate("footprint_detail/${id.removePrefix("f_")}")
+                },
                 dateTimestamp = dateTimestamp
             )
         }
@@ -221,6 +264,23 @@ fun NavGraph(initialDate: Long? = null) {
                 date = java.util.Date(dateTimestamp),
                 onBack = { navController.popBackStack() }
             )
+        }
+    }
+
+    // Resolve launch deep links only after NavHost has installed MAIN as its
+    // root. Back from a notification/detail now always returns to the home
+    // timeline instead of leaving an empty navigation graph.
+    LaunchedEffect(startDestination) {
+        if (startDestination != NavRoutes.MAIN) return@LaunchedEffect
+        when {
+            initialFootprintID != null -> {
+                navController.navigate("footprint_detail/$initialFootprintID")
+            }
+            initialFutureTripID != null || initialDate != null -> {
+                navController.navigate(
+                    "main?date=${initialDate ?: ""}&tripID=${initialFutureTripID ?: ""}"
+                )
+            }
         }
     }
 }

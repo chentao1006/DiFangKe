@@ -50,6 +50,20 @@ fun StatisticsScreen(
     val trendData by viewModel.trendData.collectAsState()
     val aiSummary by viewModel.aiSummary.collectAsState()
     val isGeneratingSummary by viewModel.isGeneratingSummary.collectAsState()
+    val context = LocalContext.current
+    fun shareStatistics() {
+        context.startActivity(
+            android.content.Intent.createChooser(
+                android.content.Intent(android.content.Intent.ACTION_SEND)
+                    .setType("text/plain")
+                    .putExtra(
+                        android.content.Intent.EXTRA_TEXT,
+                        statisticsShareText(selectedRange, frequentPlaces, activityRank, aiSummary)
+                    ),
+                "分享统计洞察"
+            )
+        )
+    }
 
     val isDark = isSystemInDarkTheme()
     val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
@@ -62,6 +76,11 @@ fun StatisticsScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = ::shareStatistics) {
+                        Icon(Icons.Default.Share, contentDescription = "分享统计")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -114,6 +133,29 @@ fun StatisticsScreen(
                     TrendSection(points = trendData, range = selectedRange)
                 }
             }
+        }
+    }
+}
+
+private fun statisticsShareText(
+    range: StatisticsRange,
+    frequentPlaces: List<FrequentPlaceItem>,
+    activityRank: List<ActivityRankItem>,
+    aiSummary: String?
+): String = buildString {
+    append("地方客 · ").append(range.label).append("统计洞察")
+    aiSummary?.takeIf(String::isNotBlank)?.let { append("\n\n").append(it) }
+    if (frequentPlaces.isNotEmpty()) {
+        append("\n\n常去地点")
+        frequentPlaces.take(3).forEachIndexed { index, item ->
+            append("\n").append(index + 1).append(". ").append(item.name)
+                .append(" · ").append(item.duration / 3600).append("小时 / ").append(item.count).append("次")
+        }
+    }
+    if (activityRank.isNotEmpty()) {
+        append("\n\n活动排行")
+        activityRank.take(3).forEachIndexed { index, item ->
+            append("\n").append(index + 1).append(". ").append(item.name).append(" · ").append(item.count).append("次")
         }
     }
 }

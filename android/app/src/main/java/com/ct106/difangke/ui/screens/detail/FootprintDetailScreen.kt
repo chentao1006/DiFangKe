@@ -1,6 +1,9 @@
 package com.ct106.difangke.ui.screens.detail
 
 import android.os.Bundle
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -26,6 +29,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
@@ -35,6 +40,8 @@ import com.ct106.difangke.ui.components.addFootprintMarkers
 import com.ct106.difangke.ui.components.addImportantPlaceCircles
 import com.ct106.difangke.ui.components.buildFootprintMapMarkers
 import com.ct106.difangke.ui.components.getIconForName
+import com.ct106.difangke.ui.components.FootprintPhotoThumbnail
+import com.ct106.difangke.ui.components.NearbyPlacePickerSheet
 import java.text.SimpleDateFormat
 import java.util.*
 import org.json.JSONArray
@@ -66,11 +73,56 @@ fun FootprintDetailScreen(
     var showLocationPicker by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
     var showingDeleteAlert by remember { mutableStateOf(false) }
+    var showingIgnoreLocationAlert by remember { mutableStateOf(false) }
     var showingTimeDialog by remember { mutableStateOf(false) }
     var showingSplitDialog by remember { mutableStateOf(false) }
     var showingMergeDialog by remember { mutableStateOf(false) }
     var mergeUsePrevious by remember { mutableStateOf(true) }
     var skipDisposeSave by remember { mutableStateOf(false) }
+    var selectedPhotoUri by remember { mutableStateOf<String?>(null) }
+    var showFullMap by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    // Use the exact same picker as the live "正在停留" row: same POI source,
+    // search, retry behaviour, and nearby saved-place merge.
+    footprint?.let { selectedFootprint ->
+        if (showLocationPicker) {
+            val coordinate = remember(selectedFootprint.footprintID) {
+                runCatching {
+                    org.json.JSONArray(selectedFootprint.latitudeJson).getDouble(0) to
+                        org.json.JSONArray(selectedFootprint.longitudeJson).getDouble(0)
+                }.getOrNull()
+            }
+            if (coordinate != null) {
+                NearbyPlacePickerSheet(
+                    latitude = coordinate.first,
+                    longitude = coordinate.second,
+                    savedPlaces = allPlaces,
+                    onDismiss = { showLocationPicker = false },
+                    onSelect = { poi ->
+                        addressText = poi.name
+                        selectedPlaceID = poi.placeID
+                        selectedLocationIsSaved = poi.isSavedPlace
+                        didEditLocation = true
+                        showLocationPicker = false
+                    }
+                )
+            }
+        }
+    }
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
+            }
+            val existing = footprint?.let(::footprintPhotoUris).orEmpty()
+            viewModel.updatePhotos(existing + uris.map { it.toString() })
+        }
+    }
     
     if (showingDeleteAlert) {
         AlertDialog(
@@ -154,6 +206,27 @@ fun FootprintDetailScreen(
                 }
             )
         }
+
+        if (showingIgnoreLocationAlert) {
+            AlertDialog(
+                onDismissRequest = { showingIgnoreLocationAlert = false },
+                title = { Text("忽略并删除此地点足迹？") },
+                text = { Text("以后将不再自动记录此地点附近的足迹，已有的同地点足迹也会移入回收站。") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            skipDisposeSave = true
+                            viewModel.ignoreLocation {
+                                showingIgnoreLocationAlert = false
+                                onBack()
+                            }
+                        },
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) { Text("忽略并删除") }
+                },
+                dismissButton = { TextButton(onClick = { showingIgnoreLocationAlert = false }) { Text("取消") } }
+            )
+        }
     }
 
     LaunchedEffect(footprintId) {
@@ -215,8 +288,9 @@ fun FootprintDetailScreen(
                 },
                 actions = {
                     IconButton(onClick = { 
-                        isHighlight = !isHighlight 
-                        Aptabase.instance.trackEvent("footprint_highlighted")
+                        val nextValue = !isHighlight
+                        isHighlight = nextValue
+                        viewModel.setHighlight(nextValue)
                     }) {
                         Icon(
                             imageVector = if (isHighlight) Icons.Default.Star else Icons.Default.StarOutline,
@@ -248,6 +322,14 @@ fun FootprintDetailScreen(
                                     showingSplitDialog = true
                                 },
                                 leadingIcon = { Icon(Icons.Default.ContentCut, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("忽略此地点") },
+                                onClick = {
+                                    showMoreMenu = false
+                                    showingIgnoreLocationAlert = true
+                                },
+                                leadingIcon = { Icon(Icons.Default.LocationOff, contentDescription = null) }
                             )
                             if (previousFootprint != null) {
                                 DropdownMenuItem(
@@ -361,7 +443,7 @@ fun FootprintDetailScreen(
                     Column(modifier = Modifier.padding(16.dp)) {
                         // Time display
 
-                        if (showLocationPicker) {
+                        if (false && showLocationPicker) {
                             ModalBottomSheet(
                                 onDismissRequest = { showLocationPicker = false },
                                 sheetState = sheetState,
@@ -478,6 +560,22 @@ fun FootprintDetailScreen(
                                 )
                             }
                         }
+
+                        val healthSummary = buildList {
+                            footprint!!.stepCount?.takeIf { it > 0 }?.let { add("$it 步") }
+                            footprint!!.walkingDistance?.takeIf { it > 0 }?.let {
+                                add(if (it >= 1000) String.format(Locale.CHINA, "%.1f 公里步行", it / 1000) else "${it.toInt()} 米步行")
+                            }
+                            footprint!!.floorsAscended?.takeIf { it > 0 }?.let { add("$it 层") }
+                        }
+                        if (healthSummary.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                healthSummary.joinToString(" · "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                        }
                     }
                 }
 
@@ -502,7 +600,25 @@ fun FootprintDetailScreen(
                         allPlaces = allPlaces,
                         activityTypes = activityTypes
                     )
+                    FilledTonalIconButton(
+                        onClick = { showFullMap = true },
+                        modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+                        )
+                    ) {
+                        Icon(Icons.Default.Fullscreen, contentDescription = "打开完整足迹地图")
+                    }
                 }
+
+                FootprintPhotosSection(
+                    uris = footprintPhotoUris(footprint!!),
+                    onAddPhotos = { photoPicker.launch(arrayOf("image/*")) },
+                    onOpenPhoto = { selectedPhotoUri = it },
+                    onRemovePhoto = { uri ->
+                        viewModel.updatePhotos(footprintPhotoUris(footprint!!).filterNot { it == uri })
+                    }
+                )
 
                 // 4. 感想备注
                 Text(
@@ -544,6 +660,133 @@ fun FootprintDetailScreen(
             }
         }
     }
+
+    selectedPhotoUri?.let { uri ->
+        FootprintPhotoViewer(uri = uri, onDismiss = { selectedPhotoUri = null })
+    }
+    footprint?.let { currentFootprint ->
+        if (showFullMap) {
+            FootprintFullMapDialog(
+                footprint = currentFootprint,
+                allPlaces = allPlaces,
+                activityTypes = activityTypes,
+                onDismiss = { showFullMap = false }
+            )
+        }
+    }
+}
+
+private fun footprintPhotoUris(footprint: FootprintEntity): List<String> = runCatching {
+    val array = JSONArray(footprint.photoAssetIDsJson)
+    (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
+}.getOrDefault(emptyList())
+
+@Composable
+private fun FootprintFullMapDialog(
+    footprint: FootprintEntity,
+    allPlaces: List<PlaceEntity>,
+    activityTypes: List<ActivityTypeEntity>,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Box {
+                DetailMapView(
+                    footprint = footprint,
+                    allPlaces = allPlaces,
+                    activityTypes = activityTypes
+                )
+                Surface(
+                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onDismiss) {
+                            Icon(Icons.Default.Close, contentDescription = "关闭完整足迹地图")
+                        }
+                        Text("足迹地图", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FootprintPhotosSection(
+    uris: List<String>,
+    onAddPhotos: () -> Unit,
+    onOpenPhoto: (String) -> Unit,
+    onRemovePhoto: (String) -> Unit
+) {
+    Text(
+        "照片",
+        style = MaterialTheme.typography.labelLarge,
+        color = Color.Gray,
+        modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        uris.take(4).forEach { uri ->
+            Box(Modifier.size(76.dp).clip(RoundedCornerShape(12.dp)).clickable { onOpenPhoto(uri) }) {
+                FootprintPhotoThumbnail(uri, Modifier.fillMaxSize(), "查看足迹照片")
+                IconButton(
+                    onClick = { onRemovePhoto(uri) },
+                    modifier = Modifier.align(Alignment.TopEnd).size(28.dp).padding(2.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "移除照片",
+                        tint = Color.White,
+                        modifier = Modifier
+                            .size(18.dp)
+                            .background(Color.Black.copy(alpha = 0.45f), CircleShape)
+                            .padding(2.dp)
+                    )
+                }
+            }
+        }
+        OutlinedButton(
+            onClick = onAddPhotos,
+            modifier = Modifier.size(width = 76.dp, height = 76.dp),
+            contentPadding = PaddingValues(0.dp)
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Default.AddPhotoAlternate, contentDescription = null)
+                Text("添加", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FootprintPhotoViewer(uri: String, onDismiss: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            AndroidView(
+                factory = { context ->
+                    android.widget.ImageView(context).apply {
+                        scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                        setImageURI(android.net.Uri.parse(uri))
+                    }
+                },
+                update = { imageView -> imageView.setImageURI(android.net.Uri.parse(uri)) },
+                modifier = Modifier.fillMaxSize()
+            )
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).background(Color.Black.copy(alpha = 0.45f), CircleShape)
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "关闭照片", tint = Color.White)
+            }
+        }
+    }
 }
 
 @Composable
@@ -565,8 +808,14 @@ private fun FootprintTimeAdjustDialog(
         }.time
     }
     val dayEnd = remember(dayStart) { Date(dayStart.time + 24 * 60 * 60_000L) }
+    // Footprints represent completed stays, so the editor must not expose a
+    // time after the current minute even when there is no following item.
+    val latestAllowedEnd = remember(footprint.footprintID) {
+        Date((System.currentTimeMillis() / 60_000L) * 60_000L)
+    }
     val rangeStart = maxOf(previous?.endTime?.time ?: dayStart.time, dayStart.time)
-    val rangeEnd = minOf(next?.startTime?.time ?: dayEnd.time, dayEnd.time)
+    val rangeEnd = minOf(next?.startTime?.time ?: dayEnd.time, dayEnd.time, latestAllowedEnd.time)
+    val hasAdjustableRange = rangeEnd - rangeStart >= 60_000L
     val totalMinutes = maxOf(1, ((rangeEnd - rangeStart) / 60_000L).toInt())
     var startMinute by remember(footprint.footprintID, rangeStart) {
         mutableFloatStateOf(((footprint.startTime.time - rangeStart) / 60_000L).coerceIn(0L, (totalMinutes - 1).toLong()).toFloat())
@@ -584,38 +833,42 @@ private fun FootprintTimeAdjustDialog(
         title = { Text("调整时间") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Text(
-                    "可调整范围 ${formatter.format(Date(rangeStart))}-${formatter.format(Date(rangeEnd))}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    "${formatter.format(startDate)} - ${formatter.format(endDate)}",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Text("开始", style = MaterialTheme.typography.labelMedium)
-                Slider(
-                    value = startMinute,
-                    onValueChange = { value ->
-                        startMinute = value.coerceIn(0f, endMinute - 1f)
-                    },
-                    valueRange = 0f..totalMinutes.toFloat(),
-                    steps = maxOf(0, totalMinutes - 1)
-                )
-                Text("结束", style = MaterialTheme.typography.labelMedium)
-                Slider(
-                    value = endMinute,
-                    onValueChange = { value ->
-                        endMinute = value.coerceIn(startMinute + 1f, totalMinutes.toFloat())
-                    },
-                    valueRange = 0f..totalMinutes.toFloat(),
-                    steps = maxOf(0, totalMinutes - 1)
-                )
+                if (!hasAdjustableRange) {
+                    Text("这条足迹没有可调整的已发生时间范围。")
+                } else {
+                    Text(
+                        "可调整范围 ${formatter.format(Date(rangeStart))}-${formatter.format(Date(rangeEnd))}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "${formatter.format(startDate)} - ${formatter.format(endDate)}",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text("开始", style = MaterialTheme.typography.labelMedium)
+                    Slider(
+                        value = startMinute,
+                        onValueChange = { value ->
+                            startMinute = value.coerceIn(0f, endMinute - 1f)
+                        },
+                        valueRange = 0f..totalMinutes.toFloat(),
+                        steps = maxOf(0, totalMinutes - 1)
+                    )
+                    Text("结束", style = MaterialTheme.typography.labelMedium)
+                    Slider(
+                        value = endMinute,
+                        onValueChange = { value ->
+                            endMinute = value.coerceIn(startMinute + 1f, totalMinutes.toFloat())
+                        },
+                        valueRange = 0f..totalMinutes.toFloat(),
+                        steps = maxOf(0, totalMinutes - 1)
+                    )
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(startDate, endDate) }) {
+            TextButton(onClick = { onSave(startDate, endDate) }, enabled = hasAdjustableRange) {
                 Text("保存")
             }
         },

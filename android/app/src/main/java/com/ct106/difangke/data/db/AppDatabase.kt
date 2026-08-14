@@ -22,7 +22,7 @@ import java.util.Date
         TransportManualSelectionEntity::class,
         FutureTripEntity::class
     ],
-    version = 5,
+    version = 7,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -130,6 +130,20 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `future_trips` ADD COLUMN `hasPlanDate` INTEGER NOT NULL DEFAULT 1")
+            }
+        }
+
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `footprints` ADD COLUMN `stepCount` INTEGER")
+                db.execSQL("ALTER TABLE `footprints` ADD COLUMN `walkingDistance` REAL")
+                db.execSQL("ALTER TABLE `footprints` ADD COLUMN `floorsAscended` INTEGER")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -137,7 +151,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "dfk_v1_stable.db"
                 )
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build()
                 INSTANCE = instance
                 instance

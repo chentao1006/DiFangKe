@@ -21,19 +21,33 @@ import com.ct106.difangke.ui.components.*
 @Composable
 fun DataManagerScreen(
     onBack: () -> Unit,
+    onNavigateToRecycleBin: () -> Unit,
+    onNavigateToRawPoints: () -> Unit,
     viewModel: DataManagerViewModel = viewModel()
 ) {
     val todayPoints by viewModel.todayPointsCount.collectAsState()
     val importResult by viewModel.importResult.collectAsState()
     val isProcessing by viewModel.isProcessing.collectAsState()
+    val rebuildProgress by viewModel.rebuildProgress.collectAsState()
     
     var showDeleteAlert by remember { mutableStateOf(false) }
+    var showRebuildAlert by remember { mutableStateOf(false) }
 
     // 文件选择器
     val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = androidx.activity.result.contract.ActivityResultContracts.GetContent()
     ) { uri ->
         uri?.let { viewModel.importData(it) }
+    }
+    val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        uri?.let { viewModel.exportData(it) }
+    }
+    val rawLogsExportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        uri?.let { viewModel.exportRawLogs(it) }
     }
 
     Scaffold(
@@ -63,7 +77,7 @@ fun DataManagerScreen(
                 SettingsNavigationItem(
                     title = "导出备份",
                     icon = Icons.Default.FileUpload,
-                    onClick = { /* TODO: 未来支持导出 */ }
+                    onClick = { exportLauncher.launch("difangke-backup-${java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date())}.json") }
                 )
                 SettingsNavigationItem(
                     title = "导入数据",
@@ -79,16 +93,28 @@ fun DataManagerScreen(
                     colors = ListItemDefaults.colors(containerColor = Color.Transparent)
                 )
                 SettingsNavigationItem(
-                    title = "查看/导出日志",
+                    title = "查看今日原始轨迹",
                     icon = Icons.Default.Description,
-                    onClick = { /* TODO */ }
+                    onClick = onNavigateToRawPoints
+                )
+                SettingsNavigationItem(
+                    title = "导出全部原始轨迹",
+                    icon = Icons.Default.FileUpload,
+                    onClick = { rawLogsExportLauncher.launch("difangke-raw-locations-${java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date())}.csv") }
                 )
 
                 SettingsHeader("回收站")
                 SettingsNavigationItem(
                     title = "足迹回收站",
                     icon = Icons.Default.DeleteSweep,
-                    onClick = { /* TODO */ }
+                    onClick = onNavigateToRecycleBin
+                )
+
+                SettingsHeader("数据维护")
+                SettingsNavigationItem(
+                    title = "重建所有时间线",
+                    icon = Icons.Default.Restore,
+                    onClick = { showRebuildAlert = true }
                 )
 
                 SettingsHeader("危险操作")
@@ -109,7 +135,16 @@ fun DataManagerScreen(
                         .background(Color.Black.copy(alpha = 0.3f)),
                     contentAlignment = androidx.compose.ui.Alignment.Center
                 ) {
-                    CircularProgressIndicator()
+                    Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+                        CircularProgressIndicator()
+                        rebuildProgress?.let { (current, total) ->
+                            Spacer(Modifier.height(16.dp))
+                            Text("正在重建时间线：$current / $total", color = Color.White)
+                            TextButton(onClick = viewModel::cancelRebuildAllTimelines) {
+                                Text("取消重建", color = Color.White)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -146,6 +181,21 @@ fun DataManagerScreen(
                     Text("取消")
                 }
             }
+        )
+    }
+
+    if (showRebuildAlert) {
+        AlertDialog(
+            onDismissRequest = { showRebuildAlert = false },
+            title = { Text("重建所有时间线") },
+            text = { Text("将根据全部原始轨迹重新生成足迹和自动交通记录。手动修改与已确认记录会保留，此过程可能需要较长时间。") },
+            confirmButton = {
+                Button(onClick = {
+                    showRebuildAlert = false
+                    viewModel.rebuildAllTimelines()
+                }) { Text("开始重建") }
+            },
+            dismissButton = { TextButton(onClick = { showRebuildAlert = false }) { Text("取消") } }
         )
     }
 }

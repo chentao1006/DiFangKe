@@ -17,6 +17,8 @@ data class FutureTripEntity(
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
     val arrivalDate: Date = Date(),
+    /** iOS permits a plan to exist before its date is decided. */
+    val hasPlanDate: Boolean = true,
     val hasArrivalTime: Boolean = false,
     val scheduleModeValue: String = FutureTripScheduleMode.TIMED.raw,
     val orderIndex: Int = 0,
@@ -30,6 +32,9 @@ data class FutureTripEntity(
 
     val isOrdered: Boolean
         get() = scheduleMode == FutureTripScheduleMode.ORDERED
+
+    val isUndated: Boolean
+        get() = !hasPlanDate
 
     fun effectiveArrivalDate(): Date {
         if (hasArrivalTime) return arrivalDate

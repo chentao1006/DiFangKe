@@ -1,6 +1,7 @@
 package com.ct106.difangke.service
 
 import android.net.Uri
+import android.location.Location
 import android.util.Log
 import com.ct106.difangke.BuildConfig
 import kotlinx.coroutines.Dispatchers
@@ -8,6 +9,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.security.MessageDigest
 
 /**
  * 腾讯位置服务的地理编码与 POI 搜索。
@@ -57,7 +59,27 @@ class GeocodeService private constructor() {
         centerLat: Double,
         centerLon: Double,
         radiusMeters: Int = 3000
-    ): List<SearchResult> = searchTencentPois("", centerLat, centerLon, radiusMeters)
+    ): List<SearchResult> = withContext(Dispatchers.IO) {
+        // Tencent's place-search endpoint rejects an empty keyword. Reverse
+        // geocoding with get_poi=1 is its nearby-POI endpoint for this case.
+        val payload = getJson("/geocoder/v1/?location=$centerLat,$centerLon&get_poi=1")
+            ?.optJSONObject("result") ?: return@withContext emptyList()
+        val pois = payload.optJSONArray("pois") ?: return@withContext emptyList()
+        buildList {
+            for (index in 0 until pois.length()) {
+                val poi = pois.optJSONObject(index) ?: continue
+                val location = poi.optJSONObject("location") ?: continue
+                add(
+                    SearchResult(
+                        name = poi.optString("title"),
+                        address = poi.optString("address"),
+                        latitude = location.optDouble("lat"),
+                        longitude = location.optDouble("lng")
+                    )
+                )
+            }
+        }.nearbyOnly(centerLat, centerLon, radiusMeters)
+    }
 
     suspend fun searchNearby(
         keyword: String,
@@ -78,20 +100,61 @@ class GeocodeService private constructor() {
                     val location = poi.optJSONObject("location") ?: continue
                     add(SearchResult(poi.optString("title"), poi.optString("address"), location.optDouble("lat"), location.optDouble("lng")))
                 }
-            }
+            }.nearbyOnly(lat, lon, radius)
         }
 
+    /** The service may return relevance-ranked results outside `boundary`; the
+     * timeline picker must always be geographically local and nearest first. */
+    private fun List<SearchResult>.nearbyOnly(
+        centerLat: Double,
+        centerLon: Double,
+        radiusMeters: Int
+    ): List<SearchResult> = mapNotNull { result ->
+        val distance = FloatArray(1)
+        Location.distanceBetween(centerLat, centerLon, result.latitude, result.longitude, distance)
+        result.takeIf { it.name.isNotBlank() && distance[0] <= radiusMeters }
+            ?.let { it to distance[0] }
+    }.sortedBy { it.second }
+        .map { it.first }
+
     private fun getJson(pathAndQuery: String): JSONObject? = try {
-        val separator = if (pathAndQuery.contains('?')) '&' else '?'
-        val url = "$BASE_URL$pathAndQuery${separator}key=${BuildConfig.TENCENT_MAP_KEY}"
+        val path = pathAndQuery.substringBefore('?')
+        val parameters = pathAndQuery.substringAfter('?', "")
+            .split('&')
+            .filter { it.isNotBlank() }
+            .associate { parameter ->
+                parameter.substringBefore('=') to parameter.substringAfter('=', "")
+            }
+            .toMutableMap()
+        parameters["key"] = BuildConfig.TENCENT_MAP_KEY
+        val query = parameters.toSortedMap().entries.joinToString("&") { (name, value) -> "$name=$value" }
+        // Tencent validates the decoded parameter values in its MD5 source
+        // string, while the actual HTTP URL must remain percent-encoded.
+        val signatureQuery = parameters.toSortedMap().entries.joinToString("&") { (name, value) ->
+            "$name=${Uri.decode(value)}"
+        }
+        // Tencent signs the request path including the /ws prefix used by the
+        // public WebService endpoint. BASE_URL owns that prefix, so put it
+        // back only for the MD5 source string.
+        val signature = md5("/ws$path?$signatureQuery${BuildConfig.TENCENT_MAP_SECRET}")
+        val url = "$BASE_URL$path?$query&sig=$signature"
+        Log.i(TAG, "POI request started: $path")
         httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            val body = response.body?.string()
+            val payload = body?.let(::JSONObject)
+            Log.i(TAG, "POI response: http=${response.code}, status=${payload?.optInt("status")}, message=${payload?.optString("message")}")
             if (!response.isSuccessful) return null
-            response.body?.string()?.let(::JSONObject)?.takeIf { it.optInt("status") == 0 }
+            payload?.takeIf { it.optInt("status") == 0 }
         }
     } catch (error: Exception) {
         Log.w(TAG, "Tencent location service request failed", error)
         null
     }
+
+    private fun md5(value: String): String = MessageDigest.getInstance("MD5")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
 
     fun coarseAutomaticPlaceName(candidates: List<String?>): String? {
         val cleaned = candidates

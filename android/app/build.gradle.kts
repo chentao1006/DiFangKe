@@ -55,6 +55,11 @@ android {
             "TENCENT_MAP_KEY",
             "\"${localProperties.getProperty("TENCENT_MAP_KEY") ?: ""}\""
         )
+        buildConfigField(
+            "String",
+            "TENCENT_MAP_SECRET",
+            "\"${localProperties.getProperty("TENCENT_MAP_SECRET") ?: ""}\""
+        )
 
         buildConfigField("String", "SERVICE_SECRET", "\"${localProperties.getProperty("SERVICE_SECRET") ?: ""}\"")
         buildConfigField("String", "PUBLIC_SERVICE_URL", "\"${localProperties.getProperty("PUBLIC_SERVICE_URL") ?: ""}\"")
@@ -185,6 +190,9 @@ dependencies {
 
     // Core
     implementation("androidx.core:core-ktx:1.13.1")
+
+    // Health Connect: read user-authorized steps/distance/floors for timeline metrics.
+    implementation("androidx.health.connect:connect-client:1.1.0-alpha11")
 
     // Gson
     implementation("com.google.code.gson:gson:2.11.0")

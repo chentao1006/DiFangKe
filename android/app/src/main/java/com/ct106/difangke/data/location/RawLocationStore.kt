@@ -205,6 +205,27 @@ class RawLocationStore private constructor(context: Context) {
         return dates
     }
 
+    /** 合并导出原始轨迹 CSV；首列保留来源日期，便于跨天审阅。 */
+    fun exportAllCsv(): String = buildString {
+        append("date,timestamp,latitude,longitude,accuracy,speed\n")
+        baseDir.listFiles()
+            ?.filter { it.isFile && it.extension == "csv" }
+            ?.sortedBy { it.name }
+            ?.forEach { file ->
+                val date = file.nameWithoutExtension
+                file.forEachLine { line ->
+                    if (line.isNotBlank()) append(date).append(',').append(line.trim()).append('\n')
+                }
+            }
+    }
+
+    /** 删除全部原始轨迹文件，仅用于用户确认后的“清空所有数据”。 */
+    fun clearAll() {
+        baseDir.listFiles()?.filter { it.isFile && it.extension == "csv" }?.forEach { file ->
+            runCatching { file.delete() }.onFailure { Log.e(TAG, "clear raw location file failed", it) }
+        }
+    }
+
     /** 获取指定日期的总点数（对应 iOS getTotalPointsCount） */
     fun getTotalPointsCount(date: Date): Int {
         val file = getFile(date)

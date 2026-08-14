@@ -2,7 +2,10 @@ package com.ct106.difangke.util
 
 import android.content.ContentUris
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.provider.MediaStore
+import androidx.core.content.ContextCompat
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -14,6 +17,14 @@ object PhotoLinker {
      * 自动关联特定足迹发生期间拍摄的照片
      */
     suspend fun linkPhotosToFootprint(context: Context, footprint: FootprintEntity): List<String> = withContext(Dispatchers.IO) {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            android.Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            android.Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED) {
+            return@withContext emptyList()
+        }
         val photos = mutableListOf<String>()
         val startTime = footprint.startTime.time
         val endTime = footprint.endTime.time
@@ -28,21 +39,23 @@ object PhotoLinker {
         val selectionArgs = arrayOf(startTime.toString(), endTime.toString())
         val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} ASC"
         
-        context.contentResolver.query(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            selection,
-            selectionArgs,
-            sortOrder
-        )?.use { cursor ->
-            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-            while (cursor.moveToNext()) {
-                val id = cursor.getLong(idColumn)
-                val contentUri = ContentUris.withAppendedId(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    id
-                )
-                photos.add(contentUri.toString())
+        runCatching {
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                sortOrder
+            )?.use { cursor ->
+                val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idColumn)
+                    val contentUri = ContentUris.withAppendedId(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        id
+                    )
+                    photos.add(contentUri.toString())
+                }
             }
         }
         

@@ -42,4 +42,18 @@ object PlaceMatcher {
             .minByOrNull { it.distance }
             ?.place
     }
+
+    /** An ignored place is a recording exclusion, not merely a label to hide. */
+    fun ignoredPlaceForCoordinate(
+        latitude: Double,
+        longitude: Double,
+        places: List<PlaceEntity>,
+        processor: FootprintProcessor = FootprintProcessor.shared
+    ): PlaceEntity? = places.asSequence()
+        .filter { it.isIgnored }
+        .filter { it.latitude.isFinite() && it.longitude.isFinite() && it.radius.isFinite() && it.radius > 0f }
+        .map { place -> Match(place, processor.haversineMeters(place.latitude, place.longitude, latitude, longitude)) }
+        .filter { it.distance <= it.place.radius + 100.0 }
+        .minByOrNull { it.distance }
+        ?.place
 }

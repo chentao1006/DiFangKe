@@ -4,6 +4,7 @@ import android.content.Context
 import com.ct106.difangke.data.db.AppDatabase
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.PlaceEntity
+import com.ct106.difangke.data.db.entity.FutureTripEntity
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.annotations.SerializedName
@@ -42,7 +43,8 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         val places: List<PlaceDTO>,
         val footprints: List<FootprintDTO>,
         @SerializedName("activityTypes") val activityTypes: List<ActivityTypeDTO>? = null,
-        @SerializedName("transports") val transports: List<TransportDTO>? = null
+        @SerializedName("transports") val transports: List<TransportDTO>? = null,
+        @SerializedName("futureTrips") val futureTrips: List<FutureTripDTO>? = null
     )
 
     data class PlaceDTO(
@@ -53,7 +55,9 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         val rad: Float,
         val addr: String?,
         @SerializedName("isIgnored") val isIgnored: Boolean? = false,
-        @SerializedName("isUserDefined") val isUserDefined: Boolean? = true
+        @SerializedName("isUserDefined") val isUserDefined: Boolean? = true,
+        @SerializedName("isPriority") val isPriority: Boolean? = false,
+        val category: String? = null
     )
 
     data class FootprintDTO(
@@ -71,14 +75,18 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         val photos: List<String>,
         val addr: String?,
         @SerializedName("isHighlight") val isHighlight: Boolean?,
-        @SerializedName("activityType") val activityType: String? = null
+        @SerializedName("activityType") val activityType: String? = null,
+        val steps: Int? = null,
+        val walkingDistance: Double? = null,
+        val floorsAscended: Int? = null
     )
 
     data class ActivityTypeDTO(
         val id: String,
         val name: String,
         val icon: String,
-        val colorHex: String
+        val colorHex: String,
+        val sortOrder: Int? = null
     )
 
     data class TransportDTO(
@@ -97,6 +105,25 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         val steps: Int? = null
     )
 
+    data class FutureTripDTO(
+        val id: String,
+        val placeID: String? = null,
+        val placeName: String,
+        val address: String?,
+        val notes: String?,
+        val lat: Double,
+        val lon: Double,
+        val arrivalDate: Date,
+        val hasPlanDate: Boolean? = true,
+        val hasArrivalTime: Boolean,
+        val scheduleMode: String? = null,
+        val orderIndex: Int? = 0,
+        val activityType: String? = null,
+        val createdAt: Date,
+        val isCompleted: Boolean? = false,
+        val completedAt: Date? = null
+    )
+
     data class RestoreReport(
         val newFootprints: Int,
         val skippedFootprints: Int,
@@ -107,7 +134,9 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         val newTransports: Int,
         val skippedTransports: Int,
         val newActivityTypes: Int,
-        val skippedActivityTypes: Int
+        val skippedActivityTypes: Int,
+        val newFutureTrips: Int,
+        val skippedFutureTrips: Int
     )
 
     suspend fun generateBackup(): String = withContext(Dispatchers.IO) {
@@ -115,11 +144,12 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
         val places = db.placeDao().getAll()
         val activities = db.activityTypeDao().getAll()
         val transports = db.transportRecordDao().getAllSync()
+        val futureTrips = db.futureTripDao().getAll()
 
         val dto = BackupDTO(
-            version = 1,
+            version = 2,
             places = places.map { p ->
-                PlaceDTO(p.placeID, p.name, p.latitude, p.longitude, p.radius, p.address, p.isIgnored, p.isUserDefined)
+                PlaceDTO(p.placeID, p.name, p.latitude, p.longitude, p.radius, p.address, p.isIgnored, p.isUserDefined, p.isPriority, p.category)
             },
             footprints = footprints.map { f ->
                 val lats = try { 
@@ -150,11 +180,14 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     } catch(e: Exception) { emptyList() },
                     addr = f.address,
                     isHighlight = f.isHighlight,
-                    activityType = f.activityTypeValue
+                    activityType = f.activityTypeValue,
+                    steps = f.stepCount,
+                    walkingDistance = f.walkingDistance,
+                    floorsAscended = f.floorsAscended
                 )
             },
             activityTypes = activities.map { a ->
-                ActivityTypeDTO(a.id, a.name, a.icon, a.colorHex)
+                ActivityTypeDTO(a.id, a.name, a.icon, a.colorHex, a.sortOrder)
             },
             transports = transports.map { tr ->
                 TransportDTO(
@@ -171,6 +204,26 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     manualType = tr.manualTypeRaw,
                     status = tr.statusRaw,
                     steps = tr.stepCount
+                )
+            },
+            futureTrips = futureTrips.map { trip ->
+                FutureTripDTO(
+                    id = trip.tripID,
+                    placeID = trip.placeID,
+                    placeName = trip.placeName,
+                    address = trip.address,
+                    notes = trip.notes,
+                    lat = trip.latitude,
+                    lon = trip.longitude,
+                    arrivalDate = trip.arrivalDate,
+                    hasPlanDate = trip.hasPlanDate,
+                    hasArrivalTime = trip.hasArrivalTime,
+                    scheduleMode = trip.scheduleModeValue,
+                    orderIndex = trip.orderIndex,
+                    activityType = trip.activityTypeValue,
+                    createdAt = trip.createdAt,
+                    isCompleted = trip.isCompleted,
+                    completedAt = trip.completedAt
                 )
             }
         )
@@ -196,7 +249,9 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     radius = p.rad,
                     address = p.addr,
                     isIgnored = p.isIgnored ?: false,
-                    isUserDefined = isUserDefined
+                    isUserDefined = isUserDefined,
+                    isPriority = p.isPriority ?: false,
+                    category = p.category
                 ))
                 if (isUserDefined) newPlacesUser++ else newPlacesSystem++
             } else {
@@ -225,7 +280,10 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     address = f.addr,
                     isHighlight = f.isHighlight ?: false,
                     aiAnalyzed = true,
-                    activityTypeValue = f.activityType
+                    activityTypeValue = f.activityType,
+                    stepCount = f.steps,
+                    walkingDistance = f.walkingDistance,
+                    floorsAscended = f.floorsAscended
                 ))
                 newFootprints++
             } else {
@@ -269,12 +327,42 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
                     name = a.name,
                     icon = a.icon,
                     colorHex = a.colorHex,
-                    sortOrder = index,
+                    sortOrder = a.sortOrder ?: index,
                     isSystem = false
                 ))
                 newActivities++
             } else {
                 skippedActivities++
+            }
+        }
+
+        var newFutureTrips = 0
+        var skippedFutureTrips = 0
+        backup.futureTrips?.forEach { trip ->
+            if (db.futureTripDao().getById(trip.id) == null) {
+                db.futureTripDao().insert(
+                    FutureTripEntity(
+                        tripID = trip.id,
+                        placeID = trip.placeID,
+                        placeName = trip.placeName,
+                        address = trip.address,
+                        notes = trip.notes,
+                        latitude = trip.lat,
+                        longitude = trip.lon,
+                        arrivalDate = trip.arrivalDate,
+                        hasPlanDate = trip.hasPlanDate ?: true,
+                        hasArrivalTime = trip.hasArrivalTime,
+                        scheduleModeValue = trip.scheduleMode ?: "timed",
+                        orderIndex = trip.orderIndex ?: 0,
+                        activityTypeValue = trip.activityType,
+                        createdAt = trip.createdAt,
+                        isCompleted = trip.isCompleted ?: false,
+                        completedAt = trip.completedAt
+                    )
+                )
+                newFutureTrips++
+            } else {
+                skippedFutureTrips++
             }
         }
 
@@ -288,7 +376,9 @@ class BackupService(private val context: Context, private val db: AppDatabase) {
             newTransports = newTransports,
             skippedTransports = skippedTransports,
             newActivityTypes = newActivities,
-            skippedActivityTypes = skippedActivities
+            skippedActivityTypes = skippedActivities,
+            newFutureTrips = newFutureTrips,
+            skippedFutureTrips = skippedFutureTrips
         )
     }
 }

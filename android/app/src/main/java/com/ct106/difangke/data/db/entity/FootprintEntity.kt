@@ -34,7 +34,11 @@ data class FootprintEntity(
     val isTitleEditedByHand: Boolean = false,
     val activityTypeValue: String? = null,
     /** JSON 编码的照片 ID 数组 */
-    val photoAssetIDsJson: String = "[]"
+    val photoAssetIDsJson: String = "[]",
+    /** Health Connect 聚合的停留期间指标；未授权或无数据时保持为空。 */
+    val stepCount: Int? = null,
+    val walkingDistance: Double? = null,
+    val floorsAscended: Int? = null
 ) {
     val status: FootprintStatus get() = FootprintStatus.from(statusValue)
 

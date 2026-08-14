@@ -52,6 +52,9 @@ interface TransportRecordDao {
     @Query("SELECT * FROM transport_records ORDER BY startTime DESC")
     suspend fun getAllSync(): List<TransportRecordEntity>
 
+    @Query("DELETE FROM transport_records")
+    suspend fun deleteAll()
+
     @Query("SELECT * FROM transport_records WHERE day != :excludingDate AND statusRaw = 'active' ORDER BY startTime DESC LIMIT :limit")
     suspend fun getRecentExcluding(excludingDate: Date, limit: Int): List<TransportRecordEntity>
 
@@ -92,6 +95,9 @@ interface TransportManualSelectionDao {
 
     @Query("SELECT * FROM transport_manual_selections WHERE isDeleted = 1 AND startTime < :end AND endTime > :start ORDER BY startTime ASC")
     suspend fun getDeletedBetween(start: Date, end: Date): List<TransportManualSelectionEntity>
+
+    @Query("DELETE FROM transport_manual_selections")
+    suspend fun deleteAll()
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(selection: TransportManualSelectionEntity)

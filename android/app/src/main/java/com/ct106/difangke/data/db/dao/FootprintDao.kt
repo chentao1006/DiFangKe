@@ -62,6 +62,12 @@ interface FootprintDao {
         )
         suspend fun getIgnoredBetween(start: Date, end: Date): List<FootprintEntity>
 
+        @Query("SELECT * FROM footprints WHERE statusValue = 'ignored' ORDER BY endTime DESC")
+        fun observeIgnored(): Flow<List<FootprintEntity>>
+
+        @Query("DELETE FROM footprints WHERE statusValue = 'ignored'")
+        suspend fun deleteAllIgnored()
+
         /** 查找与候选足迹位置/时间相近的已有足迹（用于合并判断） */
         @Query(
                 """

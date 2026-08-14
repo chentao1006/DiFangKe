@@ -15,6 +15,9 @@ import com.ct106.difangke.data.model.TimelineItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.ct106.difangke.data.location.RawLocationStore
+import com.ct106.difangke.service.PhotoService
+import com.ct106.difangke.service.PlaceMatcher
+import com.ct106.difangke.service.GeocodeService
 
 class HistoryViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -47,7 +50,8 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     val allPlaces: StateFlow<List<com.ct106.difangke.data.db.entity.PlaceEntity>> = _allPlaces.asStateFlow()
 
     val favoriteFootprints = _footprints.map { list ->
-        list.filter { it.isHighlight == true }.sortedByDescending { it.startTime }
+        list.filter { it.isHighlight == true && it.statusValue != "ignored" }
+            .sortedByDescending { it.startTime }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _isRefreshing = MutableStateFlow(false)
@@ -56,8 +60,20 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     private val _lastDataSyncTrigger = MutableStateFlow(Date())
     val lastDataSyncTrigger: StateFlow<Date> = _lastDataSyncTrigger.asStateFlow()
 
+    private val _photoCandidates = MutableStateFlow<List<FootprintEntity>>(emptyList())
+    val photoCandidates: StateFlow<List<FootprintEntity>> = _photoCandidates.asStateFlow()
+    private val _isScanningPhotos = MutableStateFlow(false)
+    val isScanningPhotos: StateFlow<Boolean> = _isScanningPhotos.asStateFlow()
+
     init {
         refreshData()
+        viewModelScope.launch {
+            combine(
+                db.footprintDao().observeAll(),
+                db.futureTripDao().observeAll(),
+                db.transportRecordDao().observeAll()
+            ) { _, _, _ -> Unit }.drop(1).collect { refreshData() }
+        }
     }
 
     fun refreshData() {
@@ -66,6 +82,8 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             val allFootprints = db.footprintDao().getAll()
             val allActivityTypes = db.activityTypeDao().getAll()
             val allPlaces = db.placeDao().getAll()
+            val allFutureTrips = db.futureTripDao().getAll()
+            val allTransports = db.transportRecordDao().getAllSync().filter { it.statusRaw == "active" }
             
             _footprints.value = allFootprints
             _activityTypes.value = allActivityTypes
@@ -82,14 +100,36 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                         set(Calendar.MILLISECOND, 0)
                     }.time
                 }
+                val futureTripsByDate = allFutureTrips
+                    .filter { trip -> trip.hasPlanDate && !trip.isCompleted }
+                    .groupBy { trip ->
+                        Calendar.getInstance().apply {
+                            time = trip.arrivalDate
+                            set(Calendar.HOUR_OF_DAY, 0)
+                            set(Calendar.MINUTE, 0)
+                            set(Calendar.SECOND, 0)
+                            set(Calendar.MILLISECOND, 0)
+                        }.time
+                    }
+                val transportsByDate = allTransports.groupBy { transport ->
+                    Calendar.getInstance().apply {
+                        time = transport.day
+                        set(Calendar.HOUR_OF_DAY, 0)
+                        set(Calendar.MINUTE, 0)
+                        set(Calendar.SECOND, 0)
+                        set(Calendar.MILLISECOND, 0)
+                    }.time
+                }
                 
                 val summaryMap = mutableMapOf<Date, DaySummary>()
-                grouped.forEach { (date, fps) ->
-                    val endOfDay = Calendar.getInstance().apply { time = date; add(Calendar.DATE, 1) }.time
-                    val transports = db.transportRecordDao().getForDay(date, endOfDay)
+                (grouped.keys + futureTripsByDate.keys + transportsByDate.keys).forEach { date ->
+                    val fps = grouped[date].orEmpty()
+                    val futureTrips = futureTripsByDate[date].orEmpty()
+                    val transports = transportsByDate[date].orEmpty()
                     
                     val timelineItems = (fps.map { TimelineItem.FootprintItem(it) } + 
-                                       transports.map { TimelineItem.TransportItem(it) })
+                                       transports.map { TimelineItem.TransportItem(it) } +
+                                       futureTrips.map { TimelineItem.FutureTripItem(it) })
                                        .sortedByDescending { it.startTime }
                     
                     val store = RawLocationStore.getInstance(getApplication())
@@ -104,7 +144,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                         footprintCount = fps.map { (it.title ?: "").ifEmpty { it.locationHash } }.distinct().size,
                         highlightCount = fps.count { it.isHighlight == true },
                         highlightTitle = fps.firstOrNull { it.isHighlight == true }?.title,
-                        hasConfirmed = fps.any { it.aiAnalyzed },
+                        hasConfirmed = fps.any { it.aiAnalyzed } || futureTrips.isNotEmpty(),
                         hasCandidate = fps.any { !it.aiAnalyzed },
                         timelineIcons = icons,
                         trajectoryCount = totalPoints,
@@ -131,6 +171,59 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             refreshData()
             _isRefreshing.value = false
             _lastDataSyncTrigger.value = Date()
+        }
+    }
+
+    fun scanPhotos(start: Date, end: Date) {
+        viewModelScope.launch {
+            _isScanningPhotos.value = true
+            val existingPhotoUris = db.footprintDao().getAll()
+                .flatMap { footprint ->
+                    runCatching {
+                        val ids = org.json.JSONArray(footprint.photoAssetIDsJson)
+                        (0 until ids.length()).mapNotNull { ids.optString(it).takeIf(String::isNotBlank) }
+                    }.getOrDefault(emptyList())
+                }
+                .toSet()
+            val rawCandidates = PhotoService.getInstance(getApplication())
+                .scanFootprintCandidates(start, end, existingPhotoUris)
+            val places = db.placeDao().getAll()
+            _photoCandidates.value = withContext(Dispatchers.IO) {
+                rawCandidates.mapNotNull { candidate ->
+                    val coordinate = runCatching {
+                        org.json.JSONArray(candidate.latitudeJson).getDouble(0) to
+                            org.json.JSONArray(candidate.longitudeJson).getDouble(0)
+                    }.getOrNull() ?: return@mapNotNull null
+                    val (latitude, longitude) = coordinate
+                    // Keep the same safety rule as iOS photo recovery: a place the
+                    // user has explicitly ignored must not be recreated by scans.
+                    val isNearIgnoredPlace = places.any { place ->
+                        if (!place.isIgnored) false else {
+                            val meters = FloatArray(1)
+                            android.location.Location.distanceBetween(latitude, longitude, place.latitude, place.longitude, meters)
+                            meters[0] < 250f
+                        }
+                    }
+                    if (isNearIgnoredPlace) return@mapNotNull null
+
+                    val place = PlaceMatcher.bestPlaceForCoordinate(latitude, longitude, places)
+                    val address = when {
+                        place?.isUserDefined == true -> place.name
+                        !place?.address.isNullOrBlank() -> place?.address
+                        else -> runCatching { GeocodeService.shared.reverseGeocode(latitude, longitude) }.getOrNull()
+                    }
+                    candidate.copy(placeID = place?.placeID, address = address)
+                }
+            }
+            _isScanningPhotos.value = false
+        }
+    }
+
+    fun importPhotoCandidates(candidates: List<FootprintEntity>) {
+        viewModelScope.launch {
+            if (candidates.isNotEmpty()) db.footprintDao().insertAll(candidates)
+            _photoCandidates.value = emptyList()
+            refreshData()
         }
     }
 

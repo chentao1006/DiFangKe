@@ -31,6 +31,7 @@ import java.util.Calendar
 @Composable
 fun DFKMapScreen(
     onBack: () -> Unit,
+    onNavigateToDetail: (String) -> Unit,
     dateTimestamp: Long? = null,
     viewModel: MapViewModel = viewModel()
 ) {
@@ -41,9 +42,13 @@ fun DFKMapScreen(
     val polylineColor = MaterialTheme.colorScheme.primary.toArgb()
     val pathPoints by viewModel.pathPoints.collectAsState()
     val footprintMarkers by viewModel.footprintMarkers.collectAsState()
+    val transportMarkers by viewModel.transportMarkers.collectAsState()
     val allPlaces by viewModel.allPlaces.collectAsState()
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-    var hasCentredToNow by remember { mutableStateOf(false) }
+    // A single map screen instance can be reused for another date.  Refit the
+    // camera when that source changes instead of retaining the prior day's
+    // "already centered" state.
+    var hasCentredToNow by remember(dateTimestamp) { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -104,7 +109,7 @@ fun DFKMapScreen(
             
             // 策略选择：如果没有数据，就开启高德自动定位找人；如果有轨迹或足迹，就手动聚焦
             val myLocationStyle = MyLocationStyle()
-            if (pathPoints.isEmpty() && footprintMarkers.isEmpty()) {
+            if (pathPoints.isEmpty() && footprintMarkers.isEmpty() && transportMarkers.isEmpty()) {
                 // 情况 A：今天还没出门，开启自动定位并将地图移动到当前位置
                 myLocationStyle.myLocationType(MyLocationStyle.LOCATION_TYPE_LOCATION_ROTATE)
             } else {
@@ -162,10 +167,23 @@ fun DFKMapScreen(
 
             amap.clear()
             amap.addImportantPlaceCircles(allPlaces)
-            amap.addFootprintMarkers(footprintMarkers, isDark = isDark)
+            amap.addFootprintMarkers(
+                footprintMarkers + transportMarkers,
+                isDark = isDark,
+                onMarkerClick = { markerID ->
+                    if (markerID.startsWith("transport:")) {
+                        onNavigateToDetail("t_${markerID.removePrefix("transport:")}")
+                    } else {
+                        onNavigateToDetail("f_$markerID")
+                    }
+                }
+            )
 
             val validLatLngs = mutableListOf<LatLng>()
             footprintMarkers.forEach {
+                validLatLngs.add(LatLng(it.latitude, it.longitude))
+            }
+            transportMarkers.forEach {
                 validLatLngs.add(LatLng(it.latitude, it.longitude))
             }
             

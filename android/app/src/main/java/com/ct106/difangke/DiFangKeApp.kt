@@ -45,6 +45,7 @@ class DiFangKeApp : Application() {
             if (preferences.isPastMemoriesNotificationEnabled.first()) {
                 com.ct106.difangke.service.PastMemoriesWorker.schedule(this@DiFangKeApp)
             }
+            com.ct106.difangke.service.FutureTripReminderWorker.rescheduleAll(this@DiFangKeApp)
         }
     }
 

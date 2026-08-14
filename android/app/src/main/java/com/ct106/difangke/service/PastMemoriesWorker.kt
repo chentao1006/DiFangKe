@@ -84,6 +84,9 @@ class PastMemoriesWorker(
             // 获取所有足迹（排除今年，匹配月日）
             val allFootprints = db.footprintDao().getAll()
             val pastFootprints = allFootprints.filter { fp ->
+                // Android keeps deleted footprints in the recycle bin. They
+                // must not reappear as a "past memory" notification.
+                if (fp.statusValue == "ignored") return@filter false
                 val cal = Calendar.getInstance().apply { time = fp.startTime }
                 val fpYear = cal.get(Calendar.YEAR)
                 val fpMonth = cal.get(Calendar.MONTH)

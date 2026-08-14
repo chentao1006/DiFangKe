@@ -26,6 +26,7 @@ import java.util.Locale
 import kotlin.math.max
 
 data class FootprintMapMarker(
+    val id: String? = null,
     val latitude: Double,
     val longitude: Double,
     val icon: String?,
@@ -33,7 +34,16 @@ data class FootprintMapMarker(
     val durationSeconds: Long = 0L
 )
 
-fun TencentMap.addFootprintMarkers(markers: List<FootprintMapMarker>, isDark: Boolean = false) {
+fun TencentMap.addFootprintMarkers(
+    markers: List<FootprintMapMarker>,
+    isDark: Boolean = false,
+    onMarkerClick: ((String) -> Unit)? = null
+) {
+    setOnMarkerClickListener { marker ->
+        val id = marker.tag as? String
+        if (id != null) onMarkerClick?.invoke(id)
+        id != null
+    }
     markers
         .filter { it.latitude.isFinite() && it.longitude.isFinite() }
         .forEach { marker ->
@@ -54,7 +64,7 @@ fun TencentMap.addFootprintMarkers(markers: List<FootprintMapMarker>, isDark: Bo
                     .anchor(0.5f, anchorV)
                     .icon(BitmapDescriptorFactory.fromBitmap(bitmap))
                     .zIndex(100f)
-            )
+            ).setTag(marker.id)
         }
 }
 
@@ -101,6 +111,7 @@ fun buildFootprintMapMarkers(
         val divisor = max(bucket.totalDurationSeconds, 1L).toDouble()
         val activity = activityById[bucket.representative.activityTypeValue]
         FootprintMapMarker(
+            id = bucket.representative.footprintID,
             latitude = bucket.weightedLatitude / divisor,
             longitude = bucket.weightedLongitude / divisor,
             icon = activity?.icon ?: "place",

@@ -13,6 +13,7 @@ import com.ct106.difangke.data.model.TransportType
 import com.ct106.difangke.util.PhotoLinker
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.util.*
@@ -92,7 +93,11 @@ class PersistentTimelineBuilder(private val context: Context) {
                     return@let
                 }
 
-                val entity = createFootprintEntity(it)
+                val entity = createFootprintEntity(it) ?: run {
+                    queue.clear()
+                    queue.add(point)
+                    return@let
+                }
                 
                 // 检查是否合并
                 var currentFp = entity
@@ -141,10 +146,11 @@ class PersistentTimelineBuilder(private val context: Context) {
                 lastCandidate.startTime.before(retained.endTime) && lastCandidate.endTime.after(retained.startTime)
             }
             if (overlap == null) {
-                val finalEntity = createFootprintEntity(lastCandidate)
-                db.footprintDao().insert(finalEntity)
-                lastFp?.let { generateTransportSegment(it, finalEntity, points, preferredAuto, preferredCycling, preferredTransport, deletedTransports) }
-                lastFp = finalEntity
+                createFootprintEntity(lastCandidate)?.let { finalEntity ->
+                    db.footprintDao().insert(finalEntity)
+                    lastFp?.let { generateTransportSegment(it, finalEntity, points, preferredAuto, preferredCycling, preferredTransport, deletedTransports) }
+                    lastFp = finalEntity
+                }
             } else {
                 // 如果最后一段也重叠了，直接将 lastFp 指向重叠的足迹，放弃这段候选
                 lastFp = overlap
@@ -168,6 +174,7 @@ class PersistentTimelineBuilder(private val context: Context) {
 
         // 5. 合并连续交通段 (iOS Parity: mergeConsecutiveTransports)
         mergeConsecutiveTransports(date, preferredAuto, preferredCycling, preferredTransport, deletedTransports)
+        deduplicateOverlappingTransports(startOfDay, endOfDay)
 
         Log.i(TAG, "Finished rebuilding timeline for $date. Found ${footprints.size} footprints.")
     }
@@ -212,8 +219,66 @@ class PersistentTimelineBuilder(private val context: Context) {
             )
 
             mergeConsecutiveTransports(date, preferredAuto, preferredCycling, preferredTransport, deletedTransports)
+            deduplicateOverlappingTransports(startOfDay, endOfDay)
         }
     }
+
+    /**
+     * A rebuild can briefly describe the same automatic route twice when two
+     * gap-filling paths meet. Keep an explicit manual classification whenever
+     * present and delete only records that cover at least 80% of the shorter
+     * interval, matching the iOS deduplication safety boundary.
+     */
+    private suspend fun deduplicateOverlappingTransports(start: Date, end: Date) {
+        val remaining = db.transportRecordDao().getForDay(start, end)
+            .filter { it.statusRaw == "active" }
+            .sortedBy { it.startTime }
+            .toMutableList()
+        var deleted = 0
+
+        var index = 0
+        while (index < remaining.size) {
+            val first = remaining[index]
+            var candidateIndex = index + 1
+            var removedFirst = false
+            while (candidateIndex < remaining.size) {
+                val second = remaining[candidateIndex]
+                if (second.startTime.time > first.endTime.time) break
+                if (first.manualTypeRaw != null && second.manualTypeRaw != null) {
+                    candidateIndex++
+                    continue
+                }
+                val overlap = (minOf(first.endTime.time, second.endTime.time) -
+                    maxOf(first.startTime.time, second.startTime.time)).coerceAtLeast(0L)
+                val shorter = minOf(
+                    first.endTime.time - first.startTime.time,
+                    second.endTime.time - second.startTime.time
+                ).coerceAtLeast(1L)
+                if (overlap.toDouble() / shorter >= 0.8) {
+                    val keepFirst = when {
+                        first.manualTypeRaw != null -> true
+                        second.manualTypeRaw != null -> false
+                        else -> transportQuality(first) >= transportQuality(second)
+                    }
+                    val duplicate = if (keepFirst) second else first
+                    db.transportRecordDao().delete(duplicate)
+                    remaining.removeAt(if (keepFirst) candidateIndex else index)
+                    deleted++
+                    if (!keepFirst) {
+                        removedFirst = true
+                        break
+                    }
+                    continue
+                }
+                candidateIndex++
+            }
+            if (!removedFirst) index++
+        }
+        if (deleted > 0) Log.i(TAG, "Removed $deleted overlapping automatic transport duplicate(s)")
+    }
+
+    private fun transportQuality(record: TransportRecordEntity): Double =
+        record.distance + runCatching { org.json.JSONArray(record.pointsJson).length().toDouble() }.getOrDefault(0.0)
 
     private fun removeTinyImpossibleJumps(rawPoints: List<RawLocationStore.RawPoint>): List<RawLocationStore.RawPoint> {
         if (rawPoints.isEmpty()) return emptyList()
@@ -351,17 +416,23 @@ class PersistentTimelineBuilder(private val context: Context) {
         }
     }
 
-    private suspend fun createFootprintEntity(candidate: com.ct106.difangke.data.model.CandidateFootprint): FootprintEntity {
+    private suspend fun createFootprintEntity(candidate: com.ct106.difangke.data.model.CandidateFootprint): FootprintEntity? {
         val address = geocoder.reverseGeocode(candidate.latitude, candidate.longitude)
         val locationHash = FootprintEntity.generateLocationHash(candidate.latitude, candidate.longitude)
+        val places = db.placeDao().getAll()
+        if (PlaceMatcher.ignoredPlaceForCoordinate(candidate.latitude, candidate.longitude, places, processor) != null) {
+            return null
+        }
         
         // 尝试匹配已知地点
         val matchedPlace = PlaceMatcher.bestPlaceForCoordinate(
             latitude = candidate.latitude,
             longitude = candidate.longitude,
-            places = db.placeDao().getAll(),
+            places = places,
             processor = processor
         )
+        val healthMetrics = HealthConnectService.getInstance(context)
+            .metricsBetween(candidate.startTime, candidate.endTime)
 
         val entity = FootprintEntity(
             footprintID = UUID.randomUUID().toString(),
@@ -374,11 +445,19 @@ class PersistentTimelineBuilder(private val context: Context) {
             title = "",
             statusValue = "candidate",
             placeID = matchedPlace?.placeID,
-            address = if (matchedPlace?.isUserDefined == true) matchedPlace.name else address
+            address = if (matchedPlace?.isUserDefined == true) matchedPlace.name else address,
+            stepCount = healthMetrics?.steps?.takeIf { it > 0 },
+            walkingDistance = healthMetrics?.walkingDistanceMeters?.takeIf { it > 0 },
+            floorsAscended = healthMetrics?.floorsAscended?.takeIf { it > 0 }
         )
 
-        // 自动关联照片
-        val photoUris = PhotoLinker.linkPhotosToFootprint(context, entity)
+        // Respect the user setting: rebuilding a day must not silently add
+        // photos when automatic linking has been disabled.
+        val photoUris = if (DiFangKeApp.instance.preferences.isAutoPhotoLinkEnabled.first()) {
+            PhotoLinker.linkPhotosToFootprint(context, entity)
+        } else {
+            emptyList()
+        }
         return if (photoUris.isNotEmpty()) {
             entity.copy(photoAssetIDsJson = PhotoLinker.mergePhotoIds("[]", photoUris))
         } else entity

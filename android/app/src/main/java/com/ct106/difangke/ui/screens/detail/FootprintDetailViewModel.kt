@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
+import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.data.location.RawLocationStore
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -181,10 +182,39 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 
+    /** 收藏是独立即时操作，不能依赖详情页最后的“保存”按钮。 */
+    fun setHighlight(isHighlight: Boolean) {
+        val current = _footprint.value ?: return
+        if (current.isHighlight == isHighlight) return
+        Aptabase.instance.trackEvent("footprint_highlighted")
+        viewModelScope.launch {
+            val updated = current.copy(isHighlight = isHighlight)
+            db.footprintDao().update(updated)
+            _footprint.value = updated
+        }
+    }
+
+    fun updatePhotos(uris: List<String>) {
+        val current = _footprint.value ?: return
+        viewModelScope.launch {
+            val updated = current.copy(photoAssetIDsJson = JSONArray(uris.distinct()).toString())
+            db.footprintDao().update(updated)
+            _footprint.value = updated
+            Aptabase.instance.trackEvent("footprint_photos_edited")
+        }
+    }
+
     fun adjustTime(newStart: Date, newEnd: Date, onSaved: () -> Unit = {}) {
         val current = _footprint.value ?: return
-        val roundedStart = roundedToMinute(newStart)
-        val roundedEnd = roundedToMinute(maxOf(newEnd.time, roundedStart.time + 60_000L).let(::Date))
+        // A footprint is an observed event, never a future plan.  Keep the
+        // persisted value safe even if an older UI or another caller supplies
+        // a future time.
+        val latestAllowedEnd = Date((System.currentTimeMillis() / 60_000L) * 60_000L)
+        val requestedEnd = minOf(roundedToMinute(newEnd).time, latestAllowedEnd.time)
+        val roundedStart = Date(
+            minOf(roundedToMinute(newStart).time, requestedEnd - 60_000L)
+        )
+        val roundedEnd = Date(maxOf(requestedEnd, roundedStart.time + 60_000L))
         if (roundedStart == current.startTime && roundedEnd == current.endTime) return
 
         viewModelScope.launch {
@@ -234,6 +264,11 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
         val split = roundedToMinute(Date(splitTime.time.coerceIn(current.startTime.time + 60_000L, current.endTime.time - 60_000L)))
 
         viewModelScope.launch {
+            val firstRatio = (split.time - current.startTime.time).toDouble() /
+                (current.endTime.time - current.startTime.time).toDouble()
+            val firstSteps = current.stepCount?.let { (it * firstRatio).toInt() }
+            val firstDistance = current.walkingDistance?.times(firstRatio)
+            val firstFloors = current.floorsAscended?.let { (it * firstRatio).toInt() }
             val firstCoords = coordinatesJsonForRange(current.startTime, split)
                 ?: fallbackCoordinatesByRatio(current, 0.0, (split.time - current.startTime.time).toDouble() / (current.endTime.time - current.startTime.time).toDouble())
             val secondCoords = coordinatesJsonForRange(split, current.endTime)
@@ -243,6 +278,9 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
                 endTime = split,
                 latitudeJson = firstCoords.first,
                 longitudeJson = firstCoords.second,
+                stepCount = firstSteps,
+                walkingDistance = firstDistance,
+                floorsAscended = firstFloors,
                 statusValue = "manual",
                 aiAnalyzed = true
             )
@@ -252,6 +290,9 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
                 startTime = split,
                 latitudeJson = secondCoords.first,
                 longitudeJson = secondCoords.second,
+                stepCount = current.stepCount?.minus(firstSteps ?: 0),
+                walkingDistance = current.walkingDistance?.minus(firstDistance ?: 0.0),
+                floorsAscended = current.floorsAscended?.minus(firstFloors ?: 0),
                 isHighlight = false,
                 statusValue = "manual",
                 aiAnalyzed = true
@@ -292,6 +333,9 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
                 activityTypeValue = first.activityTypeValue ?: second.activityTypeValue,
                 isHighlight = if (first.isHighlight == true) true else second.isHighlight,
                 photoAssetIDsJson = JSONArray(photos).toString(),
+                stepCount = nullableIntSum(first.stepCount, second.stepCount),
+                walkingDistance = nullableDoubleSum(first.walkingDistance, second.walkingDistance),
+                floorsAscended = nullableIntSum(first.floorsAscended, second.floorsAscended),
                 statusValue = "manual",
                 aiAnalyzed = true
             )
@@ -305,12 +349,49 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 
+    private fun nullableIntSum(first: Int?, second: Int?): Int? =
+        if (first == null && second == null) null else (first ?: 0) + (second ?: 0)
+
+    private fun nullableDoubleSum(first: Double?, second: Double?): Double? =
+        if (first == null && second == null) null else (first ?: 0.0) + (second ?: 0.0)
+
     fun deleteFootprint() {
         Aptabase.instance.trackEvent("footprint_deleted")
         val current = _footprint.value ?: return
         viewModelScope.launch {
-            db.footprintDao().delete(current)
+            // iOS deletes into the footprint recycle bin first; preserve the
+            // record so the user can restore it from Data Manager.
+            db.footprintDao().update(current.copy(statusValue = "ignored"))
             _footprint.value = null
+        }
+    }
+
+    /** Mirrors iOS: create/update a 100 m ignored place and hide all nearby stays. */
+    fun ignoreLocation(onSaved: () -> Unit = {}) {
+        val current = _footprint.value ?: return
+        val coordinate = representativeCoordinate(current) ?: return
+        viewModelScope.launch {
+            val existing = current.placeID?.let { db.placeDao().getById(it) }
+            val ignoredPlace = existing?.copy(isIgnored = true) ?: PlaceEntity(
+                name = current.address?.takeIf { it.isNotBlank() } ?: "已忽略地点",
+                latitude = coordinate.first,
+                longitude = coordinate.second,
+                radius = 100f,
+                address = current.address,
+                isIgnored = true,
+                isUserDefined = false
+            )
+            db.placeDao().insert(ignoredPlace)
+            val threshold = ignoredPlace.radius + 100f
+            db.footprintDao().getAll().forEach { footprint ->
+                val other = representativeCoordinate(footprint) ?: return@forEach
+                if (footprint.placeID == ignoredPlace.placeID || distanceMeters(coordinate, other) <= threshold) {
+                    db.footprintDao().update(footprint.copy(statusValue = "ignored", placeID = ignoredPlace.placeID))
+                }
+            }
+            _footprint.value = null
+            Aptabase.instance.trackEvent("footprint_location_ignored")
+            onSaved()
         }
     }
 
@@ -391,6 +472,22 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
             latsOut.put(lats.getDouble(i))
             lonsOut.put(lons.getDouble(i))
         }
+    }
+
+    private fun representativeCoordinate(fp: FootprintEntity): Pair<Double, Double>? = runCatching {
+        val lats = JSONArray(fp.latitudeJson)
+        val lons = JSONArray(fp.longitudeJson)
+        val count = min(lats.length(), lons.length())
+        if (count == 0) return@runCatching null
+        val latitudes = (0 until count).map { lats.getDouble(it) }.filter(Double::isFinite)
+        val longitudes = (0 until count).map { lons.getDouble(it) }.filter(Double::isFinite)
+        if (latitudes.isEmpty() || longitudes.isEmpty()) null else latitudes.average() to longitudes.average()
+    }.getOrNull()
+
+    private fun distanceMeters(first: Pair<Double, Double>, second: Pair<Double, Double>): Float {
+        val result = FloatArray(1)
+        android.location.Location.distanceBetween(first.first, first.second, second.first, second.second, result)
+        return result[0]
     }
 
     private fun jsonStringArray(json: String): List<String> = runCatching {

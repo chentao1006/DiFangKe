@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.model.TransportType
 import com.ct106.difangke.ui.components.addImportantPlaceCircles
 import java.text.SimpleDateFormat
@@ -39,6 +40,7 @@ fun TransportDetailScreen(
         viewModel: TransportDetailViewModel = viewModel()
 ) {
     val transport by viewModel.transport.collectAsState()
+    val adjacentTransports by viewModel.adjacentTransports.collectAsState()
     val allPlaces by viewModel.allPlaces.collectAsState()
     val isDark = isSystemInDarkTheme()
 
@@ -46,6 +48,10 @@ fun TransportDetailScreen(
     var localEndName by remember { mutableStateOf("") }
     var selectedType by remember { mutableStateOf<TransportType?>(null) }
     var showingDeleteAlert by remember { mutableStateOf(false) }
+    var showingMoreMenu by remember { mutableStateOf(false) }
+    var pendingMerge by remember { mutableStateOf<TransportRecordEntity?>(null) }
+    var showingTimeDialog by remember { mutableStateOf(false) }
+    var showingSplitDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(transportId) { viewModel.loadTransport(transportId) }
 
@@ -109,6 +115,42 @@ fun TransportDetailScreen(
                     }
                 },
                 actions = {
+                    Box {
+                        IconButton(onClick = { showingMoreMenu = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "更多操作")
+                        }
+                        DropdownMenu(
+                            expanded = showingMoreMenu,
+                            onDismissRequest = { showingMoreMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("调整时间") },
+                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                                onClick = {
+                                    showingMoreMenu = false
+                                    showingTimeDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("拆分交通") },
+                                leadingIcon = { Icon(Icons.Default.ContentCut, contentDescription = null) },
+                                onClick = {
+                                    showingMoreMenu = false
+                                    showingSplitDialog = true
+                                }
+                            )
+                            adjacentTransports.sortedBy { it.startTime }.forEach { candidate ->
+                                DropdownMenuItem(
+                                    text = { Text("合并 ${if (candidate.startTime < t.startTime) "上一段" else "下一段"}交通") },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.CallMerge, contentDescription = null) },
+                                    onClick = {
+                                        showingMoreMenu = false
+                                        pendingMerge = candidate
+                                    }
+                                )
+                            }
+                        }
+                    }
                     TextButton(
                             onClick = {
                                 viewModel.updateTransport(
@@ -260,6 +302,130 @@ fun TransportDetailScreen(
                 }
         )
     }
+
+    pendingMerge?.let { candidate ->
+        val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.CHINA) }
+        AlertDialog(
+            onDismissRequest = { pendingMerge = null },
+            title = { Text("合并相邻交通") },
+            text = {
+                Text(
+                    "将合并 ${timeFormat.format(t.startTime)}-${timeFormat.format(t.endTime)} 和 " +
+                        "${timeFormat.format(candidate.startTime)}-${timeFormat.format(candidate.endTime)}。合并后会保留为手动编辑，自动重建不会覆盖它。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.mergeWith(candidate) { pendingMerge = null }
+                }) { Text("合并") }
+            },
+            dismissButton = { TextButton(onClick = { pendingMerge = null }) { Text("取消") } }
+        )
+    }
+
+    if (showingTimeDialog) {
+        TransportTimeAdjustDialog(
+            transport = t,
+            adjacent = adjacentTransports,
+            onDismiss = { showingTimeDialog = false },
+            onSave = { start, end -> viewModel.adjustTime(start, end) { showingTimeDialog = false } }
+        )
+    }
+
+    if (showingSplitDialog) {
+        TransportSplitDialog(
+            transport = t,
+            onDismiss = { showingSplitDialog = false },
+            onSave = { split -> viewModel.splitAt(split) { showingSplitDialog = false } }
+        )
+    }
+}
+
+@Composable
+private fun TransportSplitDialog(
+    transport: TransportRecordEntity,
+    onDismiss: () -> Unit,
+    onSave: (Date) -> Unit
+) {
+    val formatter = remember { SimpleDateFormat("HH:mm", Locale.CHINA) }
+    val minutes = ((transport.endTime.time - transport.startTime.time) / 60_000L).toInt()
+    val canSplit = minutes >= 2
+    var splitMinute by remember(transport.recordID) {
+        mutableFloatStateOf((minutes / 2).coerceIn(1, maxOf(1, minutes - 1)).toFloat())
+    }
+    val split = Date(transport.startTime.time + splitMinute.toLong() * 60_000L)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("拆分交通") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                if (!canSplit) {
+                    Text("这段交通太短，无法拆分。")
+                } else {
+                    Text("拆分点 ${formatter.format(split)}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Slider(
+                        value = splitMinute,
+                        onValueChange = { splitMinute = it.coerceIn(1f, (minutes - 1).toFloat()) },
+                        valueRange = 1f..(minutes - 1).toFloat(),
+                        steps = maxOf(0, minutes - 3)
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(enabled = canSplit, onClick = { onSave(split) }) { Text("拆分") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@Composable
+private fun TransportTimeAdjustDialog(
+    transport: TransportRecordEntity,
+    adjacent: List<TransportRecordEntity>,
+    onDismiss: () -> Unit,
+    onSave: (Date, Date) -> Unit
+) {
+    val formatter = remember { SimpleDateFormat("HH:mm", Locale.CHINA) }
+    val dayStart = remember(transport.startTime) {
+        Calendar.getInstance().apply {
+            time = transport.startTime
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.time
+    }
+    val dayEnd = remember(dayStart) { Date(dayStart.time + 24 * 60 * 60_000L) }
+    val previousEnd = adjacent.filter { it.endTime <= transport.startTime }.maxByOrNull { it.endTime.time }?.endTime
+    val nextStart = adjacent.filter { it.startTime >= transport.endTime }.minByOrNull { it.startTime.time }?.startTime
+    val rangeStart = maxOf(dayStart.time, previousEnd?.time ?: dayStart.time)
+    val rangeEnd = minOf(dayEnd.time, nextStart?.time ?: dayEnd.time)
+    val totalMinutes = maxOf(1, ((rangeEnd - rangeStart) / 60_000L).toInt())
+    var startMinute by remember(transport.recordID, rangeStart) {
+        mutableFloatStateOf(((transport.startTime.time - rangeStart) / 60_000L).coerceIn(0L, (totalMinutes - 1).toLong()).toFloat())
+    }
+    var endMinute by remember(transport.recordID, rangeStart) {
+        mutableFloatStateOf(((transport.endTime.time - rangeStart) / 60_000L).coerceIn(1L, totalMinutes.toLong()).toFloat())
+    }
+    if (endMinute <= startMinute) endMinute = startMinute + 1
+    val start = Date(rangeStart + startMinute.toLong() * 60_000L)
+    val end = Date(rangeStart + endMinute.toLong() * 60_000L)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("调整交通时间") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text("可调整范围 ${formatter.format(Date(rangeStart))}-${formatter.format(Date(rangeEnd))}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("${formatter.format(start)} - ${formatter.format(end)}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("开始", style = MaterialTheme.typography.labelMedium)
+                Slider(value = startMinute, onValueChange = { startMinute = it.coerceIn(0f, endMinute - 1f) }, valueRange = 0f..totalMinutes.toFloat(), steps = maxOf(0, totalMinutes - 1))
+                Text("结束", style = MaterialTheme.typography.labelMedium)
+                Slider(value = endMinute, onValueChange = { endMinute = it.coerceIn(startMinute + 1f, totalMinutes.toFloat()) }, valueRange = 0f..totalMinutes.toFloat(), steps = maxOf(0, totalMinutes - 1))
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(start, end) }) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
 @Composable

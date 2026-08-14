@@ -52,8 +52,13 @@ fun IgnoredPlacesScreen(
                             Icon(Icons.Default.LocationOff, contentDescription = null, tint = Color.Gray)
                         },
                         trailingContent = {
-                            IconButton(onClick = { placeToDelete = place }) {
-                                Icon(Icons.Default.Delete, contentDescription = "删除", tint = Color.LightGray, modifier = Modifier.size(20.dp))
+                            Row {
+                                IconButton(onClick = { viewModel.restoreIgnoredPlace(place) }) {
+                                    Icon(Icons.Default.Undo, contentDescription = "恢复", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                }
+                                IconButton(onClick = { placeToDelete = place }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "彻底删除", tint = Color.LightGray, modifier = Modifier.size(20.dp))
+                                }
                             }
                         }
                     )
@@ -66,8 +71,8 @@ fun IgnoredPlacesScreen(
     if (placeToDelete != null) {
         AlertDialog(
             onDismissRequest = { placeToDelete = null },
-            title = { Text("确认删除") },
-            text = { Text("确定要取消忽略并删除此记录吗？") },
+            title = { Text("确认彻底删除") },
+            text = { Text("确定要彻底删除“${placeToDelete!!.name}”吗？此操作不可撤销。") },
             confirmButton = {
                 Button(onClick = {
                     viewModel.deletePlace(placeToDelete!!)

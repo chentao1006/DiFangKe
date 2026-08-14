@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.viewinterop.AndroidView
 import com.google.gson.Gson
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.FutureTripEntity
@@ -48,9 +49,33 @@ import com.tencent.tencentmap.mapsdk.maps.TencentMap
 import com.tencent.tencentmap.mapsdk.maps.TextureMapView
 import com.tencent.tencentmap.mapsdk.maps.model.LatLng
 import com.tencent.tencentmap.mapsdk.maps.model.LatLngBounds
+import com.tencent.tencentmap.mapsdk.maps.model.BitmapDescriptorFactory
 import com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions
 import com.tencent.tencentmap.mapsdk.maps.model.MyLocationStyle
 import com.tencent.tencentmap.mapsdk.maps.model.PolylineOptions
+
+/** Displays a stored MediaStore/document URI without adding a second image-loading stack. */
+@Composable
+fun FootprintPhotoThumbnail(
+    uri: String,
+    modifier: Modifier = Modifier,
+    contentDescription: String? = null
+) {
+    AndroidView(
+        factory = { context ->
+            android.widget.ImageView(context).apply {
+                scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                setImageURI(runCatching { android.net.Uri.parse(uri) }.getOrNull())
+                this.contentDescription = contentDescription
+            }
+        },
+        update = { imageView ->
+            imageView.setImageURI(runCatching { android.net.Uri.parse(uri) }.getOrNull())
+            imageView.contentDescription = contentDescription
+        },
+        modifier = modifier
+    )
+}
 
 @Composable
 fun Modifier.breathing(isActive: Boolean): Modifier {
@@ -302,7 +327,11 @@ fun FootprintCardView(
                                 .background(Color.LightGray.copy(alpha = 0.3f)),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Default.Photo, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                            FootprintPhotoThumbnail(
+                                uri = photoIds.first(),
+                                modifier = Modifier.fillMaxSize(),
+                                contentDescription = "足迹照片"
+                            )
                         }
                     }
                 }
@@ -504,14 +533,18 @@ fun FutureTripCardView(
                 Spacer(modifier = Modifier.height(5.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text(
-                        text = futureTripTimeLabel(trip),
+                        text = if (trip.isUndated) "未定日期" else futureTripTimeLabel(trip),
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                         color = subtitleColor.copy(alpha = 0.68f)
                     )
                     Text("·", color = subtitleColor.copy(alpha = 0.35f))
                     Text(
-                        text = if (trip.isOrdered) "顺序计划" else "行程计划",
+                        text = when {
+                            trip.isUndated -> "待安排"
+                            trip.isOrdered -> "顺序计划"
+                            else -> "行程计划"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = subtitleColor.copy(alpha = 0.68f)
                     )
@@ -588,6 +621,15 @@ fun RecordingStatusCard(
     val cardColor = if (isDark) Color(0xFF1C1C1E) else Color.White
     val titleColor = if (isDark) MaterialTheme.colorScheme.onSurface else Color.Black.copy(alpha = 0.8f)
     val subtitleColor = if (isDark) MaterialTheme.colorScheme.onSurfaceVariant else Color.Gray
+    val ongoingStay = trackingState as? LocationTrackingService.TrackingState.OngoingStay
+    var clockMillis by remember(ongoingStay?.since) { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(ongoingStay?.since) {
+        if (ongoingStay == null) return@LaunchedEffect
+        while (true) {
+            clockMillis = System.currentTimeMillis()
+            delay(30_000L)
+        }
+    }
 
     Surface(
         modifier = Modifier
@@ -696,11 +738,12 @@ fun RecordingStatusCard(
                     } else when (trackingState) {
                         is LocationTrackingService.TrackingState.Idle -> "定位记录已关闭"
                         is LocationTrackingService.TrackingState.Tracking -> "正在寻找位置..."
-                        is LocationTrackingService.TrackingState.OngoingStay -> "正在此处停留"
+                        is LocationTrackingService.TrackingState.OngoingStay ->
+                            trackingState.address?.takeIf { it.isNotBlank() }?.let { "正在${it}停留" } ?: "正在此处停留"
                     }
                     Text(displayTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = titleColor, maxLines = 2)
                     
-                    val ongoing = trackingState as? LocationTrackingService.TrackingState.OngoingStay
+                    val ongoing = ongoingStay
                     val tracking = trackingState as? LocationTrackingService.TrackingState.Tracking
                     val currentLat = ongoing?.lat ?: tracking?.lat
                     val currentLon = ongoing?.lon ?: tracking?.lon
@@ -728,7 +771,7 @@ fun RecordingStatusCard(
                             }
                         } else {
                             if (ongoing != null) {
-                                val durationMins = (System.currentTimeMillis() - ongoing.since.time) / 60000
+                                val durationMins = (clockMillis - ongoing.since.time).coerceAtLeast(0L) / 60000
                                 val durationStr = when {
                                     durationMins < 60 -> "${durationMins}分钟"
                                     durationMins < 1440 -> "${durationMins / 60}小时${durationMins % 60}分"
@@ -900,6 +943,13 @@ fun MiniMapView(
     markersJson: String? = null,
     footprintMarkers: List<FootprintMapMarker> = emptyList(),
     isCurrentLocation: Boolean = false,
+    userLatitude: Double? = null,
+    userLongitude: Double? = null,
+    focusUserLocationRequest: Int = 0,
+    focusLatitude: Double? = null,
+    focusLongitude: Double? = null,
+    focusTargetID: String? = null,
+    focusZoom: Float = 15f,
     allPlaces: List<PlaceEntity> = emptyList(),
     modifier: Modifier = Modifier
         .fillMaxWidth()
@@ -907,6 +957,9 @@ fun MiniMapView(
     cornerRadius: Dp = 16.dp,
     gesturesEnabled: Boolean = false,
     showClickOverlay: Boolean = true,
+    /** Portion of the map obscured by an overlaid home timeline sheet. */
+    cameraBottomPaddingFraction: Float = 0f,
+    onMarkerClick: ((String) -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val mapMarkers = remember(footprintMarkers, markersJson) {
@@ -921,7 +974,7 @@ fun MiniMapView(
     val context = LocalContext.current
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-    var hasCentred by remember(lat, lon, pointsJson, markersJson, footprintMarkers) { mutableStateOf(false) }
+    var hasCentred by remember(lat, lon, pointsJson, markersJson, footprintMarkers, focusUserLocationRequest, focusTargetID, cameraBottomPaddingFraction) { mutableStateOf(false) }
     
     Box(
         modifier = Modifier
@@ -942,6 +995,10 @@ fun MiniMapView(
         ) { view ->
             val amap = view.map
             amap.mapType = if (isDark) TencentMap.MAP_TYPE_DARK else TencentMap.MAP_TYPE_NORMAL
+            // CameraUpdateFactory centers within the map's padded viewport.
+            // The home timeline covers the lower half, so reserve that region
+            // before fitting markers/routes rather than letting them sit under it.
+            amap.setPadding(0, 0, 0, (view.height * cameraBottomPaddingFraction.coerceIn(0f, 0.9f)).toInt())
             
             amap.uiSettings.apply {
                 isZoomControlsEnabled = false
@@ -959,6 +1016,18 @@ fun MiniMapView(
                 .map { LatLng(it.latitude, it.longitude) }
             
             var handledCentering = false
+
+            if (focusTargetID != null && focusLatitude.isRenderableCoordinate() && focusLongitude.isRenderableCoordinate()) {
+                amap.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(focusLatitude!!, focusLongitude!!), focusZoom))
+                hasCentred = true
+                handledCentering = true
+            }
+
+            if (!handledCentering && focusUserLocationRequest > 0 && userLatitude.isRenderableCoordinate() && userLongitude.isRenderableCoordinate()) {
+                amap.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(userLatitude!!, userLongitude!!), 15f))
+                hasCentred = true
+                handledCentering = true
+            }
             
             if (isCurrentLocation && lat != null && lon != null) {
                 val myLocationStyle = MyLocationStyle()
@@ -1228,9 +1297,24 @@ fun MiniMapView(
                 }
             }
 
+            // The iOS home map always keeps the user's current position visible
+            // while showing the selected day's timeline. Tencent's compact map
+            // has no default location source here, so render the live tracking
+            // coordinate explicitly instead of replacing the timeline map.
+            if (userLatitude.isRenderableCoordinate() && userLongitude.isRenderableCoordinate()) {
+                amap.addMarker(
+                    MarkerOptions()
+                        .position(LatLng(userLatitude!!, userLongitude!!))
+                        .anchor(0.5f, 0.5f)
+                        .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE))
+                        .zIndex(200f)
+                        .title("当前位置")
+                )
+            }
+
             // 绘制足迹点标记 (实心圆点)
             if (mapMarkers.isNotEmpty()) {
-                amap.addFootprintMarkers(mapMarkers, isDark = isDark)
+                amap.addFootprintMarkers(mapMarkers, isDark = isDark, onMarkerClick = onMarkerClick)
             }
         }
 

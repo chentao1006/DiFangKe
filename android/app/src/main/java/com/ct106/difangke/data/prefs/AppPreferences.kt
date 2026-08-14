@@ -28,6 +28,7 @@ class AppPreferences(private val context: Context) {
         val KEY_IS_DAILY_NOTIFICATION_ENABLED = booleanPreferencesKey("isDailyNotificationEnabled")
         val KEY_IS_HIGHLIGHT_NOTIFICATION_ENABLED = booleanPreferencesKey("isHighlightNotificationEnabled")
         val KEY_IS_PAST_MEMORIES_NOTIFICATION_ENABLED = booleanPreferencesKey("isPastMemoriesNotificationEnabled")
+        val KEY_IS_FUTURE_TRIP_NOTIFICATION_ENABLED = booleanPreferencesKey("isFutureTripNotificationEnabled")
         val KEY_NOTIFICATION_HOUR = intPreferencesKey("dailyNotificationHour")
         val KEY_NOTIFICATION_MINUTE = intPreferencesKey("dailyNotificationMinute")
         val KEY_IS_AUTO_PHOTO_LINK_ENABLED = booleanPreferencesKey("isAutoPhotoLinkEnabled")
@@ -42,6 +43,7 @@ class AppPreferences(private val context: Context) {
         val KEY_PENDING_STAY_LON = doublePreferencesKey("pending_stay_lon")
         val KEY_PENDING_STAY_START_TIME = longPreferencesKey("pending_stay_start_time")
         val KEY_PENDING_STAY_ADDRESS = stringPreferencesKey("pending_stay_address")
+        val KEY_PENDING_STAY_PLACE_OVERRIDE_ID = stringPreferencesKey("pending_stay_place_override_id")
         
         val KEY_LOCATION_ACCURACY_MODE = stringPreferencesKey("locationAccuracyMode")
     }
@@ -67,6 +69,9 @@ class AppPreferences(private val context: Context) {
     }
     val isPastMemoriesNotificationEnabled: Flow<Boolean> = context.dataStore.data.map {
         it[KEY_IS_PAST_MEMORIES_NOTIFICATION_ENABLED] ?: true
+    }
+    val isFutureTripNotificationEnabled: Flow<Boolean> = context.dataStore.data.map {
+        it[KEY_IS_FUTURE_TRIP_NOTIFICATION_ENABLED] ?: true
     }
     val notificationHour: Flow<Int> = context.dataStore.data.map {
         it[KEY_NOTIFICATION_HOUR] ?: 21
@@ -122,6 +127,9 @@ class AppPreferences(private val context: Context) {
     suspend fun setPastMemoriesNotificationEnabled(enabled: Boolean) =
         context.dataStore.edit { it[KEY_IS_PAST_MEMORIES_NOTIFICATION_ENABLED] = enabled }
 
+    suspend fun setFutureTripNotificationEnabled(enabled: Boolean) =
+        context.dataStore.edit { it[KEY_IS_FUTURE_TRIP_NOTIFICATION_ENABLED] = enabled }
+
     suspend fun setNotificationTime(hour: Int, minute: Int) =
         context.dataStore.edit {
             it[KEY_NOTIFICATION_HOUR] = hour
@@ -159,6 +167,15 @@ class AppPreferences(private val context: Context) {
     suspend fun getPendingStayLon(): Double? = context.dataStore.data.map { it[KEY_PENDING_STAY_LON] }.first()
     suspend fun getPendingStayStartTime(): Long? = context.dataStore.data.map { it[KEY_PENDING_STAY_START_TIME] }.first()
     suspend fun getPendingStayAddress(): String? = context.dataStore.data.map { it[KEY_PENDING_STAY_ADDRESS] }.first()
+
+    /** A user-selected place applies only to the active stay, but must survive a service restart. */
+    suspend fun setPendingStayPlaceOverride(placeID: String?) = context.dataStore.edit {
+        if (placeID.isNullOrBlank()) it.remove(KEY_PENDING_STAY_PLACE_OVERRIDE_ID)
+        else it[KEY_PENDING_STAY_PLACE_OVERRIDE_ID] = placeID
+    }
+
+    suspend fun getPendingStayPlaceOverride(): String? =
+        context.dataStore.data.map { it[KEY_PENDING_STAY_PLACE_OVERRIDE_ID] }.first()
 
     // ── 同步/挂起读取（非响应式）────────────────────────────
     suspend fun getHasLaunchedBefore(): Boolean =

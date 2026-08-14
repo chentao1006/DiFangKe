@@ -32,6 +32,11 @@
 
     <!-- 读取外部存储（用于 CSV 存储在旧设备） -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <!-- 读取带定位信息的照片，用于按日期找回历史足迹（Android 13+）。 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.health.READ_STEPS" />
+    <uses-permission android:name="android.permission.health.READ_DISTANCE" />
+    <uses-permission android:name="android.permission.health.READ_FLOORS_CLIMBED" />
 
     <!-- 腾讯定位 SDK 会自动合入此权限；本应用不枚举用户安装的应用。 -->
     <uses-permission
@@ -64,6 +69,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity-alias
+            android:name=".HealthPermissionsActivity"
+            android:exported="true"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.health.connect.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
 
         <!-- 位置追踪前台服务 -->
         <service

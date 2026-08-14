@@ -20,6 +20,7 @@ class BootReceiver : BroadcastReceiver() {
                 if (isTracking) {
                     LocationTrackingService.start(context)
                 }
+                FutureTripReminderWorker.rescheduleAll(context)
             }
         }
     }

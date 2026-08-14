@@ -43,6 +43,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val isPastMemoriesNotificationEnabled: StateFlow<Boolean> = prefs.isPastMemoriesNotificationEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
+    val isFutureTripNotificationEnabled: StateFlow<Boolean> = prefs.isFutureTripNotificationEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
     val notificationHour: StateFlow<Int> = prefs.notificationHour
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 21)
         
@@ -111,6 +114,21 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             prefs.setPastMemoriesNotificationEnabled(enabled)
             updateNotificationSchedule()
+        }
+    }
+
+    fun setFutureTripNotificationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefs.setFutureTripNotificationEnabled(enabled)
+            database.futureTripDao().getAll().forEach { trip ->
+                if (!trip.isCompleted && trip.hasPlanDate) {
+                    if (enabled) {
+                        com.ct106.difangke.service.FutureTripReminderWorker.schedule(getApplication(), trip.tripID, trip.arrivalDate, trip.hasArrivalTime)
+                    } else {
+                        com.ct106.difangke.service.FutureTripReminderWorker.cancel(getApplication(), trip.tripID)
+                    }
+                }
+            }
         }
     }
 

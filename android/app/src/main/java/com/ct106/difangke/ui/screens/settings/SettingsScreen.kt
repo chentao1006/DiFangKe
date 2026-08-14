@@ -1,6 +1,8 @@
 package com.ct106.difangke.ui.screens.settings
 
 import android.app.TimePickerDialog
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -19,6 +21,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.health.connect.client.PermissionController
+import com.ct106.difangke.service.HealthConnectService
 
 import com.ct106.difangke.ui.components.*
 
@@ -39,6 +43,7 @@ fun SettingsScreen(
     val notificationMinute by viewModel.notificationMinute.collectAsState()
     val isHighlightNotificationEnabled by viewModel.isHighlightNotificationEnabled.collectAsState()
     val isPastMemoriesNotificationEnabled by viewModel.isPastMemoriesNotificationEnabled.collectAsState()
+    val isFutureTripNotificationEnabled by viewModel.isFutureTripNotificationEnabled.collectAsState()
     
     val importantPlacesCount by viewModel.importantPlacesCount.collectAsState()
     val savedPlacesCount by viewModel.savedPlacesCount.collectAsState()
@@ -63,9 +68,38 @@ fun SettingsScreen(
         @Suppress("DEPRECATION")
         packageInfo?.versionCode?.toLong() ?: 0L
     }
+    val isHealthConnectAvailable = remember(context) { HealthConnectService.isAvailable(context) }
+    val photoPermission = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+        android.Manifest.permission.READ_MEDIA_IMAGES
+    } else {
+        android.Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+    var hasPhotoPermission by remember(context, photoPermission) {
+        mutableStateOf(
+            androidx.core.content.ContextCompat.checkSelfPermission(context, photoPermission) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        )
+    }
 
     var showNotificationSettingsAlert by remember { mutableStateOf(false) }
+    var pendingNotificationEnableAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showAccuracyModeDialog by remember { mutableStateOf(false) }
+    val healthPermissionLauncher = rememberLauncherForActivityResult(
+        PermissionController.createRequestPermissionResultContract()
+    ) { _: Set<String> -> }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val action = pendingNotificationEnableAction
+        pendingNotificationEnableAction = null
+        if (granted) action?.invoke() else showNotificationSettingsAlert = true
+    }
+    val photoPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasPhotoPermission = granted
+        viewModel.setAutoPhotoLinkEnabled(granted)
+    }
 
     val checkNotificationPermission = { onGranted: () -> Unit ->
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
@@ -74,7 +108,8 @@ fun SettingsScreen(
                 ) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 onGranted()
             } else {
-                showNotificationSettingsAlert = true
+                pendingNotificationEnableAction = onGranted
+                notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
             }
         } else {
             onGranted()
@@ -132,9 +167,21 @@ fun SettingsScreen(
             item {
                 SettingsToggleItem(
                     title = "自动关联照片",
-                    subtitle = "根据拍摄时间将系统相册照片关联至足迹",
+                    subtitle = if (hasPhotoPermission) {
+                        "根据拍摄时间将系统相册照片关联至足迹"
+                    } else {
+                        "需要相册权限；可从“往昔足迹”中的照片导入授权"
+                    },
                     checked = isAutoPhotoLinkEnabled,
-                    onCheckedChange = { viewModel.setAutoPhotoLinkEnabled(it) }
+                    onCheckedChange = { enabled ->
+                        if (!enabled) {
+                            viewModel.setAutoPhotoLinkEnabled(false)
+                        } else if (hasPhotoPermission) {
+                            viewModel.setAutoPhotoLinkEnabled(true)
+                        } else {
+                            photoPermissionLauncher.launch(photoPermission)
+                        }
+                    }
                 )
             }
 
@@ -240,6 +287,22 @@ fun SettingsScreen(
                     }
                 )
             }
+            item {
+                SettingsToggleItem(
+                    title = "行程计划提醒",
+                    subtitle = "在设定的行程时间提醒您前往计划地点",
+                    checked = isFutureTripNotificationEnabled,
+                    onCheckedChange = { isEnabled ->
+                        if (isEnabled) {
+                            checkNotificationPermission {
+                                viewModel.setFutureTripNotificationEnabled(true)
+                            }
+                        } else {
+                            viewModel.setFutureTripNotificationEnabled(false)
+                        }
+                    }
+                )
+            }
 
             // ── 系统配置 ──────────────────────────────────────────────
             item { SettingsHeader("系统配置") }
@@ -259,6 +322,17 @@ fun SettingsScreen(
                         onClick = { onNavigate("settings/ai") }
                     )
                 }
+            }
+            item {
+                SettingsNavigationItem(
+                    title = "健康数据",
+                    badge = if (isHealthConnectAvailable) "步数与距离" else "此设备不可用",
+                    onClick = {
+                        if (isHealthConnectAvailable) {
+                            healthPermissionLauncher.launch(HealthConnectService.readPermissions)
+                        }
+                    }
+                )
             }
             item {
                 SettingsNavigationItem(

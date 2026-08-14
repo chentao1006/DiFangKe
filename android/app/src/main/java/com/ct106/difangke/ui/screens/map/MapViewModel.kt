@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.location.RawLocationStore
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.data.model.TransportType
 import com.ct106.difangke.ui.components.FootprintMapMarker
 import com.ct106.difangke.ui.components.buildFootprintMapMarkers
 import kotlinx.coroutines.flow.*
@@ -31,6 +32,9 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _footprintMarkers = MutableStateFlow<List<FootprintMapMarker>>(emptyList())
     val footprintMarkers: StateFlow<List<FootprintMapMarker>> = _footprintMarkers.asStateFlow()
+
+    private val _transportMarkers = MutableStateFlow<List<FootprintMapMarker>>(emptyList())
+    val transportMarkers: StateFlow<List<FootprintMapMarker>> = _transportMarkers.asStateFlow()
 
     val allPlaces = db.placeDao().observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -66,6 +70,19 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
             // 加载交通轨迹
             val transports = db.transportRecordDao().getForDay(startOfTarget, endOfTarget)
+            _transportMarkers.value = transports.mapNotNull { transport ->
+                val points = parseTransportPathPoints(transport.pointsJson)
+                    .filterNot { it.isSeparator }
+                if (points.size < 2) return@mapNotNull null
+                val midpoint = points[points.lastIndex / 2]
+                FootprintMapMarker(
+                    id = "transport:${transport.recordID}",
+                    latitude = midpoint.latitude,
+                    longitude = midpoint.longitude,
+                    icon = TransportType.from(transport.manualTypeRaw ?: transport.typeRaw).icon,
+                    colorHex = "#00A0AC"
+                )
+            }
             transports.forEach { tp ->
                 dbPoints.addAll(parseTransportPathPoints(tp.pointsJson))
                 // 插入分隔符，防止不同的交通记录被连成一条直线

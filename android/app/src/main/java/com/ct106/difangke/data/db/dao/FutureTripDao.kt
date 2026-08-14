@@ -18,17 +18,29 @@ interface FutureTripDao {
     @Query("SELECT * FROM future_trips ORDER BY arrivalDate ASC, orderIndex ASC, createdAt ASC")
     suspend fun getAll(): List<FutureTripEntity>
 
-    @Query("SELECT * FROM future_trips WHERE arrivalDate >= :start AND arrivalDate < :end ORDER BY orderIndex ASC, arrivalDate ASC, createdAt ASC")
+    @Query("SELECT * FROM future_trips WHERE hasPlanDate = 1 AND arrivalDate >= :start AND arrivalDate < :end ORDER BY orderIndex ASC, arrivalDate ASC, createdAt ASC")
     fun observeForDay(start: Date, end: Date): Flow<List<FutureTripEntity>>
 
-    @Query("SELECT * FROM future_trips WHERE arrivalDate >= :start AND arrivalDate < :end ORDER BY orderIndex ASC, arrivalDate ASC, createdAt ASC")
+    @Query("SELECT * FROM future_trips WHERE hasPlanDate = 1 AND arrivalDate >= :start AND arrivalDate < :end ORDER BY orderIndex ASC, arrivalDate ASC, createdAt ASC")
     suspend fun getForDay(start: Date, end: Date): List<FutureTripEntity>
 
     @Query("SELECT * FROM future_trips WHERE tripID = :id LIMIT 1")
     suspend fun getById(id: String): FutureTripEntity?
 
-    @Query("SELECT DISTINCT date(arrivalDate/1000, 'unixepoch', 'localtime') FROM future_trips ORDER BY arrivalDate ASC")
+    @Query("SELECT DISTINCT date(arrivalDate/1000, 'unixepoch', 'localtime') FROM future_trips WHERE hasPlanDate = 1 ORDER BY arrivalDate ASC")
     fun observeAvailableDates(): Flow<List<String>>
+
+    @Query("SELECT * FROM future_trips WHERE hasPlanDate = 0 ORDER BY orderIndex ASC, createdAt ASC")
+    fun observeUndated(): Flow<List<FutureTripEntity>>
+
+    @Query("SELECT * FROM future_trips WHERE hasPlanDate = 0 ORDER BY orderIndex ASC, createdAt ASC")
+    suspend fun getUndated(): List<FutureTripEntity>
+
+    @Query("SELECT * FROM future_trips WHERE isCompleted = 0 AND (hasPlanDate = 0 OR (arrivalDate >= :dayStart AND arrivalDate < :dayEnd))")
+    suspend fun getAutoCompletableForDay(dayStart: Date, dayEnd: Date): List<FutureTripEntity>
+
+    @Query("SELECT * FROM future_trips WHERE hasPlanDate = 1 AND arrivalDate >= :start AND arrivalDate < :end ORDER BY arrivalDate ASC, orderIndex ASC, createdAt ASC")
+    suspend fun getForRange(start: Date, end: Date): List<FutureTripEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(trip: FutureTripEntity)
