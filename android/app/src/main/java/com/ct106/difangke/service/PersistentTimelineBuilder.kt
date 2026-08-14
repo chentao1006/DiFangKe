@@ -10,7 +10,6 @@ import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.location.RawLocationStore
 import com.ct106.difangke.data.model.FootprintTitles
 import com.ct106.difangke.data.model.TransportType
-import com.ct106.difangke.util.PhotoLinker
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -451,16 +450,7 @@ class PersistentTimelineBuilder(private val context: Context) {
             floorsAscended = healthMetrics?.floorsAscended?.takeIf { it > 0 }
         )
 
-        // Respect the user setting: rebuilding a day must not silently add
-        // photos when automatic linking has been disabled.
-        val photoUris = if (DiFangKeApp.instance.preferences.isAutoPhotoLinkEnabled.first()) {
-            PhotoLinker.linkPhotosToFootprint(context, entity)
-        } else {
-            emptyList()
-        }
-        return if (photoUris.isNotEmpty()) {
-            entity.copy(photoAssetIDsJson = PhotoLinker.mergePhotoIds("[]", photoUris))
-        } else entity
+        return entity
     }
 
     private suspend fun generateTransportSegment(

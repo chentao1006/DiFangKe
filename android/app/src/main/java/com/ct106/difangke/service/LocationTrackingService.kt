@@ -1198,31 +1198,10 @@ class LocationTrackingService : Service() {
                                 floorsAscended = healthMetrics?.floorsAscended?.takeIf { it > 0 }
                         )
 
-                // 自动关联照片逻辑。关闭此偏好后，实时足迹与离线重建
-                // 都不能再写入新的相册关联；用户手动添加照片仍然可用。
-                val photoUris = if (prefs.isAutoPhotoLinkEnabled.first()) {
-                        com.ct106.difangke.util.PhotoLinker.linkPhotosToFootprint(
-                                applicationContext,
-                                entity
-                        )
-                } else {
-                        emptyList()
-                }
-                val finalEntity =
-                        if (photoUris.isNotEmpty()) {
-                                entity.copy(
-                                        photoAssetIDsJson =
-                                                com.ct106.difangke.util.PhotoLinker.mergePhotoIds(
-                                                        "[]",
-                                                        photoUris
-                                                )
-                                )
-                        } else entity
-
-                db.footprintDao().insert(finalEntity)
+                db.footprintDao().insert(entity)
                 ongoingFootprintID = null // clear ongoing state after finalizing
 
-                lastFp?.let { prev -> saveTransportSegment(prev, finalEntity) }
+                lastFp?.let { prev -> saveTransportSegment(prev, entity) }
         }
 
         private suspend fun saveTransportSegment(prevFp: FootprintEntity, newFp: FootprintEntity) {

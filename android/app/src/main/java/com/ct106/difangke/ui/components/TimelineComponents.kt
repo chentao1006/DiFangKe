@@ -1042,7 +1042,11 @@ fun MiniMapView(
                 handledCentering = true
             }
             
-            if (!handledCentering && pointsJson != null) {
+            // Drawing the route is independent of whether the camera has
+            // already been centered elsewhere (e.g. on the day's footprint) —
+            // gating this on handledCentering meant the transport polyline
+            // silently never drew for any day that had a footprint to focus on.
+            if (pointsJson != null) {
                 try {
                     val array = org.json.JSONArray(pointsJson)
                     val validPoints = mutableListOf<LatLng>()

@@ -3,6 +3,7 @@ package com.ct106.difangke.ui.screens.history
 import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -74,21 +75,37 @@ fun HistoryScreen(
     var showPhotoResults by remember { mutableStateOf(false) }
     var showNoPhotoResults by remember { mutableStateOf(false) }
     var wasScanningPhotos by remember { mutableStateOf(false) }
-    val photoPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        Manifest.permission.READ_MEDIA_IMAGES
-    } else Manifest.permission.READ_EXTERNAL_STORAGE
-    fun pickPhotoRange() {
-        val calendar = Calendar.getInstance().apply { time = initialDate }
-        android.app.DatePickerDialog(context, { _, startYear, startMonth, startDay ->
-            val start = Calendar.getInstance().apply { set(startYear, startMonth, startDay, 0, 0, 0); set(Calendar.MILLISECOND, 0) }.time
-            android.app.DatePickerDialog(context, { _, endYear, endMonth, endDay ->
-                val end = Calendar.getInstance().apply { set(endYear, endMonth, endDay, 23, 59, 59); set(Calendar.MILLISECOND, 999) }.time
-                viewModel.scanPhotos(minOf(start, end), maxOf(start, end))
-            }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show()
-        }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show()
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
+            }
+            viewModel.scanPhotos(uris)
+        }
     }
-    val photoPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) pickPhotoRange()
+    // 读取所选照片的拍摄地点需要此权限（读取 EXIF 中的 GPS 信息）；
+    // 用户在选完照片后立刻看到用途，拒绝也不影响照片选择本身。
+    val mediaLocationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+    }
+    fun launchPhotoImport() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED
+        ) {
+            mediaLocationPermissionLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        } else {
+            photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        }
     }
 
     LaunchedEffect(isScanningPhotos) {
@@ -118,13 +135,7 @@ fun HistoryScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = {
-                        if (ContextCompat.checkSelfPermission(context, photoPermission) == PackageManager.PERMISSION_GRANTED) {
-                            pickPhotoRange()
-                        } else {
-                            photoPermissionLauncher.launch(photoPermission)
-                        }
-                    }) {
+                    IconButton(onClick = { launchPhotoImport() }) {
                         Icon(Icons.Default.AddPhotoAlternate, contentDescription = "从照片导入足迹")
                     }
                 },

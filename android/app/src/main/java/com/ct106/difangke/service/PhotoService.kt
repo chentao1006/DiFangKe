@@ -1,20 +1,23 @@
 package com.ct106.difangke.service
 
 import android.content.Context
+import android.net.Uri
 import android.provider.MediaStore
-import android.content.ContentUris
 import android.util.Log
+import androidx.exifinterface.media.ExifInterface
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import org.json.JSONArray
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
 
 class PhotoService private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "PhotoService"
-        
+
         @Volatile
         private var INSTANCE: PhotoService? = null
 
@@ -25,7 +28,7 @@ class PhotoService private constructor(private val context: Context) {
     }
 
     data class PhotoInfo(
-        val id: String,
+        val uri: String,
         val dateTaken: Date,
         val latitude: Double?,
         val longitude: Double?
@@ -34,17 +37,18 @@ class PhotoService private constructor(private val context: Context) {
     /**
      * 将有地理位置的照片按连续停留聚成候选足迹。与 iOS 的照片寻回使用相同的
      * 500 米 / 4 小时边界；这里只产生草稿，必须由用户在结果页确认后才会写入数据库。
+     *
+     * 照片来自用户在系统照片选择器中手动选中的一批 URI（不再后台批量扫描相册）。
      */
     suspend fun scanFootprintCandidates(
-        startDate: Date,
-        endDate: Date,
+        photoUris: List<Uri>,
         excludedPhotoUris: Set<String> = emptySet()
     ): List<FootprintEntity> {
-        val photos = getPhotosBetween(startDate, endDate)
+        val photos = photosFromUris(photoUris)
             .filter { photo ->
-                photo.latitude != null && photo.longitude != null &&
-                    ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, photo.id.toLong()).toString() !in excludedPhotoUris
+                photo.latitude != null && photo.longitude != null && photo.uri !in excludedPhotoUris
             }
+            .sortedBy { it.dateTaken }
         if (photos.isEmpty()) return emptyList()
 
         val clusters = mutableListOf<MutableList<PhotoInfo>>()
@@ -68,9 +72,7 @@ class PhotoService private constructor(private val context: Context) {
             val longitudes = cluster.mapNotNull { it.longitude }
             val latitude = latitudes.average()
             val longitude = longitudes.average()
-            val photoUris = cluster.map { photo ->
-                ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, photo.id.toLong()).toString()
-            }
+            val photoUrisJson = cluster.map { it.uri }
             FootprintEntity(
                 date = startOfDay(first.dateTaken),
                 startTime = first.dateTaken,
@@ -79,7 +81,7 @@ class PhotoService private constructor(private val context: Context) {
                 longitudeJson = JSONArray(longitudes).toString(),
                 locationHash = FootprintEntity.generateLocationHash(latitude, longitude),
                 statusValue = "candidate",
-                photoAssetIDsJson = JSONArray(photoUris).toString()
+                photoAssetIDsJson = JSONArray(photoUrisJson).toString()
             )
         }
     }
@@ -100,69 +102,40 @@ class PhotoService private constructor(private val context: Context) {
     }
 
     /**
-     * 查询指定时间范围内的照片集合
-     * 对应 iOS HistoryListView 中的照片查询逻辑
+     * 读取用户手动选中的照片的拍摄时间与 GPS 坐标（EXIF 元数据）。
+     * 通过 MediaStore.setRequireOriginal 请求未脱敏的原始字节，配合
+     * ACCESS_MEDIA_LOCATION 权限获取 GPS；若未授权或读取失败，位置信息会缺失，
+     * 该照片在聚类时会被跳过（而不是让整个导入流程失败）。
      */
-    @Suppress("DEPRECATION")
-    suspend fun getPhotosBetween(startDate: Date, endDate: Date): List<PhotoInfo> = withContext(Dispatchers.IO) {
-        val photos = mutableListOf<PhotoInfo>()
-        
-        val projection = arrayOf(
-            MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DATE_TAKEN,
-            MediaStore.Images.Media.LATITUDE,
-            MediaStore.Images.Media.LONGITUDE
-        )
+    private suspend fun photosFromUris(uris: List<Uri>): List<PhotoInfo> = withContext(Dispatchers.IO) {
+        uris.mapNotNull { uri -> readPhotoInfo(uri) }
+    }
 
-        // 筛选条件：在时间范围内
-        val selection = "${MediaStore.Images.Media.DATE_TAKEN} >= ? AND ${MediaStore.Images.Media.DATE_TAKEN} <= ?"
-        val selectionArgs = arrayOf(
-            startDate.time.toString(),
-            endDate.time.toString()
-        )
-
-        // 按拍摄时间正序
-        val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} ASC"
-
-        try {
-            context.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                selectionArgs,
-                sortOrder
-            )?.use { cursor ->
-                val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                val dateTakenColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
-                val latColumn = cursor.getColumnIndex(MediaStore.Images.Media.LATITUDE)
-                val lonColumn = cursor.getColumnIndex(MediaStore.Images.Media.LONGITUDE)
-
-                while (cursor.moveToNext()) {
-                    val id = cursor.getLong(idColumn).toString()
-                    val dateTakenMs = cursor.getLong(dateTakenColumn)
-                    
-                    var lat: Double? = null
-                    var lon: Double? = null
-                    
-                    if (latColumn != -1 && lonColumn != -1 && !cursor.isNull(latColumn) && !cursor.isNull(lonColumn)) {
-                        lat = cursor.getDouble(latColumn)
-                        lon = cursor.getDouble(lonColumn)
-                    }
-
-                    photos.add(
-                        PhotoInfo(
-                            id = id,
-                            dateTaken = Date(dateTakenMs),
-                            latitude = lat,
-                            longitude = lon
-                        )
-                    )
-                }
+    private fun readPhotoInfo(uri: Uri): PhotoInfo? {
+        val originalUri = runCatching { MediaStore.setRequireOriginal(uri) }.getOrDefault(uri)
+        return try {
+            context.contentResolver.openInputStream(originalUri)?.use { stream ->
+                val exif = ExifInterface(stream)
+                val dateTaken = parseExifDate(exif) ?: return null
+                val latLong = exif.latLong
+                PhotoInfo(
+                    uri = uri.toString(),
+                    dateTaken = dateTaken,
+                    latitude = latLong?.get(0),
+                    longitude = latLong?.get(1)
+                )
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error querying MediaStore", e)
+            Log.e(TAG, "Error reading EXIF for $uri", e)
+            null
         }
+    }
 
-        photos
+    private fun parseExifDate(exif: ExifInterface): Date? {
+        val raw = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+            ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
+            ?: return null
+        val format = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US)
+        return runCatching { format.parse(raw) }.getOrNull()
     }
 }

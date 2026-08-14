@@ -74,9 +74,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return cal.time
     }
 
-    // Raw location days are meaningful timeline days even before a background
-    // rebuild has produced footprints. Without them, a recovered/imported CSV
-    // day could be opened only from Raw Points and never from the home timeline.
+    // Raw-only days (no footprint/trip yet) still need to surface as *today*,
+    // so the live tracking prompt/current-stay row has somewhere to render
+    // before any footprint has been built. A past raw-only day would otherwise
+    // show up as a bare, contentless date header in the home timeline, so it's
+    // deliberately excluded once it's no longer today.
     private val availableRawDates: Flow<Set<Date>> = LocationTrackingService.stateFlow
         .map {
             withContext(Dispatchers.IO) {
@@ -93,7 +95,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val dates: MutableSet<Date> = (footprintDates + tripDates).mapNotNull {
                 try { sdf.parse(it)?.let { d -> zeroTime(d) } } catch(e: Exception) { null }
             }.toMutableSet()
-            dates.addAll(rawDates.map(::zeroTime))
+            val today = zeroTime(Date())
+            dates.addAll(rawDates.map(::zeroTime).filter { it == today })
 
             dates.toList().sortedBy { it.time }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())

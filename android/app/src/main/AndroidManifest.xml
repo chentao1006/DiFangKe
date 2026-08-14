@@ -30,10 +30,9 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
-    <!-- 读取外部存储（用于 CSV 存储在旧设备） -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <!-- 读取带定位信息的照片，用于按日期找回历史足迹（Android 13+）。 -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- 读取用户在系统照片选择器中主动选中的照片的 GPS 拍摄地点（用于"从照片导入足迹"）。
+         不授予时，导入仍可进行，但无法读取到照片的拍摄坐标。 -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
     <uses-permission android:name="android.permission.health.READ_STEPS" />
     <uses-permission android:name="android.permission.health.READ_DISTANCE" />
     <uses-permission android:name="android.permission.health.READ_FLOORS_CLIMBED" />

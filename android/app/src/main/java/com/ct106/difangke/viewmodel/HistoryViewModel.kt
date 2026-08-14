@@ -174,7 +174,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun scanPhotos(start: Date, end: Date) {
+    fun scanPhotos(photoUris: List<android.net.Uri>) {
         viewModelScope.launch {
             _isScanningPhotos.value = true
             val existingPhotoUris = db.footprintDao().getAll()
@@ -186,7 +186,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                 }
                 .toSet()
             val rawCandidates = PhotoService.getInstance(getApplication())
-                .scanFootprintCandidates(start, end, existingPhotoUris)
+                .scanFootprintCandidates(photoUris, existingPhotoUris)
             val places = db.placeDao().getAll()
             _photoCandidates.value = withContext(Dispatchers.IO) {
                 rawCandidates.mapNotNull { candidate ->

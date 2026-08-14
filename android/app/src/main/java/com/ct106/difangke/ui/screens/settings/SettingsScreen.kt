@@ -37,7 +37,6 @@ fun SettingsScreen(
     val isTrackingEnabled by viewModel.isTrackingEnabled.collectAsState()
     val locationAccuracyMode by viewModel.locationAccuracyMode.collectAsState()
     val isAiEnabled by viewModel.isAiEnabled.collectAsState()
-    val isAutoPhotoLinkEnabled by viewModel.isAutoPhotoLinkEnabled.collectAsState()
     val isDailyNotificationEnabled by viewModel.isDailyNotificationEnabled.collectAsState()
     val notificationHour by viewModel.notificationHour.collectAsState()
     val notificationMinute by viewModel.notificationMinute.collectAsState()
@@ -69,17 +68,6 @@ fun SettingsScreen(
         packageInfo?.versionCode?.toLong() ?: 0L
     }
     val isHealthConnectAvailable = remember(context) { HealthConnectService.isAvailable(context) }
-    val photoPermission = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-        android.Manifest.permission.READ_MEDIA_IMAGES
-    } else {
-        android.Manifest.permission.READ_EXTERNAL_STORAGE
-    }
-    var hasPhotoPermission by remember(context, photoPermission) {
-        mutableStateOf(
-            androidx.core.content.ContextCompat.checkSelfPermission(context, photoPermission) ==
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-        )
-    }
 
     var showNotificationSettingsAlert by remember { mutableStateOf(false) }
     var pendingNotificationEnableAction by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -94,13 +82,6 @@ fun SettingsScreen(
         pendingNotificationEnableAction = null
         if (granted) action?.invoke() else showNotificationSettingsAlert = true
     }
-    val photoPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasPhotoPermission = granted
-        viewModel.setAutoPhotoLinkEnabled(granted)
-    }
-
     val checkNotificationPermission = { onGranted: () -> Unit ->
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             if (androidx.core.content.ContextCompat.checkSelfPermission(
@@ -164,27 +145,6 @@ fun SettingsScreen(
                     colors = ListItemDefaults.colors(containerColor = Color.Transparent)
                 )
             }
-            item {
-                SettingsToggleItem(
-                    title = "自动关联照片",
-                    subtitle = if (hasPhotoPermission) {
-                        "根据拍摄时间将系统相册照片关联至足迹"
-                    } else {
-                        "需要相册权限；可从“往昔足迹”中的照片导入授权"
-                    },
-                    checked = isAutoPhotoLinkEnabled,
-                    onCheckedChange = { enabled ->
-                        if (!enabled) {
-                            viewModel.setAutoPhotoLinkEnabled(false)
-                        } else if (hasPhotoPermission) {
-                            viewModel.setAutoPhotoLinkEnabled(true)
-                        } else {
-                            photoPermissionLauncher.launch(photoPermission)
-                        }
-                    }
-                )
-            }
-
             // ── 地点管理 ──────────────────────────────────────────────
             item { SettingsHeader("地点管理") }
             item {

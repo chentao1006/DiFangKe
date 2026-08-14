@@ -52,9 +52,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val notificationMinute: StateFlow<Int> = prefs.notificationMinute
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
-    val isAutoPhotoLinkEnabled: StateFlow<Boolean> = prefs.isAutoPhotoLinkEnabled
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
-
     val importantPlacesCount = database.placeDao().observeAll()
         .map { list: List<com.ct106.difangke.data.db.entity.PlaceEntity> -> list.filter { p -> p.isUserDefined }.size }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
@@ -139,11 +136,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun setAutoPhotoLinkEnabled(enabled: Boolean) {
-        viewModelScope.launch {
-            prefs.setAutoPhotoLinkEnabled(enabled)
-        }
-    }
 
 
     private fun updateNotificationSchedule() {

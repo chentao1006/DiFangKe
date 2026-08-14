@@ -112,11 +112,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-        freeCompilerArgs += listOf("-opt-in=androidx.compose.foundation.ExperimentalFoundationApi")
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -143,6 +138,13 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        freeCompilerArgs.add("-opt-in=androidx.compose.foundation.ExperimentalFoundationApi")
+    }
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
     implementation(composeBom)
@@ -166,9 +168,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-service:2.8.1")
 
     // Room 数据库
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
-    ksp("androidx.room:room-compiler:2.6.1")
+    implementation("androidx.room:room-runtime:2.8.4")
+    ksp("androidx.room:room-compiler:2.8.4")
 
     // DataStore
     implementation("androidx.datastore:datastore-preferences:1.1.1")
@@ -190,6 +191,9 @@ dependencies {
 
     // Core
     implementation("androidx.core:core-ktx:1.13.1")
+
+    // EXIF metadata (date/GPS) reading from user-picked photos
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     // Health Connect: read user-authorized steps/distance/floors for timeline metrics.
     implementation("androidx.health.connect:connect-client:1.1.0-alpha11")

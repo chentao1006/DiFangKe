@@ -31,7 +31,6 @@ class AppPreferences(private val context: Context) {
         val KEY_IS_FUTURE_TRIP_NOTIFICATION_ENABLED = booleanPreferencesKey("isFutureTripNotificationEnabled")
         val KEY_NOTIFICATION_HOUR = intPreferencesKey("dailyNotificationHour")
         val KEY_NOTIFICATION_MINUTE = intPreferencesKey("dailyNotificationMinute")
-        val KEY_IS_AUTO_PHOTO_LINK_ENABLED = booleanPreferencesKey("isAutoPhotoLinkEnabled")
         val KEY_HAS_SEEDED_DEFAULT_DATA = booleanPreferencesKey("hasSeededDefaultData")
         val KEY_HAS_SWIPED = booleanPreferencesKey("hasSwiped")
         val KEY_IS_GUIDE_DISMISSED = booleanPreferencesKey("isGuideDismissed")
@@ -88,13 +87,6 @@ class AppPreferences(private val context: Context) {
     val isNotificationGuideDismissed: Flow<Boolean> = context.dataStore.data.map {
         it[KEY_IS_NOTIFICATION_GUIDE_DISMISSED] ?: false
     }
-
-    val isAutoPhotoLinkEnabled: Flow<Boolean> = context.dataStore.data.map {
-        it[KEY_IS_AUTO_PHOTO_LINK_ENABLED] ?: true
-    }
-    
-    suspend fun setAutoPhotoLinkEnabled(enabled: Boolean) =
-        context.dataStore.edit { it[KEY_IS_AUTO_PHOTO_LINK_ENABLED] = enabled }
 
     // ── Suspend 写入 ──────────────────────────────────────────────
     suspend fun setTrackingEnabled(enabled: Boolean) =
