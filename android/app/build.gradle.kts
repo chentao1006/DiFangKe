@@ -195,9 +195,6 @@ dependencies {
     // EXIF metadata (date/GPS) reading from user-picked photos
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
-    // Health Connect: read user-authorized steps/distance/floors for timeline metrics.
-    implementation("androidx.health.connect:connect-client:1.1.0-alpha11")
-
     // Gson
     implementation("com.google.code.gson:gson:2.11.0")
 

@@ -1160,9 +1160,6 @@ class LocationTrackingService : Service() {
                         )
 
                 val finalId = ongoingFootprintID ?: UUID.randomUUID().toString()
-                val healthMetrics =
-                        HealthConnectService.getInstance(applicationContext)
-                                .metricsBetween(candidate.startTime, candidate.endTime)
                 val entity =
                         FootprintEntity(
                                 footprintID = finalId,
@@ -1192,10 +1189,7 @@ class LocationTrackingService : Service() {
                                         },
                                 statusValue = "candidate",
                                 placeID = matchedPlace?.placeID,
-                                address = address,
-                                stepCount = healthMetrics?.steps?.takeIf { it > 0 },
-                                walkingDistance = healthMetrics?.walkingDistanceMeters?.takeIf { it > 0 },
-                                floorsAscended = healthMetrics?.floorsAscended?.takeIf { it > 0 }
+                                address = address
                         )
 
                 db.footprintDao().insert(entity)
@@ -1282,12 +1276,9 @@ class LocationTrackingService : Service() {
                         pointsJson = gson.toJson(pts)
                 }
 
-                val healthMetrics = HealthConnectService.getInstance(applicationContext)
-                        .metricsBetween(prevFp.endTime, newFp.startTime)
                 val transportType =
                         TransportType.from(
                                 speedMs = avgSpeed,
-                                stepCount = healthMetrics?.steps ?: 0,
                                 durationSec = gapSec.toLong(),
                                 distanceMeters = totalDist,
                                 pointCount = pts.size,
@@ -1315,8 +1306,7 @@ class LocationTrackingService : Service() {
                                 distance = totalDist,
                                 averageSpeed = avgSpeed,
                                 pointsJson = pointsJson,
-                                statusRaw = "active",
-                                stepCount = healthMetrics?.steps?.takeIf { it > 0 }
+                                statusRaw = "active"
                         )
                 db.transportRecordDao().insert(record)
         }

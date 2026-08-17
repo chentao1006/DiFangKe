@@ -21,8 +21,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.health.connect.client.PermissionController
-import com.ct106.difangke.service.HealthConnectService
 
 import com.ct106.difangke.ui.components.*
 
@@ -67,14 +65,9 @@ fun SettingsScreen(
         @Suppress("DEPRECATION")
         packageInfo?.versionCode?.toLong() ?: 0L
     }
-    val isHealthConnectAvailable = remember(context) { HealthConnectService.isAvailable(context) }
-
     var showNotificationSettingsAlert by remember { mutableStateOf(false) }
     var pendingNotificationEnableAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showAccuracyModeDialog by remember { mutableStateOf(false) }
-    val healthPermissionLauncher = rememberLauncherForActivityResult(
-        PermissionController.createRequestPermissionResultContract()
-    ) { _: Set<String> -> }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -282,17 +275,6 @@ fun SettingsScreen(
                         onClick = { onNavigate("settings/ai") }
                     )
                 }
-            }
-            item {
-                SettingsNavigationItem(
-                    title = "健康数据",
-                    badge = if (isHealthConnectAvailable) "步数与距离" else "此设备不可用",
-                    onClick = {
-                        if (isHealthConnectAvailable) {
-                            healthPermissionLauncher.launch(HealthConnectService.readPermissions)
-                        }
-                    }
-                )
             }
             item {
                 SettingsNavigationItem(

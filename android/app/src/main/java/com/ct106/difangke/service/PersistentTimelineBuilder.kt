@@ -430,9 +430,6 @@ class PersistentTimelineBuilder(private val context: Context) {
             places = places,
             processor = processor
         )
-        val healthMetrics = HealthConnectService.getInstance(context)
-            .metricsBetween(candidate.startTime, candidate.endTime)
-
         val entity = FootprintEntity(
             footprintID = UUID.randomUUID().toString(),
             date = getStartOfDay(candidate.startTime),
@@ -444,10 +441,7 @@ class PersistentTimelineBuilder(private val context: Context) {
             title = "",
             statusValue = "candidate",
             placeID = matchedPlace?.placeID,
-            address = if (matchedPlace?.isUserDefined == true) matchedPlace.name else address,
-            stepCount = healthMetrics?.steps?.takeIf { it > 0 },
-            walkingDistance = healthMetrics?.walkingDistanceMeters?.takeIf { it > 0 },
-            floorsAscended = healthMetrics?.floorsAscended?.takeIf { it > 0 }
+            address = if (matchedPlace?.isUserDefined == true) matchedPlace.name else address
         )
 
         return entity

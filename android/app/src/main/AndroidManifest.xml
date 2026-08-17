@@ -33,9 +33,6 @@
     <!-- 读取用户在系统照片选择器中主动选中的照片的 GPS 拍摄地点（用于"从照片导入足迹"）。
          不授予时，导入仍可进行，但无法读取到照片的拍摄坐标。 -->
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
-    <uses-permission android:name="android.permission.health.READ_STEPS" />
-    <uses-permission android:name="android.permission.health.READ_DISTANCE" />
-    <uses-permission android:name="android.permission.health.READ_FLOORS_CLIMBED" />
 
     <!-- 腾讯定位 SDK 会自动合入此权限；本应用不枚举用户安装的应用。 -->
     <uses-permission
@@ -68,16 +65,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity-alias
-            android:name=".HealthPermissionsActivity"
-            android:exported="true"
-            android:targetActivity=".MainActivity">
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
-                <category android:name="android.health.connect.category.HEALTH_PERMISSIONS" />
-            </intent-filter>
-        </activity-alias>
-
         <!-- 位置追踪前台服务 -->
         <service
             android:name=".service.LocationTrackingService"
