@@ -331,7 +331,8 @@ struct DiFangKeApp: App {
                             }
                             
                             await WidgetDataSyncManager.shared.syncTodayOnly()
-                            await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded(force: true)
+                            // BGAppRefreshTask already forces a full history resync periodically; don't duplicate it here.
+                            await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded()
                             WatchSyncManager.shared.syncHourlyIfNeeded()
                             
                             if bgTask != .invalid {

@@ -453,8 +453,8 @@ final class WidgetDataSyncManager {
     }
 
     private func readSnapshotImage(forOffset offset: Int, themeName: String) -> UIImage? {
-        let url = getFileURL(forOffset: offset, sizeName: "medium", themeName: themeName)
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let url = getFileURL(forOffset: offset, sizeName: "medium", themeName: themeName),
+              let data = try? Data(contentsOf: url) else { return nil }
         return UIImage(data: data)
     }
     
@@ -746,6 +746,28 @@ final class WidgetDataSyncManager {
             )
             let transports = (try? context.fetch(transportDescriptor)) ?? []
             let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+
+            // Skip the expensive photo-loading + 6x MKMapSnapshotter render pass entirely
+            // when this day's underlying data hasn't changed since the last sync — history
+            // days rarely change, but syncRecentHistoryIfNeeded used to re-render them all
+            // unconditionally on every call.
+            let signature = daySignature(footprints: footprints, transports: transports, activities: allActivities)
+            let signatureKey = "widgetSnapshotSignature_\(Self.snapshotFileVersion)_\(offset)"
+            let signatureDefaults = sharedDefaults()
+            let outputCombinations: [(sizeName: String, themeName: String)] = [
+                ("small", "light"), ("small", "dark"),
+                ("medium", "light"), ("medium", "dark"),
+                ("large", "light"), ("large", "dark")
+            ]
+            let allFilesExist = outputCombinations.allSatisfy {
+                guard let url = getFileURL(forOffset: offset, sizeName: $0.sizeName, themeName: $0.themeName) else { return false }
+                return FileManager.default.fileExists(atPath: url.path)
+            }
+            if allFilesExist, signatureDefaults?.string(forKey: signatureKey) == signature {
+                signatureDefaults?.set(Date().timeIntervalSince1970, forKey: "widgetUpdate_\(offset)")
+                return
+            }
+
             let aggregatedFootprints = aggregatedFootprints(from: footprints)
             let footprintPhotoImages = await loadAggregatedFootprintPhotoImages(aggregatedFootprints, targetSide: 88)
             let decodedTransports = transports.compactMap { transport -> WidgetDecodedTransport? in
@@ -939,8 +961,8 @@ final class WidgetDataSyncManager {
                         }
                         
                         // 保存图片
-                        if let data = image.jpegData(compressionQuality: 0.8) {
-                            let fileURL = getFileURL(forOffset: offset, sizeName: s.name, themeName: themeName)
+                        if let data = image.jpegData(compressionQuality: 0.8),
+                           let fileURL = getFileURL(forOffset: offset, sizeName: s.name, themeName: themeName) {
                             try? data.write(to: fileURL)
                         }
                     }
@@ -956,17 +978,41 @@ final class WidgetDataSyncManager {
             }).count
             defaults?.set(uniqueFootprintCount, forKey: "widgetCount_\(offset)")
             defaults?.set(Date().timeIntervalSince1970, forKey: "widgetUpdate_\(offset)")
-            
+            defaults?.set(signature, forKey: signatureKey)
+
         } catch {
             print("[WidgetSync] Sync error for offset \(offset): \(error)")
         }
     }
-    
-    private func getFileURL(forOffset offset: Int, sizeName: String, themeName: String) -> URL {
+
+    /// A cheap, stable fingerprint of a day's data. Used to skip re-rendering
+    /// widget map snapshots for offsets whose footprints/transports/activities
+    /// haven't changed since the last sync.
+    private func daySignature(
+        footprints: [Footprint],
+        transports: [TransportRecord],
+        activities: [ActivityType]
+    ) -> String {
+        let footprintPart = footprints
+            .sorted { $0.footprintID.uuidString < $1.footprintID.uuidString }
+            .map { "\($0.footprintID.uuidString)|\($0.startTime.timeIntervalSince1970)|\($0.endTime.timeIntervalSince1970)|\($0.address ?? "")|\($0.activityTypeValue ?? "")|\($0.statusValue)" }
+            .joined(separator: ";")
+        let transportPart = transports
+            .sorted { $0.recordID.uuidString < $1.recordID.uuidString }
+            .map { "\($0.recordID.uuidString)|\($0.startTime.timeIntervalSince1970)|\($0.endTime.timeIntervalSince1970)|\($0.statusRaw)|\($0.manualTypeRaw ?? $0.typeRaw)|\($0.pointsData.count)" }
+            .joined(separator: ";")
+        let activityPart = activities
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+            .map { "\($0.id.uuidString)|\($0.colorHex)|\($0.icon)|\($0.name)" }
+            .joined(separator: ";")
+        return "\(footprintPart)##\(transportPart)##\(activityPart)"
+    }
+
+    private func getFileURL(forOffset offset: Int, sizeName: String, themeName: String) -> URL? {
         let manager = FileManager.default
-        let containerURL = manager.containerURL(forSecurityApplicationGroupIdentifier: groupID)
+        guard let containerURL = manager.containerURL(forSecurityApplicationGroupIdentifier: groupID) else { return nil }
         let fileName = "widget_snapshot_\(sizeName)_\(themeName)_\(offset)_\(Self.snapshotFileVersion).jpg"
-        return containerURL!.appendingPathComponent(fileName)
+        return containerURL.appendingPathComponent(fileName)
     }
 
     private func formatDuration(_ duration: TimeInterval) -> (number: String, unit: String) {

@@ -379,17 +379,21 @@ struct RawPointsListView: View {
     }
 
     private func deletePoint(_ point: CLLocation) {
-        RawLocationStore.shared.deleteLocation(at: point.timestamp.timeIntervalSince1970, for: date)
-        if let idx = entries.firstIndex(where: { $0.location.timestamp == point.timestamp }) {
-            withAnimation(.spring()) {
-                _ = entries.remove(at: idx)
+        Task {
+            await RawLocationStore.shared.deleteLocation(at: point.timestamp.timeIntervalSince1970, for: date)
+            await MainActor.run {
+                if let idx = entries.firstIndex(where: { $0.location.timestamp == point.timestamp }) {
+                    withAnimation(.spring()) {
+                        _ = entries.remove(at: idx)
+                    }
+                    let loadResult = RawPointsLoadResult(entries: entries)
+                    previousDistances = loadResult.previousDistances
+                    suspiciousIndices = loadResult.suspiciousIndices
+                    mapCoordinates = loadResult.mapCoordinates
+                    mapDriftCoordinates = loadResult.mapDriftCoordinates
+                    dataVersion += 1
+                }
             }
-            let loadResult = RawPointsLoadResult(entries: entries)
-            previousDistances = loadResult.previousDistances
-            suspiciousIndices = loadResult.suspiciousIndices
-            mapCoordinates = loadResult.mapCoordinates
-            mapDriftCoordinates = loadResult.mapDriftCoordinates
-            dataVersion += 1
         }
     }
 
@@ -397,10 +401,10 @@ struct RawPointsListView: View {
         isBatchDeleting = true
         let indicesToDelete = selection
         let timestampsToDelete = Set(entries.filter { indicesToDelete.contains($0.originalIndex) }.map { $0.location.timestamp.timeIntervalSince1970 })
-        
-        Task.detached(priority: .userInitiated) {
-            RawLocationStore.shared.deleteLocations(at: timestampsToDelete, for: self.date)
-            
+
+        Task {
+            await RawLocationStore.shared.deleteLocations(at: timestampsToDelete, for: self.date)
+
             await MainActor.run {
                 withAnimation(.spring()) {
                     self.entries.removeAll { indicesToDelete.contains($0.originalIndex) }

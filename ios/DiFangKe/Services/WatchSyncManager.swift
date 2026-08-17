@@ -104,6 +104,7 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
     /// sync remains immediate; this covers changes that otherwise have no location event.
     func syncHourlyIfNeeded(now: Date = Date()) {
         guard WCSession.isSupported(),
+              WCSession.default.activationState == .activated,
               WCSession.default.isWatchAppInstalled,
               now.timeIntervalSince1970 - UserDefaults.standard.double(forKey: lastHourlySyncKey) >= 60 * 60 else { return }
         syncSnapshot()

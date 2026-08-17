@@ -370,82 +370,90 @@ final class RawLocationStore {
     }
     
     /// 从源文件中彻底删除某个点 (匹配时间戳)
-    func deleteLocation(at timestamp: Double, for date: Date) {
-        saveQueue.sync { [weak self] in
-            guard let self = self else { return }
-            
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd"
-            let prefix = formatter.string(from: date)
-            
-            guard let files = try? self.fileManager.contentsOfDirectory(at: self.baseDirectory, includingPropertiesForKeys: nil) else { return }
-            let targetFiles = files.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "csv" }
-            
-            for url in targetFiles {
-                guard let data = try? Data(contentsOf: url),
-                      let content = String(data: data, encoding: .utf8) else { continue }
-                
-                let lines = content.components(separatedBy: .newlines)
-                let originalCount = lines.count
-                let filteredLines = lines.filter { line in
-                    guard !line.isEmpty else { return false }
-                    let parts = line.split(separator: ",")
-                    if let ts = Double(parts[0]) {
-                        return abs(ts - timestamp) > 0.0001
+    /// 用 continuation 桥接到 saveQueue，避免在 Swift Concurrency 线程上做同步阻塞等待
+    /// (queue.sync 会触发 "unsafeForcedSync called from Swift Concurrent context")
+    func deleteLocation(at timestamp: Double, for date: Date) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            saveQueue.async { [weak self] in
+                defer { continuation.resume() }
+                guard let self = self else { return }
+
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy-MM-dd"
+                let prefix = formatter.string(from: date)
+
+                guard let files = try? self.fileManager.contentsOfDirectory(at: self.baseDirectory, includingPropertiesForKeys: nil) else { return }
+                let targetFiles = files.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "csv" }
+
+                for url in targetFiles {
+                    guard let data = try? Data(contentsOf: url),
+                          let content = String(data: data, encoding: .utf8) else { continue }
+
+                    let lines = content.components(separatedBy: .newlines)
+                    let originalCount = lines.count
+                    let filteredLines = lines.filter { line in
+                        guard !line.isEmpty else { return false }
+                        let parts = line.split(separator: ",")
+                        if let ts = Double(parts[0]) {
+                            return abs(ts - timestamp) > 0.0001
+                        }
+                        return true
                     }
-                    return true
+
+                    if filteredLines.count < originalCount - 1 {
+                        let newContent = filteredLines.joined(separator: "\n") + "\n"
+                        try? newContent.write(to: url, atomically: true, encoding: .utf8)
+                    }
                 }
-                
-                if filteredLines.count < originalCount - 1 {
-                    let newContent = filteredLines.joined(separator: "\n") + "\n"
-                    try? newContent.write(to: url, atomically: true, encoding: .utf8)
+
+                // 异步回主线程通知更新
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: NSNotification.Name("RawLocationDataDeleted"), object: nil, userInfo: ["date": date, "deletedTimestamps": [timestamp]])
                 }
-            }
-            
-            // 异步回主线程通知更新
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: NSNotification.Name("RawLocationDataDeleted"), object: nil, userInfo: ["date": date, "deletedTimestamps": [timestamp]])
             }
         }
     }
 
     /// 从源文件中批量删除多个点 (匹配时间戳)
-    func deleteLocations(at timestamps: Set<Double>, for date: Date) {
-        saveQueue.sync { [weak self] in
-            guard let self = self else { return }
-            
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd"
-            let prefix = formatter.string(from: date)
-            
-            guard let files = try? self.fileManager.contentsOfDirectory(at: self.baseDirectory, includingPropertiesForKeys: nil) else { return }
-            let targetFiles = files.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "csv" }
-            
-            for url in targetFiles {
-                guard let data = try? Data(contentsOf: url),
-                      let content = String(data: data, encoding: .utf8) else { continue }
-                
-                let lines = content.components(separatedBy: .newlines)
-                let originalCount = lines.count
-                let filteredLines = lines.filter { line in
-                    guard !line.isEmpty else { return false }
-                    let parts = line.split(separator: ",")
-                    if let ts = Double(parts[0]) {
-                        for targetTs in timestamps {
-                            if abs(ts - targetTs) < 0.0001 { return false }
+    func deleteLocations(at timestamps: Set<Double>, for date: Date) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            saveQueue.async { [weak self] in
+                defer { continuation.resume() }
+                guard let self = self else { return }
+
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy-MM-dd"
+                let prefix = formatter.string(from: date)
+
+                guard let files = try? self.fileManager.contentsOfDirectory(at: self.baseDirectory, includingPropertiesForKeys: nil) else { return }
+                let targetFiles = files.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "csv" }
+
+                for url in targetFiles {
+                    guard let data = try? Data(contentsOf: url),
+                          let content = String(data: data, encoding: .utf8) else { continue }
+
+                    let lines = content.components(separatedBy: .newlines)
+                    let originalCount = lines.count
+                    let filteredLines = lines.filter { line in
+                        guard !line.isEmpty else { return false }
+                        let parts = line.split(separator: ",")
+                        if let ts = Double(parts[0]) {
+                            for targetTs in timestamps {
+                                if abs(ts - targetTs) < 0.0001 { return false }
+                            }
                         }
+                        return true
                     }
-                    return true
+
+                    if filteredLines.count < originalCount - 1 {
+                        let newContent = filteredLines.joined(separator: "\n") + "\n"
+                        try? newContent.write(to: url, atomically: true, encoding: .utf8)
+                    }
                 }
-                
-                if filteredLines.count < originalCount - 1 {
-                    let newContent = filteredLines.joined(separator: "\n") + "\n"
-                    try? newContent.write(to: url, atomically: true, encoding: .utf8)
+
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: NSNotification.Name("RawLocationDataDeleted"), object: nil, userInfo: ["date": date, "deletedTimestamps": Array(timestamps)])
                 }
-            }
-            
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: NSNotification.Name("RawLocationDataDeleted"), object: nil, userInfo: ["date": date, "deletedTimestamps": Array(timestamps)])
             }
         }
     }
