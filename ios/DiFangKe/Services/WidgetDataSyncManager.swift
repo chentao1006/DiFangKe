@@ -56,8 +56,32 @@ final class WidgetDataSyncManager {
     private var hasPendingTodaySync = false
     private var isHistorySyncInFlight = false
     private var onDemandOffsetsInFlight = Set<Int>()
+    // MapKit snapshot creation may suspend, so @MainActor alone does not stop a
+    // location-triggered sync, history sync, and share-card render from overlapping.
+    // Keep the GPU-backed snapshotter lifecycle strictly serial.
+    private var isMapSnapshotWorkInFlight = false
+    private var mapSnapshotWorkWaiters: [CheckedContinuation<Void, Never>] = []
     
     private init() {}
+
+    private func withExclusiveMapSnapshotWork<T>(_ operation: () async -> T) async -> T {
+        if isMapSnapshotWorkInFlight {
+            await withCheckedContinuation { continuation in
+                mapSnapshotWorkWaiters.append(continuation)
+            }
+        } else {
+            isMapSnapshotWorkInFlight = true
+        }
+
+        defer {
+            if mapSnapshotWorkWaiters.isEmpty {
+                isMapSnapshotWorkInFlight = false
+            } else {
+                mapSnapshotWorkWaiters.removeFirst().resume()
+            }
+        }
+        return await operation()
+    }
     
     /// 更新数据库容器
     func updateContainer(_ newContainer: ModelContainer) {
@@ -176,8 +200,25 @@ final class WidgetDataSyncManager {
         markerScale: CGFloat = 1,
         size: CGSize = CGSize(width: 329, height: 119)
     ) async -> (light: UIImage?, dark: UIImage?) {
+        await withExclusiveMapSnapshotWork {
+            await self.makeShareMapSnapshotsUnlocked(
+                footprints: footprints,
+                transports: transports,
+                activities: activities,
+                markerScale: markerScale,
+                size: size
+            )
+        }
+    }
+
+    private func makeShareMapSnapshotsUnlocked(
+        footprints: [Footprint],
+        transports: [TransportRecord],
+        activities: [ActivityType],
+        markerScale: CGFloat,
+        size: CGSize
+    ) async -> (light: UIImage?, dark: UIImage?) {
         let aggregatedFootprints = aggregatedFootprints(from: footprints)
-        let footprintPhotoImages = await loadAggregatedFootprintPhotoImages(aggregatedFootprints, targetSide: 88)
         let decodedTransports = transports.compactMap { transport -> WidgetDecodedTransport? in
             guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
                   !decoded.isEmpty else {
@@ -198,21 +239,30 @@ final class WidgetDataSyncManager {
             )
         }
 
-        let allMapCoordinates = (footprints.flatMap(\.coordinates) + decodedTransports.flatMap(\.coordinates)).filter {
+        // 分享卡片的相机只由足迹决定。交通仍完整绘制为覆盖层，但不能因为
+        // 一段很长的行程把足迹标记缩得看不清；纯交通卡片才退回以交通定范围。
+        let footprintCameraCoordinates = footprints.flatMap(\.coordinates).filter {
             $0.latitude.isFinite &&
             $0.longitude.isFinite &&
             CLLocationCoordinate2DIsValid($0)
         }
-        guard !allMapCoordinates.isEmpty else { return (nil, nil) }
+        let cameraCoordinates = footprintCameraCoordinates.isEmpty
+            ? decodedTransports.flatMap(\.coordinates).filter {
+                $0.latitude.isFinite &&
+                $0.longitude.isFinite &&
+                CLLocationCoordinate2DIsValid($0)
+            }
+            : footprintCameraCoordinates
+        guard !cameraCoordinates.isEmpty else { return (nil, nil) }
 
         let allActivities = activities
         let activitiesByID = Dictionary(allActivities.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { first, _ in first })
         let activitiesByName = Dictionary(allActivities.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
 
         async let light = makeWidgetMapSnapshot(
-            coordinates: allMapCoordinates,
+            coordinates: cameraCoordinates,
             aggregatedFootprints: aggregatedFootprints,
-            footprintPhotoImages: footprintPhotoImages,
+            footprintPhotoImages: [:],
             decodedTransports: decodedTransports,
             activitiesByID: activitiesByID,
             activitiesByName: activitiesByName,
@@ -221,9 +271,9 @@ final class WidgetDataSyncManager {
             size: size
         )
         async let dark = makeWidgetMapSnapshot(
-            coordinates: allMapCoordinates,
+            coordinates: cameraCoordinates,
             aggregatedFootprints: aggregatedFootprints,
-            footprintPhotoImages: footprintPhotoImages,
+            footprintPhotoImages: [:],
             decodedTransports: decodedTransports,
             activitiesByID: activitiesByID,
             activitiesByName: activitiesByName,
@@ -380,35 +430,16 @@ final class WidgetDataSyncManager {
                 }
                 ctx.cgContext.restoreGState()
 
-                if let latestPhotoAssetID = aggregated.latestPhotoAssetID,
-                   let photoImage = footprintPhotoImages[latestPhotoAssetID] {
-                    let photoRadius = innerRadius + 0.5
-                    let photoRect = CGRect(
-                        x: innerCenter.x - photoRadius,
-                        y: innerCenter.y - photoRadius,
-                        width: photoRadius * 2,
-                        height: photoRadius * 2
+                let iconName = activity?.icon ?? FootprintIconDefaults.map
+                if let iconImage = UIImage(systemName: iconName) {
+                    let iconSize: CGFloat = 11 * markerScale
+                    let iconRect = CGRect(
+                        x: innerCenter.x - iconSize / 2,
+                        y: innerCenter.y - iconSize / 2,
+                        width: iconSize,
+                        height: iconSize
                     )
-                    let clipPath = UIBezierPath(ovalIn: photoRect)
-                    ctx.cgContext.saveGState()
-                    clipPath.addClip()
-                    photoImage.drawAspectFill(in: photoRect)
-                    ctx.cgContext.restoreGState()
-                    activityColor.setStroke()
-                    clipPath.lineWidth = 1
-                    clipPath.stroke()
-                } else {
-                    let iconName = activity?.icon ?? FootprintIconDefaults.map
-                    if let iconImage = UIImage(systemName: iconName) {
-                        let iconSize: CGFloat = 11 * markerScale
-                        let iconRect = CGRect(
-                            x: innerCenter.x - iconSize / 2,
-                            y: innerCenter.y - iconSize / 2,
-                            width: iconSize,
-                            height: iconSize
-                        )
-                        iconImage.withTintColor(iconColor, renderingMode: .alwaysTemplate).drawAspectFit(in: iconRect)
-                    }
+                    iconImage.withTintColor(iconColor, renderingMode: .alwaysTemplate).drawAspectFit(in: iconRect)
                 }
             }
         }
@@ -683,6 +714,12 @@ final class WidgetDataSyncManager {
     }
     
     private func syncData(forOffset offset: Int) async {
+        await withExclusiveMapSnapshotWork {
+            await self.syncDataUnlocked(forOffset: offset)
+        }
+    }
+
+    private func syncDataUnlocked(forOffset offset: Int) async {
         let calendar = Calendar.current
         let now = Date()
         let startOfToday = calendar.startOfDay(for: now)

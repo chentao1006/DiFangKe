@@ -2442,6 +2442,15 @@ class PersistentTimelineBuilder {
         while i < fps.count - 1 {
             let current = fps[i]
             let next = fps[i+1]
+
+            // 手动分割会把两段都标记为 manual。它们定义了用户明确指定的
+            // 时间线边界，自动同步/冷启动重建绝不能再把它们合回去。
+            // `.confirmed` 是自动识别足迹的正常状态，不能把它当作手动边界。
+            guard current.status != .manual,
+                  next.status != .manual else {
+                i += 1
+                continue
+            }
             
             let currentLoc = CLLocation(latitude: current.latitude, longitude: current.longitude)
             let nextLoc = CLLocation(latitude: next.latitude, longitude: next.longitude)
@@ -2694,6 +2703,7 @@ class PersistentTimelineBuilder {
 
                      let matchedPlace = allPlaces.first { place in place.placeID == fp.placeID }
                 if let existing = latestMergeableFootprint(endingBefore: fp.endTime, startOfDay: startOfDay, context: context),
+                   existing.status != .manual,
                    !hasTransportOverlap(between: existing.endTime, and: fp.startTime, startOfDay: startOfDay, context: context),
                    shouldExtendExistingFootprint(existing, with: candidate, matchedPlace: matchedPlace) {
                     existing.endTime = max(existing.endTime, fp.endTime)

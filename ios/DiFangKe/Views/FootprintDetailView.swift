@@ -340,7 +340,7 @@ extension FootprintModalView {
             photoAssets: mapPhotos,
             isInteractive: true,
             showsStandalonePhotos: true,
-            prefersActivityIcons: false,
+            prefersActivityIcons: true,
             selectedFootprintID: footprint.footprintID,
             centersFootprintInVisibleTopArea: true,
             visibleMapFraction: 1

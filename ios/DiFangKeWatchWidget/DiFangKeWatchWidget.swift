@@ -40,14 +40,23 @@ private struct ComplicationProvider: TimelineProvider {
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<ComplicationEntry>) -> Void) {
-        let entry = loadEntry()
-        // The relative duration refreshes even if no new phone snapshot arrives.
-        completion(Timeline(entries: [entry], policy: .after(.now.addingTimeInterval(15 * 60))))
+        let now = Date()
+        let snapshot = loadSnapshot()
+        // The compact label is not a system .timer, so provide minute-by-minute
+        // entries to keep it advancing even while the iPhone has no new data.
+        let entries = (0...60).map { offset in
+            ComplicationEntry(date: now.addingTimeInterval(TimeInterval(offset * 60)), snapshot: snapshot)
+        }
+        completion(Timeline(entries: entries, policy: .atEnd))
     }
 
     private func loadEntry() -> ComplicationEntry {
+        ComplicationEntry(date: .now, snapshot: loadSnapshot())
+    }
+
+    private func loadSnapshot() -> ComplicationSnapshot? {
         let data = UserDefaults(suiteName: groupID)?.data(forKey: snapshotKey)
-        return ComplicationEntry(date: .now, snapshot: data.flatMap { try? JSONDecoder().decode(ComplicationSnapshot.self, from: $0) })
+        return data.flatMap { try? JSONDecoder().decode(ComplicationSnapshot.self, from: $0) }
     }
 }
 
@@ -80,18 +89,21 @@ private struct WatchComplicationView: View {
     private var title: String { transport?.name ?? activity?.name ?? (entry.snapshot?.isTracking == true ? "记录中" : "未记录") }
     private var duration: String {
         guard let startedAt = entry.snapshot?.currentTransportStartedAt ?? entry.snapshot?.startedAt else { return "--" }
-        let minutes = max(0, Int(Date().timeIntervalSince(startedAt) / 60))
-        return minutes >= 60 ? "\(minutes / 60)时\(minutes % 60)分" : "\(minutes)分"
+        let minutes = max(0, Int(entry.date.timeIntervalSince(startedAt) / 60))
+        if minutes < 60 {
+            return "\(max(1, minutes))分钟"
+        }
+
+        let hours = Double(minutes) / 60
+        if hours >= 10 {
+            return "\(Int(hours.rounded()))小时"
+        }
+        return "\(String(format: "%g", (hours * 10).rounded() / 10))小时"
     }
 
-    @ViewBuilder
-    private var liveDuration: some View {
-        if let startedAt = entry.snapshot?.currentTransportStartedAt ?? entry.snapshot?.startedAt {
-            Text(startedAt, style: .timer)
-                .monospacedDigit()
-        } else {
-            Text(duration)
-        }
+    private var durationLabel: some View {
+        Text(duration)
+            .monospacedDigit()
     }
     private var color: Color {
         guard let hex = activity?.colorHex else { return .blue }
@@ -106,7 +118,7 @@ private struct WatchComplicationView: View {
         case .accessoryCircular:
             VStack(spacing: 1) {
                 Image(systemName: icon).font(.title3).foregroundStyle(color)
-                liveDuration.font(.caption2).lineLimit(1).minimumScaleFactor(0.65)
+                durationLabel.font(.caption2).lineLimit(1).minimumScaleFactor(0.65)
             }
             .widgetLabel(title)
         case .accessoryRectangular:
@@ -114,7 +126,7 @@ private struct WatchComplicationView: View {
                 Image(systemName: icon).font(.title2).foregroundStyle(color).frame(width: 24)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).font(.headline).lineLimit(1)
-                    HStack(spacing: 2) { Text("已持续"); liveDuration }
+                    HStack(spacing: 2) { Text("已持续"); durationLabel }
                         .font(.caption2)
                     Text(todaySummary).font(.caption2).foregroundStyle(.secondary)
                 }
@@ -124,10 +136,10 @@ private struct WatchComplicationView: View {
                 Image(systemName: icon)
                 Text(title)
                 Text("·")
-                liveDuration
+                durationLabel
             }
         case .accessoryCorner:
-            liveDuration.widgetLabel { Label(title, systemImage: icon) }
+            durationLabel.widgetLabel { Label(title, systemImage: icon) }
         default:
             VStack(alignment: .leading) {
                 Label(title, systemImage: icon).foregroundStyle(color)
@@ -138,8 +150,7 @@ private struct WatchComplicationView: View {
 
     private var todaySummary: String {
         guard let snapshot = entry.snapshot else { return "等待 iPhone 同步" }
-        let distance = snapshot.todayDistance < 1_000 ? String(format: "%.0f米", snapshot.todayDistance) : String(format: "%.1f公里", snapshot.todayDistance / 1_000)
-        return "今日 \(snapshot.todayFootprintCount) 个足迹 · \(distance)"
+        return "今日 \(snapshot.todayFootprintCount) 个足迹"
     }
 }
 

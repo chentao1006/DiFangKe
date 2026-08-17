@@ -2,13 +2,22 @@ import SwiftUI
 
 struct WatchHomeView: View {
     @EnvironmentObject private var store: WatchStore
+    @State private var selectedPage = "current"
 
     var body: some View {
-        TabView {
+        TabView(selection: $selectedPage) {
+            ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
+                FutureTripPage(trip: trip)
+                    .tag("future-\(trip.id)")
+            }
             CurrentPlaceView()
-            TodayAndNextView()
+                .tag("current")
+            ForEach(store.snapshot.recentDays ?? []) { day in
+                DayTimelinePage(day: day)
+                    .tag("day-\(day.date.timeIntervalSince1970)")
+            }
         }
-        .tabViewStyle(.verticalPage)
+        .tabViewStyle(.page(indexDisplayMode: .never))
     }
 }
 
@@ -91,28 +100,23 @@ private struct ActivityPickerView: View {
     }
 }
 
-private struct TodayAndNextView: View {
+private struct DayTimelinePage: View {
     @EnvironmentObject private var store: WatchStore
+    let day: WatchDaySnapshot
 
     var body: some View {
-        let snapshot = store.snapshot
         ScrollView {
             VStack(alignment: .leading, spacing: 9) {
-                Text("今天")
+                Text(dayTitle)
                     .font(.headline)
-                Text("\(snapshot.todayFootprintCount) 个足迹")
-                    .font(.title3.bold())
-                Text(distanceText(snapshot.todayDistance))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Divider()
-                if let trip = snapshot.nextTrip {
-                    Text("下一站").font(.caption).foregroundStyle(.secondary)
-                    Text(trip.placeName).font(.headline).lineLimit(2)
-                    Text(nextTripDetail(trip)).font(.caption).foregroundStyle(.secondary)
+                if !day.timeline.isEmpty {
+                    ForEach(day.timeline) { item in
+                        WatchTimelineRow(item: item)
+                    }
                 } else {
-                    Text("下一站").font(.caption).foregroundStyle(.secondary)
-                    Text("暂无计划").font(.headline)
+                    Text(store.hasReceivedSnapshot ? "没有记录" : "等待 iPhone 同步")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -120,13 +124,53 @@ private struct TodayAndNextView: View {
         }
     }
 
-    private func distanceText(_ meters: Double) -> String {
-        meters < 1_000 ? String(format: "%.0f 米", meters) : String(format: "%.1f 公里", meters / 1_000)
+    private var dayTitle: String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(day.date) { return "今天" }
+        if calendar.isDateInYesterday(day.date) { return "昨天" }
+        return day.date.formatted(.dateTime.month().day())
     }
+}
 
-    private func nextTripDetail(_ trip: WatchTripSnapshot) -> String {
-        let distance = trip.distance.map { distanceText($0) } ?? "距离待更新"
-        guard trip.hasArrivalTime else { return distance }
-        return "\(distance) · \(trip.arrivalDate.formatted(date: .omitted, time: .shortened))"
+private struct FutureTripPage: View {
+    let trip: WatchTripSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("未来计划")
+                .font(.headline)
+            Image(systemName: "calendar.badge.clock")
+                .font(.title2)
+                .foregroundStyle(.tint)
+            Text(trip.placeName)
+                .font(.title3.bold())
+                .lineLimit(3)
+            if trip.hasArrivalTime {
+                Text(trip.arrivalDate.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .scenePadding()
+    }
+}
+
+private struct WatchTimelineRow: View {
+    let item: WatchTimelineItem
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 7) {
+            Text(item.startTime.formatted(date: .omitted, time: .shortened))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 34, alignment: .leading)
+            Image(systemName: item.icon)
+                .foregroundStyle(activityColor(item.colorHex))
+                .frame(width: 16)
+            Text(item.title)
+                .font(.caption)
+                .lineLimit(2)
+        }
     }
 }

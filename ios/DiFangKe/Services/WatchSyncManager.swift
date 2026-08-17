@@ -1,4 +1,3 @@
-import CoreLocation
 import Foundation
 import SwiftData
 import WatchConnectivity
@@ -23,6 +22,9 @@ struct WatchSnapshot: Codable {
     let todayDistance: Double
     let nextTrip: WatchTripSnapshot?
     let activities: [WatchActivityOption]
+    let todayTimeline: [WatchTimelineItem]
+    let recentDays: [WatchDaySnapshot]
+    let futureTrips: [WatchTripSnapshot]
 }
 
 struct WatchTripSnapshot: Codable {
@@ -31,6 +33,20 @@ struct WatchTripSnapshot: Codable {
     let distance: Double?
     let arrivalDate: Date
     let hasArrivalTime: Bool
+}
+
+struct WatchTimelineItem: Codable {
+    let id: String
+    let startTime: Date
+    let endTime: Date
+    let title: String
+    let icon: String
+    let colorHex: String?
+}
+
+struct WatchDaySnapshot: Codable {
+    let date: Date
+    let timeline: [WatchTimelineItem]
 }
 
 @MainActor
@@ -111,6 +127,7 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
         let calendar = Calendar.current
         let todayStart = calendar.startOfDay(for: now)
         let todayEnd = calendar.date(byAdding: .day, value: 1, to: todayStart) ?? now
+        let historyStart = calendar.date(byAdding: .day, value: -13, to: todayStart) ?? todayStart
         let footprints = (try? context.fetch(FetchDescriptor<Footprint>(
             predicate: #Predicate { $0.startTime >= todayStart && $0.startTime < todayEnd },
             sortBy: [SortDescriptor(\.endTime, order: .reverse)]
@@ -124,10 +141,63 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
             sortBy: [SortDescriptor(\.endTime, order: .reverse)]
         ))) ?? []
         let currentTransport = transports.first
-        let nextTrip = FutureTrip.dayOrdered((try? context.fetch(FetchDescriptor<FutureTrip>())) ?? [])
-            .first(where: { !$0.isCompleted && $0.hasPlanDate && ($0.isOrdered ? calendar.isDateInToday($0.arrivalDate) : $0.effectiveArrivalDate(now: now) >= now) })
-        let distance = nextTrip.map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
-            .flatMap { destination in LocationManager.shared.lastLocation.map { $0.distance(from: destination) } }
+        let todayTransports = (try? context.fetch(FetchDescriptor<TransportRecord>(
+            predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < todayEnd && $0.endTime >= todayStart },
+            sortBy: [SortDescriptor(\.startTime)]
+        ))) ?? []
+        let activityByValue = activities.reduce(into: [String: WatchActivityOption]()) { result, activity in
+            result[activity.id] = activity
+            result[activity.name] = activity
+        }
+        let recentFootprints = (try? context.fetch(FetchDescriptor<Footprint>(
+            predicate: #Predicate { $0.startTime >= historyStart && $0.startTime < todayEnd },
+            sortBy: [SortDescriptor(\.startTime)]
+        ))) ?? []
+        let recentTransports = (try? context.fetch(FetchDescriptor<TransportRecord>(
+            predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < todayEnd && $0.endTime >= historyStart },
+            sortBy: [SortDescriptor(\.startTime)]
+        ))) ?? []
+        func timeline(footprints: [Footprint], transports: [TransportRecord]) -> [WatchTimelineItem] {
+            (footprints.map { footprint in
+                let activity = footprint.activityTypeValue.flatMap { activityByValue[$0] }
+                return WatchTimelineItem(
+                    id: footprint.footprintID.uuidString,
+                    startTime: footprint.startTime,
+                    endTime: footprint.endTime,
+                    title: footprint.address?.isEmpty == false ? footprint.address! : "未知地点",
+                    icon: activity?.icon ?? "mappin.and.ellipse",
+                    colorHex: activity?.colorHex
+                )
+            }
+            + transports.map { transport in
+                let type = TransportType(rawValue: transport.manualTypeRaw ?? transport.typeRaw)
+                return WatchTimelineItem(
+                    id: transport.recordID.uuidString,
+                    startTime: transport.startTime,
+                    endTime: transport.endTime,
+                    title: type?.localizedName ?? "出行",
+                    icon: type?.sfSymbol ?? "arrow.triangle.swap",
+                    colorHex: nil
+                )
+            }
+            ).sorted { $0.startTime < $1.startTime }
+        }
+        let recentDays = (0..<14).compactMap { offset -> WatchDaySnapshot? in
+            guard let dayStart = calendar.date(byAdding: .day, value: -offset, to: todayStart),
+                  let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return nil }
+            return WatchDaySnapshot(
+                date: dayStart,
+                timeline: timeline(
+                    footprints: recentFootprints.filter { $0.startTime >= dayStart && $0.startTime < dayEnd },
+                    transports: recentTransports.filter { $0.startTime < dayEnd && $0.endTime >= dayStart }
+                )
+            )
+        }
+        let futureTrips = FutureTrip.dayOrdered((try? context.fetch(FetchDescriptor<FutureTrip>())) ?? [])
+            .filter { !$0.isCompleted && $0.hasPlanDate && ($0.isOrdered ? $0.arrivalDate >= now : $0.effectiveArrivalDate(now: now) >= now) }
+            .prefix(10)
+            .map { WatchTripSnapshot(id: $0.id.uuidString, placeName: $0.placeName, distance: nil, arrivalDate: $0.arrivalDate, hasArrivalTime: $0.hasArrivalTime) }
+        let nextTrip = futureTrips.first
 
         return WatchSnapshot(
             currentFootprintID: latest?.footprintID.uuidString,
@@ -140,8 +210,11 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
             currentTransportStartedAt: currentTransport?.startTime,
             todayFootprintCount: footprints.count,
             todayDistance: footprints.compactMap(\.walkingDistance).reduce(0, +),
-            nextTrip: nextTrip.map { WatchTripSnapshot(id: $0.id.uuidString, placeName: $0.placeName, distance: distance, arrivalDate: $0.arrivalDate, hasArrivalTime: $0.hasArrivalTime) },
-            activities: activities
+            nextTrip: nextTrip,
+            activities: activities,
+            todayTimeline: timeline(footprints: footprints, transports: todayTransports),
+            recentDays: recentDays,
+            futureTrips: Array(futureTrips)
         )
     }
 

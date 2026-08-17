@@ -478,7 +478,6 @@ struct TransportModalView: View {
             
             // Preserve current type
             record.manualTypeRaw = (localManualType ?? transport.manualType ?? transport.type).rawValue
-            
             try? modelContext.save()
             CloudSettingsManager.shared.triggerDataSyncPulse()
             onLocationUpdate?()
@@ -800,7 +799,12 @@ private struct TransportTimeAdjustmentView: View {
         // manual so periodic automatic consolidation cannot replace the
         // adjusted interval with a newly inferred one.
         record.manualTypeRaw = record.manualTypeRaw ?? transport.manualType?.rawValue ?? transport.type.rawValue
-        refreshMetrics(record)
+        // `record.pointsData` only contains the old inferred interval.  It is
+        // safe for a shrink, but it cannot supply the points newly included by
+        // an expanded boundary.  Rebuild from the same raw points shown on the
+        // adjustment map so the saved route and distance match the selected
+        // time range.
+        refreshMetrics(record, rawRoute: selectedPoints)
         let adjacentDates = adjustAdjacentItems(
             oldStart: oldStart,
             oldEnd: oldEnd,
@@ -822,7 +826,24 @@ private struct TransportTimeAdjustmentView: View {
         return try? modelContext.fetch(descriptor).first
     }
 
-    private func refreshMetrics(_ record: TransportRecord) {
+    private func refreshMetrics(_ record: TransportRecord, rawRoute: [CLLocation]? = nil) {
+        if let rawRoute, !rawRoute.isEmpty {
+            let routePoints = rawRoute.map {
+                CodableCoordinate(
+                    lat: $0.coordinate.latitude,
+                    lon: $0.coordinate.longitude,
+                    timestamp: $0.timestamp
+                )
+            }
+            if let data = try? JSONEncoder().encode(routePoints) {
+                record.pointsData = data
+                record.distance = TimelineBuilder.calculatePathDistance(routePoints)
+            }
+            let duration = record.endTime.timeIntervalSince(record.startTime)
+            record.averageSpeed = duration > 0 ? record.distance / duration : 0
+            return
+        }
+
         if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData) {
             let filtered = decoded.filter { point in
                 guard let timestamp = point.timestamp else { return point.isSyntheticPadding == true }

@@ -240,7 +240,9 @@ final class RawLocationStore {
                         // 新增：物理不可能的速度直接过滤（如 5秒内 3公里 = 600m/s）
                         if calcSpeed > AppConfig.shared.physicalMaxSpeedThreshold { return }
                         
-                        let isRidiculous = (accuracy > 400 && dist > 1500) || (calcSpeed > 80.0 && accuracy > 80)
+                        let hasReportedHighSpeed = speed >= 20.0
+                        let isRidiculous = (accuracy > 400 && dist > 1500 && !hasReportedHighSpeed)
+                            || (calcSpeed > 80.0 && accuracy > 80 && !hasReportedHighSpeed)
                         if isRidiculous { return } // 跳过该点，不加入列表，且不更新 lastValidPoint
                     }
                 }
@@ -353,7 +355,9 @@ final class RawLocationStore {
                         // 新增：物理不可能的速度直接过滤
                         if calcSpeed > AppConfig.shared.physicalMaxSpeedThreshold { return }
                         
-                        let isRidiculous = (accuracy > 400 && dist > 1500) || (calcSpeed > 80.0 && accuracy > 80)
+                        let hasReportedHighSpeed = speed >= 20.0
+                        let isRidiculous = (accuracy > 400 && dist > 1500 && !hasReportedHighSpeed)
+                            || (calcSpeed > 80.0 && accuracy > 80 && !hasReportedHighSpeed)
                         if isRidiculous { return }
                     }
                 }
@@ -866,19 +870,29 @@ final class FootprintProcessor {
             // --- 强化漂移过滤 (针对地铁/城市峡谷) ---
             let distance = location.distance(from: lastLoc)
             let calculatedSpeed = distance / timeInterval // m/s
+            // Core Location 明确报告的高速是高铁等真实移动的强证据。高铁运行时
+            // 水平精度常短暂变差，不能让仅依赖计算速度/精度的漂移规则抹掉整段行程。
+            let hasReportedHighSpeed = location.speed >= 20.0
             
             // A: 物理不可能性判断：时速超过阈值 (约 220km/h) 且精度不佳，判定为漂移数据
-            if calculatedSpeed > AppConfig.shared.driftSpeedMaxPossible && location.horizontalAccuracy > AppConfig.shared.driftAccuracyThreshold {
+            if calculatedSpeed > AppConfig.shared.driftSpeedMaxPossible
+                && location.horizontalAccuracy > AppConfig.shared.driftAccuracyThreshold
+                && !hasReportedHighSpeed {
                 return nil
             }
             
             // B: 精度断崖式下降判断：如果位移很大 且当前精度比上一点差很多 (>3倍且绝对值>150m)，判定为漂移
-            if distance > AppConfig.shared.driftDistanceGap && location.horizontalAccuracy > lastLoc.horizontalAccuracy * 3 && location.horizontalAccuracy > 150 {
+            if distance > AppConfig.shared.driftDistanceGap
+                && location.horizontalAccuracy > lastLoc.horizontalAccuracy * 3
+                && location.horizontalAccuracy > 150
+                && !hasReportedHighSpeed {
                 return nil
             }
             
             // C: 基础漂移判断
-            if distance > driftDistanceThreshold && location.speed > driftSpeedThreshold {
+            if distance > driftDistanceThreshold
+                && location.speed > driftSpeedThreshold
+                && !hasReportedHighSpeed {
                 return nil
             }
         }
@@ -2168,9 +2182,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     return
                 }
                 
-                // 地铁/隧道环境常见的离谱漂移：精度骤降 (>500m) 且 瞬间位移巨大 (>2km) 且 速度不合理 (>80m/s)
-                // 降低判定门槛：只要速度超过 60m/s (216km/h) 且精度不佳，就视为漂移
-                let isRidiculous = (location.horizontalAccuracy > 400 && dist > 1500) || (calcSpeed > 60.0 && location.horizontalAccuracy > 80)
+                // 地铁/隧道环境常见的离谱漂移：精度骤降 (>500m) 且瞬间位移巨大，
+                // 或位置推算出极高速、但 Core Location 自身并没有报告高速。
+                // 不能仅因 >216km/h + 精度 >80m 就丢弃：高铁的真实定位会恰好满足它，
+                // 这样会让旧的实时停留永远得不到“已离开”的点。
+                let hasReportedHighSpeed = location.speed >= 20.0
+                let isRidiculous = (location.horizontalAccuracy > 400 && dist > 1500 && !hasReportedHighSpeed)
+                    || (calcSpeed > 60.0 && location.horizontalAccuracy > 80 && !hasReportedHighSpeed)
                 if isRidiculous {
                     print("Detected ridiculous drift, skipping point. Dist: \(dist), Acc: \(location.horizontalAccuracy)")
                     return 
@@ -2398,10 +2416,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         isSamePlace: Bool,
         isMovingBySensor: Bool
     ) -> Bool {
+        let distance = location.distance(from: startLoc)
+        // 高铁等高速交通中，系统已报告的速度是明确的离开证据；这时定位精度常会
+        // 暂时超过普通停留判定的 100m 上限。只要已远离 500m，就必须立即结束停留。
+        if location.speed >= 20.0 && distance > 500.0 {
+            return true
+        }
+
         guard !isSamePlace else { return false }
         guard location.horizontalAccuracy >= 0 && location.horizontalAccuracy < 100.0 else { return false }
-
-        let distance = location.distance(from: startLoc)
         guard distance > 150.0 else { return false }
 
         // 长时间宅家/办公后，启动时常会先收到一个单点 GPS 漂移。没有运动证据时不要仅凭
@@ -3128,6 +3151,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     private func shouldMergeExistingFootprint(_ last: Footprint, with candidate: CandidateFootprint, matchedPlace: Place?) -> Bool {
+        // 实时候选足迹同样不能跨越用户手动拆分出的边界。
+        // `isUserModifiedForDailySummary` 也会把自动生成的 `.confirmed`
+        // 足迹视为可用于日报，不能用于这里的合并保护；手动时间线编辑
+        // 才会写入 `.manual`。
+        guard last.status != .manual else { return false }
         if let placeID = matchedPlace?.placeID, last.placeID == placeID {
             let timeGap = candidate.startTime.timeIntervalSince(last.endTime)
             return timeGap < max(AppConfig.shared.liveStayMergeTimeThreshold, AppConfig.shared.samePlaceMergeGapThreshold)
