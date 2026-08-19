@@ -167,6 +167,7 @@ private struct ContinuousTimelineView: View {
     @State private var hiddenTimelineDateSet = Set<Date>()
     @State private var visibleTimelineFillTask: Task<Void, Never>?
     @State private var midnightTimelineRefreshTask: Task<Void, Never>?
+    @State private var isReloadingTimelineExternally = false
     @State private var mapInteractionEnableTask: Task<Void, Never>?
     @State private var selectedFootprintPhotoFetchTask: Task<Void, Never>?
     @State private var selectedFootprint: Footprint?
@@ -324,6 +325,7 @@ private struct ContinuousTimelineView: View {
             timelinesByDate: timelinesByDate,
             futureTrips: hasCompletedInitialTimelineLoad ? futureTrips : [],
             initialTimelineLoadCompleted: hasCompletedInitialTimelineLoad,
+            isReloadingTimelineExternally: isReloadingTimelineExternally,
             locationManager: locationManager,
             activeTimelineDate: $activeTimelineDate,
             todayScrollRequest: $todayScrollRequest,
@@ -1459,8 +1461,14 @@ private struct ContinuousTimelineView: View {
         let datesToReload = Array(Set(timelinesByDate.keys).union(visibleTimelineDates)).sorted()
         guard !datesToReload.isEmpty else { return }
         timelineCache.invalidate(datesToReload)
+        // Reloading can reshuffle every loaded date section's content/height (e.g. a burst of
+        // CloudKit changes arriving after the app returns from background). Signal the sheet so
+        // it can freeze viewport-driven date tracking while that happens, otherwise transient
+        // scroll geometry gets misread as the user having scrolled to an old date.
+        isReloadingTimelineExternally = true
         Task(priority: .utility) { @MainActor in
             _ = await loadTimelineIncrementally(for: datesToReload, batchSize: 1, defersMapUpdates: true)
+            isReloadingTimelineExternally = false
         }
     }
 
@@ -1993,6 +2001,7 @@ private struct ContinuousTimelineSheet: View {
     let timelinesByDate: [Date: [TimelineItem]]
     let futureTrips: [FutureTrip]
     let initialTimelineLoadCompleted: Bool
+    let isReloadingTimelineExternally: Bool
     let locationManager: LocationManager
     @Binding var activeTimelineDate: Date
     @Binding var todayScrollRequest: Int
@@ -2479,6 +2488,19 @@ private struct ContinuousTimelineSheet: View {
                     }
                     .onChange(of: todayScrollRequest) { _, _ in
                         requestScrollToToday(using: proxy)
+                    }
+                    .onChange(of: isReloadingTimelineExternally) { _, isReloading in
+                        // A reload triggered outside this view (e.g. CloudKit changes syncing in
+                        // after the app returns from background) can reshuffle every loaded date
+                        // section's content/height. Freeze viewport-driven date tracking for the
+                        // duration so the transient scroll geometry isn't misread as the user
+                        // having scrolled to an old date.
+                        if isReloading {
+                            freezesViewportDrivenUpdatesUntil = Date.distantFuture
+                        } else {
+                            freezesViewportDrivenUpdatesUntil = nil
+                            applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
+                        }
                     }
                     .onReceive(NotificationCenter.default.publisher(for: FutureTrip.didChangeNotification)) { _ in
                         restoreFutureTripTimelinePosition(using: proxy)
@@ -4775,6 +4797,8 @@ private struct ContinuousTimelineRow: View {
             Text(item.startTime.formatted(date: .omitted, time: .shortened))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(item.isTransport ? .secondary : .primary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .frame(width: ContinuousTimelineLayout.timeColumnWidth, alignment: .leading)
                 .padding(.top, 4)
 
@@ -5240,6 +5264,8 @@ private struct CurrentStayTimelineCard: View {
             Text(now.formatted(date: .omitted, time: .shortened))
                 .font(.subheadline.monospacedDigit().weight(.medium))
                 .foregroundStyle(.primary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .frame(width: ContinuousTimelineLayout.timeColumnWidth, alignment: .leading)
                 .padding(.top, 24)
             VStack(spacing: 0) {

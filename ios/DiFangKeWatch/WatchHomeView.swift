@@ -3,21 +3,47 @@ import SwiftUI
 struct WatchHomeView: View {
     @EnvironmentObject private var store: WatchStore
     @State private var selectedPage = "current"
+    @State private var showingMap = false
 
     var body: some View {
-        TabView(selection: $selectedPage) {
-            ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
-                FutureTripPage(trip: trip)
-                    .tag("future-\(trip.id)")
+        NavigationStack {
+            TabView(selection: $selectedPage) {
+                ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
+                    FutureTripPage(trip: trip)
+                        .tag("future-\(trip.id)")
+                }
+                CurrentPlaceView()
+                    .tag("current")
+                ForEach(store.snapshot.recentDays ?? []) { day in
+                    DayTimelinePage(day: day)
+                        .tag("day-\(day.date.timeIntervalSince1970)")
+                }
             }
-            CurrentPlaceView()
-                .tag("current")
-            ForEach(store.snapshot.recentDays ?? []) { day in
-                DayTimelinePage(day: day)
-                    .tag("day-\(day.date.timeIntervalSince1970)")
+            .tabViewStyle(.page(indexDisplayMode: .automatic))
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showingMap = true
+                    } label: {
+                        Image(systemName: "map")
+                    }
+                }
+            }
+            .navigationDestination(isPresented: $showingMap) {
+                WatchMapView(day: selectedDaySnapshot)
             }
         }
-        .tabViewStyle(.page(indexDisplayMode: .never))
+    }
+
+    private var selectedDaySnapshot: WatchDaySnapshot? {
+        if selectedPage.hasPrefix("day-"),
+           let day = store.snapshot.recentDays?.first(where: { "day-\($0.date.timeIntervalSince1970)" == selectedPage }) {
+            return day
+        }
+        if let today = store.snapshot.recentDays?.first(where: { Calendar.current.isDateInToday($0.date) }) {
+            return today
+        }
+        return WatchDaySnapshot(date: Calendar.current.startOfDay(for: Date()), timeline: store.snapshot.todayTimeline ?? [])
     }
 }
 
@@ -66,7 +92,7 @@ private struct CurrentPlaceView: View {
     }
 }
 
-private func activityColor(_ hex: String?) -> Color {
+func activityColor(_ hex: String?) -> Color {
     guard let hex else { return .blue }
     let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
     guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .blue }
@@ -164,7 +190,9 @@ private struct WatchTimelineRow: View {
             Text(item.startTime.formatted(date: .omitted, time: .shortened))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 34, alignment: .leading)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minWidth: 34, alignment: .leading)
             Image(systemName: item.icon)
                 .foregroundStyle(activityColor(item.colorHex))
                 .frame(width: 16)

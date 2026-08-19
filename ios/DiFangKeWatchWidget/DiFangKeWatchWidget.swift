@@ -20,6 +20,15 @@ private struct ComplicationSnapshot: Codable {
     let todayFootprintCount: Int
     let todayDistance: Double
     let activities: [ComplicationActivity]
+    let todayTimeline: [ComplicationTimelineItem]?
+}
+
+private struct ComplicationTimelineItem: Codable {
+    let id: String
+    let startTime: Date
+    let endTime: Date
+    let colorHex: String?
+    let isTransport: Bool?
 }
 
 private struct ComplicationEntry: TimelineEntry {
@@ -112,24 +121,44 @@ private struct WatchComplicationView: View {
         return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
     }
 
+    private var dayTimelineRing: some View {
+        DayTimelineRing(
+            items: entry.snapshot?.todayTimeline ?? [],
+            currentFootprintID: entry.snapshot?.currentFootprintID,
+            date: entry.date
+        )
+    }
+
     @ViewBuilder
     var body: some View {
         switch family {
         case .accessoryCircular:
-            VStack(spacing: 1) {
-                Image(systemName: icon).font(.title3).foregroundStyle(color)
-                durationLabel.font(.caption2).lineLimit(1).minimumScaleFactor(0.65)
+            ZStack {
+                dayTimelineRing
+                VStack(spacing: 1) {
+                    Image(systemName: icon).font(.title3).foregroundStyle(color)
+                    durationLabel.font(.caption2).lineLimit(1).minimumScaleFactor(0.65)
+                }
             }
+            .padding(1)
             .widgetLabel(title)
         case .accessoryRectangular:
-            HStack(spacing: 8) {
-                Image(systemName: icon).font(.title2).foregroundStyle(color).frame(width: 24)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.headline).lineLimit(1)
-                    HStack(spacing: 2) { Text("已持续"); durationLabel }
-                        .font(.caption2)
-                    Text(todaySummary).font(.caption2).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Image(systemName: icon).font(.title2).foregroundStyle(color).frame(width: 24)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(title).font(.headline).lineLimit(1)
+                        HStack(spacing: 2) { Text("已持续"); durationLabel }
+                            .font(.caption2)
+                        Text(todaySummary).font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
+                DayTimelineBar(
+                    items: entry.snapshot?.todayTimeline ?? [],
+                    currentFootprintID: entry.snapshot?.currentFootprintID,
+                    date: entry.date
+                )
+                .frame(height: 6)
             }
         case .accessoryInline:
             HStack(spacing: 3) {
@@ -151,6 +180,146 @@ private struct WatchComplicationView: View {
     private var todaySummary: String {
         guard let snapshot = entry.snapshot else { return "等待 iPhone 同步" }
         return "今日 \(snapshot.todayFootprintCount) 个足迹"
+    }
+}
+
+/// A clock-face day: midnight is at 12 o'clock and each segment is clipped to
+/// the displayed calendar day.  Footprints sit above transport so an activity
+/// remains legible when records overlap.
+private struct DayTimelineRing: View {
+    let items: [ComplicationTimelineItem]
+    let currentFootprintID: String?
+    let date: Date
+
+    private let calendar = Calendar.current
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(.gray.opacity(0.10), lineWidth: 2.4)
+            Circle()
+                .trim(from: 0, to: elapsedDayFraction)
+                .stroke(.gray.opacity(0.42), lineWidth: 2.4)
+
+            ForEach(items.filter { $0.isTransport == true }, id: \.id) { item in
+                segment(for: item, color: .accentColor, lineWidth: 1.15)
+            }
+            ForEach(items.filter { $0.isTransport != true }, id: \.id) { item in
+                segment(
+                    for: item,
+                    color: color(from: item.colorHex),
+                    lineWidth: item.id == currentFootprintID ? 4.2 : 2.4
+                )
+            }
+        }
+        .rotationEffect(.degrees(-90))
+    }
+
+    @ViewBuilder
+    private func segment(for item: ComplicationTimelineItem, color: Color, lineWidth: CGFloat) -> some View {
+        let range = clippedFractionRange(for: item)
+        if range.length > 0 {
+            Circle()
+                .trim(from: range.start, to: range.start + range.length)
+                .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+        }
+    }
+
+    private func clippedFractionRange(for item: ComplicationTimelineItem) -> (start: Double, length: Double) {
+        let startOfDay = calendar.startOfDay(for: date)
+        guard let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) else { return (0, 0) }
+        let start = max(item.startTime, startOfDay)
+        let end = min(item.endTime, endOfDay)
+        guard end > start else { return (0, 0) }
+        let dayDuration = endOfDay.timeIntervalSince(startOfDay)
+        return (
+            max(0, start.timeIntervalSince(startOfDay) / dayDuration),
+            min(1, end.timeIntervalSince(start) / dayDuration)
+        )
+    }
+
+    private var elapsedDayFraction: Double {
+        let startOfDay = calendar.startOfDay(for: date)
+        guard let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) else { return 0 }
+        return min(1, max(0, date.timeIntervalSince(startOfDay) / endOfDay.timeIntervalSince(startOfDay)))
+    }
+
+    private func color(from hex: String?) -> Color {
+        guard let hex else { return .accentColor }
+        let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .accentColor }
+        return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
+    }
+}
+
+/// The rectangular family has room for a linear day clock.  The faint tail is
+/// time that has not arrived yet; the stronger gray baseline is elapsed time
+/// without a recorded footprint.
+private struct DayTimelineBar: View {
+    let items: [ComplicationTimelineItem]
+    let currentFootprintID: String?
+    let date: Date
+
+    private let calendar = Calendar.current
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.gray.opacity(0.10))
+                Capsule()
+                    .fill(.gray.opacity(0.42))
+                    .frame(width: geometry.size.width * elapsedDayFraction)
+
+                ForEach(items.filter { $0.isTransport == true }, id: \.id) { item in
+                    segment(for: item, in: geometry.size, color: .accentColor, height: 2)
+                }
+                ForEach(items.filter { $0.isTransport != true }, id: \.id) { item in
+                    segment(
+                        for: item,
+                        in: geometry.size,
+                        color: color(from: item.colorHex),
+                        height: item.id == currentFootprintID ? 6 : 4
+                    )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func segment(for item: ComplicationTimelineItem, in size: CGSize, color: Color, height: CGFloat) -> some View {
+        let range = clippedFractionRange(for: item)
+        if range.length > 0 {
+            Capsule()
+                .fill(color)
+                .frame(width: max(1.5, size.width * range.length), height: height)
+                .offset(x: size.width * range.start)
+        }
+    }
+
+    private func clippedFractionRange(for item: ComplicationTimelineItem) -> (start: Double, length: Double) {
+        let startOfDay = calendar.startOfDay(for: date)
+        guard let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) else { return (0, 0) }
+        let start = max(item.startTime, startOfDay)
+        let end = min(item.endTime, endOfDay)
+        guard end > start else { return (0, 0) }
+        let dayDuration = endOfDay.timeIntervalSince(startOfDay)
+        return (
+            max(0, start.timeIntervalSince(startOfDay) / dayDuration),
+            min(1, end.timeIntervalSince(start) / dayDuration)
+        )
+    }
+
+    private var elapsedDayFraction: CGFloat {
+        let startOfDay = calendar.startOfDay(for: date)
+        guard let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) else { return 0 }
+        return CGFloat(min(1, max(0, date.timeIntervalSince(startOfDay) / endOfDay.timeIntervalSince(startOfDay))))
+    }
+
+    private func color(from hex: String?) -> Color {
+        guard let hex else { return .accentColor }
+        let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .accentColor }
+        return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
     }
 }
 

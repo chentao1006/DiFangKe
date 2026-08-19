@@ -13,6 +13,7 @@
 		19D19D677339112CC0F14ED5 /* Place.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7338D01A9D36898197763A48 /* Place.swift */; };
 		32BD3192C18CDD34C8B5EB24 /* TimelineEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */; };
 		441650B9A8F33BB36DD1822C /* WatchHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6B399C338BB4612145C364B /* WatchHomeView.swift */; };
+		A1D3F511AA001001AA001011 /* WatchMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D3F510AA001001AA001010 /* WatchMapView.swift */; };
 		4A0BE9B15A8560F2969D5C2D /* Secrets.plist in Resources */ = {isa = PBXBuildFile; fileRef = AA55D128BD63CB08D5888227 /* Secrets.plist */; };
 		51C5B1CA5308C8B8E9EEDFBC /* FootprintDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DA88C94F7EAC66D28F00A84 /* FootprintDetailView.swift */; };
 		537DA85FA44FBE884BDF342B /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C0E6E94F0AB674372B9577B9 /* Foundation.framework */; };
@@ -217,6 +218,7 @@
 		C68EFC112F8AA05900C1F901 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		C6ACF7662F95110B006D9536 /* RawPointsListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawPointsListView.swift; sourceTree = "<group>"; };
 		C6B399C338BB4612145C364B /* WatchHomeView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchHomeView.swift; sourceTree = "<group>"; };
+		A1D3F510AA001001AA001010 /* WatchMapView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchMapView.swift; sourceTree = "<group>"; };
 		C6D2DE392F90E39800466878 /* HealthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthManager.swift; sourceTree = "<group>"; };
 		C6FC95002F9A67B2004E1FE6 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiFangKeWatchApp.swift; sourceTree = "<group>"; };
@@ -451,6 +453,7 @@
 				A1D3F503AA001001AA001001 /* AppIcon.icon */,
 				C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */,
 				C6B399C338BB4612145C364B /* WatchHomeView.swift */,
+				A1D3F510AA001001AA001010 /* WatchMapView.swift */,
 				75C47077CF83E07E81527983 /* WatchStore.swift */,
 				9F3945441A99914928D9C615 /* DiFangKeWatch.entitlements */,
 			);
@@ -630,6 +633,7 @@
 			files = (
 				FE83FA99A0DCD7ACEF34A49F /* DiFangKeWatchApp.swift in Sources */,
 				441650B9A8F33BB36DD1822C /* WatchHomeView.swift in Sources */,
+				A1D3F511AA001001AA001011 /* WatchMapView.swift in Sources */,
 				D9F2FA2BC5D3F85EF9E1621C /* WatchStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

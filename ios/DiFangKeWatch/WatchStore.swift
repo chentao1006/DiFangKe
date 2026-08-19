@@ -17,6 +17,11 @@ struct WatchTripSnapshot: Codable, Hashable, Identifiable {
     let hasArrivalTime: Bool
 }
 
+struct WatchCoordinate: Codable, Hashable {
+    let lat: Double
+    let lon: Double
+}
+
 struct WatchTimelineItem: Codable, Hashable, Identifiable {
     let id: String
     let startTime: Date
@@ -24,6 +29,10 @@ struct WatchTimelineItem: Codable, Hashable, Identifiable {
     let title: String
     let icon: String
     let colorHex: String?
+    let isTransport: Bool?
+    let latitude: Double?
+    let longitude: Double?
+    let routeCoordinates: [WatchCoordinate]?
 }
 
 struct WatchDaySnapshot: Codable, Hashable, Identifiable {

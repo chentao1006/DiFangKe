@@ -35,6 +35,11 @@ struct WatchTripSnapshot: Codable {
     let hasArrivalTime: Bool
 }
 
+struct WatchCoordinate: Codable {
+    let lat: Double
+    let lon: Double
+}
+
 struct WatchTimelineItem: Codable {
     let id: String
     let startTime: Date
@@ -42,6 +47,14 @@ struct WatchTimelineItem: Codable {
     let title: String
     let icon: String
     let colorHex: String?
+    /// Kept optional so a Watch with a previously persisted snapshot can still
+    /// decode it while the iPhone is updating the shared complication data.
+    let isTransport: Bool?
+    /// Footprint location; nil for transport items, which carry `routeCoordinates` instead.
+    let latitude: Double?
+    let longitude: Double?
+    /// Downsampled transport route, kept short so the payload stays small over WatchConnectivity.
+    let routeCoordinates: [WatchCoordinate]?
 }
 
 struct WatchDaySnapshot: Codable {
@@ -167,7 +180,11 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
                     endTime: footprint.endTime,
                     title: footprint.address?.isEmpty == false ? footprint.address! : "未知地点",
                     icon: activity?.icon ?? "mappin.and.ellipse",
-                    colorHex: activity?.colorHex
+                    colorHex: activity?.colorHex,
+                    isTransport: false,
+                    latitude: footprint.latitude,
+                    longitude: footprint.longitude,
+                    routeCoordinates: nil
                 )
             }
             + transports.map { transport in
@@ -178,7 +195,11 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
                     endTime: transport.endTime,
                     title: type?.localizedName ?? "出行",
                     icon: type?.sfSymbol ?? "arrow.triangle.swap",
-                    colorHex: nil
+                    colorHex: nil,
+                    isTransport: true,
+                    latitude: nil,
+                    longitude: nil,
+                    routeCoordinates: Self.downsampledRoute(from: transport.pointsData)
                 )
             }
             ).sorted { $0.startTime < $1.startTime }
@@ -232,6 +253,21 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
         try? context.save()
         syncSnapshot()
         NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+    }
+
+    /// Watch map routes only need to convey the shape of a trip on a tiny screen, so the
+    /// full GPS trace is thinned to a fixed point budget to keep the WatchConnectivity payload small.
+    private static func downsampledRoute(from pointsData: Data, maxCount: Int = 40) -> [WatchCoordinate]? {
+        guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: pointsData), decoded.count >= 2 else { return nil }
+        guard decoded.count > maxCount else {
+            return decoded.map { WatchCoordinate(lat: $0.lat, lon: $0.lon) }
+        }
+        let step = Double(decoded.count - 1) / Double(maxCount - 1)
+        return (0..<maxCount).map { i in
+            let index = min(Int((Double(i) * step).rounded()), decoded.count - 1)
+            let point = decoded[index]
+            return WatchCoordinate(lat: point.lat, lon: point.lon)
+        }
     }
 
     private func applyPendingActivityChangeIfNeeded() {
