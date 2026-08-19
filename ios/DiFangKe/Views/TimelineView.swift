@@ -2494,7 +2494,10 @@ private struct ContinuousTimelineSheet: View {
                         // after the app returns from background) can reshuffle every loaded date
                         // section's content/height. Freeze viewport-driven date tracking for the
                         // duration so the transient scroll geometry isn't misread as the user
-                        // having scrolled to an old date.
+                        // having scrolled to an old date. Leave the initial launch positioning
+                        // alone entirely — it manages this same freeze on its own timeline, and
+                        // stepping on it here would race the "stay on today at launch" behavior.
+                        guard hasCompletedInitialTimelinePositioning else { return }
                         if isReloading {
                             freezesViewportDrivenUpdatesUntil = Date.distantFuture
                         } else {
