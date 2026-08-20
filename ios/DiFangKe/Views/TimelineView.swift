@@ -1942,6 +1942,7 @@ private struct ContinuousTimelineSheet: View {
     }
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var activityTypes: [ActivityType]
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @State private var lastPrefetchOldestDate: Date?
@@ -2504,6 +2505,18 @@ private struct ContinuousTimelineSheet: View {
                             freezesViewportDrivenUpdatesUntil = nil
                             applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
                         }
+                    }
+                    .onChange(of: scenePhase) { oldPhase, newPhase in
+                        // Returning from background can make the LazyVStack's underlying
+                        // UICollectionView remount/relayout its rows, which briefly reports
+                        // incorrect frames through ContinuousTimelineDateFramePreferenceKey.
+                        // Freeze viewport-driven date tracking across that window so those
+                        // transient frames can't get misread as the user having scrolled to
+                        // an old date. Gate on initial positioning so this can't fire during
+                        // (and interfere with) the cold-launch "stay on today" sequence.
+                        guard newPhase == .active, oldPhase != .active else { return }
+                        guard hasCompletedInitialTimelinePositioning else { return }
+                        freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.6)
                     }
                     .onReceive(NotificationCenter.default.publisher(for: FutureTrip.didChangeNotification)) { _ in
                         restoreFutureTripTimelinePosition(using: proxy)
@@ -3418,10 +3431,17 @@ private struct ContinuousTimelineSheet: View {
         let targetDate = Calendar.current.startOfDay(for: activeTimelineDate)
         guard dates.contains(targetDate) else { return }
 
+        // Mirrors scrollToToday's target/anchor choice: when there's an ongoing stay or
+        // transport, center that card in the timeline instead of pinning it to the bottom.
+        let hasCurrentStatus = locationManager.potentialStopStartLocation != nil || locationManager.uiIsMoving
+
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             proxy.scrollTo(ScrollTarget.date(targetDate), anchor: .bottom)
+            if hasCurrentStatus {
+                proxy.scrollTo(ScrollTarget.now, anchor: .center)
+            }
         }
         applySelectedCalendarDate(targetDate)
     }

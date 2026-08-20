@@ -301,16 +301,14 @@ struct SettingsView: View {
                 .foregroundColor(.primary)
                 
                 Button(action: {
-                    let email = "chentao1006@me.com"
-                    let subject = "地方客（DiFangKe）意见反馈"
-                    if let url = URL(string: "mailto:\(email)?subject=\(subject)".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "") {
+                    if let url = URL(string: "https://github.com/chentao1006/DiFangKe/issues") {
                         UIApplication.shared.open(url)
                     }
                 }) {
                     HStack {
                         Text("反馈建议")
                         Spacer()
-                        Text("chentao1006@me.com")
+                        Text("GitHub Issues")
                             .foregroundColor(.secondary)
                     }
                 }
