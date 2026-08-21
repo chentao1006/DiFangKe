@@ -263,7 +263,7 @@ struct LocationSearchSheet: View {
         search.start { response, error in
             isSearching = false
             guard let response = response, error == nil else { return }
-            self.searchResults = response.mapItems.map { item in
+            let mappedResults = response.mapItems.map { item in
                 let addr = [item.placemark.thoroughfare, item.placemark.subThoroughfare, item.placemark.locality, item.placemark.administrativeArea].compactMap { $0 }.joined(separator: " ")
                 return LocationSuggestion(
                     name: item.name ?? "位置", 
@@ -271,6 +271,20 @@ struct LocationSearchSheet: View {
                     coordinate: item.placemark.coordinate,
                     category: item.pointOfInterestCategory?.rawValue
                 )
+            }
+            // Apple Maps does not guarantee text-search ordering by distance.
+            // A footprint's coordinate is the editing anchor, so nearby
+            // matches must be shown first.
+            if let center = coordinate {
+                let origin = CLLocation(latitude: center.latitude, longitude: center.longitude)
+                self.searchResults = mappedResults.sorted {
+                    let firstDistance = origin.distance(from: CLLocation(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude))
+                    let secondDistance = origin.distance(from: CLLocation(latitude: $1.coordinate.latitude, longitude: $1.coordinate.longitude))
+                    if abs(firstDistance - secondDistance) > 1 { return firstDistance < secondDistance }
+                    return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                }
+            } else {
+                self.searchResults = mappedResults
             }
         }
     }

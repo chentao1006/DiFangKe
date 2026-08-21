@@ -46,78 +46,6 @@ private enum ActivityRankScope: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
-private func simplifiedChineseName(_ value: String) -> String {
-    value.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? value
-}
-
-private struct StatisticsGeographyCandidate: Sendable {
-    let footprintID: UUID
-    let latitude: Double
-    let longitude: Double
-    let address: String?
-}
-
-private struct StatisticsGeographyResult: Sendable {
-    let footprintID: UUID
-    let countryCode: String
-    let countryName: String
-    let cityName: String
-}
-
-/// Keeps reverse-geocoding off the main actor. The statistics view only receives
-/// completed value results in small batches, so MapKit/SwiftUI stays responsive.
-private actor StatisticsGeographyResolver {
-    private let geocoder = CLGeocoder()
-
-    func resolve(_ candidate: StatisticsGeographyCandidate) async -> StatisticsGeographyResult? {
-        let location = CLLocation(latitude: candidate.latitude, longitude: candidate.longitude)
-        var countryCode: String?
-        var countryName: String?
-        var cityName: String?
-
-        do {
-            let placemarks = try await geocoder.reverseGeocodeLocation(location)
-            if let placemark = placemarks.first {
-                countryCode = placemark.isoCountryCode
-                countryName = countryCode.flatMap {
-                    Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
-                } ?? placemark.country
-                cityName = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea
-            }
-        } catch { }
-
-        if countryCode == nil || countryName?.isEmpty != false || cityName?.isEmpty != false,
-           let overseas = await OpenStreetMapGeocoder.shared.lookupInternationalHierarchy(coordinate: location.coordinate) {
-            countryCode = overseas.countryCode ?? countryCode
-            countryName = overseas.countryName ?? countryName
-            cityName = overseas.cityName ?? cityName
-        }
-
-        if (countryCode == nil || countryName?.isEmpty != false || cityName?.isEmpty != false),
-           let savedHierarchy = DFKGeographicHierarchy.fromPersistedForeignAddress(candidate.address) {
-            countryCode = savedHierarchy.countryCode
-            countryName = savedHierarchy.countryName
-            cityName = savedHierarchy.cityName
-        }
-
-        guard let countryCode,
-              let countryName, !countryName.isEmpty,
-              let cityName, !cityName.isEmpty else {
-            return nil
-        }
-        return StatisticsGeographyResult(
-            footprintID: candidate.footprintID,
-            countryCode: countryCode,
-            countryName: simplifiedChineseName(countryName),
-            cityName: simplifiedChineseName(cityName)
-        )
-    }
-
-    func cancel() {
-        geocoder.cancelGeocode()
-    }
-}
-
 struct HistoryStatisticsView: View {
     @Environment(\.modelContext) private var modelContext
     var onClose: () -> Void = {}
@@ -138,9 +66,6 @@ struct HistoryStatisticsView: View {
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @State private var aiSummary: String? = nil
     @State private var isGeneratingSummary = false
-    @State private var aiSummaryTask: Task<Void, Never>?
-    @State private var aiSummaryGeocoder: CLGeocoder?
-    @State private var aiSummaryRequestID = UUID()
     // Cache structure: [RangeRawValue: (text: String, timestamp: Double)]
     @State private var summaryCache: [String: [String: Any]] = (UserDefaults.standard.dictionary(forKey: "statistics_ai_cache") as? [String: [String: Any]]) ?? [:]
     
@@ -151,9 +76,8 @@ struct HistoryStatisticsView: View {
     @State private var activityRankScope: ActivityRankScope = .footprints
     @State private var geographicBackfillAttempts: [UUID: Int] = [:]
     @State private var isResolvingGeographies = false
-    @State private var geographyBackfillTask: Task<Void, Never>?
-    @State private var geographyBackfillResolver: StatisticsGeographyResolver?
-    @State private var geographyBackfillRequestID = UUID()
+    @State private var geographyBackfillToast: String?
+    @State private var geographyBackfillError: String?
     
     // Filtered footprints based on range
     private var filteredFootprints: [Footprint] {
@@ -201,9 +125,44 @@ struct HistoryStatisticsView: View {
             }
         }
         .background(Color.dfkBackground)
+        .overlay(alignment: .bottom) {
+            if let geographyBackfillToast {
+                HStack(spacing: 8) {
+                    if isResolvingGeographies {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(geographyBackfillToast)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(2)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.black.opacity(0.78), in: Capsule())
+                .padding(.horizontal, 24)
+                .padding(.bottom, 20)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .alert("地点识别失败", isPresented: Binding(
+            get: { geographyBackfillError != nil },
+            set: { if !$0 { geographyBackfillError = nil } }
+        )) {
+            Button("知道了", role: .cancel) { geographyBackfillError = nil }
+        } message: {
+            Text(geographyBackfillError ?? "")
+        }
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text("往昔足迹")
+                HStack(spacing: 7) {
+                    Text("往昔足迹")
+                    if isResolvingGeographies {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("正在补齐国家和城市")
+                    }
+                }
             }
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 18) {
@@ -222,7 +181,6 @@ struct HistoryStatisticsView: View {
             }
         }
         .onChange(of: selectedRange) { _, _ in
-            stopGeographyBackfill()
             geographicBackfillAttempts.removeAll()
             updateAiSummary()
             updateMapPosition()
@@ -236,10 +194,6 @@ struct HistoryStatisticsView: View {
             withAnimation(.easeIn(duration: 0.6)) {
                 appearanceTrigger = true
             }
-        }
-        .onDisappear {
-            stopGeographyBackfill()
-            stopAiSummaryWork()
         }
         .fullScreenCover(isPresented: $showingFullMap) {
             FullHeatmapView(heatmapPoints: heatmapPoints, initialPosition: mapPosition)
@@ -365,9 +319,6 @@ struct HistoryStatisticsView: View {
     }
     
     private func generateAiSummary() {
-        stopAiSummaryWork()
-        let requestID = UUID()
-        aiSummaryRequestID = requestID
         let rangeAtStart = selectedRange
         let footprintsInScope = filteredFootprints
         guard !footprintsInScope.isEmpty else {
@@ -410,7 +361,7 @@ struct HistoryStatisticsView: View {
             }
         }
         
-        aiSummaryTask = Task { @MainActor in
+        Task {
             // 构建需要反查的代表性足迹列表
             var repsToGeocode: [Footprint] = []
             
@@ -435,20 +386,10 @@ struct HistoryStatisticsView: View {
             }
             
             let geocoder = CLGeocoder()
-            aiSummaryGeocoder = geocoder
-            defer {
-                if aiSummaryGeocoder === geocoder {
-                    aiSummaryGeocoder = nil
-                }
-                if requestID == aiSummaryRequestID {
-                    aiSummaryTask = nil
-                }
-            }
             var fpToCity: [UUID: String] = [:]
             var fpToCountry: [UUID: String] = [:]
             
             for fp in repsToGeocode {
-                guard !Task.isCancelled else { return }
                 let location = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
                 if let placemarks = try? await geocoder.reverseGeocodeLocation(location),
                    let placemark = placemarks.first {
@@ -549,12 +490,10 @@ struct HistoryStatisticsView: View {
             6. **多维推理**：如果照片多，可以说你喜欢记录；如果地点分散，说明你经常到处跑；如果集中，说明生活比较规律安稳。
             7. **语言与篇幅**：80字左右。语气必须平实、正常、干练，绝对不要过度抒情，绝对不要写得太文绉绉、不要肉麻。
             """
-            guard !Task.isCancelled else { return }
             
             OpenAIService.shared.getCustomSummary(prompt: prompt) { summary in
                 // 竞态过滤
-                guard rangeAtStart == self.selectedRange,
-                      requestID == self.aiSummaryRequestID else { return }
+                guard rangeAtStart == self.selectedRange else { return }
                 
                 withAnimation {
                     let finalized = summary ?? ""
@@ -572,15 +511,6 @@ struct HistoryStatisticsView: View {
                 }
             }
         }
-    }
-
-    private func stopAiSummaryWork() {
-        aiSummaryRequestID = UUID()
-        aiSummaryTask?.cancel()
-        aiSummaryTask = nil
-        aiSummaryGeocoder?.cancelGeocode()
-        aiSummaryGeocoder = nil
-        isGeneratingSummary = false
     }
     
     private func updateMapPosition() {
@@ -703,7 +633,7 @@ struct HistoryStatisticsView: View {
                     // 地图缩放变化时，动态重新聚类
                     updateHeatmapPoints(delta: context.region.span.latitudeDelta)
                 }
-                .frame(height: 220)
+                .frame(height: 280)
                 .cornerRadius(24)
                 .padding(.horizontal, 16)
                 .onTapGesture {
@@ -717,12 +647,7 @@ struct HistoryStatisticsView: View {
     private var frequentPlacesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                sectionHeader("常去地点", icon: "mappin.and.ellipse", horizontalPadding: 0)
-                if isResolvingGeographies {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityLabel("正在补齐国家和城市")
-                }
+                sectionHeader("常去地点排行", icon: "mappin.and.ellipse", horizontalPadding: 0)
 
                 Picker("地点排行维度", selection: $frequentPlaceRankScope) {
                     ForEach(FrequentPlaceRankScope.allCases) { scope in
@@ -797,7 +722,7 @@ struct HistoryStatisticsView: View {
     private var activityRankSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 8) {
-                sectionHeader("活动偏好", icon: "medal.fill", horizontalPadding: 0)
+                sectionHeader("活动偏好排行", icon: "medal.fill", horizontalPadding: 0)
                 Picker("活动排行维度", selection: $activityRankScope) {
                     ForEach(ActivityRankScope.allCases) { scope in
                         Text(scope.rawValue).tag(scope)
@@ -968,9 +893,6 @@ struct HistoryStatisticsView: View {
     private func getFrequentPlacesData() -> [FrequentPlaceItem] {
         requestMissingRankingGeographies()
         var groups: [String: (name: String, address: String, count: Int, duration: TimeInterval)] = [:]
-        let hasMultipleCountries = Set(filteredFootprints.compactMap { footprint in
-            footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines)
-        }.filter { !$0.isEmpty }).count > 1
         
         for fp in filteredFootprints {
             var address = ""
@@ -999,23 +921,11 @@ struct HistoryStatisticsView: View {
             // footprints that were recorded before an address was available.
             if name.isEmpty || name.contains("未知") || (frequentPlaceRankScope == .place && address.isEmpty) { continue }
             
-            let subtitle: String
-            let key: String
-            switch frequentPlaceRankScope {
-            case .country:
-                subtitle = ""
-                key = fp.countryCode ?? name
-            case .city:
-                subtitle = hasMultipleCountries ? simplifiedChineseName(fp.countryName ?? "") : ""
-                key = "\(fp.countryCode ?? "")|\(name)"
-            case .place:
-                subtitle = address
-                key = name
-            }
+            let key = name
             if let existing = groups[key] {
                 groups[key] = (existing.name, existing.address, existing.count + 1, existing.duration + fp.duration)
             } else {
-                groups[key] = (name, subtitle, 1, fp.duration)
+                groups[key] = (name, frequentPlaceRankScope == .place ? address : "", 1, fp.duration)
             }
         }
         
@@ -1039,9 +949,9 @@ struct HistoryStatisticsView: View {
             return placeName
         case .country:
             guard let countryName, let countryCode else { return nil }
-            return "\(flagEmoji(for: countryCode)) \(simplifiedChineseName(countryName))"
+            return "\(flagEmoji(for: countryCode)) \(countryName)"
         case .city:
-            return cityName.map(simplifiedChineseName)
+            return cityName
         }
     }
 
@@ -1317,79 +1227,132 @@ struct HistoryStatisticsView: View {
         }
         guard !pending.isEmpty, !isResolvingGeographies else { return }
         isResolvingGeographies = true
-        let requestID = UUID()
-        geographyBackfillRequestID = requestID
-        let candidates = pending.map {
-            StatisticsGeographyCandidate(
-                footprintID: $0.footprintID,
-                latitude: $0.latitude,
-                longitude: $0.longitude,
-                address: $0.address
-            )
-        }
-        for candidate in candidates {
-            geographicBackfillAttempts[candidate.footprintID, default: 0] += 1
-        }
 
-        let resolver = StatisticsGeographyResolver()
-        geographyBackfillResolver = resolver
-        geographyBackfillTask = Task.detached(priority: .utility) {
-            var pendingResults: [StatisticsGeographyResult] = []
-            for candidate in candidates {
-                guard !Task.isCancelled else { break }
-                if let result = await resolver.resolve(candidate) {
-                    pendingResults.append(result)
+        Task { @MainActor in
+            defer { isResolvingGeographies = false }
+            let geocoder = CLGeocoder()
+            for footprint in pending {
+                geographicBackfillAttempts[footprint.footprintID, default: 0] += 1
+                let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
+                let footprintLabel = geographyBackfillLabel(for: footprint)
+                geographyBackfillToast = "正在处理：\(footprintLabel)"
+                var countryCode: String?
+                var countryName: String?
+                var cityName: String?
+                var appleResult = "Apple 未返回地点"
+                do {
+                    let placemarks = try await geocoder.reverseGeocodeLocation(location)
+                    guard let placemark = placemarks.first else {
+                        throw CLError(.geocodeFoundNoResult)
+                    }
+                    countryCode = placemark.isoCountryCode
+                    countryName = countryCode.flatMap {
+                        Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
+                    } ?? placemark.country
+                    cityName = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea
+                    appleResult = "Apple 返回不完整层级"
+                } catch {
+                    appleResult = "Apple 失败：\(error.localizedDescription)"
                 }
-                if pendingResults.count >= 12 {
-                    await applyRankingGeographies(pendingResults, requestID: requestID)
-                    pendingResults.removeAll(keepingCapacity: true)
+                // Overseas footprints use OpenStreetMap's separate reverse
+                // geocoder when Apple's result is absent or lacks hierarchy.
+                var source = "Apple"
+                if countryCode == nil || countryName?.isEmpty != false || cityName?.isEmpty != false {
+                    geographyBackfillToast = "正在处理：\(footprintLabel)（海外地点服务）"
+                    if let overseas = await OpenStreetMapGeocoder.shared.lookup(coordinate: location.coordinate) {
+                        countryCode = overseas.countryCode ?? countryCode
+                        countryName = overseas.countryName ?? countryName
+                        cityName = overseas.cityName ?? cityName
+                        source = "海外地点服务"
+                    } else {
+                        source = "海外地点服务无结果；\(appleResult)"
+                    }
                 }
-                // Keep public reverse-geocoding requests serial and paced.
+                // The footprint may already contain a usable overseas address
+                // even when both reverse-geocoders are unavailable. Use it as
+                // the final local fallback so a network miss cannot discard
+                // known data such as “泰国 普吉府 ...”.
+                if countryCode == nil || countryName?.isEmpty != false || cityName?.isEmpty != false,
+                   let inferred = inferGeographyFromAddress(footprint.address) {
+                    countryCode = countryCode ?? inferred.countryCode
+                    countryName = countryName ?? inferred.countryName
+                    cityName = cityName ?? inferred.cityName
+                    source = "足迹地址"
+                }
+                if let countryCode,
+                   let countryName, !countryName.isEmpty,
+                   let cityName, !cityName.isEmpty {
+                    footprint.countryCode = countryCode
+                    footprint.countryName = countryName
+                    footprint.cityName = cityName
+                    // The overseas service is intentionally serial and can be
+                    // slow for a historical year. Persist each success so its
+                    // country/city enters the ranking immediately.
+                    try? modelContext.save()
+                    allFootprints = Array(allFootprints)
+                    geographyBackfillToast = "已识别：\(countryName) · \(cityName)（\(source)）"
+                } else {
+                    let failure = "\(footprintLabel)\n\n\(source)"
+                    geographyBackfillToast = "未识别：\(footprintLabel)"
+                    geographyBackfillError = failure
+                }
+                // CLGeocoder is rate limited. Keep this serial and paced so a
+                // large historical year can finish instead of failing as a burst.
                 try? await Task.sleep(for: .milliseconds(350))
             }
-            if !pendingResults.isEmpty, !Task.isCancelled {
-                await applyRankingGeographies(pendingResults, requestID: requestID)
+            // The source is an explicit @State snapshot rather than @Query;
+            // reassign so the country/city picker redraws as rows are enriched.
+            allFootprints = Array(allFootprints)
+            if filteredFootprints.contains(where: {
+                ($0.countryCode == nil || $0.countryName == nil || $0.cityName == nil)
+                    && geographicBackfillAttempts[$0.footprintID, default: 0] < 3
+            }) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.resolveRankingGeographies()
+                }
+            } else if geographyBackfillToast != nil {
+                geographyBackfillToast = "地点补齐完成"
             }
-            await finishRankingGeographyBackfill(requestID: requestID)
         }
     }
 
-    @MainActor
-    private func applyRankingGeographies(_ results: [StatisticsGeographyResult], requestID: UUID) {
-        guard requestID == geographyBackfillRequestID else { return }
-        let resultsByID = Dictionary(uniqueKeysWithValues: results.map { ($0.footprintID, $0) })
-        var changed = false
-        for footprint in allFootprints {
-            guard let result = resultsByID[footprint.footprintID] else { continue }
-            footprint.countryCode = result.countryCode
-            footprint.countryName = result.countryName
-            footprint.cityName = result.cityName
-            changed = true
-        }
-        guard changed else { return }
-        try? modelContext.save()
-        // A single refresh per completed batch keeps the ranking current
-        // without repeatedly rebuilding the map and every chart.
-        allFootprints = Array(allFootprints)
+    private func geographyBackfillLabel(for footprint: Footprint) -> String {
+        let address = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !address.isEmpty { return address }
+        return footprint.startTime.formatted(.dateTime.year().month().day())
     }
 
-    @MainActor
-    private func finishRankingGeographyBackfill(requestID: UUID) {
-        guard requestID == geographyBackfillRequestID else { return }
-        geographyBackfillResolver = nil
-        isResolvingGeographies = false
-        geographyBackfillTask = nil
-    }
+    private func inferGeographyFromAddress(_ address: String?) -> (countryCode: String, countryName: String, cityName: String)? {
+        guard let address else { return nil }
+        let parts = address
+            .replacingOccurrences(of: ";", with: " ")
+            .replacingOccurrences(of: ",", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+        guard !parts.isEmpty else { return nil }
 
-    private func stopGeographyBackfill() {
-        geographyBackfillRequestID = UUID()
-        geographyBackfillTask?.cancel()
-        geographyBackfillTask = nil
-        if let resolver = geographyBackfillResolver {
-            Task { await resolver.cancel() }
+        let countries: [(aliases: [String], code: String, name: String)] = [
+            (["泰国", "泰國", "Thailand"], "TH", "泰国"),
+            (["日本", "Japan"], "JP", "日本"),
+            (["韩国", "韓國", "South Korea"], "KR", "韩国"),
+            (["新加坡", "Singapore"], "SG", "新加坡"),
+            (["马来西亚", "馬來西亞", "Malaysia"], "MY", "马来西亚"),
+            (["越南", "Vietnam"], "VN", "越南"),
+            (["美国", "美國", "United States", "USA"], "US", "美国"),
+            (["英国", "英國", "United Kingdom", "UK"], "GB", "英国")
+        ]
+        guard let match = countries.first(where: { country in
+            parts.contains { part in country.aliases.contains { part.localizedCaseInsensitiveContains($0) } }
+        }) else { return nil }
+
+        let countryIndex = parts.firstIndex { part in
+            match.aliases.contains { part.localizedCaseInsensitiveContains($0) }
+        } ?? 0
+        let city = parts.dropFirst(countryIndex + 1).first { part in
+            !part.isEmpty && !match.aliases.contains { part.localizedCaseInsensitiveContains($0) }
         }
-        geographyBackfillResolver = nil
-        isResolvingGeographies = false
+        guard let city, !city.isEmpty else { return nil }
+        return (match.code, match.name, city)
     }
 
     private func requestMissingRankingGeographies() {

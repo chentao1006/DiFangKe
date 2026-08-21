@@ -309,8 +309,6 @@ struct _MapPickerView: UIViewRepresentable {
 /// requires low request volume, so results are cached and calls are serialized
 /// to at most one per second.
 actor OpenStreetMapGeocoder {
-    private static let userAgent = "DiFangKe/1.0 (https://ct106.com; contact: support@ct106.com)"
-    private static let contactEmail = "support@ct106.com"
     struct Result: Sendable {
         let placeName: String
         let address: String
@@ -329,110 +327,51 @@ actor OpenStreetMapGeocoder {
 
     private var cache: [String: Result] = [:]
     private var searchCache: [String: [SearchResult]] = [:]
-    private var internationalHierarchyCache: [String: Result] = [:]
     private var nextRequestDate = Date.distantPast
 
     func lookup(coordinate: CLLocationCoordinate2D) async -> Result? {
         guard coordinate.latitude.isFinite, coordinate.longitude.isFinite,
-              CLLocationCoordinate2DIsValid(coordinate) else {
-            return nil
-        }
+              CLLocationCoordinate2DIsValid(coordinate) else { return nil }
 
         let key = String(format: "%.4f,%.4f", coordinate.latitude, coordinate.longitude)
-        if let cached = cache[key] {
-            return cached
-        }
+        if let cached = cache[key] { return cached }
 
-        await waitForRequestSlot()
+        // A precise road/POI lookup can legitimately return no feature for a
+        // valid overseas coordinate. Retry at an administrative zoom so the
+        // country/city statistics still get a usable result.
+        for zoom in [18, 10] {
+            await waitForRequestSlot()
 
-        var components = URLComponents(string: "https://nominatim.openstreetmap.org/reverse")!
-        components.queryItems = [
-            URLQueryItem(name: "format", value: "jsonv2"),
-            URLQueryItem(name: "lat", value: String(coordinate.latitude)),
-            URLQueryItem(name: "lon", value: String(coordinate.longitude)),
-            URLQueryItem(name: "zoom", value: "18"),
-            URLQueryItem(name: "addressdetails", value: "1"),
-            URLQueryItem(name: "accept-language", value: "zh-CN"),
-            URLQueryItem(name: "email", value: Self.contactEmail)
-        ]
-        guard let url = components.url else {
-            return nil
-        }
+            var components = URLComponents(string: "https://nominatim.openstreetmap.org/reverse")!
+            components.queryItems = [
+                URLQueryItem(name: "format", value: "jsonv2"),
+                URLQueryItem(name: "lat", value: String(coordinate.latitude)),
+                URLQueryItem(name: "lon", value: String(coordinate.longitude)),
+                URLQueryItem(name: "zoom", value: String(zoom)),
+                URLQueryItem(name: "addressdetails", value: "1"),
+                URLQueryItem(name: "accept-language", value: "zh-CN,th;q=0.8,en;q=0.6")
+            ]
+            guard let url = components.url else { continue }
 
-        var request = URLRequest(url: url)
-        // Public Nominatim commonly responds in ~5 seconds from this region;
-        // eight seconds is too tight once mobile DNS/TLS latency is included.
-        request.timeoutInterval = 20
-        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+            var request = URLRequest(url: url)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.timeoutInterval = 8
+            request.setValue("DiFangKe iOS reverse-geocoding fallback", forHTTPHeaderField: "User-Agent")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                return nil
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else { continue }
+                let payload = try JSONDecoder().decode(NominatimReverseResponse.self, from: data)
+                if let result = makeResult(from: payload.address ?? [:], displayName: payload.displayName) {
+                    cache[key] = result
+                    return result
+                }
+            } catch {
+                continue
             }
-            guard httpResponse.statusCode == 200 else {
-                return nil
-            }
-            let payload = try JSONDecoder().decode(NominatimReverseResponse.self, from: data)
-            guard let result = makeResult(from: payload.address) else {
-                return nil
-            }
-            cache[key] = result
-            return result
-        } catch {
-            return nil
         }
-    }
-
-    /// Country/city statistics need a globally reachable hierarchy service,
-    /// not a POI search result. Try BigDataCloud first, then retain Nominatim
-    /// as a fallback for networks where it is available.
-    func lookupInternationalHierarchy(coordinate: CLLocationCoordinate2D) async -> Result? {
-        guard coordinate.latitude.isFinite, coordinate.longitude.isFinite,
-              CLLocationCoordinate2DIsValid(coordinate) else {
-            return nil
-        }
-        let key = String(format: "%.4f,%.4f", coordinate.latitude, coordinate.longitude)
-        if let cached = internationalHierarchyCache[key] {
-            return cached
-        }
-
-        var components = URLComponents(string: "https://api.bigdatacloud.net/data/reverse-geocode-client")!
-        components.queryItems = [
-            URLQueryItem(name: "latitude", value: String(coordinate.latitude)),
-            URLQueryItem(name: "longitude", value: String(coordinate.longitude)),
-            URLQueryItem(name: "localityLanguage", value: "zh")
-        ]
-        guard let url = components.url else { return await lookup(coordinate: coordinate) }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 12
-        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                return await lookup(coordinate: coordinate)
-            }
-            guard httpResponse.statusCode == 200 else {
-                return await lookup(coordinate: coordinate)
-            }
-            let payload = try JSONDecoder().decode(BigDataCloudReverseResponse.self, from: data)
-            guard let rawCode = payload.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !rawCode.isEmpty,
-                  let rawCity = (payload.city ?? payload.locality ?? payload.principalSubdivision)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !rawCity.isEmpty else {
-                return await lookup(coordinate: coordinate)
-            }
-            let countryCode = rawCode.uppercased()
-            let countryName = Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: countryCode)
-                ?? payload.countryName?.split(separator: ";", maxSplits: 1).first.map(String.init)
-                ?? countryCode
-            let result = Result(placeName: rawCity, address: "\(countryName) \(rawCity)", countryCode: countryCode, countryName: countryName, cityName: rawCity)
-            internationalHierarchyCache[key] = result
-            return result
-        } catch {
-            return await lookup(coordinate: coordinate)
-        }
+        return nil
     }
 
     func search(query: String) async -> [SearchResult] {
@@ -447,14 +386,13 @@ actor OpenStreetMapGeocoder {
             URLQueryItem(name: "q", value: normalizedQuery),
             URLQueryItem(name: "limit", value: "5"),
             URLQueryItem(name: "addressdetails", value: "1"),
-            URLQueryItem(name: "accept-language", value: "zh-CN"),
-            URLQueryItem(name: "email", value: Self.contactEmail)
+            URLQueryItem(name: "accept-language", value: "zh-CN")
         ]
         guard let url = components.url else { return [] }
 
         var request = URLRequest(url: url)
-        request.timeoutInterval = 20
-        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 8
+        request.setValue("DiFangKe iOS place-search fallback", forHTTPHeaderField: "User-Agent")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -485,7 +423,7 @@ actor OpenStreetMapGeocoder {
         nextRequestDate = Date().addingTimeInterval(1)
     }
 
-    private func makeResult(from address: [String: String]) -> Result? {
+    private func makeResult(from address: [String: String], displayName: String? = nil) -> Result? {
         func value(_ keys: String...) -> String? {
             keys.lazy.compactMap { key in
                 guard let text = address[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
@@ -501,21 +439,23 @@ actor OpenStreetMapGeocoder {
         let countryCode = value("country_code")?.uppercased()
         let country = value("country")
             ?? countryCode.flatMap { Locale(identifier: "zh_CN").localizedString(forRegionCode: $0) }
-        let city = value("city", "town", "village", "municipality", "county")
-        let region = value("state", "state_district", "province")
+        let city = value("city", "town", "village", "municipality", "county", "district")
+        let region = value("state", "state_district", "province", "region")
         let locality = value("suburb", "city_district", "neighbourhood")
         let road = value("road", "pedestrian", "residential")
         let houseNumber = value("house_number")
         let placeName = value("amenity", "building", "shop", "tourism") ?? city ?? region ?? country
+            ?? displayName?.split(separator: ",", maxSplits: 1).first.map(String.init)
         guard let placeName else { return nil }
 
         let address = countryCode == "CN"
             ? unique([city, locality, road, houseNumber]).joined()
             : unique([country, region, city, locality, road, houseNumber]).joined(separator: " ")
-        guard !address.isEmpty else { return nil }
+        let resolvedAddress = address.isEmpty ? (displayName ?? "") : address
+        guard !resolvedAddress.isEmpty else { return nil }
         return Result(
             placeName: placeName,
-            address: address,
+            address: resolvedAddress,
             countryCode: countryCode,
             countryName: country,
             cityName: city ?? region
@@ -524,43 +464,12 @@ actor OpenStreetMapGeocoder {
 }
 
 private struct NominatimReverseResponse: Decodable {
-    let address: [String: String]
-}
+    let address: [String: String]?
+    let displayName: String?
 
-private struct BigDataCloudReverseResponse: Decodable {
-    let countryName: String?
-    let countryCode: String?
-    let principalSubdivision: String?
-    let city: String?
-    let locality: String?
-}
-
-/// Historical footprints may already have a localized reverse-geocoded address
-/// from the recording-time provider even when today's online services are
-/// unavailable. This is a migration fallback for overseas records only; it
-/// persists country/city as proper fields rather than ranking by address text.
-enum DFKGeographicHierarchy {
-    struct Value {
-        let countryCode: String
-        let countryName: String
-        let cityName: String
-    }
-
-    static func fromPersistedForeignAddress(_ address: String?) -> Value? {
-        let text = address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !text.isEmpty else { return nil }
-        let locale = Locale(identifier: "zh_Hans_CN")
-        let countries = Locale.isoRegionCodes.compactMap { code -> (String, String)? in
-            guard code != "CN", let name = locale.localizedString(forRegionCode: code), !name.isEmpty else { return nil }
-            return (code, name)
-        }.sorted { $0.1.count > $1.1.count }
-        guard let (countryCode, countryName) = countries.first(where: { text.hasPrefix($0.1) }) else {
-            return nil
-        }
-        let remainder = text.dropFirst(countryName.count).trimmingCharacters(in: .whitespacesAndNewlines)
-        let city = remainder.split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == "，" || $0 == "、" }).first.map(String.init) ?? ""
-        guard !city.isEmpty else { return nil }
-        return Value(countryCode: countryCode, countryName: countryName, cityName: city)
+    enum CodingKeys: String, CodingKey {
+        case address
+        case displayName = "display_name"
     }
 }
 

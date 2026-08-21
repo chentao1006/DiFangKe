@@ -1841,19 +1841,20 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 let base = workingSorted[i]
                 let next = workingSorted[i+1]
 
-                // 自动维护绝不能改写人工确认或编辑过的足迹。它们是用户的
-                // 明确时间线边界，合并后会在下次启动的 gap filling 中反复出现。
-                guard !base.isUserModifiedForDailySummary,
-                      !next.isUserModifiedForDailySummary else {
-                    i += 1
-                    continue
-                }
-
                 // 时间间隔：负数表示重叠，视同可合并
                 let timeGap = next.startTime.timeIntervalSince(base.endTime)
                 let baseLoc = CLLocation(latitude: base.latitude, longitude: base.longitude)
                 let nextLoc = CLLocation(latitude: next.latitude, longitude: next.longitude)
                 let dist = baseLoc.distance(from: nextLoc)
+
+                // 人工编辑仍是保护信号，但不能阻止“同一地点、连续时间”的
+                // 两条足迹合并。时间调整会把足迹标记为 manual；如果这里
+                // 直接跳过，就会留下用户截图中的重复停留记录。
+                let isSamePlace = (base.placeID != nil && base.placeID == next.placeID) || dist <= mergeDist
+                if (base.isUserModifiedForDailySummary || next.isUserModifiedForDailySummary) && !isSamePlace {
+                    i += 1
+                    continue
+                }
 
                 // 硬规则：若两段停留之间存在交通记录，则禁止合并，避免“出门回来仍是一条长足迹”。
                 let bEnd = base.endTime
@@ -2069,16 +2070,19 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             let base = recentFps[i]
             let next = recentFps[i + 1]
 
-            // 与启动时的 consolidateFootprints 保持同一条边界：人工记录
-            // 不能由实时合并任务自动删除或延长。
-            guard !base.isUserModifiedForDailySummary,
-                  !next.isUserModifiedForDailySummary else {
+            let bEnd = base.endTime
+            let nStart = next.startTime
+
+            let baseLoc = CLLocation(latitude: base.latitude, longitude: base.longitude)
+            let nextLoc = CLLocation(latitude: next.latitude, longitude: next.longitude)
+            let isSamePlace = (base.placeID != nil && base.placeID == next.placeID)
+                || baseLoc.distance(from: nextLoc) <= AppConfig.shared.mergeDistanceThreshold
+            // 人工编辑仍不能跨地点合并；但时间调整后的同地点足迹仍要
+            // 按连续停留处理，避免新记录重复出现在时间线上。
+            if (base.isUserModifiedForDailySummary || next.isUserModifiedForDailySummary) && !isSamePlace {
                 i += 1
                 continue
             }
-            
-            let bEnd = base.endTime
-            let nStart = next.startTime
 
             let calendar = Calendar.current
             let baseIsSameDay = calendar.isDate(base.startTime, inSameDayAs: base.endTime.addingTimeInterval(-0.001))
@@ -2101,21 +2105,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             if timeGap > AppConfig.shared.stayMergeGapThreshold {
                 i += 1
                 continue
-            }
-            
-            var isSamePlace = false
-            if let pid = base.placeID, pid == next.placeID {
-                isSamePlace = true
-            } else {
-                let lat1 = base.latitude
-                let lon1 = base.longitude
-                let lat2 = next.latitude
-                let lon2 = next.longitude
-                let loc1 = CLLocation(latitude: lat1, longitude: lon1)
-                let loc2 = CLLocation(latitude: lat2, longitude: lon2)
-                if loc1.distance(from: loc2) < AppConfig.shared.mergeDistanceThreshold {
-                    isSamePlace = true
-                }
             }
             
             if isSamePlace {
@@ -3401,14 +3390,36 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let footprintID = footprint.footprintID
 
         geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
-            guard let placemark = placemarks?.first else { return }
-            let countryCode = placemark.isoCountryCode
-            let countryName = countryCode.flatMap {
-                Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
-            } ?? placemark.country
-            let cityName = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea
-
             Task { @MainActor [weak self] in
+                var countryCode: String?
+                var countryName: String?
+                var cityName: String?
+                if let placemark = placemarks?.first {
+                    countryCode = placemark.isoCountryCode
+                    countryName = countryCode.flatMap {
+                        Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
+                    } ?? placemark.country
+                    cityName = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea
+                }
+                if countryCode == nil || countryName?.isEmpty != false || cityName?.isEmpty != false,
+                   let overseas = await OpenStreetMapGeocoder.shared.lookupInternationalHierarchy(coordinate: location.coordinate) {
+                    countryCode = overseas.countryCode ?? countryCode
+                    countryName = overseas.countryName ?? countryName
+                    cityName = overseas.cityName ?? cityName
+                }
+                if (countryCode == nil || countryName?.isEmpty != false || cityName?.isEmpty != false),
+                   let savedHierarchy = DFKGeographicHierarchy.fromPersistedForeignAddress(footprint.address) {
+                    countryCode = savedHierarchy.countryCode
+                    countryName = savedHierarchy.countryName
+                    cityName = savedHierarchy.cityName
+                }
+                countryName = countryName?.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? countryName
+                cityName = cityName?.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? cityName
+                guard let countryCode,
+                      let countryName, !countryName.isEmpty,
+                      let cityName, !cityName.isEmpty else {
+                    return
+                }
                 guard let mainContext = self?.modelContext?.container.mainContext,
                       let current = try? mainContext.fetch(FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })).first else {
                     return
@@ -4254,14 +4265,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         async let poisFromPOI = performPOIRequest(at: coordinate, radius: 1000)
         async let poisFromGeneral = performNaturalLanguageSearch(at: coordinate, query: "附近 周边 地点", radius: 1000)
         
-        // B. 即时生活圈 & 社交网红 (办公、社交、生活、网红点 - 半径 1.5km)
-        async let poisFromLife = performNaturalLanguageSearch(at: coordinate, query: "大厦 写字楼 中心 商务 SOHO CBD 国际中心 塔 咖啡 书店 瑞幸 Luckin 星巴克 喜茶 玩具 潮玩 乐高 POP MART 旗舰店 网红 打卡 拍照 绝美 出片 秘境 停车场 驿站", radius: 1500)
+        // B. 日常大型设施与社区公共空间。刻意不以奶茶、咖啡、便利店等
+        // 小商户作为候选主力，避免自动地点列表看起来像沿街店铺清单。
+        async let poisFromLife = performNaturalLanguageSearch(at: coordinate, query: "大厦 写字楼 中心 商务 SOHO CBD 国际中心 园区 社区 市民中心 政务服务 图书馆 文化宫 菜市场 农贸市场 超市 百货", radius: 2000)
         
-        // C. 文体、商业与公共空间 (商场、剧院、体育、公园、游乐场、广场、城市空间 - 半径 2.5km)
-        async let poisFromVenuesPublic = performNaturalLanguageSearch(at: coordinate, query: "公园 游乐场 广场 园 林 绿地 湖 岛 湾 滩 漫步道 步道 骑行 体育馆 运动场 网球馆 游泳馆 场馆 剧院 剧场 电影院 影城 影院 音乐厅 艺术中心 展览馆 美术馆 科技馆 商场 购物中心 万象 城 悦 恒隆 苹果 华为", radius: 2500)
+        // C. 文体、商业与公共空间 (综合商场、剧院、体育、公园、城市空间 - 半径 2.5km)
+        async let poisFromVenuesPublic = performNaturalLanguageSearch(at: coordinate, query: "商场 购物中心 商业中心 城市广场 百货 奥特莱斯 万象城 大悦城 恒隆 公园 游乐场 广场 园 林 绿地 湖 岛 湾 滩 漫步道 步道 骑行 体育馆 运动场 网球馆 游泳馆 场馆 剧院 剧场 电影院 影城 音乐厅 艺术中心 展览馆 美术馆 科技馆", radius: 2500)
         
-        // D. 宏大地标、交通、文旅与教育 (枢纽、机场、火车站、景区、地标、大学、医院 - 半径 5km)
-        async let poisFromLandmarksLandscale = performNaturalLanguageSearch(at: coordinate, query: "机场 车站 火车站 高铁站 枢纽 总站 码头 港 景区 景点 故居 寺 庙 遗址 古镇 纪念碑 雕像 祠 宫 塔 大学 学院 医院 卫生 局 馆", radius: 5000)
+        // D. 宏大地标、交通、医疗、教育和文旅 (半径 5km)
+        async let poisFromLandmarksLandscale = performNaturalLanguageSearch(at: coordinate, query: "机场 航站楼 车站 火车站 高铁站 地铁站 客运站 交通枢纽 总站 码头 港 医院 医学中心 妇幼 保健院 急救中心 大学 学院 学校 校区 图书馆 博物馆 文化馆 景区 景点 故居 寺 庙 遗址 古镇 纪念碑 雕像 祠 宫 塔", radius: 5000)
         
         // E. 区域 AOI 定向深挖 (针对反地理编码结果进行精准确认)
         async let poisFromAOITask: [LocationSuggestion] = {
@@ -4318,26 +4330,53 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
 
         
-        // 4. 排序与去重 (保留 10-15 个)
+        // 5. 去重、质量分层后按距离排序。大型公共设施、综合商业体和
+        // 用户保存地点优先；沿街小店仅在附近没有更合适地点时才补充。
         var seenNames = Set<String>()
         var unique: [LocationSuggestion] = []
-        
-        // 按距离排序 (计算到中心的距离)
-        let sortedAll = allFound.sorted { s1, s2 in
-            let d1 = center.distance(from: CLLocation(latitude: s1.coordinate.latitude, longitude: s1.coordinate.longitude))
-            let d2 = center.distance(from: CLLocation(latitude: s2.coordinate.latitude, longitude: s2.coordinate.longitude))
-            return d1 < d2
+        for suggestion in allFound {
+            let key = suggestion.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !key.isEmpty, !seenNames.contains(key) else { continue }
+            seenNames.insert(key)
+            unique.append(suggestion)
         }
-        
-        for s in sortedAll {
-            if !seenNames.contains(s.name) {
-                seenNames.insert(s.name)
-                unique.append(s)
+
+        func distance(to suggestion: LocationSuggestion) -> CLLocationDistance {
+            center.distance(from: CLLocation(latitude: suggestion.coordinate.latitude, longitude: suggestion.coordinate.longitude))
+        }
+        func sortByDistance(_ suggestions: [LocationSuggestion]) -> [LocationSuggestion] {
+            suggestions.sorted {
+                let firstDistance = distance(to: $0)
+                let secondDistance = distance(to: $1)
+                if abs(firstDistance - secondDistance) > 1 { return firstDistance < secondDistance }
+                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
             }
-            if unique.count >= 25 { break } // 增加到 25 个，方便用户从更多结果中选择
         }
-        
-        return unique
+
+        let meaningfulPlaces = sortByDistance(unique.filter { nearbySuggestionQuality($0) >= 0 })
+        let smallBusinessFallback = sortByDistance(unique.filter { nearbySuggestionQuality($0) < 0 })
+        return Array((meaningfulPlaces + smallBusinessFallback).prefix(25))
+    }
+
+    /// Positive/neutral candidates are useful for an automatic footprint
+    /// title. Negative candidates are ordinary small storefronts and are only
+    /// retained as a fallback when a neighbourhood has little else to offer.
+    private func nearbySuggestionQuality(_ suggestion: LocationSuggestion) -> Int {
+        if suggestion.isExistingPlace { return 3 }
+        let name = suggestion.name.lowercased()
+        let category = suggestion.category?.lowercased() ?? ""
+
+        let smallBusinessTerms = ["便利店", "小卖部", "烟酒", "美发", "美容", "美甲", "洗车", "快递", "菜鸟", "维修", "彩票", "五金", "水果店", "服装店", "眼镜店", "打印", "复印", "奶茶", "咖啡", "茶饮", "小吃", "烧烤", "面馆"]
+        if smallBusinessTerms.contains(where: { name.contains($0) }) { return -1 }
+
+        let majorVenueTerms = ["购物中心", "商业中心", "商场", "百货", "奥特莱斯", "广场", "医院", "医学中心", "保健院", "大学", "学院", "校区", "机场", "航站楼", "火车站", "高铁站", "地铁站", "客运站", "交通枢纽", "码头", "公园", "景区", "博物馆", "美术馆", "图书馆", "文化馆", "艺术中心", "剧院", "体育馆", "体育场", "游泳馆", "科技馆", "市民中心", "政务服务", "社区", "园区", "写字楼"]
+        if majorVenueTerms.contains(where: { name.contains($0) }) { return 2 }
+
+        let majorCategories = ["airport", "amusementpark", "beach", "campground", "hospital", "library", "marina", "museum", "nationalpark", "park", "publictransport", "school", "stadium", "theater", "university", "zoo"]
+        if majorCategories.contains(where: { category.contains($0) }) { return 2 }
+
+        if category.contains("shopping") || category.contains("store") { return 1 }
+        return 0
     }
     
     private func performPOIRequest(at coordinate: CLLocationCoordinate2D, radius: Double) async -> [LocationSuggestion] {
@@ -4378,6 +4417,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     /// 用户选择建议地点后的处理
     func selectSuggestion(_ suggestion: LocationSuggestion, forOngoing: Bool, footprint: Footprint? = nil, isDraft: Bool = false) {
+        // Import-preview candidates are disposable. Do not create or modify a
+        // persistent Place while editing one; only carry the chosen display
+        // value into the draft, which is inserted solely by the Import button.
+        if isDraft, !forOngoing, let fp = footprint {
+            fp.address = suggestion.name
+            fp.placeID = suggestion.placeID
+            fp.isAddressEditedByHand = true
+            return
+        }
+
         let targetPlace = updateOrCreatePlaceAsPriority(suggestion)
         
         // 如果是“重要地点”（用户定义），展示地址而非名称（因为名称会在标签/标题里展示）

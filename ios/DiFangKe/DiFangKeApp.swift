@@ -244,6 +244,13 @@ struct DiFangKeApp: App {
                                     PhotoService.shared.modelContext = context
                                     OpenAIService.shared.modelContainer = container
 
+                                    // A preview normally owns only detached
+                                    // models. If the process was terminated in
+                                    // the middle of one, remove any draft that
+                                    // an older edit path attached before the
+                                    // timeline can read it.
+                                    PhotoImportDraftRecovery.discardPending(in: context)
+
                                     // Clean up duplicates created by older builds
                                     // before the timeline reads them.  New rebuilds
                                     // are guarded at insertion time as well.

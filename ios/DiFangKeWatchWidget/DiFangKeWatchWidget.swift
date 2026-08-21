@@ -115,7 +115,7 @@ private struct WatchComplicationView: View {
             .monospacedDigit()
     }
     private var color: Color {
-        if transport != nil { return .accentColor }
+        if transport != nil { return Color.accentColor }
         guard let hex = activity?.colorHex else { return .blue }
         let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
         guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .blue }
@@ -202,19 +202,19 @@ private struct DayTimelineRing: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(.gray.opacity(0.16), lineWidth: 3.0)
+                .stroke(.gray.opacity(0.16), lineWidth: 3.8)
             Circle()
                 .trim(from: 0, to: elapsedDayFraction)
-                .stroke(.gray.opacity(0.42), lineWidth: 3.0)
+                .stroke(.gray.opacity(0.42), lineWidth: 3.8)
 
             ForEach(items.filter { $0.isTransport == true }, id: \.id) { item in
-                segment(for: item, color: .accentColor, lineWidth: 1.55)
+                transportSegment(for: item)
             }
             ForEach(items.filter { $0.isTransport != true }, id: \.id) { item in
                 segment(
                     for: item,
                     color: color(from: item.colorHex),
-                    lineWidth: item.id == currentFootprintID ? 5.0 : 3.0
+                    lineWidth: item.id == currentFootprintID ? 6.2 : 4.0
                 )
             }
         }
@@ -225,11 +225,29 @@ private struct DayTimelineRing: View {
     private func segment(for item: ComplicationTimelineItem, color: Color, lineWidth: CGFloat) -> some View {
         let range = clippedFractionRange(for: item)
         // Rounded caps otherwise close a tiny trim gap on the compact dial.
-        let gap = min(0.024, range.length * 0.16)
+        let gap = min(0.030, range.length * 0.18)
         if range.length > gap * 2 {
             Circle()
                 .trim(from: range.start + gap, to: range.start + range.length - gap)
                 .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+        }
+    }
+
+    /// Transport is intentionally hollow so it reads as movement rather than
+    /// a stay: white center, thin theme-colour outline.
+    @ViewBuilder
+    private func transportSegment(for item: ComplicationTimelineItem) -> some View {
+        let range = clippedFractionRange(for: item)
+        let gap = min(0.030, range.length * 0.18)
+        if range.length > gap * 2 {
+            let start = range.start + gap
+            let end = range.start + range.length - gap
+            Circle()
+                .trim(from: start, to: end)
+                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3.6, lineCap: .round))
+            Circle()
+                .trim(from: start, to: end)
+                .stroke(.white, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
         }
     }
 
@@ -253,9 +271,9 @@ private struct DayTimelineRing: View {
     }
 
     private func color(from hex: String?) -> Color {
-        guard let hex = hex else { return .accentColor }
+        guard let hex = hex else { return Color.accentColor }
         let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .accentColor }
+        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return Color.accentColor }
         return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
     }
 }
@@ -279,7 +297,7 @@ private struct DayTimelineBar: View {
                     .frame(width: geometry.size.width * elapsedDayFraction)
 
                 ForEach(items.filter { $0.isTransport == true }, id: \.id) { item in
-                    segment(for: item, in: geometry.size, color: .accentColor, height: 2)
+                    segment(for: item, in: geometry.size, color: Color.accentColor, height: 2)
                 }
                 ForEach(items.filter { $0.isTransport != true }, id: \.id) { item in
                     segment(
@@ -324,9 +342,9 @@ private struct DayTimelineBar: View {
     }
 
     private func color(from hex: String?) -> Color {
-        guard let hex = hex else { return .accentColor }
+        guard let hex = hex else { return Color.accentColor }
         let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .accentColor }
+        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return Color.accentColor }
         return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
     }
 }

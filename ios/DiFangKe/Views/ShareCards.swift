@@ -1338,8 +1338,8 @@ struct DFKShareCardView: View {
         VStack(alignment: .leading, spacing: s(30)) {
             statsMapBlock
             statsSummaryRow
-            rankingSection(title: "城市排行", entries: payload.placeRankings, showsIcon: false)
-            rankingSection(title: "活动排行", entries: payload.activityRankings)
+            rankingSection(title: "最常去的地点", entries: payload.placeRankings, showsIcon: false)
+            rankingSection(title: "最喜欢的活动", entries: payload.activityRankings)
         }
     }
 
@@ -2066,28 +2066,65 @@ enum DFKShareCardFactory {
     private static func placeRankingEntries(footprints: [Footprint], places: [Place]) -> [DFKShareRankingEntry] {
         struct Aggregate {
             var title: String
+            var countryName: String?
             var count = 0
             var duration: TimeInterval = 0
         }
 
+        let hasMultipleCountries = Set(footprints.compactMap { footprint in
+            footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }).count > 1
+        let cityKeys = Set(footprints.compactMap { footprint -> String? in
+            guard let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines), !city.isEmpty else { return nil }
+            return "\(footprint.countryCode ?? "")|\(city)"
+        })
+        let ranksPlaces = cityKeys.count <= 1
+
         var groups: [String: Aggregate] = [:]
         for footprint in footprints {
-            guard let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !city.isEmpty else { continue }
-            var aggregate = groups[city] ?? Aggregate(title: city)
+            let title: String
+            let key: String
+            if ranksPlaces {
+                if let placeID = footprint.placeID,
+                   let place = places.first(where: { $0.placeID == placeID }),
+                   !place.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    title = place.name
+                    key = placeID.uuidString
+                } else {
+                    title = displayPlace(for: footprint)
+                    key = title
+                }
+                guard !title.isEmpty, title != "一个生活现场" else { continue }
+            } else {
+                guard let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !city.isEmpty else { continue }
+                title = city
+                key = "\(footprint.countryCode ?? "")|\(city)"
+            }
+            var aggregate = groups[key] ?? Aggregate(title: title, countryName: footprint.countryName)
+            if aggregate.countryName?.isEmpty != false {
+                aggregate.countryName = footprint.countryName
+            }
             aggregate.count += 1
             aggregate.duration += footprint.duration
-            groups[city] = aggregate
+            groups[key] = aggregate
         }
 
         return groups.values
-            .sorted { $0.duration > $1.duration }
+            .sorted {
+                $0.count == $1.count ? $0.duration > $1.duration : $0.count > $1.count
+            }
             .prefix(3)
             .map { item in
                 DFKShareRankingEntry(
-                    title: item.title,
+                    title: hasMultipleCountries
+                        ? [item.countryName, item.title]
+                            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                            .filter { !$0.isEmpty }
+                            .joined(separator: " ")
+                        : item.title,
                     detail: nil,
-                    value: "\(durationText(item.duration)) · \(item.count)个足迹",
+                    value: "\(item.count)个足迹",
                     icon: "mappin.and.ellipse",
                     color: .dfkAccent
                 )
@@ -2097,8 +2134,11 @@ enum DFKShareCardFactory {
     private static func activityRankingEntries(footprints: [Footprint], activities: [ActivityType]) -> [DFKShareRankingEntry] {
         var groups: [String: (activity: ActivityType?, count: Int)] = [:]
         for footprint in footprints {
-            let activity = footprint.getActivityType(from: activities)
-            let name = activity?.name ?? "日常"
+            guard let activity = footprint.getActivityType(from: activities) else { continue }
+            let name = activity.name
+            // The share card's activity ranking is about life activities;
+            // transport has its own statistic and must not occupy a rank.
+            guard name != "交通" else { continue }
             var aggregate = groups[name] ?? (activity, 0)
             aggregate.count += 1
             groups[name] = aggregate

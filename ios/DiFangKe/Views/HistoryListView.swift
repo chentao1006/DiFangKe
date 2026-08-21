@@ -340,7 +340,7 @@ struct HistoryListView: View {
                 .min()
             return earliestDateInYear.map { (year: year, date: $0) }
         }
-        .sorted { $0.year < $1.year }
+        .sorted { $0.year > $1.year }
     }
     
     private func jumpToYear(_ date: Date) {
@@ -838,18 +838,18 @@ private struct MonthDayTimelineRing: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(.gray.opacity(isToday ? 0.16 : unrecordedOpacity), lineWidth: 2.4)
+                .stroke(.gray.opacity(isToday ? 0.16 : unrecordedOpacity), lineWidth: 3.2)
             if isToday {
                 Circle()
                     .trim(from: 0, to: elapsedDayFraction)
-                    .stroke(.gray.opacity(0.30), lineWidth: 2.4)
+                    .stroke(.gray.opacity(0.30), lineWidth: 3.2)
             }
 
             ForEach(segments.filter(\.isTransport)) { segment in
-                arc(for: segment, lineWidth: 1.3)
+                transportArc(for: segment)
             }
             ForEach(segments.filter { !$0.isTransport }) { segment in
-                arc(for: segment, lineWidth: segment.isCurrent ? 4.2 : 2.6)
+                arc(for: segment, lineWidth: segment.isCurrent ? 5.4 : 3.5)
             }
             ForEach(plannedTrips.filter(\.hasArrivalTime), id: \.id) { trip in
                 planMarker(for: trip)
@@ -863,11 +863,29 @@ private struct MonthDayTimelineRing: View {
         let range = clippedFractionRange(start: segment.startTime, end: segment.endTime)
         // Rounded caps extend past the trim point.  This larger inset keeps a
         // real visible gray break between adjacent segments in a 34pt cell.
-        let gap = min(0.024, range.length * 0.16)
+        let gap = min(0.028, range.length * 0.18)
         if range.length > gap * 2 {
             Circle()
                 .trim(from: range.start + gap, to: range.start + range.length - gap)
                 .stroke(segment.color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+        }
+    }
+
+    /// Transport is a hollow band: white interior with a thin theme-colour
+    /// outline, kept narrower than a footprint segment.
+    @ViewBuilder
+    private func transportArc(for segment: MonthDayTimelineSegment) -> some View {
+        let range = clippedFractionRange(start: segment.startTime, end: segment.endTime)
+        let gap = min(0.028, range.length * 0.18)
+        if range.length > gap * 2 {
+            let start = range.start + gap
+            let end = range.start + range.length - gap
+            Circle()
+                .trim(from: start, to: end)
+                .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: 3.2, lineCap: .round))
+            Circle()
+                .trim(from: start, to: end)
+                .stroke(.white, style: StrokeStyle(lineWidth: 1.4, lineCap: .round))
         }
     }
 
@@ -964,14 +982,14 @@ struct ImportOverlaysModifier: ViewModifier {
                     VStack(spacing: 20) {
                         ProgressView(value: Double(scanProgress), total: max(1, Double(scanTotal))).tint(.white).frame(width: 200)
                         VStack(spacing: 8) {
-                            Text("正在穿越时空...").foregroundColor(.white).font(.headline)
+                            Text("正在读取照片...").foregroundColor(.white).font(.headline)
                             Text("\(scanProgress) / \(scanTotal)").foregroundColor(.white.opacity(0.7)).font(.caption.monospacedDigit())
                         }
                         
                         Button(role: .cancel) {
                             onCancelScan()
                         } label: {
-                            Text("取消同步")
+                            Text("取消导入")
                                 .font(.subheadline.bold())
                                 .foregroundColor(.white)
                                 .padding(.horizontal, 20)
@@ -1014,7 +1032,7 @@ struct PhotoImportRangePicker: View {
                 Picker("年份", selection: $selectedYear) {
                     ForEach((min(earliestYear, selectedYear)...Calendar.current.component(.year, from: Date())), id: \.self) { Text("\(String(format: "%d", $0))年").tag($0) }
                 }.pickerStyle(.wheel)
-                Button("开启穿越") {
+                Button("开始导入") {
                     let s = Calendar.current.date(from: DateComponents(year: selectedYear, month: 1, day: 1))!
                     let e = Calendar.current.date(from: DateComponents(year: selectedYear, month: 12, day: 31, hour: 23, minute: 59))!
                     onSelect(s, e)
@@ -1034,11 +1052,13 @@ struct PhotoImportRangePicker: View {
 
 struct PhotoImportResultsView: View {
     @Environment(LocationManager.self) private var locationManager
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) var dismiss
     @Query private var allPlaces: [Place]
     @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
     @State private var selectedIDs: Set<UUID> = []
     @State private var selectedFootprintForEdit: Footprint?
+    @State private var didCommitImport = false
     
     let results: [Footprint]
     let onConfirm: ([Footprint]) -> Void
@@ -1116,10 +1136,11 @@ struct PhotoImportResultsView: View {
                                                     toggleSelection(fp.footprintID)
                                                 }
                                             
-                                            FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false, disableContextMenu: true) { f, _ in 
-                                                selectedFootprintForEdit = f
-                                            }
-                                            .padding(.vertical, 4)
+                                            PhotoImportResultRow(
+                                                footprint: fp,
+                                                allPlaces: allPlaces,
+                                                onTap: { selectedFootprintForEdit = $0 }
+                                            )
                                         }
                                         .padding(.trailing, 16)
                                         .contentShape(Rectangle())
@@ -1139,12 +1160,17 @@ struct PhotoImportResultsView: View {
                 FootprintModalView(footprint: fp, isDraft: true)
                     .environment(locationManager)
             }
+            .onAppear {
+                PhotoImportDraftRecovery.markPending(results)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("导入") { 
+                        didCommitImport = true
+                        PhotoImportDraftRecovery.clearPending()
                         Aptabase.shared.trackEvent("photos_imported")
                         onConfirm(results.filter { selectedIDs.contains($0.footprintID) }) 
                     }
@@ -1152,7 +1178,24 @@ struct PhotoImportResultsView: View {
                     .disabled(selectedIDs.isEmpty)
                 }
             }
+            .onDisappear {
+                discardUnimportedDrafts()
+            }
         }
+    }
+
+    /// Drafts normally have no model context. This is a final safety net for
+    /// any edit path that accidentally attached one while the import preview
+    /// was open: closing/cancelling must never leave a footprint in history.
+    private func discardUnimportedDrafts() {
+        guard !didCommitImport else { return }
+        defer { PhotoImportDraftRecovery.clearPending() }
+        let attachedDrafts = results.filter { $0.modelContext != nil }
+        guard !attachedDrafts.isEmpty else { return }
+        for draft in attachedDrafts {
+            modelContext.delete(draft)
+        }
+        try? modelContext.save()
     }
     
     private func dateHeader(for date: Date, dateResults: [Footprint]) -> some View {
@@ -1210,6 +1253,67 @@ struct PhotoImportResultsView: View {
                 selectedIDs.insert(id)
             }
         }
+    }
+
+}
+
+/// Import candidates are draft models, so their address changes are not backed
+/// by a SwiftData query. Keep the visible title in row state: the row redraws
+/// immediately when geocoding completes, even before the draft is persisted.
+private struct PhotoImportResultRow: View {
+    @Bindable var footprint: Footprint
+    let allPlaces: [Place]
+    let onTap: (Footprint) -> Void
+    @State private var displayAddress: String?
+
+    init(footprint: Footprint, allPlaces: [Place], onTap: @escaping (Footprint) -> Void) {
+        self._footprint = Bindable(footprint)
+        self.allPlaces = allPlaces
+        self.onTap = onTap
+        self._displayAddress = State(initialValue: Self.usableAddress(from: footprint.address))
+    }
+
+    var body: some View {
+        FootprintCardView(
+            footprint: footprint,
+            allPlaces: allPlaces,
+            showTimeline: false,
+            disableContextMenu: true,
+            displayAddressOverride: displayAddress,
+            resolvesUnknownAddress: false
+        ) { footprint, _ in
+            onTap(footprint)
+        }
+        .padding(.vertical, 4)
+        .task(id: footprint.address) {
+            await refreshDisplayAddress()
+        }
+    }
+
+    private func refreshDisplayAddress() async {
+        let currentAddress = footprint.address
+        if let resolved = Self.usableAddress(from: currentAddress) {
+            displayAddress = resolved
+            return
+        }
+
+        let coordinate = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+        guard let resolved = await OpenStreetMapGeocoder.shared.lookup(coordinate: coordinate)?.address,
+              !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              footprint.address == currentAddress else {
+            return
+        }
+
+        // Update UI state first. The visible title must not wait for the
+        // draft model's observation/persistence cycle.
+        displayAddress = resolved
+        footprint.address = resolved
+    }
+
+    private static func usableAddress(from address: String?) -> String? {
+        let value = address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let unresolved: Set<String> = ["", "未知位置", "未知地点", "地点记录", "正在解析位置...", "此处"]
+        return unresolved.contains(value) ? nil : value
     }
 }
 

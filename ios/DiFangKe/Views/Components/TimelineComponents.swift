@@ -632,6 +632,8 @@ struct FootprintCardView: View {
     var showDateAboveTitle: Bool = false
     var fixedWidth: CGFloat? = nil
     var disableContextMenu: Bool = false
+    var displayAddressOverride: String? = nil
+    var resolvesUnknownAddress: Bool = true
     let onTap: (Footprint, Bool) -> Void
     
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
@@ -667,7 +669,7 @@ struct FootprintCardView: View {
                         
                         HStack(spacing: 6) {
                             let matchedPlace = matchedImportantPlace
-                            let displayText = matchedPlace?.name ?? footprint.address ?? "未知地点"
+                            let displayText = matchedPlace?.name ?? displayAddressOverride ?? footprint.address ?? "未知地点"
                             
                             Text(displayText)
                                 .font(.system(.headline, design: .rounded))
@@ -786,7 +788,9 @@ struct FootprintCardView: View {
                 if footprint.isHighlight == true {
                     withAnimation(.easeOut(duration: 0.3).delay(0.2)) { highlightVisible = true }
                 }
-                geocodeAddress()
+                if resolvesUnknownAddress {
+                    geocodeAddress()
+                }
                 
                 // 自动关联缺失或无效的照片（针对首次入场或跨设备同步的情况）
                 locationManager.linkPhotos(to: footprint, context: modelContext)

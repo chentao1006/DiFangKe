@@ -3,20 +3,75 @@ import UIKit
 import CoreLocation
 import SwiftData
 
+private struct PhotoGeocodeResult: Sendable {
+    let title: String
+    let address: String?
+    let countryCode: String?
+    let countryName: String?
+    let cityName: String?
+}
+
 private final class PhotoGeocodeCache: @unchecked Sendable {
-    private var storage: [String: (String, String?)] = [:]
+    private var storage: [String: PhotoGeocodeResult] = [:]
     private let lock = NSLock()
 
-    func value(for key: String) -> (String, String?)? {
+    func value(for key: String) -> PhotoGeocodeResult? {
         lock.lock()
         defer { lock.unlock() }
         return storage[key]
     }
 
-    func set(_ value: (String, String?), for key: String) {
+    func set(_ value: PhotoGeocodeResult, for key: String) {
         lock.lock()
         storage[key] = value
         lock.unlock()
+    }
+}
+
+/// A photo cluster can receive a result from the system geocoder, its timeout,
+/// or the network fallback. Only the first result may advance the scan.
+private final class PhotoScanClusterCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasCompleted = false
+
+    func perform(_ work: () -> Void) {
+        lock.lock()
+        guard !hasCompleted else {
+            lock.unlock()
+            return
+        }
+        hasCompleted = true
+        lock.unlock()
+        work()
+    }
+}
+
+/// An import preview contains detached models. Keep their IDs across an
+/// unexpected app termination so a legacy edit path can never resurrect one
+/// into the timeline on the following launch.
+enum PhotoImportDraftRecovery {
+    private static let pendingDraftIDsKey = "pendingPhotoImportDraftIDs"
+
+    static func markPending(_ footprints: [Footprint]) {
+        UserDefaults.standard.set(footprints.map { $0.footprintID.uuidString }, forKey: pendingDraftIDsKey)
+    }
+
+    static func clearPending() {
+        UserDefaults.standard.removeObject(forKey: pendingDraftIDsKey)
+    }
+
+    static func discardPending(in context: ModelContext) {
+        let ids = Set((UserDefaults.standard.stringArray(forKey: pendingDraftIDsKey) ?? []).compactMap(UUID.init(uuidString:)))
+        guard !ids.isEmpty else { return }
+        defer { clearPending() }
+
+        let descriptor = FetchDescriptor<Footprint>()
+        guard let staleDrafts = try? context.fetch(descriptor).filter({ ids.contains($0.footprintID) }) else { return }
+        guard !staleDrafts.isEmpty else { return }
+        for draft in staleDrafts {
+            context.delete(draft)
+        }
+        try? context.save()
     }
 }
 
@@ -288,7 +343,6 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             let sortedClusters = clusters.sorted(by: { $0.count > $1.count })
             let geocodeCache = PhotoGeocodeCache()
             let group = DispatchGroup()
-            let geocoder = CLGeocoder()
             var processedPhotosCount = 0
             let totalPhotosCount = assetsWithLocation.count
             
@@ -362,69 +416,107 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 let captureClusterIDs = cluster.map { $0.localIdentifier }
                 let captureClusterCount = cluster.count
                 let captureTitle = title
+                let clusterCompletion = PhotoScanClusterCompletion()
 
-                func createAndAdd(t: String, a: String?, pID: UUID?) {
-                    let fp = Footprint(
-                        date: Calendar.current.startOfDay(for: captureStartTime),
-                        startTime: captureStartTime,
-                        endTime: captureEndTime,
-                        footprintLocations: captureCoords,
-                        locationHash: captureHash,
-                        duration: captureDuration,
-                        status: .candidate,
-                        placeID: pID,
-                        photoAssetIDs: captureClusterIDs,
-                        address: t.isEmpty ? a : t
-                    )
-                    if let autoMatch = ActivityType.getAutoMatchActivity(for: fp, allActivities: allActivities, allPlaces: allPlaces, history: history) {
-                        fp.activityTypeValue = autoMatch.id.uuidString
+                func createAndAdd(
+                    t: String,
+                    a: String?,
+                    pID: UUID?,
+                    countryCode: String? = nil,
+                    countryName: String? = nil,
+                    cityName: String? = nil
+                ) {
+                    clusterCompletion.perform {
+                        let fp = Footprint(
+                            date: Calendar.current.startOfDay(for: captureStartTime),
+                            startTime: captureStartTime,
+                            endTime: captureEndTime,
+                            footprintLocations: captureCoords,
+                            locationHash: captureHash,
+                            duration: captureDuration,
+                            status: .candidate,
+                            placeID: pID,
+                            photoAssetIDs: captureClusterIDs,
+                            address: t.isEmpty ? a : t
+                        )
+                        fp.countryCode = countryCode
+                        fp.countryName = countryName?.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? countryName
+                        fp.cityName = cityName?.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? cityName
+                        if let autoMatch = ActivityType.getAutoMatchActivity(for: fp, allActivities: allActivities, allPlaces: allPlaces, history: history) {
+                            fp.activityTypeValue = autoMatch.id.uuidString
+                        }
+                        scanResult.append(fp)
+                        incrementProgress(captureClusterCount)
+                        group.leave()
                     }
-                    scanResult.append(fp)
-                    incrementProgress(captureClusterCount)
-                    group.leave()
                 }
+
+                // Address enrichment must never be allowed to block importing
+                // the photos. Retain a matched place's own name/address if the
+                // reverse geocoder or the fallback service does not respond.
+                let fallbackItem = DispatchWorkItem {
+                    createAndAdd(t: captureTitle, a: address, pID: matchedPlaceID)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: fallbackItem)
                 
                 if matchedPlaceID == nil {
                     if let cached = geocodeCache.value(for: cacheKey) {
-                        createAndAdd(t: cached.0, a: cached.1, pID: nil)
+                        createAndAdd(
+                            t: cached.title,
+                            a: cached.address,
+                            pID: nil,
+                            countryCode: cached.countryCode,
+                            countryName: cached.countryName,
+                            cityName: cached.cityName
+                        )
                     } else {
-                        var isFinished = false
-                        let timeoutItem = DispatchWorkItem {
-                            if !isFinished {
-                                isFinished = true
-                                incrementProgress(captureClusterCount)
-                                group.leave()
-                            }
-                        }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: timeoutItem)
-
-                        geocoder.reverseGeocodeLocation(firstLoc) { placemarks, error in
-                            if isFinished { return }
-                            isFinished = true
-                            timeoutItem.cancel()
+                        let geocoder = CLGeocoder()
+                        geocoder.reverseGeocodeLocation(firstLoc) { [geocoder] placemarks, _ in
                             var resolvedTitle = ""
                             var resolvedAddress: String? = nil
                             if let pm = placemarks?.first {
                                 let pmName = pm.name ?? ""
                                 let pmThorough = pm.thoroughfare ?? ""
                                 if allPlaces.contains(where: { p in p.isIgnored && (p.name == pmName || p.address == pmName || (p.address?.contains(pmName) == true)) }) {
-                                    incrementProgress(captureClusterCount)
-                                    group.leave()
+                                    clusterCompletion.perform {
+                                        incrementProgress(captureClusterCount)
+                                        group.leave()
+                                    }
                                     return
                                 }
                                 if !pmName.isEmpty { resolvedTitle = pmName }
                                 else if let pmSub = pm.subLocality, !pmSub.isEmpty { resolvedTitle = "\(pmSub) 附近" }
                                 resolvedAddress = (pmThorough.isEmpty || pmName == pmThorough) ? pmName : "\(pmThorough) \(pmName)"
                                 if !resolvedTitle.isEmpty || !(resolvedAddress ?? "").isEmpty {
-                                    geocodeCache.set((resolvedTitle, resolvedAddress), for: cacheKey)
-                                    createAndAdd(t: resolvedTitle, a: resolvedAddress, pID: nil)
+                                    let countryCode = pm.isoCountryCode
+                                    let countryName = countryCode.flatMap {
+                                        Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
+                                    } ?? pm.country
+                                    let cityName = pm.locality ?? pm.subAdministrativeArea ?? pm.administrativeArea
+                                    let result = PhotoGeocodeResult(
+                                        title: resolvedTitle,
+                                        address: resolvedAddress,
+                                        countryCode: countryCode,
+                                        countryName: countryName,
+                                        cityName: cityName
+                                    )
+                                    geocodeCache.set(result, for: cacheKey)
+                                    createAndAdd(
+                                        t: result.title,
+                                        a: result.address,
+                                        pID: nil,
+                                        countryCode: result.countryCode,
+                                        countryName: result.countryName,
+                                        cityName: result.cityName
+                                    )
                                 } else {
                                     Task {
                                         let fallback = await OpenStreetMapGeocoder.shared.lookup(coordinate: firstLoc.coordinate)
                                         let fallbackTitle = fallback?.placeName ?? ""
                                         let fallbackAddress = fallback?.address
-                                        geocodeCache.set((fallbackTitle, fallbackAddress), for: cacheKey)
-                                        createAndAdd(t: fallbackTitle, a: fallbackAddress, pID: nil)
+                                        let result = PhotoGeocodeResult(title: fallbackTitle, address: fallbackAddress, countryCode: fallback?.countryCode, countryName: fallback?.countryName, cityName: fallback?.cityName)
+                                        geocodeCache.set(result, for: cacheKey)
+                                        createAndAdd(t: result.title, a: result.address, pID: nil, countryCode: result.countryCode, countryName: result.countryName, cityName: result.cityName)
                                     }
                                 }
                             } else {
@@ -434,15 +526,48 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                                     let fallback = await OpenStreetMapGeocoder.shared.lookup(coordinate: firstLoc.coordinate)
                                     let fallbackTitle = fallback?.placeName ?? ""
                                     let fallbackAddress = fallback?.address
-                                    geocodeCache.set((fallbackTitle, fallbackAddress), for: cacheKey)
-                                    createAndAdd(t: fallbackTitle, a: fallbackAddress, pID: nil)
+                                    let result = PhotoGeocodeResult(title: fallbackTitle, address: fallbackAddress, countryCode: fallback?.countryCode, countryName: fallback?.countryName, cityName: fallback?.cityName)
+                                    geocodeCache.set(result, for: cacheKey)
+                                    createAndAdd(t: result.title, a: result.address, pID: nil, countryCode: result.countryCode, countryName: result.countryName, cityName: result.cityName)
                                 }
                             }
                         }
                         Thread.sleep(forTimeInterval: 0.25)
                     }
                 } else {
-                    createAndAdd(t: captureTitle, a: address, pID: matchedPlaceID)
+                    // A manually matched place already has a display name, but
+                    // still needs the same country/city fields as every other
+                    // imported footprint. Do not defer that work to Statistics.
+                    let geocoder = CLGeocoder()
+                    geocoder.reverseGeocodeLocation(firstLoc) { [geocoder] placemarks, _ in
+                        if let placemark = placemarks?.first {
+                            let countryCode = placemark.isoCountryCode
+                            let countryName = countryCode.flatMap {
+                                Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
+                            } ?? placemark.country
+                            let cityName = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea
+                            createAndAdd(
+                                t: captureTitle,
+                                a: address,
+                                pID: matchedPlaceID,
+                                countryCode: countryCode,
+                                countryName: countryName,
+                                cityName: cityName
+                            )
+                        } else {
+                            Task {
+                                let hierarchy = await OpenStreetMapGeocoder.shared.lookupInternationalHierarchy(coordinate: firstLoc.coordinate)
+                                createAndAdd(
+                                    t: captureTitle,
+                                    a: address,
+                                    pID: matchedPlaceID,
+                                    countryCode: hierarchy?.countryCode,
+                                    countryName: hierarchy?.countryName,
+                                    cityName: hierarchy?.cityName
+                                )
+                            }
+                        }
+                    }
                 }
             }
             
