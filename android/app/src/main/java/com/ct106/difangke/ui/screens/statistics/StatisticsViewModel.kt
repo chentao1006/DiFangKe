@@ -9,6 +9,7 @@ import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.service.OpenAIService
+import com.ct106.difangke.service.GeocodeService
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -28,13 +29,18 @@ sealed class StatisticsRange(val label: String, val days: Int?) {
     }
 }
 
+enum class FrequentPlaceRankScope(val label: String) { COUNTRY("国家"), CITY("城市"), PLACE("地点") }
+enum class ActivityRankScope(val label: String) { FOOTPRINTS("足迹"), TRANSPORT("交通") }
+
 data class HeatmapPoint(val lat: Double, val lon: Double, val count: Int)
 data class ActivityRankItem(val name: String, val count: Int, val colorHex: String, val icon: String)
 data class FrequentPlaceItem(val name: String, val address: String, val count: Int, val duration: Long)
 data class TrendPoint(val date: Date, val score: Double)
+data class TrendSegment(val date: Date, val startHour: Double, val endHour: Double, val colorHex: String)
 
 class StatisticsViewModel(application: Application) : AndroidViewModel(application) {
     private val db = DiFangKeApp.instance.database
+    private val attemptedGeographicBackfills = mutableSetOf<String>()
     
     private val _selectedRange = MutableStateFlow<StatisticsRange>(StatisticsRange.LAST_30_DAYS)
     val selectedRange: StateFlow<StatisticsRange> = _selectedRange.asStateFlow()
@@ -51,8 +57,17 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
     private val _frequentPlaces = MutableStateFlow<List<FrequentPlaceItem>>(emptyList())
     val frequentPlaces: StateFlow<List<FrequentPlaceItem>> = _frequentPlaces.asStateFlow()
 
+    private val _frequentPlaceRankScope = MutableStateFlow(FrequentPlaceRankScope.CITY)
+    val frequentPlaceRankScope: StateFlow<FrequentPlaceRankScope> = _frequentPlaceRankScope.asStateFlow()
+
+    private val _activityRankScope = MutableStateFlow(ActivityRankScope.FOOTPRINTS)
+    val activityRankScope: StateFlow<ActivityRankScope> = _activityRankScope.asStateFlow()
+
     private val _trendData = MutableStateFlow<List<TrendPoint>>(emptyList())
     val trendData: StateFlow<List<TrendPoint>> = _trendData.asStateFlow()
+
+    private val _trendSegments = MutableStateFlow<List<TrendSegment>>(emptyList())
+    val trendSegments: StateFlow<List<TrendSegment>> = _trendSegments.asStateFlow()
 
     private val _aiSummary = MutableStateFlow<String?>(null)
     val aiSummary: StateFlow<String?> = _aiSummary.asStateFlow()
@@ -66,6 +81,17 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
 
     fun setRange(range: StatisticsRange) {
         _selectedRange.value = range
+        attemptedGeographicBackfills.clear()
+    }
+
+    fun setFrequentPlaceRankScope(scope: FrequentPlaceRankScope) {
+        _frequentPlaceRankScope.value = scope
+        refreshData()
+    }
+
+    fun setActivityRankScope(scope: ActivityRankScope) {
+        _activityRankScope.value = scope
+        refreshData()
     }
 
     private fun refreshData() {
@@ -119,16 +145,28 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
             _heatmapPoints.value = calculateHeatmap(filteredFootprints)
 
             // 2. Activity Rank
-            _activityRank.value = calculateActivityRank(filteredFootprints, filteredTransports, activityTypes)
+            _activityRank.value = calculateActivityRank(
+                filteredFootprints, filteredTransports, activityTypes, _activityRankScope.value
+            )
 
             // 3. Frequent Places
-            _frequentPlaces.value = calculateFrequentPlaces(filteredFootprints, db.placeDao().getAll())
+            _frequentPlaces.value = calculateFrequentPlaces(
+                filteredFootprints, db.placeDao().getAll(), _frequentPlaceRankScope.value
+            )
 
             // 4. Trend Data
             _trendData.value = calculateTrend(filteredFootprints, range.days ?: 90)
+            _trendSegments.value = calculateTrendSegments(filteredFootprints, filteredTransports, activityTypes)
 
             // 5. AI Summary
             checkAiSummaryCacheOrGenerate(filteredFootprints, range)
+
+            // Older records predate the hierarchy columns. Enrich a small batch
+            // when the user requests country/city rankings instead of guessing
+            // from a POI display address.
+            if (_frequentPlaceRankScope.value != FrequentPlaceRankScope.PLACE) {
+                backfillGeographicHierarchy(filteredFootprints)
+            }
         }
     }
 
@@ -174,7 +212,9 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
             _isGeneratingSummary.value = true
             _aiSummary.value = null
 
-            val rankData = calculateActivityRank(footprints, emptyList(), emptyList())
+            val rankData = calculateActivityRank(
+                footprints, emptyList(), emptyList(), ActivityRankScope.FOOTPRINTS
+            )
                 .take(3).joinToString(", ") { "${it.name}(${it.count}次)" }
             
             val totalDurationHours = footprints.sumOf { it.endTime.time - it.startTime.time }.toDouble() / 3600000.0
@@ -239,28 +279,35 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
     private fun calculateActivityRank(
         footprints: List<FootprintEntity>,
         transports: List<TransportRecordEntity>,
-        activityTypes: List<ActivityTypeEntity>
+        activityTypes: List<ActivityTypeEntity>,
+        scope: ActivityRankScope
     ): List<ActivityRankItem> {
         val counts = mutableMapOf<String, Int>()
         
-        footprints.forEach { fp ->
-            val type = activityTypes.find { it.id == fp.activityTypeValue }?.name ?: "自定义"
-            counts[type] = (counts[type] ?: 0) + 1
+        if (scope == ActivityRankScope.FOOTPRINTS) {
+            footprints.forEach { fp ->
+                val type = activityTypes.find { it.id == fp.activityTypeValue }?.name ?: "日常"
+                // Transportation is represented by its dedicated tab, never as
+                // a life activity in the footprint ranking.
+                if (type != "交通") counts[type] = (counts[type] ?: 0) + 1
+            }
         }
         
-        transports.forEach { t ->
-            val type = when(t.typeRaw) {
-                "slow" -> "步行"
-                "running" -> "跑步"
-                "bicycle" -> "骑行"
-                "car" -> "自驾"
-                "bus" -> "公交"
-                "subway" -> "地铁"
-                "train" -> "火车"
-                "airplane" -> "飞行"
-                else -> "交通"
+        if (scope == ActivityRankScope.TRANSPORT) {
+            transports.forEach { t ->
+                val type = when(t.typeRaw) {
+                    "slow" -> "步行"
+                    "running" -> "跑步"
+                    "bicycle" -> "骑行"
+                    "car" -> "自驾"
+                    "bus" -> "公交"
+                    "subway" -> "地铁"
+                    "train" -> "火车"
+                    "airplane" -> "飞行"
+                    else -> "交通"
+                }
+                counts[type] = (counts[type] ?: 0) + 1
             }
-            counts[type] = (counts[type] ?: 0) + 1
         }
 
         return counts.map { (name, count) ->
@@ -276,7 +323,8 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
 
     private fun calculateFrequentPlaces(
         footprints: List<FootprintEntity>,
-        places: List<com.ct106.difangke.data.db.entity.PlaceEntity>
+        places: List<com.ct106.difangke.data.db.entity.PlaceEntity>,
+        scope: FrequentPlaceRankScope
     ): List<FrequentPlaceItem> {
         data class PlaceAggregate(val name: String, val address: String, var count: Int, var duration: Long)
 
@@ -286,18 +334,24 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
         footprints.forEach { footprint ->
             val place = footprint.placeID?.let(placesById::get)
             val address = place?.address ?: footprint.address.orEmpty()
-            val name = place?.name?.takeIf { it.isNotBlank() }
-                ?: address
-                    .substringAfterLast("市", address)
-                    .substringAfterLast("区", address)
-                    .substringAfterLast("县", address)
-                    .trim()
-                    .substringBefore(" ")
+            val name = when (scope) {
+                FrequentPlaceRankScope.COUNTRY -> footprint.countryName
+                FrequentPlaceRankScope.CITY -> footprint.cityName
+                FrequentPlaceRankScope.PLACE -> place?.name?.takeIf { it.isNotBlank() }
+                    ?: address.substringAfterLast("市", address).substringAfterLast("区", address)
+                        .substringAfterLast("县", address).trim().substringBefore(" ")
+            }
 
-            if (name.isBlank() || name.contains("未知")) return@forEach
+            if (name.isNullOrBlank() || name.contains("未知")) return@forEach
+            val groupKey = when (scope) {
+                FrequentPlaceRankScope.COUNTRY -> footprint.countryCode ?: name
+                FrequentPlaceRankScope.CITY -> "${footprint.countryCode.orEmpty()}|$name"
+                FrequentPlaceRankScope.PLACE -> footprint.placeID ?: name
+            }
+            val displayAddress = if (scope == FrequentPlaceRankScope.PLACE) address else ""
 
-            val aggregate = groups.getOrPut(name) {
-                PlaceAggregate(name = name, address = address, count = 0, duration = 0)
+            val aggregate = groups.getOrPut(groupKey) {
+                PlaceAggregate(name = name, address = displayAddress, count = 0, duration = 0)
             }
             aggregate.count += 1
             aggregate.duration += footprint.duration
@@ -309,6 +363,32 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
             .sortedByDescending { it.duration }
             .map { FrequentPlaceItem(it.name, it.address, it.count, it.duration) }
             .toList()
+    }
+
+    private fun backfillGeographicHierarchy(footprints: List<FootprintEntity>) {
+        val candidates = footprints.filter {
+            (it.countryName.isNullOrBlank() || it.cityName.isNullOrBlank()) &&
+                it.footprintID !in attemptedGeographicBackfills
+        }.take(8)
+        if (candidates.isEmpty()) return
+        attemptedGeographicBackfills.addAll(candidates.map { it.footprintID })
+        viewModelScope.launch {
+            candidates.forEach { footprint ->
+                val coordinate = runCatching {
+                    JSONArray(footprint.latitudeJson).getDouble(0) to JSONArray(footprint.longitudeJson).getDouble(0)
+                }.getOrNull() ?: return@forEach
+                val result = GeocodeService.shared.reverseGeocodeDetails(coordinate.first, coordinate.second)
+                    ?: return@forEach
+                if (!result.countryName.isNullOrBlank() || !result.cityName.isNullOrBlank()) {
+                    db.footprintDao().update(footprint.copy(
+                        countryCode = result.countryCode ?: footprint.countryCode,
+                        countryName = result.countryName ?: footprint.countryName,
+                        cityName = result.cityName ?: footprint.cityName
+                    ))
+                }
+            }
+            refreshData()
+        }
     }
 
     private fun calculateTrend(footprints: List<FootprintEntity>, daysInScope: Int): List<TrendPoint> {
@@ -341,5 +421,42 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
             result.add(TrendPoint(d, score))
         }
         return result
+    }
+
+    private fun calculateTrendSegments(
+        footprints: List<FootprintEntity>,
+        transports: List<TransportRecordEntity>,
+        activities: List<ActivityTypeEntity>
+    ): List<TrendSegment> {
+        val activityColors = activities.associateBy { it.id }
+        val segments = mutableListOf<TrendSegment>()
+        fun append(start: Date, end: Date, color: String) {
+            var cursor = start
+            while (cursor.before(end)) {
+                val dayStart = Calendar.getInstance().apply {
+                    time = cursor; set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+                }.time
+                val dayEnd = Calendar.getInstance().apply { time = dayStart; add(Calendar.DAY_OF_YEAR, 1) }.time
+                val segmentEnd = minOf(end, dayEnd)
+                val startHour = (cursor.time - dayStart.time).toDouble() / 3_600_000.0
+                val endHour = maxOf(startHour + 0.08, (segmentEnd.time - dayStart.time).toDouble() / 3_600_000.0)
+                segments += TrendSegment(dayStart, startHour, minOf(24.0, endHour), color)
+                cursor = dayEnd
+            }
+        }
+        footprints.forEach { footprint ->
+            append(footprint.startTime, footprint.endTime,
+                activityColors[footprint.activityTypeValue]?.colorHex ?: "#00A0AC")
+        }
+        transports.forEach { transport -> append(transport.startTime, transport.endTime, transportTrendColor(transport.typeRaw)) }
+        return segments
+    }
+
+    private fun transportTrendColor(type: String): String = when (type) {
+        "slow" -> "#34C759"; "running" -> "#FF9500"; "bicycle" -> "#30B0C7"
+        "ebike" -> "#3DDC97"; "motorcycle" -> "#FF2D55"; "car" -> "#007AFF"
+        "bus" -> "#5856D6"; "subway" -> "#AF52DE"; "train" -> "#A2845E"
+        "airplane" -> "#32ADE6"; else -> "#00A0AC"
     }
 }

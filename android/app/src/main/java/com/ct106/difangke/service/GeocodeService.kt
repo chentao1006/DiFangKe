@@ -10,6 +10,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.security.MessageDigest
+import java.util.Locale
 
 /**
  * 腾讯位置服务的地理编码与 POI 搜索。
@@ -33,16 +34,27 @@ class GeocodeService private constructor() {
         val placeID: String? = null
     )
 
+    data class ReverseGeocodeResult(
+        val address: String?,
+        val countryCode: String?,
+        val countryName: String?,
+        val cityName: String?
+    )
+
     /**
      * 逆地理编码：获取语义化地址
      */
-    suspend fun reverseGeocode(lat: Double, lon: Double): String? = withContext(Dispatchers.IO) {
+    suspend fun reverseGeocode(lat: Double, lon: Double): String? =
+        reverseGeocodeDetails(lat, lon)?.address
+
+    /** Returns display address and geographic hierarchy from the same response. */
+    suspend fun reverseGeocodeDetails(lat: Double, lon: Double): ReverseGeocodeResult? = withContext(Dispatchers.IO) {
         val result = getJson("/geocoder/v1/?location=$lat,$lon&get_poi=1") ?: return@withContext null
         val payload = result.optJSONObject("result") ?: return@withContext null
         val pois = payload.optJSONArray("pois")
         val firstPoi = pois?.optJSONObject(0)?.optString("title")
         val addressComponent = payload.optJSONObject("address_component")
-        coarseAutomaticPlaceName(
+        val address = coarseAutomaticPlaceName(
             listOf(
                 firstPoi,
                 payload.optString("address"),
@@ -50,6 +62,20 @@ class GeocodeService private constructor() {
                 addressComponent?.optString("street")
             )
         )
+        val countryName = addressComponent?.optString("nation")?.trim()?.takeIf { it.isNotEmpty() }
+        val countryCode = countryName?.let(::countryCodeForName)
+        val cityName = sequenceOf("city", "district", "province")
+            .mapNotNull { key -> addressComponent?.optString(key)?.trim()?.takeIf(String::isNotEmpty) }
+            .firstOrNull()
+        ReverseGeocodeResult(address, countryCode, countryName, cityName)
+    }
+
+    private fun countryCodeForName(name: String): String? {
+        if (name == "中国" || name.equals("China", ignoreCase = true)) return "CN"
+        return Locale.getISOCountries().firstOrNull { code ->
+            Locale("", code).getDisplayCountry(Locale.SIMPLIFIED_CHINESE).equals(name, ignoreCase = true) ||
+                Locale("", code).displayCountry.equals(name, ignoreCase = true)
+        }
     }
 
     /**

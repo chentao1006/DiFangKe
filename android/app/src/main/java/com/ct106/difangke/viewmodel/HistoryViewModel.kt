@@ -137,6 +137,36 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                     val totalPoints = store.getTotalPointsCount(date)
                     
                     val icons = buildTimelineIcons(timelineItems, allActivityTypes)
+                    val activityById = allActivityTypes.associateBy { it.id }
+                    val latestFootprintId = fps.maxByOrNull { it.startTime }?.footprintID
+                    val isToday = Calendar.getInstance().run {
+                        time = date
+                        val today = Calendar.getInstance()
+                        get(Calendar.YEAR) == today.get(Calendar.YEAR) &&
+                            get(Calendar.DAY_OF_YEAR) == today.get(Calendar.DAY_OF_YEAR)
+                    }
+                    val segments = buildList {
+                        fps.forEach { footprint ->
+                            add(DaySummary.TimelineSegment(
+                                id = footprint.footprintID,
+                                startTime = footprint.startTime,
+                                endTime = footprint.endTime,
+                                colorHex = activityById[footprint.activityTypeValue]?.colorHex ?: "#00A0AC",
+                                isTransport = false,
+                                isCurrent = isToday && footprint.footprintID == latestFootprintId
+                            ))
+                        }
+                        transports.forEach { transport ->
+                            add(DaySummary.TimelineSegment(
+                                id = transport.recordID,
+                                startTime = transport.startTime,
+                                endTime = transport.endTime,
+                                colorHex = "#00A0AC",
+                                isTransport = true,
+                                isCurrent = false
+                            ))
+                        }
+                    }.sortedBy { it.startTime }
 
                     summaryMap[date] = DaySummary(
                         date = date,
@@ -147,6 +177,8 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                         hasConfirmed = fps.any { it.aiAnalyzed } || futureTrips.isNotEmpty(),
                         hasCandidate = fps.any { !it.aiAnalyzed },
                         timelineIcons = icons,
+                        timelineSegments = segments,
+                        plannedArrivalTimes = futureTrips.filter { it.hasArrivalTime }.map { it.arrivalDate },
                         trajectoryCount = totalPoints,
                         mileage = totalMileage
                     )
@@ -207,12 +239,23 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                     if (isNearIgnoredPlace) return@mapNotNull null
 
                     val place = PlaceMatcher.bestPlaceForCoordinate(latitude, longitude, places)
+                    // A saved place owns its display label, but it must not prevent
+                    // the photo footprint from receiving its geographic hierarchy.
+                    val geocode = runCatching {
+                        GeocodeService.shared.reverseGeocodeDetails(latitude, longitude)
+                    }.getOrNull()
                     val address = when {
                         place?.isUserDefined == true -> place.name
                         !place?.address.isNullOrBlank() -> place?.address
-                        else -> runCatching { GeocodeService.shared.reverseGeocode(latitude, longitude) }.getOrNull()
+                        else -> geocode?.address
                     }
-                    candidate.copy(placeID = place?.placeID, address = address)
+                    candidate.copy(
+                        placeID = place?.placeID,
+                        address = address,
+                        countryCode = geocode?.countryCode,
+                        countryName = geocode?.countryName,
+                        cityName = geocode?.cityName
+                    )
                 }
             }
             _isScanningPhotos.value = false

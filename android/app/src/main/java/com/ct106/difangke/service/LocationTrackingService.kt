@@ -810,7 +810,10 @@ class LocationTrackingService : Service() {
                 val matchedPlace = ongoingPlaceOverrideID?.let { overrideID ->
                         places.firstOrNull { it.placeID == overrideID && !it.isIgnored }
                 } ?: PlaceMatcher.bestPlaceForCoordinate(centerLat, centerLon, places, processor)
-                val resolvedAddress = ongoingPlaceOverrideName ?: address ?: geocoder.reverseGeocode(centerLat, centerLon)
+                val geocode = if (ongoingPlaceOverrideName == null && address == null) {
+                        geocoder.reverseGeocodeDetails(centerLat, centerLon)
+                } else null
+                val resolvedAddress = ongoingPlaceOverrideName ?: address ?: geocode?.address
 
                 val existing =
                         ongoingFootprintID?.let { db.footprintDao().getById(it) }
@@ -835,7 +838,10 @@ class LocationTrackingService : Service() {
                                                 else matchedPlace?.placeID ?: existing.placeID,
                                         address =
                                                 if (keepManualLocation) existing.address
-                                                else resolvedAddress ?: existing.address
+                                                else resolvedAddress ?: existing.address,
+                                        countryCode = existing.countryCode ?: geocode?.countryCode,
+                                        countryName = existing.countryName ?: geocode?.countryName,
+                                        cityName = existing.cityName ?: geocode?.cityName
                                 )
                         db.footprintDao().update(updated)
                         return
@@ -869,7 +875,10 @@ class LocationTrackingService : Service() {
                                         },
                                 statusValue = "candidate",
                                 placeID = matchedPlace?.placeID,
-                                address = resolvedAddress
+                                address = resolvedAddress,
+                                countryCode = geocode?.countryCode,
+                                countryName = geocode?.countryName,
+                                cityName = geocode?.cityName
                         )
 
                 db.footprintDao().insert(entity)
@@ -1140,7 +1149,8 @@ class LocationTrackingService : Service() {
                         }
                 }
 
-                val address = geocoder.reverseGeocode(candidate.latitude, candidate.longitude)
+                val geocode = geocoder.reverseGeocodeDetails(candidate.latitude, candidate.longitude)
+                val address = geocode?.address
                 val locationHash =
                         FootprintEntity.generateLocationHash(
                                 candidate.latitude,
@@ -1189,7 +1199,10 @@ class LocationTrackingService : Service() {
                                         },
                                 statusValue = "candidate",
                                 placeID = matchedPlace?.placeID,
-                                address = address
+                                address = address,
+                                countryCode = geocode?.countryCode,
+                                countryName = geocode?.countryName,
+                                cityName = geocode?.cityName
                         )
 
                 db.footprintDao().insert(entity)

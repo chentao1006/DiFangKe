@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,6 +34,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
@@ -555,10 +557,10 @@ fun MonthDayCell(
     onViewRawPoints: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    val hasData = summary != null && summary.footprintCount > 0
+    val hasData = summary != null && (summary.timelineSegments.isNotEmpty() || summary.plannedArrivalTimes.isNotEmpty())
     val isToday = isSameDay(date, Date())
     
-    Column(
+    Box(
         modifier = Modifier
             .aspectRatio(1f)
             .padding(2.dp)
@@ -569,8 +571,7 @@ fun MonthDayCell(
                 onClick = onClick,
                 onLongClick = { if (hasData) showMenu = true }
             ),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        contentAlignment = Alignment.Center
     ) {
         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
             DropdownMenuItem(
@@ -584,29 +585,72 @@ fun MonthDayCell(
                 leadingIcon = { Icon(Icons.AutoMirrored.Filled.List, null) }
             )
         }
+        if (hasData) {
+            MonthDayTimelineRing(date, summary!!)
+        }
         Text(
             text = Calendar.getInstance().apply { time = date }.get(Calendar.DAY_OF_MONTH).toString(),
             style = MaterialTheme.typography.bodySmall,
             fontWeight = if (hasData) FontWeight.Bold else FontWeight.Normal,
             color = if (hasData) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
         )
-        if (hasData) {
-            Spacer(Modifier.height(3.dp))
-            Column(
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                summary.timelineIcons.take(4).chunked(2).forEach { rowItems ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                        rowItems.forEach { item ->
-                            HistoryIconBadge(item = item, size = 16.dp, iconSize = 9.dp, borderWidth = 1.1.dp)
-                        }
-                    }
-                }
-            }
+    }
+}
+
+@Composable
+private fun MonthDayTimelineRing(date: Date, summary: DaySummary) {
+    val accent = MaterialTheme.colorScheme.primary
+    val today = isSameDay(date, Date())
+    val future = date.after(historyStartOfDay(Date()))
+    Canvas(Modifier.size(34.dp)) {
+        val baseWidth = 3.2.dp.toPx()
+        val inset = baseWidth / 2f
+        val diameter = size.minDimension - baseWidth
+        val bounds = androidx.compose.ui.geometry.Rect(inset, inset, inset + diameter, inset + diameter)
+        drawArc(Color.Gray.copy(alpha = if (today || future) 0.16f else 0.30f), -90f, 360f, false,
+            bounds.topLeft, bounds.size, style = Stroke(baseWidth, cap = StrokeCap.Round))
+        if (today) drawArc(Color.Gray.copy(alpha = 0.30f), -90f, historyDayFraction(Date(), date) * 360f, false,
+            bounds.topLeft, bounds.size, style = Stroke(baseWidth, cap = StrokeCap.Round))
+        summary.timelineSegments.filter { it.isTransport }.forEach {
+            drawHistoryRingArc(historyArcRange(date, it.startTime, it.endTime), bounds, 3.2.dp.toPx(), accent, true)
+        }
+        summary.timelineSegments.filterNot { it.isTransport }.forEach {
+            val color = runCatching { Color(android.graphics.Color.parseColor(it.colorHex)) }.getOrDefault(accent)
+            drawHistoryRingArc(historyArcRange(date, it.startTime, it.endTime), bounds, if (it.isCurrent) 5.4.dp.toPx() else 3.5.dp.toPx(), color)
+        }
+        summary.plannedArrivalTimes.forEach { arrival ->
+            val range = historyArcRange(date, arrival, Date(arrival.time + 600_000L))
+            if (range.length > 0) drawArc(accent, -90f + (range.start * 360).toFloat(), maxOf(4.32f, (range.length * 360).toFloat()), false,
+                bounds.topLeft, bounds.size, style = Stroke(2.2.dp.toPx(), cap = StrokeCap.Round))
         }
     }
 }
+
+private data class HistoryArcRange(val start: Double, val length: Double)
+
+private fun historyArcRange(day: Date, start: Date, end: Date): HistoryArcRange {
+    val dayStart = historyStartOfDay(day)
+    val dayEnd = Date(dayStart.time + 86_400_000L)
+    val clippedStart = maxOf(start.time, dayStart.time)
+    val clippedEnd = minOf(end.time, dayEnd.time)
+    if (clippedEnd <= clippedStart) return HistoryArcRange(0.0, 0.0)
+    return HistoryArcRange((clippedStart - dayStart.time).toDouble() / 86_400_000.0, (clippedEnd - clippedStart).toDouble() / 86_400_000.0)
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawHistoryRingArc(range: HistoryArcRange, bounds: androidx.compose.ui.geometry.Rect, width: Float, color: Color, hollow: Boolean = false) {
+    val gap = minOf(0.028, range.length * 0.18)
+    if (range.length <= gap * 2) return
+    val start = -90f + ((range.start + gap) * 360).toFloat()
+    val sweep = ((range.length - gap * 2) * 360).toFloat()
+    drawArc(color, start, sweep, false, bounds.topLeft, bounds.size, style = Stroke(width, cap = StrokeCap.Round))
+    if (hollow) drawArc(Color.White, start, sweep, false, bounds.topLeft, bounds.size, style = Stroke(1.4.dp.toPx(), cap = StrokeCap.Round))
+}
+
+private fun historyStartOfDay(date: Date): Date = Calendar.getInstance().run {
+    time = date; set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0); time
+}
+
+private fun historyDayFraction(now: Date, day: Date): Float = ((now.time - historyStartOfDay(day).time).toDouble() / 86_400_000.0).coerceIn(0.0, 1.0).toFloat()
 
 @Composable
 private fun HistoryIconBadge(

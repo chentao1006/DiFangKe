@@ -416,7 +416,8 @@ class PersistentTimelineBuilder(private val context: Context) {
     }
 
     private suspend fun createFootprintEntity(candidate: com.ct106.difangke.data.model.CandidateFootprint): FootprintEntity? {
-        val address = geocoder.reverseGeocode(candidate.latitude, candidate.longitude)
+        val geocode = geocoder.reverseGeocodeDetails(candidate.latitude, candidate.longitude)
+        val address = geocode?.address
         val locationHash = FootprintEntity.generateLocationHash(candidate.latitude, candidate.longitude)
         val places = db.placeDao().getAll()
         if (PlaceMatcher.ignoredPlaceForCoordinate(candidate.latitude, candidate.longitude, places, processor) != null) {
@@ -441,7 +442,10 @@ class PersistentTimelineBuilder(private val context: Context) {
             title = "",
             statusValue = "candidate",
             placeID = matchedPlace?.placeID,
-            address = if (matchedPlace?.isUserDefined == true) matchedPlace.name else address
+            address = if (matchedPlace?.isUserDefined == true) matchedPlace.name else address,
+            countryCode = geocode?.countryCode,
+            countryName = geocode?.countryName,
+            cityName = geocode?.cityName
         )
 
         return entity

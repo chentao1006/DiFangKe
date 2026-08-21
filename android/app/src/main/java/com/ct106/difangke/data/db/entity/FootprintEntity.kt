@@ -28,6 +28,10 @@ data class FootprintEntity(
     val aiScore: Float = 0f,
     val placeID: String? = null,
     val address: String? = null,
+    /** Canonical reverse-geocoded hierarchy; never derive statistics from POI text. */
+    val countryCode: String? = null,
+    val countryName: String? = null,
+    val cityName: String? = null,
     val isHighlight: Boolean? = null,
     val isPlaceSuggestionIgnored: Boolean = false,
     val aiAnalyzed: Boolean = false,

@@ -925,8 +925,8 @@ private fun TimelineSheetHeader(
         IconButton(onClick = onShare) {
             Icon(Icons.Default.Share, contentDescription = "分享")
         }
-        IconButton(onClick = onAddFutureTrip) {
-            Icon(Icons.Default.Add, contentDescription = "新增行程计划")
+        IconButton(onClick = onShowStatistics) {
+            Icon(Icons.Default.BarChart, contentDescription = "统计洞察")
         }
         Box {
             IconButton(onClick = { showMoreMenu = true }) {
@@ -934,9 +934,9 @@ private fun TimelineSheetHeader(
             }
             DropdownMenu(expanded = showMoreMenu, onDismissRequest = { showMoreMenu = false }) {
                 DropdownMenuItem(
-                    text = { Text("统计洞察") },
-                    leadingIcon = { Icon(Icons.Default.BarChart, contentDescription = null) },
-                    onClick = { showMoreMenu = false; onShowStatistics() }
+                    text = { Text("新增行程计划") },
+                    leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    onClick = { showMoreMenu = false; onAddFutureTrip() }
                 )
                 DropdownMenuItem(
                     text = { Text("重要地点") },

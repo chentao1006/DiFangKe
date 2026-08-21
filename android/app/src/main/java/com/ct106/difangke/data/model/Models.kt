@@ -306,6 +306,8 @@ data class DaySummary(
     val hasConfirmed: Boolean,
     val hasCandidate: Boolean,
     val timelineIcons: List<TimelineIcon>,
+    val timelineSegments: List<TimelineSegment> = emptyList(),
+    val plannedArrivalTimes: List<Date> = emptyList(),
     val trajectoryCount: Int,
     val mileage: Double,
     var photoCount: Int = 0
@@ -315,6 +317,15 @@ data class DaySummary(
         val colorHex: String,
         val isTransport: Boolean,
         val isHighlight: Boolean
+    )
+
+    data class TimelineSegment(
+        val id: String,
+        val startTime: Date,
+        val endTime: Date,
+        val colorHex: String,
+        val isTransport: Boolean,
+        val isCurrent: Boolean
     )
 
     val activityLevel: Float get() {

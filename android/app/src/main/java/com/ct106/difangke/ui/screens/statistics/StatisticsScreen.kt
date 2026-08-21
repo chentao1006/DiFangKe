@@ -47,7 +47,10 @@ fun StatisticsScreen(
     val allPlaces by viewModel.allPlaces.collectAsState()
     val activityRank by viewModel.activityRank.collectAsState()
     val frequentPlaces by viewModel.frequentPlaces.collectAsState()
+    val frequentPlaceRankScope by viewModel.frequentPlaceRankScope.collectAsState()
+    val activityRankScope by viewModel.activityRankScope.collectAsState()
     val trendData by viewModel.trendData.collectAsState()
+    val trendSegments by viewModel.trendSegments.collectAsState()
     val aiSummary by viewModel.aiSummary.collectAsState()
     val isGeneratingSummary by viewModel.isGeneratingSummary.collectAsState()
     val context = LocalContext.current
@@ -124,13 +127,21 @@ fun StatisticsScreen(
                     HeatmapSection(points = heatmapPoints, allPlaces = allPlaces)
 
                     // Frequent places (same threshold and duration-first ranking as iOS)
-                    FrequentPlacesSection(items = frequentPlaces)
+                    FrequentPlacesSection(
+                        items = frequentPlaces,
+                        scope = frequentPlaceRankScope,
+                        onScopeSelected = viewModel::setFrequentPlaceRankScope
+                    )
 
                     // Activity Rank (iOS Style: Progress bars)
-                    ActivityRankSection(items = activityRank)
+                    ActivityRankSection(
+                        items = activityRank,
+                        scope = activityRankScope,
+                        onScopeSelected = viewModel::setActivityRankScope
+                    )
 
                     // Trend Chart (iOS Style: Area/Line chart)
-                    TrendSection(points = trendData, range = selectedRange)
+                    TrendSection(points = trendData, segments = trendSegments, range = selectedRange)
                 }
             }
         }
@@ -161,9 +172,21 @@ private fun statisticsShareText(
 }
 
 @Composable
-fun FrequentPlacesSection(items: List<FrequentPlaceItem>) {
+fun FrequentPlacesSection(
+    items: List<FrequentPlaceItem>,
+    scope: FrequentPlaceRankScope,
+    onScopeSelected: (FrequentPlaceRankScope) -> Unit
+) {
     Column(modifier = Modifier.fillMaxWidth()) {
         SectionHeader("常去地点排行", Icons.Default.Place)
+        Spacer(Modifier.height(12.dp))
+
+        StatisticsSegmentedControl(
+            options = FrequentPlaceRankScope.entries.toList(),
+            selected = scope,
+            label = { it.label },
+            onSelected = onScopeSelected
+        )
         Spacer(Modifier.height(12.dp))
 
         Card(
@@ -173,7 +196,7 @@ fun FrequentPlacesSection(items: List<FrequentPlaceItem>) {
         ) {
             if (items.isEmpty()) {
                 Text(
-                    "暂无常去地点数据",
+                    "暂无${scope.label}排行数据",
                     modifier = Modifier.padding(20.dp),
                     color = Color.LightGray
                 )
@@ -350,7 +373,7 @@ fun HeatmapSection(points: List<HeatmapPoint>, allPlaces: List<PlaceEntity> = em
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(280.dp)
+                .height(220.dp)
                 .pointerInput(Unit) {
                     // 拦截触摸事件，防止与父级滚动冲突
                     awaitPointerEventScope {
@@ -468,10 +491,21 @@ fun HeatmapSection(points: List<HeatmapPoint>, allPlaces: List<PlaceEntity> = em
 }
 
 @Composable
-fun ActivityRankSection(items: List<ActivityRankItem>) {
+fun ActivityRankSection(
+    items: List<ActivityRankItem>,
+    scope: ActivityRankScope,
+    onScopeSelected: (ActivityRankScope) -> Unit
+) {
     Column(modifier = Modifier.fillMaxWidth()) {
         SectionHeader("活动排行", Icons.AutoMirrored.Filled.ShowChart)
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(12.dp))
+        StatisticsSegmentedControl(
+            options = ActivityRankScope.entries.toList(),
+            selected = scope,
+            label = { it.label },
+            onSelected = onScopeSelected
+        )
+        Spacer(Modifier.height(12.dp))
         
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -480,13 +514,39 @@ fun ActivityRankSection(items: List<ActivityRankItem>) {
         ) {
             Column(modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp)) {
                 if (items.isEmpty()) {
-                    Text("暂无活动记录", modifier = Modifier.padding(20.dp), color = Color.LightGray)
+                    Text("暂无${scope.label}记录", modifier = Modifier.padding(20.dp), color = Color.LightGray)
                 } else {
                     val maxCount = items.maxByOrNull { it.count }?.count ?: 1
                     items.take(6).forEach { item ->
                         ActivityRankRow(item, maxCount)
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun <T> StatisticsSegmentedControl(
+    options: List<T>,
+    selected: T,
+    label: (T) -> String,
+    onSelected: (T) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)).padding(3.dp)
+    ) {
+        options.forEach { option ->
+            val active = option == selected
+            Box(
+                modifier = Modifier.weight(1f).clip(RoundedCornerShape(8.dp))
+                    .background(if (active) DfkAccent else Color.Transparent)
+                    .clickable { onSelected(option) }.padding(vertical = 7.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(label(option), fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    color = if (active) Color.White else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -527,7 +587,7 @@ fun ActivityRankRow(item: ActivityRankItem, maxCount: Int) {
 }
 
 @Composable
-fun TrendSection(points: List<TrendPoint>, range: StatisticsRange) {
+fun TrendSection(points: List<TrendPoint>, segments: List<TrendSegment>, range: StatisticsRange) {
     Column(modifier = Modifier.fillMaxWidth()) {
         SectionHeader("活跃趋势", Icons.Default.Timeline)
         Spacer(Modifier.height(16.dp))
@@ -538,21 +598,44 @@ fun TrendSection(points: List<TrendPoint>, range: StatisticsRange) {
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f))
         ) {
             Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
-                if (points.isEmpty()) {
+                if (segments.isEmpty()) {
                     Box(modifier = Modifier.fillMaxWidth().height(180.dp), contentAlignment = Alignment.Center) {
                         Text("数据加载中...", color = Color.Gray, fontSize = 13.sp)
                     }
                 } else {
-                    SmoothLineChart(points = points)
+                    DailyTimelineTrendChart(segments)
                     
                     Spacer(Modifier.height(16.dp))
                     Text(
-                        "数据说明：综合了您的出行频率、活动地点和照片等",
+                        "每一列是一日；纵向从 0 时到 24 时，显示足迹与交通时段。",
                         fontSize = 10.sp,
                         color = Color.Gray.copy(alpha = 0.6f)
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun DailyTimelineTrendChart(segments: List<TrendSegment>) {
+    val days = segments.map { it.date }.distinct().sorted()
+    Canvas(Modifier.fillMaxWidth().height(240.dp).padding(horizontal = 8.dp)) {
+        val columnWidth = size.width / days.size.coerceAtLeast(1)
+        listOf(0, 6, 12, 18, 24).forEach { hour ->
+            val y = size.height * hour / 24f
+            drawLine(Color.Gray.copy(alpha = 0.16f), androidx.compose.ui.geometry.Offset(0f, y),
+                androidx.compose.ui.geometry.Offset(size.width, y), 1.dp.toPx())
+        }
+        segments.forEach { segment ->
+            val column = days.indexOf(segment.date)
+            if (column < 0) return@forEach
+            val color = runCatching { Color(android.graphics.Color.parseColor(segment.colorHex)) }.getOrDefault(DfkAccent)
+            val top = size.height * (segment.startHour / 24.0).toFloat()
+            val bottom = size.height * (segment.endHour / 24.0).toFloat()
+            drawRoundRect(color, topLeft = androidx.compose.ui.geometry.Offset(column * columnWidth + columnWidth * 0.18f, top),
+                size = androidx.compose.ui.geometry.Size(columnWidth * 0.64f, maxOf(2.dp.toPx(), bottom - top)),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(3.dp.toPx(), 3.dp.toPx()))
         }
     }
 }
