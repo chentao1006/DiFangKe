@@ -37,9 +37,10 @@ struct IMESafeMultilineTextField: View {
 /// committed; SwiftUI state is deliberately updated only after that point.
 struct IMESafeTextView: UIViewRepresentable {
     @ObservedObject var textState: IMETextState
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(textState: textState)
+        Coordinator(textState: textState, onFocusChange: onFocusChange)
     }
 
     func makeUIView(context: Context) -> UITextView {
@@ -65,9 +66,15 @@ struct IMESafeTextView: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextViewDelegate {
         private let textState: IMETextState
+        private let onFocusChange: ((Bool) -> Void)?
 
-        init(textState: IMETextState) {
+        init(textState: IMETextState, onFocusChange: ((Bool) -> Void)?) {
             self.textState = textState
+            self.onFocusChange = onFocusChange
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            onFocusChange?(true)
         }
 
         func textViewDidChange(_ textView: UITextView) {
@@ -77,6 +84,7 @@ struct IMESafeTextView: UIViewRepresentable {
 
         func textViewDidEndEditing(_ textView: UITextView) {
             commit(textView)
+            onFocusChange?(false)
         }
 
         private func commit(_ textView: UITextView) {

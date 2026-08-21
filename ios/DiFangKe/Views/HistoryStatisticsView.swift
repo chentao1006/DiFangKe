@@ -31,11 +31,28 @@ enum StatisticsRange: Hashable {
     }
 }
 
+private enum FrequentPlaceRankScope: String, CaseIterable, Identifiable {
+    case country = "国家"
+    case city = "城市"
+    case place = "地点"
+
+    var id: Self { self }
+}
+
+private enum ActivityRankScope: String, CaseIterable, Identifiable {
+    case footprints = "足迹"
+    case transport = "交通"
+
+    var id: Self { self }
+}
+
 struct HistoryStatisticsView: View {
     @Environment(\.modelContext) private var modelContext
+    var onClose: () -> Void = {}
     
     @State private var allFootprints: [Footprint] = []
     @State private var manualTransports: [TransportManualSelection] = []
+    @State private var transportRecords: [TransportRecord] = []
     @State private var activityTypes: [ActivityType] = []
     @State private var allPlaces: [Place] = []
     
@@ -55,6 +72,9 @@ struct HistoryStatisticsView: View {
     @State private var showingFullMap = false
     @State private var activeYearForSegment: Int = Calendar.current.component(.year, from: Date())
     @State private var sharePayload: DFKShareCardPayload?
+    @State private var frequentPlaceRankScope: FrequentPlaceRankScope = .city
+    @State private var activityRankScope: ActivityRankScope = .footprints
+    @State private var requestedGeographicBackfills: Set<UUID> = []
     
     // Filtered footprints based on range
     private var filteredFootprints: [Footprint] {
@@ -104,22 +124,31 @@ struct HistoryStatisticsView: View {
         .background(Color.dfkBackground)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    prepareStatsShare()
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
+                HStack(spacing: 18) {
+                    Button {
+                        prepareStatsShare()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .accessibilityLabel("分享统计")
+
+                    Button(action: onClose) {
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
+                    }
+                    .accessibilityLabel("关闭统计")
                 }
-                .accessibilityLabel("分享统计")
             }
         }
         .onChange(of: selectedRange) { _, _ in
             updateAiSummary()
             updateMapPosition()
+            resolveRankingGeographies()
         }
         .onAppear {
             fetchData()
             updateAiSummary()
             updateMapPosition()
+            resolveRankingGeographies()
             withAnimation(.easeIn(duration: 0.6)) {
                 appearanceTrigger = true
             }
@@ -143,22 +172,23 @@ struct HistoryStatisticsView: View {
         sharePayload = loadingPayload
         let payloadID = loadingPayload.id
 
-        DFKShareImageLoader.loadMapImages(
-            coordinates: coordinates,
-            footprints: footprints,
-            activities: activityTypes,
-            markerScale: footprints.count <= 1 ? 2.2 : 1.5
-        ) { mapImages in
+        let locations = getTopLocations(delta: 0.1)
+        let maxIntensity = locations.map(\.count).max() ?? 1
+        let heatmapPoints = locations.map {
+            DFKMapView.HeatmapPoint(coordinate: $0.coord, intensity: $0.count, maxIntensity: maxIntensity)
+        }
+
+        DFKShareImageLoader.loadStatisticsHeatmapImages(points: heatmapPoints) { mapImages in
             var payload = DFKShareCardFactory.statsPayload(
                 rangeText: statisticsRangeText,
                 footprints: footprints,
+                transports: filteredTransportRecords,
                 places: allPlaces,
-                activities: activityTypes,
-                aiSummary: aiSummary
+                activities: activityTypes
             )
-            payload.backgroundMapImage = mapImages.light ?? mapImages.dark
-            payload.backgroundMapLightImage = mapImages.light
-            payload.backgroundMapDarkImage = mapImages.dark
+            payload.contentMapImage = mapImages.light ?? mapImages.dark
+            payload.contentMapLightImage = mapImages.light
+            payload.contentMapDarkImage = mapImages.dark
             payload.id = payloadID
             sharePayload = payload
         }
@@ -258,7 +288,7 @@ struct HistoryStatisticsView: View {
         self.aiSummary = nil
         
         // Prepare data for AI
-        let rankData = getActivityRankData().prefix(3).map { "\($0.name)(\($0.count)次)" }.joined(separator: ", ")
+        let rankData = getActivityRankData(for: .footprints).prefix(3).map { "\($0.name)(\($0.count)次)" }.joined(separator: ", ")
         let topPlacesCount = getTopLocations(delta: 0.01).prefix(3).count
         
         // 寻找主要地点分组
@@ -574,7 +604,19 @@ struct HistoryStatisticsView: View {
     // MARK: - Frequent Places Section
     private var frequentPlacesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("常去地点排行", icon: "mappin.and.ellipse")
+            HStack(spacing: 8) {
+                sectionHeader("常去地点排行", icon: "mappin.and.ellipse", horizontalPadding: 0)
+
+                Picker("地点排行维度", selection: $frequentPlaceRankScope) {
+                    ForEach(FrequentPlaceRankScope.allCases) { scope in
+                        Text(scope.rawValue).tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(width: 172)
+            }
+            .padding(.horizontal, 20)
             
             let data = getFrequentPlacesData()
             
@@ -612,7 +654,7 @@ struct HistoryStatisticsView: View {
                                     .font(.system(size: 15, weight: .semibold))
                                     .foregroundColor(.dfkAccent)
                                 
-                                Text("\(item.count)次")
+                                Text("\(item.count)个足迹")
                                     .font(.system(size: 12))
                                     .foregroundColor(.secondary)
                             }
@@ -637,9 +679,20 @@ struct HistoryStatisticsView: View {
     // MARK: - Activity Rank Section
     private var activityRankSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            sectionHeader("活动偏好排行", icon: "medal.fill")
+            HStack(spacing: 8) {
+                sectionHeader("活动偏好排行", icon: "medal.fill", horizontalPadding: 0)
+                Picker("活动排行维度", selection: $activityRankScope) {
+                    ForEach(ActivityRankScope.allCases) { scope in
+                        Text(scope.rawValue).tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(width: 112)
+            }
+            .padding(.horizontal, 20)
             
-            let data = getActivityRankData()
+            let data = getActivityRankData(for: activityRankScope)
             let maxCount = data.first?.count ?? 1
             
             if data.isEmpty {
@@ -682,71 +735,44 @@ struct HistoryStatisticsView: View {
     // MARK: - Trend Section
     private var trendSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("生活活跃趋势", icon: "chart.line.uptrend.xyaxis")
+            sectionHeader("生活活跃趋势", icon: "chart.bar.fill")
             
             let data = getTrendData()
             
             if data.isEmpty {
-                placeholderView("数据加载中...")
+                placeholderView("暂无活动或交通时段")
             } else {
                 VStack(alignment: .leading, spacing: 4) {
-                    Chart {
-                        ForEach(data) { item in
-                            AreaMark(
-                                x: .value("日期", item.date, unit: .day),
-                                y: .value("活跃度", item.score)
-                            )
-                            .foregroundStyle(
-                                LinearGradient(
-                                    colors: [Color.dfkAccent.opacity(0.3), Color.dfkAccent.opacity(0)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Chart {
+                            ForEach(data) { item in
+                                RectangleMark(
+                                    x: .value("日期", item.date, unit: .day),
+                                    yStart: .value("开始", item.startHour),
+                                    yEnd: .value("结束", item.endHour)
                                 )
-                            )
-                            .interpolationMethod(.catmullRom)
-                            
-                            LineMark(
-                                x: .value("日期", item.date, unit: .day),
-                                y: .value("活跃度", item.score)
-                            )
-                            .foregroundStyle(Color.dfkAccent.gradient)
-                            .lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
-                            .interpolationMethod(.catmullRom)
-                        }
-                    }
-                    .chartXAxis {
-                        switch selectedRange {
-                        case .last7Days:
-                            AxisMarks(values: .stride(by: .day, count: 1)) { _ in
-                                AxisTick()
-                                AxisValueLabel(format: .dateTime.month().day())
-                                    .font(.system(size: 9))
-                            }
-                        case .last30Days:
-                            AxisMarks(values: .stride(by: .day, count: 7)) { _ in
-                                AxisTick()
-                                AxisValueLabel(format: .dateTime.month().day())
-                                    .font(.system(size: 9))
-                            }
-                        case .last90Days:
-                            AxisMarks(values: .stride(by: .day, count: 15)) { _ in
-                                AxisTick()
-                                AxisValueLabel(format: .dateTime.month().day())
-                                    .font(.system(size: 9))
-                            }
-                        case .lastYear, .customYear:
-                            AxisMarks(values: .stride(by: .month, count: 2)) { _ in
-                                AxisTick()
-                                AxisValueLabel(format: .dateTime.month())
-                                    .font(.system(size: 9))
+                                .foregroundStyle(item.color)
                             }
                         }
+                        .chartYScale(domain: 0...24)
+                        .chartYAxis {
+                            AxisMarks(values: [0, 6, 12, 18, 24]) { value in
+                                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+                                AxisValueLabel {
+                                    if let hour = value.as(Int.self) { Text("\(hour):00").font(.system(size: 9)) }
+                                }
+                            }
+                        }
+                        .chartXAxis {
+                            AxisMarks(values: .stride(by: .day, count: trendAxisStride)) { _ in
+                                AxisTick()
+                                AxisValueLabel(format: .dateTime.month().day()).font(.system(size: 9))
+                            }
+                        }
+                        .frame(width: max(320, CGFloat(trendDayCount) * 28), height: 220)
                     }
-                    .chartYAxis(.hidden)
-                    .frame(height: 180)
-                    .padding(.horizontal, 8)
                     
-                    Text("数据说明：综合了你的出行频率、去过的地方和拍下的照片")
+                    Text("按每天 0–24 点展示：活动类型与交通方式使用不同颜色")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary.opacity(0.6))
                         .padding(.leading, 12)
@@ -759,7 +785,7 @@ struct HistoryStatisticsView: View {
         }
     }
     
-    private func sectionHeader(_ title: String, icon: String) -> some View {
+    private func sectionHeader(_ title: String, icon: String, horizontalPadding: CGFloat = 20) -> some View {
         HStack {
             Image(systemName: icon)
                 .foregroundColor(.dfkAccent)
@@ -768,7 +794,7 @@ struct HistoryStatisticsView: View {
                 .font(.system(size: 16, weight: .bold))
             Spacer()
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, horizontalPadding)
         .padding(.top, 8)
     }
     
@@ -799,20 +825,31 @@ struct HistoryStatisticsView: View {
     }
     
     private func getFrequentPlacesData() -> [FrequentPlaceItem] {
+        requestMissingRankingGeographies()
         var groups: [String: (name: String, address: String, count: Int, duration: TimeInterval)] = [:]
         
         for fp in filteredFootprints {
-            let name: String
             let address: String
             
+            let placeName: String
             if let pID = fp.placeID, let place = allPlaces.first(where: { $0.placeID == pID }) {
-                name = place.name
-                address = place.address ?? ""
+                placeName = place.name
+                address = place.address ?? fp.address ?? ""
             } else if let addr = fp.address, !addr.isEmpty {
                 let parts = addr.components(separatedBy: "市").last?.components(separatedBy: "区").last?.components(separatedBy: "县").last ?? addr
-                name = parts.components(separatedBy: " ").first ?? addr
+                placeName = parts.components(separatedBy: " ").first ?? addr
                 address = addr
             } else {
+                continue
+            }
+
+            guard let name = rankName(
+                for: frequentPlaceRankScope,
+                placeName: placeName,
+                countryName: fp.countryName,
+                countryCode: fp.countryCode,
+                cityName: fp.cityName
+            ) else {
                 continue
             }
             
@@ -822,16 +859,43 @@ struct HistoryStatisticsView: View {
             if let existing = groups[key] {
                 groups[key] = (existing.name, existing.address, existing.count + 1, existing.duration + fp.duration)
             } else {
-                groups[key] = (name, address, 1, fp.duration)
+                groups[key] = (name, frequentPlaceRankScope == .place ? address : "", 1, fp.duration)
             }
         }
         
         return groups.values
-            .filter { $0.duration >= 3600 && $0.count > 2 }
+            .filter {
+                frequentPlaceRankScope != .place || $0.duration >= 3600
+            }
             .map { FrequentPlaceItem(name: $0.name, address: $0.address, count: $0.count, duration: $0.duration) }
             .sorted { $0.duration > $1.duration }
     }
-    
+
+    private func rankName(
+        for scope: FrequentPlaceRankScope,
+        placeName: String,
+        countryName: String?,
+        countryCode: String?,
+        cityName: String?
+    ) -> String? {
+        switch scope {
+        case .place:
+            return placeName
+        case .country:
+            guard let countryName, let countryCode else { return nil }
+            return "\(flagEmoji(for: countryCode)) \(countryName)"
+        case .city:
+            return cityName
+        }
+    }
+
+    private func flagEmoji(for countryCode: String) -> String {
+        let base: UInt32 = 127397
+        return countryCode.uppercased().unicodeScalars.compactMap {
+            UnicodeScalar(base + $0.value).map(String.init)
+        }.joined()
+    }
+
     struct LocationPoint {
         let hash: String
         let coord: CLLocationCoordinate2D
@@ -884,41 +948,20 @@ struct HistoryStatisticsView: View {
         let icon: String
     }
     
-    private func getActivityRankData() -> [RankItem] {
+    private func getActivityRankData(for scope: ActivityRankScope) -> [RankItem] {
         var counts: [String: Int] = [:]
         
-        // 1. 统计驻留活动 (Stays/Footprints)
-        for fp in filteredFootprints {
-            if let type = fp.getActivityType(from: activityTypes)?.name {
-                counts[type, default: 0] += 1
+        if scope == .footprints {
+            for fp in filteredFootprints {
+                if let type = fp.getActivityType(from: activityTypes)?.name {
+                    counts[type, default: 0] += 1
+                }
             }
-        }
-        
-        // 2. 统计交通活动 (Manual Transports)
-        // 注意：自动识别的交通目前未持久化为单个对象，此处先计入用户手动确认或修改的交通
-        let calendar = Calendar.current
-        let rangeFilteredTransports = manualTransports.filter { transport in
-            switch selectedRange {
-            case .last7Days:
-                let cutoff = calendar.date(byAdding: .day, value: -7, to: Date())!
-                return transport.startTime >= cutoff
-            case .last30Days:
-                let cutoff = calendar.date(byAdding: .day, value: -30, to: Date())!
-                return transport.startTime >= cutoff
-            case .last90Days:
-                let cutoff = calendar.date(byAdding: .day, value: -90, to: Date())!
-                return transport.startTime >= cutoff
-            case .lastYear:
-                let cutoff = calendar.date(byAdding: .day, value: -365, to: Date())!
-                return transport.startTime >= cutoff
-            case .customYear(let year):
-                return calendar.component(.year, from: transport.startTime) == year
-            }
-        }
-        
-        for transport in rangeFilteredTransports {
-            if let type = TransportType(rawValue: transport.vehicleType) {
-                counts[type.localizedName, default: 0] += 1
+        } else {
+            for transport in filteredManualTransports {
+                if let type = TransportType(rawValue: transport.vehicleType) {
+                    counts[type.localizedName, default: 0] += 1
+                }
             }
         }
         
@@ -941,54 +984,156 @@ struct HistoryStatisticsView: View {
             return $0.count > $1.count 
         }
     }
+
+    private var filteredManualTransports: [TransportManualSelection] {
+        let calendar = Calendar.current
+        return manualTransports.filter { transport in
+            switch selectedRange {
+            case .last7Days:
+                return transport.startTime >= calendar.date(byAdding: .day, value: -7, to: Date())!
+            case .last30Days:
+                return transport.startTime >= calendar.date(byAdding: .day, value: -30, to: Date())!
+            case .last90Days:
+                return transport.startTime >= calendar.date(byAdding: .day, value: -90, to: Date())!
+            case .lastYear:
+                return transport.startTime >= calendar.date(byAdding: .day, value: -365, to: Date())!
+            case .customYear(let year):
+                return calendar.component(.year, from: transport.startTime) == year
+            }
+        }
+    }
+
+    private var filteredTransportRecords: [TransportRecord] {
+        let calendar = Calendar.current
+        return transportRecords.filter { transport in
+            switch selectedRange {
+            case .last7Days:
+                return transport.startTime >= calendar.date(byAdding: .day, value: -7, to: Date())!
+            case .last30Days:
+                return transport.startTime >= calendar.date(byAdding: .day, value: -30, to: Date())!
+            case .last90Days:
+                return transport.startTime >= calendar.date(byAdding: .day, value: -90, to: Date())!
+            case .lastYear:
+                return transport.startTime >= calendar.date(byAdding: .day, value: -365, to: Date())!
+            case .customYear(let year):
+                return calendar.component(.year, from: transport.startTime) == year
+            }
+        }
+    }
     
     struct TrendItem: Identifiable {
         let id = UUID()
         let date: Date
-        let score: Double
+        let startHour: Double
+        let endHour: Double
+        let color: Color
     }
     
     private func getTrendData() -> [TrendItem] {
         let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        
-        let days: Int
-        let endDate: Date
-        
-        if let rangeDays = selectedRange.days {
-            days = rangeDays
-            endDate = today
-        } else if case .customYear(let year) = selectedRange {
-            if year == calendar.component(.year, from: today) {
-                let startOfYear = calendar.date(from: DateComponents(year: year, month: 1, day: 1))!
-                days = calendar.dateComponents([.day], from: startOfYear, to: today).day ?? 1
-                endDate = today
-            } else {
-                let startOfYear = calendar.date(from: DateComponents(year: year, month: 1, day: 1))!
-                let endOfYear = calendar.date(from: DateComponents(year: year, month: 12, day: 31))!
-                days = calendar.dateComponents([.day], from: startOfYear, to: endOfYear).day ?? 365
-                endDate = endOfYear
+        var segments: [TrendItem] = []
+
+        func appendSegment(start: Date, end: Date, color: Color) {
+            var cursor = start
+            while cursor < end {
+                let dayStart = calendar.startOfDay(for: cursor)
+                guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { break }
+                let segmentEnd = min(end, dayEnd)
+                let startHour = cursor.timeIntervalSince(dayStart) / 3600
+                let endHour = max(startHour + 0.08, segmentEnd.timeIntervalSince(dayStart) / 3600)
+                segments.append(TrendItem(date: dayStart, startHour: startHour, endHour: min(24, endHour), color: color))
+                cursor = dayEnd
             }
-        } else {
-            days = 30
-            endDate = today
         }
-        
-        var points: [TrendItem] = []
-        let grouped = Dictionary(grouping: filteredFootprints) { calendar.startOfDay(for: $0.startTime) }
-        
-        for i in (0..<days).reversed() {
-            guard let date = calendar.date(byAdding: .day, value: -i, to: endDate) else { continue }
-            let dayFootprints = grouped[date] ?? []
-            
-            let uniqueTypes = Set(dayFootprints.compactMap { $0.activityTypeValue }).count
-            let photoCount = dayFootprints.reduce(0) { $0 + $1.photoAssetIDs.count }
-            
-            let baseScore = Double(dayFootprints.count * 10) + Double(uniqueTypes * 15) + Double(min(photoCount, 50))
-            points.append(TrendItem(date: date, score: baseScore))
+
+        for footprint in filteredFootprints {
+            appendSegment(
+                start: footprint.startTime,
+                end: footprint.endTime,
+                color: footprint.getActivityType(from: activityTypes)?.color ?? .dfkAccent
+            )
         }
-        
-        return points
+        for transport in filteredManualTransports {
+            let color = TransportType(rawValue: transport.vehicleType).map(transportTrendColor) ?? .secondary
+            appendSegment(start: transport.startTime, end: transport.endTime, color: color)
+        }
+        return segments
+    }
+
+    private var trendDayCount: Int {
+        switch selectedRange {
+        case .last7Days: 7
+        case .last30Days: 30
+        case .last90Days: 90
+        case .lastYear, .customYear: 365
+        }
+    }
+
+    private var trendAxisStride: Int {
+        switch selectedRange {
+        case .last7Days: 1
+        case .last30Days: 7
+        case .last90Days: 15
+        case .lastYear, .customYear: 30
+        }
+    }
+
+    private func transportTrendColor(_ type: TransportType) -> Color {
+        switch type {
+        case .slow: .green
+        case .running: .orange
+        case .bicycle: .teal
+        case .ebike: .mint
+        case .motorcycle: .pink
+        case .car: .blue
+        case .bus: .indigo
+        case .subway: .purple
+        case .train: .brown
+        case .airplane: .cyan
+        case .ship: .blue.opacity(0.7)
+        }
+    }
+
+    private func resolveRankingGeographies() {
+        let pending = filteredFootprints.filter {
+            ($0.countryCode == nil || $0.countryName == nil || $0.cityName == nil)
+                && !requestedGeographicBackfills.contains($0.footprintID)
+        }
+        guard !pending.isEmpty else { return }
+        requestedGeographicBackfills.formUnion(pending.map(\.footprintID))
+
+        Task { @MainActor in
+            let geocoder = CLGeocoder()
+            for footprint in pending {
+                let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
+                guard let placemarks = try? await geocoder.reverseGeocodeLocation(location),
+                      let placemark = placemarks.first else { continue }
+                let countryCode = placemark.isoCountryCode
+                let countryName = countryCode.flatMap {
+                    Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
+                } ?? placemark.country
+                let cityName = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea
+                footprint.countryCode = countryCode
+                footprint.countryName = countryName
+                footprint.cityName = cityName
+            }
+            try? modelContext.save()
+            // The source is an explicit @State snapshot rather than @Query;
+            // reassign so the country/city picker redraws as rows are enriched.
+            allFootprints = Array(allFootprints)
+        }
+    }
+
+    private func requestMissingRankingGeographies() {
+        guard filteredFootprints.contains(where: {
+            ($0.countryCode == nil || $0.countryName == nil || $0.cityName == nil)
+                && !requestedGeographicBackfills.contains($0.footprintID)
+        }) else {
+            return
+        }
+        DispatchQueue.main.async {
+            self.resolveRankingGeographies()
+        }
     }
     
     private func fetchData() {
@@ -1005,6 +1150,13 @@ struct HistoryStatisticsView: View {
         )
         if let fetched = try? modelContext.fetch(transportDescriptor) {
             manualTransports = fetched
+        }
+
+        let transportRecordDescriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate<TransportRecord> { $0.statusRaw == "active" }
+        )
+        if let fetched = try? modelContext.fetch(transportRecordDescriptor) {
+            transportRecords = fetched
         }
         
         let activityDescriptor = FetchDescriptor<ActivityType>(

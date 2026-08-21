@@ -3335,6 +3335,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         // 核心修复：必须是受管理的持久化模型才能进行后续 AI 分析并保存
         guard footprint.modelContext != nil else { return }
+
+        enrichGeographicHierarchy(for: footprint)
         
         // 核心检查：使用显式标识判断是否已分析
         if footprint.aiAnalyzed {
@@ -3391,6 +3393,32 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
 
         footprint.aiAnalyzed = true
+    }
+
+    private func enrichGeographicHierarchy(for footprint: Footprint) {
+        guard footprint.countryCode == nil || footprint.cityName == nil else { return }
+        let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
+        let footprintID = footprint.footprintID
+
+        geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
+            guard let placemark = placemarks?.first else { return }
+            let countryCode = placemark.isoCountryCode
+            let countryName = countryCode.flatMap {
+                Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
+            } ?? placemark.country
+            let cityName = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea
+
+            Task { @MainActor [weak self] in
+                guard let mainContext = self?.modelContext?.container.mainContext,
+                      let current = try? mainContext.fetch(FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })).first else {
+                    return
+                }
+                current.countryCode = countryCode
+                current.countryName = countryName
+                current.cityName = cityName
+                try? mainContext.save()
+            }
+        }
     }
 
     

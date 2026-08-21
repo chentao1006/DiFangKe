@@ -413,7 +413,10 @@ private struct ContinuousTimelineView: View {
             .presentationDetents([.height(88), .medium, .large], selection: $timelineDetent)
             .presentationBackground(.clear)
             .presentationDragIndicator(.visible)
-            .presentationContentInteraction(selectedFootprint != nil ? .resizes : .scrolls)
+            // A selected footprint presents an editor above this sheet. Let its
+            // scroll view keep its touches instead of turning them into a resize
+            // gesture on the underlying timeline sheet.
+            .presentationContentInteraction(.scrolls)
             .interactiveDismissDisabled()
             .presentationBackgroundInteraction(.enabled(upThrough: .medium))
     }
@@ -1952,12 +1955,14 @@ private struct ContinuousTimelineSheet: View {
     @State private var lastEarlierDatePrefetchTime: Date?
     @State private var isShowingCalendar = false
     @State private var isShowingHistory = false
+    @State private var isHistoryStatisticsActive = false
     @State private var earlierDatePrefetchTask: Task<Void, Never>?
     @State private var scrollMetrics = ContinuousTimelineScrollMetrics()
     @State private var scrollRestorer = ContinuousTimelineScrollRestorer()
     @State private var headerVisibleDates: [Date] = []
     @State private var isViewingUndatedFutureTrips = false
     @State private var freezesViewportDrivenUpdatesUntil: Date? = Date.distantFuture
+    @State private var activeTimelineDateBeforeBackground: Date?
     @State private var calendarScrollLockTarget: Date?
     @State private var pendingCalendarBackfillDates: [Date] = []
     @State private var calendarScrollRetryTask: Task<Void, Never>?
@@ -2166,16 +2171,20 @@ private struct ContinuousTimelineSheet: View {
                             HistoryListView(initialDate: activeTimelineDate, showImportOnAppear: requestedHistoryImport, onDateSelected: { selectedDate in
                                 isShowingHistory = false
                                 scrollToDate(selectedDate, using: proxy)
+                            }, onStatisticsVisibilityChanged: { isActive in
+                                isHistoryStatisticsActive = isActive
                             })
                             .onDisappear {
                                 requestedHistoryImport = false
                             }
                             .toolbar {
                                 ToolbarItem(placement: .topBarTrailing) {
-                                    Button {
-                                        isShowingHistory = false
-                                    } label: {
-                                        Image(systemName: "xmark").dfkToolbarDismissIcon()
+                                    if !isHistoryStatisticsActive {
+                                        Button {
+                                            isShowingHistory = false
+                                        } label: {
+                                            Image(systemName: "xmark").dfkToolbarDismissIcon()
+                                        }
                                     }
                                 }
                             }
@@ -2286,12 +2295,12 @@ private struct ContinuousTimelineSheet: View {
             } // NavigationStack
             if isInitialTimelineLoading {
                 // This is outside the scroll view so its material reaches the
-                // sheet's bottom edge. Keep the navigation bar's 52pt band clear.
+                // sheet's bottom edge. Keep the full title-bar band clear.
                 GeometryReader { viewport in
                     initialTimelineLoadingOverlay
                         .frame(
                             width: viewport.size.width,
-                            height: max(0, viewport.size.height - 52)
+                            height: max(0, viewport.size.height - 64)
                         )
                         .frame(maxHeight: .infinity, alignment: .bottom)
                         .ignoresSafeArea(.container, edges: .bottom)
@@ -2502,21 +2511,47 @@ private struct ContinuousTimelineSheet: View {
                         if isReloading {
                             freezesViewportDrivenUpdatesUntil = Date.distantFuture
                         } else {
-                            freezesViewportDrivenUpdatesUntil = nil
-                            applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
+                            // Don't force an immediate re-read here: latestDateFrames can still
+                            // reflect stale/incomplete geometry from before the reload settled.
+                            // Give layout a brief moment, then let the ordinary preference-key
+                            // pipeline (which reports real, settled frames) resume driving date
+                            // tracking on its own.
+                            freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.3)
                         }
                     }
                     .onChange(of: scenePhase) { oldPhase, newPhase in
                         // Returning from background can make the LazyVStack's underlying
                         // UICollectionView remount/relayout its rows, which briefly reports
                         // incorrect frames through ContinuousTimelineDateFramePreferenceKey.
-                        // Freeze viewport-driven date tracking across that window so those
-                        // transient frames can't get misread as the user having scrolled to
-                        // an old date. Gate on initial positioning so this can't fire during
-                        // (and interfere with) the cold-launch "stay on today" sequence.
-                        guard newPhase == .active, oldPhase != .active else { return }
+                        // Freezing only reactively on the way back to .active leaves a race:
+                        // the bad geometry read can land at/just before that callback fires,
+                        // before the freeze is in effect. So freeze indefinitely the moment we
+                        // leave .active, keeping protection engaged with no gap for the entire
+                        // backgrounded stretch, then shrink it to a short settle window once
+                        // we're actually back. Gate on initial positioning so this can't fire
+                        // during (and interfere with) the cold-launch "stay on today" sequence.
                         guard hasCompletedInitialTimelinePositioning else { return }
-                        freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.6)
+                        if newPhase == .active {
+                            if oldPhase != .active {
+                                freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.6)
+                                // Belt-and-suspenders: don't just rely on the freeze window
+                                // timing out safely — deterministically put the date state back
+                                // to what it was right before backgrounding, in case a bad
+                                // geometry read already slipped through before this callback
+                                // ran. The scroll view itself never physically moved while
+                                // backgrounded, so this can't fight the user's real position.
+                                if let restoredDate = activeTimelineDateBeforeBackground {
+                                    activeTimelineDate = restoredDate
+                                    visibleDatesChanged([Calendar.current.startOfDay(for: restoredDate)])
+                                }
+                                activeTimelineDateBeforeBackground = nil
+                            }
+                        } else {
+                            if oldPhase == .active {
+                                activeTimelineDateBeforeBackground = activeTimelineDate
+                            }
+                            freezesViewportDrivenUpdatesUntil = Date.distantFuture
+                        }
                     }
                     .onReceive(NotificationCenter.default.publisher(for: FutureTrip.didChangeNotification)) { _ in
                         restoreFutureTripTimelinePosition(using: proxy)

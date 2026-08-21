@@ -36,11 +36,11 @@ struct WatchMapView: View {
                         MapPolyline(coordinates: item.routeCoordinates!.map {
                             CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
                         })
-                        .stroke(.orange, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+                        .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
                     }
                     ForEach(footprintItems) { item in
                         Marker(item.title, systemImage: item.icon, coordinate: CLLocationCoordinate2D(latitude: item.latitude!, longitude: item.longitude!))
-                            .tint(activityColor(item.colorHex))
+                            .tint(markerTint(for: item))
                     }
                 }
                 .mapStyle(.standard(elevation: .flat))
@@ -55,6 +55,10 @@ struct WatchMapView: View {
         if calendar.isDateInToday(date) { return "今天" }
         if calendar.isDateInYesterday(date) { return "昨天" }
         return date.formatted(.dateTime.month().day())
+    }
+
+    private func markerTint(for item: WatchTimelineItem) -> Color {
+        item.isTransport == true ? Color.accentColor : activityColor(item.colorHex)
     }
 
     private static func initialCameraPosition(for day: WatchDaySnapshot?) -> MapCameraPosition {

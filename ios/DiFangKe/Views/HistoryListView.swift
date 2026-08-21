@@ -116,6 +116,7 @@ struct IdentifiableDate: Identifiable {
 
 struct HistoryListView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
     @Environment(LocationManager.self) private var locationManager
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
     @Query private var allManualSelections: [TransportManualSelection]
@@ -155,12 +156,14 @@ struct HistoryListView: View {
     @State private var hasScrolledMonth = false
     
     var onDateSelected: ((Date) -> Void)? = nil
+    var onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil
     
-    init(initialDate: Date = Date(), showImportOnAppear: Bool = false, onDateSelected: ((Date) -> Void)? = nil) {
+    init(initialDate: Date = Date(), showImportOnAppear: Bool = false, onDateSelected: ((Date) -> Void)? = nil, onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil) {
         let normalizedDate = Calendar.current.startOfDay(for: initialDate)
         self.initialDate = normalizedDate
         self.showImportOnAppear = showImportOnAppear
         self.onDateSelected = onDateSelected
+        self.onStatisticsVisibilityChanged = onStatisticsVisibilityChanged
         _selectedDate = State(initialValue: normalizedDate)
     }
     
@@ -177,9 +180,16 @@ struct HistoryListView: View {
         .background(Color.dfkBackground)
         .onAppear { 
             rebuildIndex()
+            onStatisticsVisibilityChanged?(viewMode == .statistics)
             if showImportOnAppear {
                 checkPhotoPermission()
             }
+        }
+        .onChange(of: viewMode) { _, mode in
+            onStatisticsVisibilityChanged?(mode == .statistics)
+        }
+        .onDisappear {
+            onStatisticsVisibilityChanged?(false)
         }
         .onChange(of: allFootprints) { rebuildIndex() }
         .onChange(of: allTransportRecords) { rebuildIndex() }
@@ -293,7 +303,7 @@ struct HistoryListView: View {
                 .environment(locationManager)
                 .tag(ViewMode.favorites)
             
-            HistoryStatisticsView()
+            HistoryStatisticsView(onClose: { dismiss() })
                 .tag(ViewMode.statistics)
             
         }
@@ -746,86 +756,54 @@ struct MonthDayCell: View {
     let futureTrips: [FutureTrip]
     let activityTypes: [ActivityType]
     let onTap: () -> Void
-    @Environment(\.colorScheme) private var colorScheme
-    
-    var allIcons: [DaySummary.TimelineIcon] {
-        if footprints.isEmpty && transports.isEmpty && futureTrips.isEmpty { return [] }
-        
-        var items: [TimelineItem] = []
-        for fp in footprints { items.append(.footprint(fp)) }
-        for tp in transports {
-            let tType = TransportType(rawValue: tp.typeRaw) ?? .slow
-            let mType = tp.manualTypeRaw != nil ? TransportType(rawValue: tp.manualTypeRaw!) : nil
-            let t = Transport(id: tp.recordID, startTime: tp.startTime, endTime: tp.endTime, startLocation: tp.startLocation, endLocation: tp.endLocation, type: tType, distance: tp.distance, averageSpeed: tp.averageSpeed, points: [], manualType: mType)
-            items.append(.transport(t))
-        }
-        items.sort { $0.startTime < $1.startTime }
-        
-        var icons = items.map { item in
-            DaySummary.TimelineIcon(
-                icon: item.getIcon(allActivityTypes: activityTypes),
-                colorHex: item.getColor(allActivityTypes: activityTypes),
-                isTransport: item.isTransport,
-                isHighlight: item.isHighlight
-            )
-        }
-
-        icons.append(contentsOf: futureTrips.map { trip in
-            let activity = activity(for: trip)
-            return DaySummary.TimelineIcon(
-                icon: activity?.icon ?? "calendar",
-                colorHex: activity?.colorHex ?? "#007AFF",
+    private var timelineSegments: [MonthDayTimelineSegment] {
+        let footprintSegments = footprints.map { footprint in
+            let activity = footprint.activityTypeValue.flatMap { value in
+                activityTypes.first { $0.id.uuidString == value || $0.name == value }
+            }
+            return MonthDayTimelineSegment(
+                id: footprint.footprintID.uuidString,
+                startTime: footprint.startTime,
+                endTime: footprint.endTime,
+                color: Color(hex: activity?.colorHex ?? "") ?? .dfkAccent,
                 isTransport: false,
-                isHighlight: false
+                isCurrent: Calendar.current.isDateInToday(date) && footprint.footprintID == latestFootprintID
             )
-        })
-
-        return deduplicatedTimelineIcons(icons)
+        }
+        let transportSegments = transports.map { transport in
+            MonthDayTimelineSegment(
+                id: transport.recordID.uuidString,
+                startTime: transport.startTime,
+                endTime: transport.endTime,
+                color: .dfkAccent,
+                isTransport: true,
+                isCurrent: false
+            )
+        }
+        return (footprintSegments + transportSegments).sorted { $0.startTime < $1.startTime }
     }
 
-    private func activity(for trip: FutureTrip) -> ActivityType? {
-        guard let activityTypeValue = trip.activityTypeValue else { return nil }
-        return activityTypes.first { $0.id.uuidString == activityTypeValue || $0.name == activityTypeValue }
+    private var latestFootprintID: UUID? {
+        footprints.max { $0.startTime < $1.startTime }?.footprintID
     }
-    
+
     var body: some View {
-        let icons = allIcons
-        let hasData = !icons.isEmpty
+        let hasData = !footprints.isEmpty || !transports.isEmpty || !futureTrips.isEmpty
         let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
         let isTarget = Calendar.current.isDate(date, inSameDayAs: targetDate)
         
-        VStack(spacing: 0) {
+        ZStack {
+            if hasData {
+                MonthDayTimelineRing(
+                    date: date,
+                    segments: timelineSegments,
+                    plannedTrips: futureTrips
+                )
+                .frame(width: 34, height: 34)
+            }
             Text("\(Calendar.current.component(.day, from: date))")
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .foregroundColor(hasData ? .primary : .secondary.opacity(0.4))
-                .padding(.top, 3)
-            
-            if !icons.isEmpty {
-                FlowLayout(spacing: 1) {
-                    ForEach(icons) { item in
-                        let style = timelineIconStyle(for: item, colorScheme: colorScheme)
-                        ZStack {
-                            if item.isHighlight {
-                                StarOutlineShape()
-                                    .fill(style.backgroundColor)
-                                    .frame(width: 15, height: 15)
-                            } else if style.showsCircularBackground {
-                                Circle()
-                                    .fill(style.backgroundColor)
-                                    .frame(width: 12, height: 12)
-                            }
-
-                            Image(systemName: item.icon)
-                                .font(.system(size: item.isHighlight ? 7.4 : 7.0, weight: .semibold))
-                                .foregroundColor(item.isTransport ? .dfkAccent : style.foregroundColor)
-                        }
-                        .frame(width: item.isHighlight ? 15 : 13, height: item.isHighlight ? 15 : 13)
-                    }
-                }
-                .frame(maxWidth: 56)
-                .padding(.top, 1)
-            }
-            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity)
         .frame(height: 50)
@@ -837,6 +815,94 @@ struct MonthDayCell: View {
         )
         .onTapGesture { if hasData { onTap() } }
     }
+}
+
+private struct MonthDayTimelineSegment: Identifiable {
+    let id: String
+    let startTime: Date
+    let endTime: Date
+    let color: Color
+    let isTransport: Bool
+    let isCurrent: Bool
+}
+
+/// The calendar's compact counterpart to the Watch day ring.  A data day has
+/// its time distribution around the date rather than a row of unrelated icons.
+private struct MonthDayTimelineRing: View {
+    let date: Date
+    let segments: [MonthDayTimelineSegment]
+    let plannedTrips: [FutureTrip]
+
+    private let calendar = Calendar.current
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(.gray.opacity(isToday ? 0.16 : unrecordedOpacity), lineWidth: 2.4)
+            if isToday {
+                Circle()
+                    .trim(from: 0, to: elapsedDayFraction)
+                    .stroke(.gray.opacity(0.30), lineWidth: 2.4)
+            }
+
+            ForEach(segments.filter(\.isTransport)) { segment in
+                arc(for: segment, lineWidth: 1.3)
+            }
+            ForEach(segments.filter { !$0.isTransport }) { segment in
+                arc(for: segment, lineWidth: segment.isCurrent ? 4.2 : 2.6)
+            }
+            ForEach(plannedTrips.filter(\.hasArrivalTime), id: \.id) { trip in
+                planMarker(for: trip)
+            }
+        }
+        .rotationEffect(.degrees(-90))
+    }
+
+    @ViewBuilder
+    private func arc(for segment: MonthDayTimelineSegment, lineWidth: CGFloat) -> some View {
+        let range = clippedFractionRange(start: segment.startTime, end: segment.endTime)
+        // Rounded caps extend past the trim point.  This larger inset keeps a
+        // real visible gray break between adjacent segments in a 34pt cell.
+        let gap = min(0.024, range.length * 0.16)
+        if range.length > gap * 2 {
+            Circle()
+                .trim(from: range.start + gap, to: range.start + range.length - gap)
+                .stroke(segment.color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+        }
+    }
+
+    private func planMarker(for trip: FutureTrip) -> some View {
+        let range = clippedFractionRange(start: trip.arrivalDate, end: trip.arrivalDate.addingTimeInterval(10 * 60))
+        return Circle()
+            .trim(from: range.start, to: min(1, range.start + max(0.012, range.length)))
+            .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
+    }
+
+    private var unrecordedOpacity: Double {
+        return calendar.startOfDay(for: date) > calendar.startOfDay(for: Date()) ? 0.16 : 0.30
+    }
+
+    private var isToday: Bool { calendar.isDateInToday(date) }
+
+    private var elapsedDayFraction: Double {
+        let dayStart = calendar.startOfDay(for: date)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return 0 }
+        return min(1, max(0, Date().timeIntervalSince(dayStart) / dayEnd.timeIntervalSince(dayStart)))
+    }
+
+    private func clippedFractionRange(start: Date, end: Date) -> (start: Double, length: Double) {
+        let dayStart = calendar.startOfDay(for: date)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return (0, 0) }
+        let clippedStart = max(start, dayStart)
+        let clippedEnd = min(end, dayEnd)
+        guard clippedEnd > clippedStart else { return (0, 0) }
+        let duration = dayEnd.timeIntervalSince(dayStart)
+        return (
+            max(0, clippedStart.timeIntervalSince(dayStart) / duration),
+            min(1, clippedEnd.timeIntervalSince(clippedStart) / duration)
+        )
+    }
+
 }
 
 // MARK: - Extensions

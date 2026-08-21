@@ -41,6 +41,11 @@ final class Footprint {
     var photoAssetIDsData: Data = Data()
     var photoMetadataData: Data = Data() // 存储云端同步元数据
     var address: String?
+    // Canonical hierarchy from reverse geocoding. Keep these separate from
+    // display address/place name so statistics never infer geography from POI text.
+    var countryCode: String?
+    var countryName: String?
+    var cityName: String?
     
     var isHighlight: Bool?
     var isPlaceSuggestionIgnored: Bool = false

@@ -7,19 +7,32 @@ struct WatchHomeView: View {
 
     var body: some View {
         NavigationStack {
-            TabView(selection: $selectedPage) {
-                ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
-                    FutureTripPage(trip: trip)
-                        .tag("future-\(trip.id)")
+            ZStack(alignment: .bottomLeading) {
+                TabView(selection: $selectedPage) {
+                    ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
+                        FutureTripPage(trip: trip)
+                            .tag("future-\(trip.id)")
+                    }
+                    CurrentPlaceView()
+                        .tag("current")
+                    ForEach(store.snapshot.recentDays ?? []) { day in
+                        DayTimelinePage(day: day)
+                            .tag("day-\(day.date.timeIntervalSince1970)")
+                    }
                 }
-                CurrentPlaceView()
-                    .tag("current")
-                ForEach(store.snapshot.recentDays ?? []) { day in
-                    DayTimelinePage(day: day)
-                        .tag("day-\(day.date.timeIntervalSince1970)")
+                .tabViewStyle(.page(indexDisplayMode: .automatic))
+
+                if selectedPage != "current" {
+                    Button {
+                        selectedPage = "current"
+                    } label: {
+                        Image(systemName: "location")
+                    }
+                    .padding(.leading, 6)
+                    .padding(.bottom, 5)
+                    .accessibilityLabel("返回当前停留")
                 }
             }
-            .tabViewStyle(.page(indexDisplayMode: .automatic))
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
@@ -194,7 +207,7 @@ private struct WatchTimelineRow: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .frame(minWidth: 34, alignment: .leading)
             Image(systemName: item.icon)
-                .foregroundStyle(activityColor(item.colorHex))
+                .foregroundStyle(item.isTransport == true ? .accentColor : activityColor(item.colorHex))
                 .frame(width: 16)
             Text(item.title)
                 .font(.caption)

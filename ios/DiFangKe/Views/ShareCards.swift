@@ -137,6 +137,8 @@ struct DFKShareCardPayload: Identifiable {
     var entries: [DFKShareEntry] = []
     var plans: [DFKSharePlanEntry] = []
     var stats: [DFKShareStatEntry] = []
+    var placeRankings: [DFKShareRankingEntry] = []
+    var activityRankings: [DFKShareRankingEntry] = []
     var summary: String?
     var isLoading: Bool = false
     var brandName: String = "地方客"
@@ -176,6 +178,15 @@ struct DFKShareStatEntry: Identifiable {
     var label: String
     var value: String
     var detail: String?
+}
+
+struct DFKShareRankingEntry: Identifiable {
+    let id = UUID()
+    var title: String
+    var detail: String?
+    var value: String
+    var icon: String
+    var color: Color
 }
 
 struct DFKShareCardPreviewView: View {
@@ -321,6 +332,7 @@ struct DFKShareCardPreviewView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(isRendering || editablePayload.isLoading)
+
                 }
                 .padding(16)
                 .background(.bar)
@@ -671,8 +683,8 @@ struct DFKShareCardPreviewView: View {
         \(shareTitleScenarioInstruction)
 
         分享类型：\(shareKindName)
-        行程时长：\(shareDurationDescription)
-        行程范围（仅供判断跨度，绝不能写进标题）：\(editablePayload.rangeText)
+        时间范围：\(editablePayload.rangeText)
+        时间语境：\(shareDurationDescription)
         足迹与活动：
         \(facts.isEmpty ? "无" : facts)
         交通：
@@ -709,14 +721,21 @@ struct DFKShareCardPreviewView: View {
     }
 
     private var shareTitleScenarioInstruction: String {
-        if case .plan = editablePayload.kind {
+        switch editablePayload.kind {
+        case .plan:
             return "这是尚未发生的未来计划。标题必须表达准备、期待、将要或计划中的方向；严禁使用“去了、玩了、吃了、走过、经历、回忆、这一天”等已完成或回顾性的说法。只能根据已选计划提炼未来安排，不能暗示任何计划已经发生。"
+        case .stats:
+            return "这是一个统计时间区间内的生活总结，不是单日行程。必须基于所给时间范围概括整个统计周期，严禁写成“一日盘点”“一天”“今日”“当日”或任何单日叙事。"
+        case .moment, .timeline:
+            return "这是已经发生的足迹或生活记录。标题应基于已提供的事实概括经历，不要虚构未发生的安排。"
         }
-        return "这是已经发生的足迹或生活记录。标题应基于已提供的事实概括经历，不要虚构未发生的安排。"
     }
 
     private var shareDurationDescription: String {
         let range = editablePayload.rangeText
+        if case .stats = editablePayload.kind {
+            return "统计周期为“\(range)”，应概括该时间区间的整体生活状态，不能按单日行程理解。"
+        }
         let isDateRange = range.contains(" - ") || range.contains("至") || range.contains("~")
         if !isDateRange {
             return "单日行程。标题必须围绕当天的主线，禁止使用“这段时间”“近期”“一段旅程”等跨日措辞。"
@@ -1017,6 +1036,10 @@ struct DFKShareCardView: View {
     static func pixelSize(for payload: DFKShareCardPayload) -> CGSize {
         let width: CGFloat = 1080
         let hasPhoto = payload.heroImages.first != nil || payload.heroImage != nil
+        if case .stats = payload.kind {
+            let rows = max(2, payload.placeRankings.count + payload.activityRankings.count)
+            return CGSize(width: width, height: max(2_060, 1_160 + CGFloat(rows) * 130))
+        }
         if case .plan = payload.kind {
             let includedPlans = payload.plans.filter(\.isIncluded)
             let planCount = max(1, includedPlans.count)
@@ -1183,7 +1206,11 @@ struct DFKShareCardView: View {
 
     @ViewBuilder
     private func mapBackground(cardWidth: CGFloat, cardHeight: CGFloat) -> some View {
-        if let image = themedMapImage {
+        // Statistics already carry their own heatmap. Never use the generic
+        // coordinate fallback here: it connects unrelated stays into lines.
+        if case .stats = payload.kind {
+            EmptyView()
+        } else if let image = themedMapImage {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
@@ -1308,59 +1335,95 @@ struct DFKShareCardView: View {
     }
 
     private var statsContent: some View {
-        VStack(alignment: .leading, spacing: s(28)) {
-            if let summary = payload.summary {
-                editableText(summary, update: { newText in
-                    var updated = payload
-                    updated.summary = newText
-                    onPayloadUpdate(updated)
-                }) {
-                    Text(summary)
-                        .font(.system(size: fs(42), weight: .semibold))
-                        .foregroundStyle(theme.foreground)
-                        .lineSpacing(s(8))
-                        .padding(s(30))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: s(22)).fill(theme.card))
-                }
-            }
+        VStack(alignment: .leading, spacing: s(30)) {
+            statsMapBlock
+            statsSummaryRow
+            rankingSection(title: "城市排行", entries: payload.placeRankings, showsIcon: false)
+            rankingSection(title: "活动排行", entries: payload.activityRankings)
+        }
+    }
 
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: s(18)) {
-                ForEach(payload.stats.prefix(5)) { stat in
-                    VStack(alignment: .leading, spacing: s(10)) {
-                        editableText(stat.label, update: { newText in
-                            updateStat(stat.id) { $0.label = newText }
-                        }) {
-                            Text(stat.label)
-                                .font(.system(size: fs(24), weight: .medium))
-                                .foregroundStyle(theme.secondary)
-                        }
-                        editableText(stat.value, update: { newText in
-                            updateStat(stat.id) { $0.value = newText }
-                        }) {
-                            Text(stat.value)
-                                .font(.system(size: fs(48), weight: .bold))
-                                .foregroundStyle(theme.foreground)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.65)
-                        }
-                        if let detail = stat.detail {
-                            editableText(detail, update: { newText in
-                                updateStat(stat.id) { $0.detail = newText }
-                            }) {
-                                Text(detail)
-                                    .font(.system(size: fs(22)))
-                                    .foregroundStyle(theme.secondary)
-                                    .lineLimit(2)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(s(24))
-                    .background(RoundedRectangle(cornerRadius: s(18)).fill(theme.card))
+    private var statsMapBlock: some View {
+        ZStack {
+            if let mapImage = themedContentMapImage {
+                Image(uiImage: mapImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                DFKShareMapFallbackView(coordinates: payload.coordinates, theme: theme)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: s(460))
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: s(26)))
+    }
+
+    private var statsSummaryRow: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(payload.stats.prefix(3).enumerated()), id: \.element.id) { index, stat in
+                VStack(spacing: s(5)) {
+                    Text(stat.value)
+                        .font(.system(size: fs(42), weight: .bold))
+                        .foregroundStyle(theme.accent)
+                    Text(stat.label)
+                        .font(.system(size: fs(21), weight: .medium))
+                        .foregroundStyle(theme.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                if index < min(2, payload.stats.count - 1) {
+                    Rectangle()
+                        .fill(theme.secondary.opacity(0.25))
+                        .frame(width: 1, height: s(52))
                 }
             }
         }
+        .padding(.vertical, s(18))
+        .background(RoundedRectangle(cornerRadius: s(22)).fill(theme.card))
+    }
+
+    private func rankingSection(title: String, entries: [DFKShareRankingEntry], showsIcon: Bool = true) -> some View {
+        VStack(alignment: .leading, spacing: s(16)) {
+            Text(title)
+                .font(.system(size: fs(38), weight: .bold))
+                .foregroundStyle(theme.foreground)
+
+            ForEach(Array(entries.prefix(3).enumerated()), id: \.element.id) { index, entry in
+                HStack(spacing: s(18)) {
+                    Text("\(index + 1)")
+                        .font(.system(size: fs(30), weight: .bold))
+                        .foregroundStyle(theme.accent)
+                        .frame(width: s(34), alignment: .leading)
+                    if showsIcon {
+                        Image(systemName: entry.icon)
+                            .font(.system(size: fs(26), weight: .semibold))
+                            .foregroundStyle(entry.color)
+                            .frame(width: s(36))
+                    }
+                    VStack(alignment: .leading, spacing: s(4)) {
+                        Text(entry.title)
+                            .font(.system(size: fs(34), weight: .semibold))
+                            .foregroundStyle(theme.foreground)
+                            .lineLimit(1)
+                        if let detail = entry.detail, !detail.isEmpty {
+                            Text(detail)
+                                .font(.system(size: fs(22)))
+                                .foregroundStyle(theme.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: s(12))
+                    Text(entry.value)
+                        .font(.system(size: fs(28), weight: .bold))
+                        .foregroundStyle(theme.accent)
+                }
+                .padding(.vertical, s(12))
+            }
+        }
+        .padding(s(26))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: s(22)).fill(theme.card))
     }
 
     private func mediaBlock(height: CGFloat) -> some View {
@@ -1971,24 +2034,16 @@ enum DFKShareCardFactory {
         )
     }
 
-    static func statsPayload(rangeText: String, footprints: [Footprint], places: [Place], activities: [ActivityType], aiSummary: String?) -> DFKShareCardPayload {
+    static func statsPayload(rangeText: String, footprints: [Footprint], transports: [TransportRecord], places: [Place], activities: [ActivityType]) -> DFKShareCardPayload {
         let uniquePlaceKeys = Set(footprints.map { footprint in
             footprint.placeID?.uuidString ?? displayPlace(for: footprint)
         })
-        let totalPhotos = footprints.reduce(0) { $0 + $1.photoAssetIDs.count }
-        let totalHours = Int(footprints.reduce(0) { $0 + $1.duration } / 3600)
-        let topPlace = topPlaceName(footprints: footprints, places: places)
-        let topActivity = topActivityName(footprints: footprints, activities: activities)
-        let streak = currentRecordingStreak(footprints: footprints)
-
-        let fallbackSummary: String
-        if footprints.isEmpty {
-            fallbackSummary = "生活还在继续，新的足迹会慢慢留下来。"
-        } else if let topPlace {
-            fallbackSummary = "这段时间，你在 \(topPlace) 留下了不少生活的痕迹。"
-        } else {
-            fallbackSummary = "生活被一点一点留了下来。"
-        }
+        // Use persisted route mileage when it is complete. Older timeline data
+        // can have an incomplete TransportRecord, so the footprint-to-footprint
+        // travel distance is the fallback baseline for a period total.
+        let recordedMileage = transports.reduce(0) { $0 + max(0, $1.distance) }
+        let inferredMileage = footprintTransferDistance(footprints)
+        let totalMileage = max(recordedMileage, inferredMileage)
 
         return DFKShareCardPayload(
             kind: .stats,
@@ -2000,14 +2055,87 @@ enum DFKShareCardFactory {
             stats: [
                 DFKShareStatEntry(label: "足迹", value: "\(footprints.count)", detail: "次记录"),
                 DFKShareStatEntry(label: "地点", value: "\(uniquePlaceKeys.count)", detail: "个生活节点"),
-                DFKShareStatEntry(label: "照片", value: "\(totalPhotos)", detail: "张画面"),
-                DFKShareStatEntry(label: "停留", value: "\(totalHours)", detail: "小时"),
-                DFKShareStatEntry(label: "常去", value: topPlace ?? "暂无", detail: nil),
-                DFKShareStatEntry(label: "偏好", value: topActivity ?? "日常", detail: nil),
-                DFKShareStatEntry(label: "连续", value: "\(streak)", detail: "天记录")
+                DFKShareStatEntry(label: "里程", value: mileageText(totalMileage), detail: nil)
             ],
-            summary: aiSummary?.isEmpty == false ? aiSummary : fallbackSummary
+            placeRankings: placeRankingEntries(footprints: footprints, places: places),
+            activityRankings: activityRankingEntries(footprints: footprints, activities: activities),
+            summary: nil
         )
+    }
+
+    private static func placeRankingEntries(footprints: [Footprint], places: [Place]) -> [DFKShareRankingEntry] {
+        struct Aggregate {
+            var title: String
+            var count = 0
+            var duration: TimeInterval = 0
+        }
+
+        var groups: [String: Aggregate] = [:]
+        for footprint in footprints {
+            guard let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !city.isEmpty else { continue }
+            var aggregate = groups[city] ?? Aggregate(title: city)
+            aggregate.count += 1
+            aggregate.duration += footprint.duration
+            groups[city] = aggregate
+        }
+
+        return groups.values
+            .sorted { $0.duration > $1.duration }
+            .prefix(3)
+            .map { item in
+                DFKShareRankingEntry(
+                    title: item.title,
+                    detail: nil,
+                    value: "\(durationText(item.duration)) · \(item.count)个足迹",
+                    icon: "mappin.and.ellipse",
+                    color: .dfkAccent
+                )
+            }
+    }
+
+    private static func activityRankingEntries(footprints: [Footprint], activities: [ActivityType]) -> [DFKShareRankingEntry] {
+        var groups: [String: (activity: ActivityType?, count: Int)] = [:]
+        for footprint in footprints {
+            let activity = footprint.getActivityType(from: activities)
+            let name = activity?.name ?? "日常"
+            var aggregate = groups[name] ?? (activity, 0)
+            aggregate.count += 1
+            groups[name] = aggregate
+        }
+
+        return groups
+            .sorted { $0.value.count > $1.value.count }
+            .prefix(3)
+            .map { name, aggregate in
+                DFKShareRankingEntry(
+                    title: name,
+                    detail: nil,
+                    value: "\(aggregate.count)个足迹",
+                    icon: aggregate.activity?.icon ?? "figure.walk",
+                    color: aggregate.activity?.color ?? .dfkAccent
+                )
+            }
+    }
+
+    private static func durationText(_ duration: TimeInterval) -> String {
+        let hours = Int(duration / 3600)
+        return hours > 0 ? "\(hours)小时" : "\(max(1, Int(duration / 60)))分钟"
+    }
+
+    private static func mileageText(_ meters: Double) -> String {
+        meters >= 1_000 ? "\(Int((meters / 1_000).rounded()))公里" : "\(Int(meters.rounded()))米"
+    }
+
+    private static func footprintTransferDistance(_ footprints: [Footprint]) -> Double {
+        let ordered = footprints
+            .sorted { $0.startTime < $1.startTime }
+            .map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
+            .filter { CLLocationCoordinate2DIsValid($0.coordinate) && $0.coordinate.latitude != 0 && $0.coordinate.longitude != 0 }
+        guard ordered.count >= 2 else { return 0 }
+        return zip(ordered, ordered.dropFirst()).reduce(0) { partial, pair in
+            partial + pair.0.distance(from: pair.1)
+        }
     }
 
     private static func displayPlace(for footprint: Footprint) -> String {
@@ -2165,17 +2293,35 @@ enum DFKShareCardFactory {
         return formatter.string(from: date)
     }
 
-    private static func topPlaceName(footprints: [Footprint], places: [Place]) -> String? {
+    private static func topCityName(footprints: [Footprint], places: [Place]) -> String? {
         var counts: [String: Int] = [:]
         for footprint in footprints {
-            if let placeID = footprint.placeID, let place = places.first(where: { $0.placeID == placeID }) {
-                counts[place.name, default: 0] += 1
-            } else {
-                let name = displayPlace(for: footprint)
-                counts[name, default: 0] += 1
-            }
+            let address = footprint.placeID
+                .flatMap { id in places.first(where: { $0.placeID == id })?.address }
+                ?? footprint.address
+                ?? ""
+            guard let city = cityName(from: address) else { continue }
+            counts[city, default: 0] += 1
         }
         return counts.sorted { $0.value > $1.value }.first?.key
+    }
+
+    private static func cityName(from address: String) -> String? {
+        let normalized = address.replacingOccurrences(of: "中国", with: "")
+        if let provinceRange = normalized.range(of: "省") {
+            let afterProvince = String(normalized[provinceRange.upperBound...])
+            if let cityRange = afterProvince.range(of: "市") {
+                return String(afterProvince[..<cityRange.upperBound])
+            }
+        }
+        if let cityRange = normalized.range(of: "市") {
+            let beforeCity = String(normalized[..<cityRange.upperBound])
+            return beforeCity
+                .split(whereSeparator: { $0 == "," || $0 == "，" || $0 == " " })
+                .last
+                .map(String.init)
+        }
+        return nil
     }
 
     private static func topActivityName(footprints: [Footprint], activities: [ActivityType]) -> String? {
@@ -2242,6 +2388,35 @@ private struct DFKShareMapSnapshotMarker {
 }
 
 enum DFKShareImageLoader {
+    static func loadStatisticsHeatmapImages(
+        points: [DFKMapView.HeatmapPoint],
+        completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
+    ) {
+        let validPoints = points.filter { $0.coordinate.isRenderableMapCoordinate }
+        guard !validPoints.isEmpty else {
+            completion((nil, nil))
+            return
+        }
+        Task {
+            async let light = makeMapSnapshot(
+                coordinates: validPoints.map(\.coordinate),
+                markers: [],
+                style: .light,
+                drawsFootprintOverlays: false,
+                heatmapPoints: validPoints
+            )
+            async let dark = makeMapSnapshot(
+                coordinates: validPoints.map(\.coordinate),
+                markers: [],
+                style: .dark,
+                drawsFootprintOverlays: false,
+                heatmapPoints: validPoints
+            )
+            let images = await (light, dark)
+            await MainActor.run { completion(images) }
+        }
+    }
+
     static func loadPlanMapImages(
         plans: [DFKSharePlanEntry],
         completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
@@ -2532,6 +2707,7 @@ enum DFKShareImageLoader {
         style: UIUserInterfaceStyle = .unspecified,
         drawsFootprintOverlays: Bool = true,
         drawsPath: Bool = true,
+        heatmapPoints: [DFKMapView.HeatmapPoint] = [],
         size: CGSize = CGSize(width: 1200, height: 720),
         spanMultiplier: CLLocationDegrees = 2.2,
         minimumSpan: CLLocationDegrees = 0.012,
@@ -2574,9 +2750,33 @@ enum DFKShareImageLoader {
                         drawFootprintMarkers(markers: markers, snapshot: snapshot, style: style, in: context.cgContext)
                     }
                 }
+                drawHeatmap(points: heatmapPoints, snapshot: snapshot, in: context.cgContext)
             }
         } catch {
             return nil
+        }
+    }
+
+    private static func drawHeatmap(
+        points: [DFKMapView.HeatmapPoint],
+        snapshot: MKMapSnapshotter.Snapshot,
+        in context: CGContext
+    ) {
+        for point in points {
+            let mapped = snapshot.point(for: point.coordinate)
+            let ratio = pow(Double(point.intensity) / Double(max(1, point.maxIntensity)), 0.4)
+            let color: UIColor = ratio < 0.25 ? .systemOrange : (ratio < 0.85 ? .systemRed : UIColor(Color.dfkDeepRed))
+            let radius = CGFloat(18 + ratio * 24)
+            let colors = [color.withAlphaComponent(0.48).cgColor, color.withAlphaComponent(0.04).cgColor] as CFArray
+            guard let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) else { continue }
+            context.drawRadialGradient(
+                gradient,
+                startCenter: mapped,
+                startRadius: 0,
+                endCenter: mapped,
+                endRadius: radius,
+                options: []
+            )
         }
     }
 

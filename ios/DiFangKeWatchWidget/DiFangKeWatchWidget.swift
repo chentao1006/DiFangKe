@@ -115,6 +115,7 @@ private struct WatchComplicationView: View {
             .monospacedDigit()
     }
     private var color: Color {
+        if transport != nil { return .accentColor }
         guard let hex = activity?.colorHex else { return .blue }
         let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
         guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .blue }
@@ -135,9 +136,14 @@ private struct WatchComplicationView: View {
         case .accessoryCircular:
             ZStack {
                 dayTimelineRing
-                VStack(spacing: 1) {
-                    Image(systemName: icon).font(.title3).foregroundStyle(color)
-                    durationLabel.font(.caption2).lineLimit(1).minimumScaleFactor(0.65)
+                VStack(spacing: 0) {
+                    Image(systemName: icon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(color)
+                    durationLabel
+                        .font(.system(size: 8, weight: .medium, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                 }
             }
             .padding(1)
@@ -196,19 +202,19 @@ private struct DayTimelineRing: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(.gray.opacity(0.10), lineWidth: 2.4)
+                .stroke(.gray.opacity(0.16), lineWidth: 3.0)
             Circle()
                 .trim(from: 0, to: elapsedDayFraction)
-                .stroke(.gray.opacity(0.42), lineWidth: 2.4)
+                .stroke(.gray.opacity(0.42), lineWidth: 3.0)
 
             ForEach(items.filter { $0.isTransport == true }, id: \.id) { item in
-                segment(for: item, color: .accentColor, lineWidth: 1.15)
+                segment(for: item, color: .accentColor, lineWidth: 1.55)
             }
             ForEach(items.filter { $0.isTransport != true }, id: \.id) { item in
                 segment(
                     for: item,
                     color: color(from: item.colorHex),
-                    lineWidth: item.id == currentFootprintID ? 4.2 : 2.4
+                    lineWidth: item.id == currentFootprintID ? 5.0 : 3.0
                 )
             }
         }
@@ -218,9 +224,11 @@ private struct DayTimelineRing: View {
     @ViewBuilder
     private func segment(for item: ComplicationTimelineItem, color: Color, lineWidth: CGFloat) -> some View {
         let range = clippedFractionRange(for: item)
-        if range.length > 0 {
+        // Rounded caps otherwise close a tiny trim gap on the compact dial.
+        let gap = min(0.024, range.length * 0.16)
+        if range.length > gap * 2 {
             Circle()
-                .trim(from: range.start, to: range.start + range.length)
+                .trim(from: range.start + gap, to: range.start + range.length - gap)
                 .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
         }
     }
@@ -245,7 +253,7 @@ private struct DayTimelineRing: View {
     }
 
     private func color(from hex: String?) -> Color {
-        guard let hex else { return .accentColor }
+        guard let hex = hex else { return .accentColor }
         let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
         guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .accentColor }
         return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
@@ -265,7 +273,7 @@ private struct DayTimelineBar: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
-                Capsule().fill(.gray.opacity(0.10))
+                Capsule().fill(.gray.opacity(0.16))
                 Capsule()
                     .fill(.gray.opacity(0.42))
                     .frame(width: geometry.size.width * elapsedDayFraction)
@@ -316,7 +324,7 @@ private struct DayTimelineBar: View {
     }
 
     private func color(from hex: String?) -> Color {
-        guard let hex else { return .accentColor }
+        guard let hex = hex else { return .accentColor }
         let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
         guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .accentColor }
         return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)

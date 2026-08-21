@@ -24,8 +24,6 @@ struct FootprintModalView: View {
     @State private var showMap = false
     @State private var showAI = false
     @FocusState private var addressFocused: Bool
-    @FocusState private var reasonFocused: Bool
-    @State private var reasonState = IMETextState()
     var autoFocus: Bool = false
     @State private var showingDeleteAlert = false
     @State private var showAddPhotoDialog = false
@@ -118,7 +116,10 @@ struct FootprintModalView: View {
                     }
                 }
             }
-            .scrollDismissesKeyboard(.interactively)
+            // Keep the map's GeometryReader height stable when the keyboard
+            // appears. Otherwise focusing the note shrinks the map to a new
+            // third-height and forces MapKit to relayout/reload.
+            .ignoresSafeArea(.keyboard, edges: .bottom)
             .navigationTitle(isMinimized ? "" : "足迹详情")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -172,7 +173,6 @@ struct FootprintModalView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { 
-                        saveDraftReasonIfNeeded()
                         if !isDraft { try? modelContext.save() }
                         onDismiss?(hasChanged)
                         if !isInline { dismiss() }
@@ -199,8 +199,6 @@ struct FootprintModalView: View {
                 }
             }
             .onAppear {
-                reasonState.text = footprint.reason ?? ""
-                
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { withAnimation(.easeOut(duration: 0.25)) { showMap = true } }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { withAnimation(.easeOut(duration: 0.3)) { showAI = true } }
                 
@@ -319,7 +317,6 @@ struct FootprintModalView: View {
                 Text(aiErrorMessage)
             }
         .onDisappear {
-            saveDraftReasonIfNeeded()
             if hasChanged {
                 Aptabase.shared.trackEvent("footprint_edited")
                 footprint.status = .manual
@@ -331,6 +328,55 @@ struct FootprintModalView: View {
     }
 
 }
+}
+
+private struct FootprintReasonEditor: View {
+    @StateObject private var textState: IMETextState
+    @State private var keyboardHeight: CGFloat = 0
+    let onCommit: (String) -> Void
+    let onBeginEditing: () -> Void
+
+    init(text: String, onCommit: @escaping (String) -> Void, onBeginEditing: @escaping () -> Void) {
+        _textState = StateObject(wrappedValue: IMETextState(text))
+        self.onCommit = onCommit
+        self.onBeginEditing = onBeginEditing
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if textState.text.isEmpty {
+                Text("输入备注...")
+                    .font(.body)
+                    .foregroundColor(.secondary)
+                    .allowsHitTesting(false)
+            }
+
+            IMESafeTextView(textState: textState, onFocusChange: { isFocused in
+                if isFocused { onBeginEditing() }
+            })
+                .frame(minHeight: 52, maxHeight: 120)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.secondary.opacity(0.05))
+        )
+        .onDisappear {
+            onCommit(textState.text)
+        }
+        // The detail layout intentionally ignores the keyboard to keep MapKit
+        // from resizing. Add scrollable space locally instead, so this editor
+        // can still move completely above the keyboard.
+        .padding(.bottom, keyboardHeight)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
+            guard let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+            let height = max(0, UIScreen.main.bounds.maxY - frame.minY)
+            withAnimation(.easeOut(duration: 0.2)) {
+                keyboardHeight = height
+            }
+        }
+    }
 }
 
 extension FootprintModalView {
@@ -349,23 +395,28 @@ extension FootprintModalView {
     }
 
     private var footprintDetailContent: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 0) {
-                headerContent
-                footerContent
+        ScrollViewReader { proxy in
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    headerContent
+                    footerContent {
+                        // Wait for the keyboard's layout pass, then keep the
+                        // focused editor above it without resizing the map.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                proxy.scrollTo("footprintReasonEditor", anchor: .top)
+                            }
+                        }
+                    }
 
-                Spacer().frame(height: 30)
+                    Spacer().frame(height: 30)
+                }
             }
         }
         .background(Color.dfkBackground)
-        .onTapGesture {
-            addressFocused = false
-            reasonFocused = false
-        }
     }
 
     private func prepareMomentShare() {
-        saveDraftReasonIfNeeded()
         let loadingPayload = DFKShareCardFactory.loadingPayload(
             kind: .moment,
             rangeText: DFKShareCardFactory.dateText(footprint.startTime),
@@ -400,8 +451,7 @@ extension FootprintModalView {
         }
     }
 
-    private func saveDraftReasonIfNeeded() {
-        let text = reasonState.text
+    private func saveReason(_ text: String) {
         if text != (footprint.reason ?? "") {
             ensureFootprintManaged()
             footprint.reason = text
@@ -943,45 +993,33 @@ extension FootprintModalView {
     }
     
     
-    private var footerContent: some View {
+    private func footerContent(onBeginReasonEditing: @escaping () -> Void) -> some View {
         Group {
-            aiContent
+            aiContent(onBeginReasonEditing: onBeginReasonEditing)
             photoSection.padding(.horizontal, 24).padding(.top, 16)
         }
     }
     
-    private var aiContent: some View {
-        aiSection
+    private func aiContent(onBeginReasonEditing: @escaping () -> Void) -> some View {
+        aiSection(onBeginReasonEditing: onBeginReasonEditing)
             .padding(.horizontal, 24)
             .padding(.top, 20)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
     
-    private var aiSection: some View {
+    private func aiSection(onBeginReasonEditing: @escaping () -> Void) -> some View {
         VStack(alignment: .center, spacing: 10) {
             Text("足迹备注")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.secondary)
                 .frame(maxWidth: .infinity)
             
-            IMESafeMultilineTextField(prompt: "输入备注...", textState: reasonState, isFocused: $reasonFocused, alignment: .center)
-                .font(.body)
-                .foregroundColor(Color.dfkMainText.opacity(0.85))
-                .frame(maxWidth: .infinity)
-                .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(reasonFocused ? Color.dfkAccent.opacity(0.05) : Color.secondary.opacity(0.05))
+            FootprintReasonEditor(
+                text: footprint.reason ?? "",
+                onCommit: saveReason,
+                onBeginEditing: onBeginReasonEditing
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(reasonFocused ? Color.dfkAccent.opacity(0.3) : Color.clear, lineWidth: 1)
-            )
-            .onChange(of: reasonFocused) { _, focused in
-                if !focused {
-                    saveDraftReasonIfNeeded()
-                }
-            }
+            .id("footprintReasonEditor")
         }
     }
     
