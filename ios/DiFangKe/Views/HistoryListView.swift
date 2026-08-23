@@ -109,6 +109,15 @@ private func timelineIconStyle(for item: DaySummary.TimelineIcon, colorScheme: C
 
 
 
+private extension View {
+    func contentVisibility(for mode: HistoryListView.ViewMode, matching target: HistoryListView.ViewMode) -> some View {
+        self
+            .opacity(mode == target ? 1 : 0)
+            .allowsHitTesting(mode == target)
+            .accessibilityHidden(mode != target)
+    }
+}
+
 struct IdentifiableDate: Identifiable {
     var id: Date { date }
     let date: Date
@@ -116,7 +125,6 @@ struct IdentifiableDate: Identifiable {
 
 struct HistoryListView: View {
     @Environment(\.modelContext) private var modelContext
-    @Environment(\.dismiss) private var dismiss
     @Environment(LocationManager.self) private var locationManager
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
     @Query private var allManualSelections: [TransportManualSelection]
@@ -156,14 +164,12 @@ struct HistoryListView: View {
     @State private var hasScrolledMonth = false
     
     var onDateSelected: ((Date) -> Void)? = nil
-    var onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil
-    
-    init(initialDate: Date = Date(), showImportOnAppear: Bool = false, onDateSelected: ((Date) -> Void)? = nil, onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil) {
+
+    init(initialDate: Date = Date(), showImportOnAppear: Bool = false, onDateSelected: ((Date) -> Void)? = nil) {
         let normalizedDate = Calendar.current.startOfDay(for: initialDate)
         self.initialDate = normalizedDate
         self.showImportOnAppear = showImportOnAppear
         self.onDateSelected = onDateSelected
-        self.onStatisticsVisibilityChanged = onStatisticsVisibilityChanged
         _selectedDate = State(initialValue: normalizedDate)
     }
     
@@ -178,18 +184,11 @@ struct HistoryListView: View {
         .navigationTitle("往昔足迹")
         .navigationBarTitleDisplayMode(.inline)
         .background(Color.dfkBackground)
-        .onAppear { 
+        .onAppear {
             rebuildIndex()
-            onStatisticsVisibilityChanged?(viewMode == .statistics)
             if showImportOnAppear {
                 checkPhotoPermission()
             }
-        }
-        .onChange(of: viewMode) { _, mode in
-            onStatisticsVisibilityChanged?(mode == .statistics)
-        }
-        .onDisappear {
-            onStatisticsVisibilityChanged?(false)
         }
         .onChange(of: allFootprints) { rebuildIndex() }
         .onChange(of: allTransportRecords) { rebuildIndex() }
@@ -273,15 +272,8 @@ struct HistoryListView: View {
                     }
                 } label: {
                     Image(systemName: "calendar")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                        .frame(width: 36, height: 36)
-                        .background(
-                            Circle()
-                                .fill(Color.dfkAccent)
-                        )
-                        .shadow(color: .black.opacity(0.08), radius: 8, y: 2)
                 }
+                .yearJumpButtonStyle()
                 .padding(.top, 6)
                 .padding(.trailing, 20)
             }
@@ -289,7 +281,7 @@ struct HistoryListView: View {
     }
     
     private var contentArea: some View {
-        TabView(selection: $viewMode) {
+        ZStack {
             HistoryMonthView(footprintsByDay: footprintsByDay, transportsByDay: transportsByDay, futureTripsByDay: futureTripsByDay, allActivityTypes: allActivityTypes, targetDate: selectedDate, earliestDate: earliestHistoryDate, latestDate: latestHistoryDate, hasScrolled: $hasScrolledMonth, showingRawPointsDate: $showingRawPointsDate) { date in
                 if let onDateSelected = onDateSelected {
                     onDateSelected(date)
@@ -297,17 +289,15 @@ struct HistoryListView: View {
                     showingDate = IdentifiableDate(date: date)
                 }
             }
-            .tag(ViewMode.month)
-            
+            .contentVisibility(for: viewMode, matching: .month)
+
             HistoryFavoritesView(onUpdate: rebuildIndex)
                 .environment(locationManager)
-                .tag(ViewMode.favorites)
-            
-            HistoryStatisticsView(onClose: { dismiss() })
-                .tag(ViewMode.statistics)
-            
+                .contentVisibility(for: viewMode, matching: .favorites)
+
+            HistoryStatisticsView(isActive: viewMode == .statistics)
+                .contentVisibility(for: viewMode, matching: .statistics)
         }
-        .tabViewStyle(.page(indexDisplayMode: .never))
     }
     
     private var earliestHistoryDate: Date {
@@ -352,31 +342,41 @@ struct HistoryListView: View {
     @State private var transportsByDay: [Date: [TransportRecord]] = [:]
     @State private var futureTripsByDay: [Date: [FutureTrip]] = [:]
 
+    /// Days a [start, end) span meaningfully overlaps, skipping any day where the
+    /// overlap is under `minOverlap` (e.g. a span that ends right at midnight would
+    /// otherwise flag the next day too, even though it has ~0s of actual time on it).
+    private func daysWithMeaningfulOverlap(from start: Date, to end: Date, calendar: Calendar, minOverlap: TimeInterval = 60) -> [Date] {
+        guard end > start else { return [calendar.startOfDay(for: start)] }
+        var days: [Date] = []
+        var current = calendar.startOfDay(for: start)
+        let lastDay = calendar.startOfDay(for: end)
+        while current <= lastDay {
+            guard let next = calendar.date(byAdding: .day, value: 1, to: current) else { break }
+            let overlapStart = max(start, current)
+            let overlapEnd = min(end, next)
+            if overlapEnd.timeIntervalSince(overlapStart) >= minOverlap {
+                days.append(current)
+            }
+            current = next
+        }
+        return days.isEmpty ? [calendar.startOfDay(for: start)] : days
+    }
+
     private func rebuildIndex() {
         let calendar = Calendar.current
         var fpMap: [Date: [Footprint]] = [:]
         var tpMap: [Date: [TransportRecord]] = [:]
         var tripMap: [Date: [FutureTrip]] = [:]
-        
+
         for fp in allFootprints where fp.statusValue != "ignored" {
-            let start = calendar.startOfDay(for: fp.startTime)
-            let end = calendar.startOfDay(for: fp.endTime)
-            var current = start
-            while current <= end {
-                fpMap[current, default: []].append(fp)
-                guard let next = calendar.date(byAdding: .day, value: 1, to: current) else { break }
-                current = next
+            for day in daysWithMeaningfulOverlap(from: fp.startTime, to: fp.endTime, calendar: calendar) {
+                fpMap[day, default: []].append(fp)
             }
         }
-        
+
         for tp in allTransportRecords where tp.statusRaw != "ignored" {
-            let start = calendar.startOfDay(for: tp.startTime)
-            let end = calendar.startOfDay(for: tp.endTime)
-            var current = start
-            while current <= end {
-                tpMap[current, default: []].append(tp)
-                guard let next = calendar.date(byAdding: .day, value: 1, to: current) else { break }
-                current = next
+            for day in daysWithMeaningfulOverlap(from: tp.startTime, to: tp.endTime, calendar: calendar) {
+                tpMap[day, default: []].append(tp)
             }
         }
 
@@ -990,12 +990,8 @@ struct ImportOverlaysModifier: ViewModifier {
                             onCancelScan()
                         } label: {
                             Text("取消导入")
-                                .font(.subheadline.bold())
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 8)
-                                .background(Capsule().stroke(.white.opacity(0.5), lineWidth: 1))
                         }
+                        .historyActionButtonStyle()
                     }.padding(40).background(RoundedRectangle(cornerRadius: 24).fill(Color.black.opacity(0.8)))
                 }
             }}
@@ -1020,6 +1016,27 @@ struct ImportToolbarModifier: ViewModifier {
     }
 }
 
+private extension View {
+    @ViewBuilder
+    func yearJumpButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+        }
+    }
+
+    @ViewBuilder
+    func historyActionButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.borderedProminent)
+        }
+    }
+}
+
 // MARK: - Supporting Views
 struct PhotoImportRangePicker: View {
     @Environment(\.dismiss) var dismiss
@@ -1036,7 +1053,8 @@ struct PhotoImportRangePicker: View {
                     let s = Calendar.current.date(from: DateComponents(year: selectedYear, month: 1, day: 1))!
                     let e = Calendar.current.date(from: DateComponents(year: selectedYear, month: 12, day: 31, hour: 23, minute: 59))!
                     onSelect(s, e)
-                }.buttonStyle(.borderedProminent).padding()
+                }
+                .historyActionButtonStyle()
             }
             .navigationTitle("寻回那年的记忆")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() } } }

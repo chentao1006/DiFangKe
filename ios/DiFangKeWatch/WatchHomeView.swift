@@ -4,6 +4,7 @@ struct WatchHomeView: View {
     @EnvironmentObject private var store: WatchStore
     @State private var selectedPage = "current"
     @State private var showingMap = false
+    @State private var showingStatistics = false
 
     var body: some View {
         NavigationStack {
@@ -28,10 +29,24 @@ struct WatchHomeView: View {
                     } label: {
                         Image(systemName: "location")
                     }
-                    .padding(.leading, 6)
-                    .padding(.bottom, 5)
-                    .accessibilityLabel("返回当前停留")
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .padding(.leading, 8)
+                    .padding(.bottom, 8)
+                    .accessibilityLabel("回到当下")
                 }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Button {
+                    showingStatistics = true
+                } label: {
+                    Image(systemName: "chart.bar")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .padding(.trailing, 8)
+                .padding(.bottom, 8)
+                .accessibilityLabel("统计")
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -44,6 +59,9 @@ struct WatchHomeView: View {
             }
             .navigationDestination(isPresented: $showingMap) {
                 WatchMapView(day: selectedDaySnapshot)
+            }
+            .navigationDestination(isPresented: $showingStatistics) {
+                WatchStatisticsView()
             }
         }
     }
@@ -195,6 +213,129 @@ private struct FutureTripPage: View {
     }
 }
 
+private struct WatchStatisticsView: View {
+    @EnvironmentObject private var store: WatchStore
+    @State private var range: Range = .last7Days
+
+    private enum Range: String, CaseIterable, Identifiable {
+        case last7Days = "最近7天"
+        case synced = "已同步"
+
+        var id: Self { self }
+    }
+
+    private var days: [WatchDaySnapshot] {
+        let snapshots = store.snapshot.recentDays ?? []
+        guard range == .last7Days,
+              let cutoff = Calendar.current.date(byAdding: .day, value: -6, to: Calendar.current.startOfDay(for: Date())) else {
+            return snapshots
+        }
+        return snapshots.filter { $0.date >= cutoff }
+    }
+
+    private var items: [WatchTimelineItem] {
+        days.flatMap(\.timeline)
+    }
+
+    private var footprintItems: [WatchTimelineItem] {
+        items.filter { $0.isTransport != true }
+    }
+
+    private var transportItems: [WatchTimelineItem] {
+        items.filter { $0.isTransport == true }
+    }
+
+    private var totalDuration: TimeInterval {
+        footprintItems.reduce(0) { total, item in
+            total + max(0, item.endTime.timeIntervalSince(item.startTime))
+        }
+    }
+
+    private var rankedPlaces: [(name: String, duration: TimeInterval, count: Int)] {
+        let grouped = Dictionary(grouping: footprintItems.filter { !$0.title.isEmpty }, by: \.title)
+        var ranked: [(name: String, duration: TimeInterval, count: Int)] = []
+        for (name, items) in grouped {
+            var duration: TimeInterval = 0
+            for item in items {
+                duration += max(0, item.endTime.timeIntervalSince(item.startTime))
+            }
+            ranked.append((name: name, duration: duration, count: items.count))
+        }
+        ranked.sort { lhs, rhs in
+            lhs.duration == rhs.duration ? lhs.count > rhs.count : lhs.duration > rhs.duration
+        }
+        return Array(ranked.prefix(3))
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Picker("范围", selection: $range) {
+                    ForEach(Range.allCases) { Text($0.rawValue).tag($0) }
+                }
+            }
+
+            Section("概览") {
+                WatchStatisticRow(title: "活跃天数", value: "\(days.filter { !$0.timeline.isEmpty }.count) 天", icon: "calendar")
+                WatchStatisticRow(title: "足迹", value: "\(footprintItems.count) 个", icon: "mappin.and.ellipse")
+                WatchStatisticRow(title: "交通", value: "\(transportItems.count) 段", icon: "car")
+                WatchStatisticRow(title: "停留时长", value: durationText(totalDuration), icon: "clock")
+                if range == .last7Days {
+                    WatchStatisticRow(title: "今日里程", value: distanceText(store.snapshot.todayDistance), icon: "figure.walk")
+                }
+            }
+
+            Section("常去地点") {
+                if rankedPlaces.isEmpty {
+                    Text("暂无足迹数据")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(rankedPlaces.enumerated()), id: \.offset) { index, place in
+                        HStack(spacing: 7) {
+                            Text("\(index + 1)")
+                                .font(.caption.bold())
+                                .foregroundStyle(.tint)
+                                .frame(width: 14)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(place.name).lineLimit(1)
+                                Text("\(place.count) 次 · \(durationText(place.duration))")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("统计")
+    }
+
+    private func durationText(_ duration: TimeInterval) -> String {
+        let minutes = Int(duration / 60)
+        if minutes < 60 { return "\(minutes) 分钟" }
+        return "\(minutes / 60) 小时\(minutes % 60 > 0 ? " \(minutes % 60) 分" : "")"
+    }
+
+    private func distanceText(_ distance: Double) -> String {
+        distance >= 1_000 ? String(format: "%.1f 公里", distance / 1_000) : "\(Int(distance.rounded())) 米"
+    }
+}
+
+private struct WatchStatisticRow: View {
+    let title: String
+    let value: String
+    let icon: String
+
+    var body: some View {
+        HStack {
+            Label(title, systemImage: icon)
+            Spacer()
+            Text(value)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 private struct WatchTimelineRow: View {
     let item: WatchTimelineItem
 
@@ -209,9 +350,36 @@ private struct WatchTimelineRow: View {
             Image(systemName: item.icon)
                 .foregroundStyle(item.isTransport == true ? .accentColor : activityColor(item.colorHex))
                 .frame(width: 16)
-            Text(item.title)
-                .font(.caption)
-                .lineLimit(2)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.title)
+                    .font(.caption)
+                    .lineLimit(2)
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
     }
+
+    private var subtitle: String {
+        let duration = timelineDurationText(item.endTime.timeIntervalSince(item.startTime))
+        if item.isTransport == true {
+            guard let distance = item.distance else { return duration }
+            return "\(timelineDistanceText(distance)) · \(duration)"
+        }
+        guard let activityName = item.activityName, !activityName.isEmpty else { return duration }
+        return "\(activityName) · \(duration)"
+    }
+}
+
+private func timelineDurationText(_ duration: TimeInterval) -> String {
+    let totalMinutes = max(1, Int(duration / 60))
+    let hours = totalMinutes / 60
+    let minutes = totalMinutes % 60
+    return hours > 0 ? "\(hours) 小时 \(minutes) 分钟" : "\(minutes) 分钟"
+}
+
+private func timelineDistanceText(_ distance: Double) -> String {
+    distance >= 1_000 ? String(format: "%.1f 公里", distance / 1_000) : "\(Int(distance.rounded())) 米"
 }

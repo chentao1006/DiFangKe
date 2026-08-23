@@ -1955,7 +1955,6 @@ private struct ContinuousTimelineSheet: View {
     @State private var lastEarlierDatePrefetchTime: Date?
     @State private var isShowingCalendar = false
     @State private var isShowingHistory = false
-    @State private var isHistoryStatisticsActive = false
     @State private var earlierDatePrefetchTask: Task<Void, Never>?
     @State private var scrollMetrics = ContinuousTimelineScrollMetrics()
     @State private var scrollRestorer = ContinuousTimelineScrollRestorer()
@@ -2122,7 +2121,13 @@ private struct ContinuousTimelineSheet: View {
             NavigationStack {
                 ScrollViewReader { proxy in
                     GeometryReader { viewport in
+                        // Keep the scroll view mounted while collapsed so its
+                        // current offset survives re-expansion. Rendering it
+                        // transparent prevents its first row from peeking
+                        // below the title bar in the 88pt detent.
                         mainScrollView(proxy: proxy, viewport: viewport)
+                            .opacity(isCollapsed ? 0 : 1)
+                            .allowsHitTesting(!isCollapsed)
                     .sheet(item: $footprintPendingSplit, onDismiss: handleFootprintSplitDismissal) { footprint in
                         FootprintSplitView(footprint: footprint)
                             .environment(locationManager)
@@ -2171,20 +2176,16 @@ private struct ContinuousTimelineSheet: View {
                             HistoryListView(initialDate: activeTimelineDate, showImportOnAppear: requestedHistoryImport, onDateSelected: { selectedDate in
                                 isShowingHistory = false
                                 scrollToDate(selectedDate, using: proxy)
-                            }, onStatisticsVisibilityChanged: { isActive in
-                                isHistoryStatisticsActive = isActive
                             })
                             .onDisappear {
                                 requestedHistoryImport = false
                             }
                             .toolbar {
                                 ToolbarItem(placement: .topBarTrailing) {
-                                    if !isHistoryStatisticsActive {
-                                        Button {
-                                            isShowingHistory = false
-                                        } label: {
-                                            Image(systemName: "xmark").dfkToolbarDismissIcon()
-                                        }
+                                    Button {
+                                        isShowingHistory = false
+                                    } label: {
+                                        Image(systemName: "xmark").dfkToolbarDismissIcon()
                                     }
                                 }
                             }
@@ -4923,6 +4924,7 @@ private struct ContinuousTimelineRow: View {
                             .frame(width: markerSize, height: markerSize)
                             .background(markerBackground, in: Circle())
                             .overlay(Circle().strokeBorder(markerStroke, lineWidth: markerStrokeWidth))
+                            .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
                     }
                 }
                 .buttonStyle(.plain)
@@ -5103,11 +5105,11 @@ private struct ContinuousTimelineRow: View {
     }
 
     private var markerSize: CGFloat {
-        ContinuousTimelineLayout.markerSize
+        item.isTransport ? ContinuousTimelineLayout.markerSize - 4 : ContinuousTimelineLayout.markerSize
     }
 
     private var markerIconFont: Font {
-        item.isTransport ? .system(size: 10, weight: .bold) : .caption.weight(.bold)
+        item.isTransport ? .system(size: 9, weight: .bold) : .caption.weight(.bold)
     }
 
     private var titleFont: Font {

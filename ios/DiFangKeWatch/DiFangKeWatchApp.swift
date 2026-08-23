@@ -8,6 +8,10 @@ struct DiFangKeWatchApp: App {
         WindowGroup {
             WatchHomeView()
                 .environmentObject(store)
+                .tint(.teal)
+        }
+        .backgroundTask(.appRefresh(WatchStore.backgroundRefreshTaskID)) {
+            await store.handleBackgroundRefresh()
         }
     }
 }

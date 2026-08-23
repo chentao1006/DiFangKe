@@ -120,7 +120,10 @@ private actor StatisticsGeographyResolver {
 
 struct HistoryStatisticsView: View {
     @Environment(\.modelContext) private var modelContext
-    var onClose: () -> Void = {}
+    // `contentArea` in HistoryListView keeps every tab mounted at once (only
+    // faded with .opacity), so an unconditional share button here would stay
+    // attached to the shared nav bar even while another tab is showing.
+    var isActive: Bool = true
     
     @State private var allFootprints: [Footprint] = []
     @State private var manualTransports: [TransportManualSelection] = []
@@ -202,22 +205,16 @@ struct HistoryStatisticsView: View {
         }
         .background(Color.dfkBackground)
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("往昔足迹")
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 18) {
+            // The outer HistoryListView toolbar already owns the close button
+            // for every tab — no need for a second one here.
+            if isActive {
+                ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         prepareStatsShare()
                     } label: {
                         Image(systemName: "square.and.arrow.up")
                     }
                     .accessibilityLabel("分享统计")
-
-                    Button(action: onClose) {
-                        Image(systemName: "xmark").dfkToolbarDismissIcon()
-                    }
-                    .accessibilityLabel("关闭统计")
                 }
             }
         }
@@ -852,7 +849,7 @@ struct HistoryStatisticsView: View {
     // MARK: - Trend Section
     private var trendSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("生活活跃趋势", icon: "chart.bar.fill")
+            sectionHeader("活动时间分布", icon: "chart.bar.fill")
             
             let data = getTrendData()
             
@@ -878,10 +875,16 @@ struct HistoryStatisticsView: View {
                     .chartYScale(domain: 0...24)
                     .chartYScale(range: .plotDimension(padding: 14))
                     .chartYAxis {
+                        // 0/24 sit at the very top/bottom of the plot, so the anchor
+                        // has to hang the label INTO the visible area (0 upward from
+                        // its tick, 24 downward from its tick) or it clips off-screen.
+                        // Using the same AxisValueLabel as every other tick — rather
+                        // than a separately positioned overlay — is what keeps these
+                        // two lined up with the rest of the column.
                         AxisMarks(position: .leading, values: Array(stride(from: 0, through: 24, by: 3))) { value in
                             AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
                             if let hour = value.as(Int.self) {
-                                AxisValueLabel(anchor: hour == 24 ? .bottomTrailing : (hour == 0 ? .topTrailing : .trailing)) {
+                                AxisValueLabel(anchor: hour == 24 ? .topTrailing : (hour == 0 ? .bottomTrailing : .trailing)) {
                                     Text("\(hour):00")
                                         .font(.system(size: 9))
                                 }
@@ -898,21 +901,6 @@ struct HistoryStatisticsView: View {
                                         .fixedSize(horizontal: true, vertical: false)
                                 }
                             }
-                        }
-                    }
-                    .chartOverlay { proxy in
-                        GeometryReader { geometry in
-                            let plotFrame = geometry[proxy.plotAreaFrame]
-                            VStack(spacing: 0) {
-                                endpointTimeLabel("24:00")
-                                Spacer(minLength: 0)
-                                endpointTimeLabel("0:00")
-                            }
-                            .frame(width: 42, height: plotFrame.height)
-                            .position(
-                                x: max(21, plotFrame.minX - 24),
-                                y: plotFrame.midY
-                            )
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -1268,13 +1256,6 @@ struct HistoryStatisticsView: View {
         case .lastYear, .customYear:
             return date.formatted(.dateTime.month())
         }
-    }
-
-    private func endpointTimeLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 9))
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: true, vertical: true)
     }
 
     private func trendMonthAxisDates(every months: Int) -> [Date] {

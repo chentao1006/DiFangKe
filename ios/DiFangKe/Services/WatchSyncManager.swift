@@ -55,6 +55,10 @@ struct WatchTimelineItem: Codable {
     let longitude: Double?
     /// Downsampled transport route, kept short so the payload stays small over WatchConnectivity.
     let routeCoordinates: [WatchCoordinate]?
+    /// Footprint activity name; nil for transport items.
+    let activityName: String?
+    /// Transport distance in meters; nil for footprint items.
+    let distance: Double?
 }
 
 struct WatchDaySnapshot: Codable {
@@ -110,7 +114,16 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
               WCSession.default.activationState == .activated,
               WCSession.default.isWatchAppInstalled else { return }
         guard let data = try? JSONEncoder().encode(makeSnapshot(context: context)) else { return }
-        try? WCSession.default.updateApplicationContext(["snapshot": data])
+        let payload = ["snapshot": data]
+        // updateApplicationContext always runs so the watch has the latest state whenever
+        // it next wakes (background refresh or manual open). sendMessage is a best-effort
+        // fast path: it only succeeds while the watch app is reachable, but when it does,
+        // the complication updates instantly instead of waiting for the next wake.
+        let session = WCSession.default
+        if session.isReachable {
+            session.sendMessage(payload, replyHandler: nil, errorHandler: nil)
+        }
+        try? session.updateApplicationContext(payload)
     }
 
     /// A best-effort hourly catch-up for the installed companion app. Location-triggered
@@ -184,7 +197,9 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
                     isTransport: false,
                     latitude: footprint.latitude,
                     longitude: footprint.longitude,
-                    routeCoordinates: nil
+                    routeCoordinates: nil,
+                    activityName: activity?.name,
+                    distance: nil
                 )
             }
             + transports.map { transport in
@@ -199,7 +214,9 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
                     isTransport: true,
                     latitude: nil,
                     longitude: nil,
-                    routeCoordinates: Self.downsampledRoute(from: transport.pointsData)
+                    routeCoordinates: Self.downsampledRoute(from: transport.pointsData),
+                    activityName: nil,
+                    distance: transport.distance
                 )
             }
             ).sorted { $0.startTime < $1.startTime }
