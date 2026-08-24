@@ -997,9 +997,7 @@ class TimelineBuilder {
         
         // 最终过滤：等所有短小的交通记录尽可能合并成大段后，再把由于信号漂移产生的，且无法被融合的独立“毛刺”交通彻底剔除
         return merged.filter { t in
-            if t.distance >= AppConfig.shared.transportMinDistanceThreshold { return true } // 位移达到阈值，保留
-            if t.duration < AppConfig.shared.transportMinDurationThreshold { return false } // 持续时间不足，剔除
-            return true
+            t.distance >= AppConfig.shared.transportMinDistanceThreshold
         }
     }
     
@@ -1058,9 +1056,8 @@ class TimelineBuilder {
         let averageSpeed = duration > 0 ? distance / duration : 0
         let kmh = averageSpeed * 3.6
         
-        // 根据配置进行最基础判定
-        if distance < AppConfig.shared.transportMinDistanceThreshold && 
-           duration < AppConfig.shared.transportMinDurationThreshold { return nil }
+        // 最低位移是自动交通的硬门槛，不能由较长停留时间替代。
+        guard distance >= AppConfig.shared.transportMinDistanceThreshold else { return nil }
 
         if duration < 60 && kmh < 3 { return nil } // 保持原有的极短距离高速过滤
         
@@ -2774,12 +2771,10 @@ class PersistentTimelineBuilder {
                     let codableCoords = transportPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) }
                     let diameter = TimelineBuilder.calculateMaxDiameter(coords)
                     
-                    // 如果一段交通的位移和时间均不足以被计入，则跳过
-                    if diameter < AppConfig.shared.transportMinDistanceThreshold {
-                        if tEnd.timeIntervalSince(tStart) < AppConfig.shared.transportMinDurationThreshold {
-                            i = k
-                            continue
-                        }
+                    // 最低位移是自动交通的硬门槛，不能由较长停留时间替代。
+                    guard diameter >= AppConfig.shared.transportMinDistanceThreshold else {
+                        i = k
+                        continue
                     }
 
                     let ptsData = (try? JSONEncoder().encode(codableCoords)) ?? Data()

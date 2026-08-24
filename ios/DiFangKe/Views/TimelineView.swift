@@ -1955,6 +1955,7 @@ private struct ContinuousTimelineSheet: View {
     @State private var lastEarlierDatePrefetchTime: Date?
     @State private var isShowingCalendar = false
     @State private var isShowingHistory = false
+    @State private var isHistoryStatisticsActive = false
     @State private var earlierDatePrefetchTask: Task<Void, Never>?
     @State private var scrollMetrics = ContinuousTimelineScrollMetrics()
     @State private var scrollRestorer = ContinuousTimelineScrollRestorer()
@@ -1962,6 +1963,8 @@ private struct ContinuousTimelineSheet: View {
     @State private var isViewingUndatedFutureTrips = false
     @State private var freezesViewportDrivenUpdatesUntil: Date? = Date.distantFuture
     @State private var activeTimelineDateBeforeBackground: Date?
+    @State private var viewportAnchorBeforeBackground: ContinuousTimelineScrollAnchor?
+    @State private var externalReloadViewportAnchor: ContinuousTimelineScrollAnchor?
     @State private var calendarScrollLockTarget: Date?
     @State private var pendingCalendarBackfillDates: [Date] = []
     @State private var calendarScrollRetryTask: Task<Void, Never>?
@@ -2176,16 +2179,29 @@ private struct ContinuousTimelineSheet: View {
                             HistoryListView(initialDate: activeTimelineDate, showImportOnAppear: requestedHistoryImport, onDateSelected: { selectedDate in
                                 isShowingHistory = false
                                 scrollToDate(selectedDate, using: proxy)
+                            }, onStatisticsVisibilityChanged: { isActive in
+                                isHistoryStatisticsActive = isActive
                             })
                             .onDisappear {
                                 requestedHistoryImport = false
                             }
                             .toolbar {
                                 ToolbarItem(placement: .topBarTrailing) {
-                                    Button {
-                                        isShowingHistory = false
-                                    } label: {
-                                        Image(systemName: "xmark").dfkToolbarDismissIcon()
+                                    HStack(spacing: 18) {
+                                        if isHistoryStatisticsActive {
+                                            Button {
+                                                NotificationCenter.default.post(name: .dfkShareHistoryStatistics, object: nil)
+                                            } label: {
+                                                Image(systemName: "square.and.arrow.up")
+                                            }
+                                            .accessibilityLabel("分享统计")
+                                        }
+
+                                        Button {
+                                            isShowingHistory = false
+                                        } label: {
+                                            Image(systemName: "xmark").dfkToolbarDismissIcon()
+                                        }
                                     }
                                 }
                             }
@@ -2510,6 +2526,7 @@ private struct ContinuousTimelineSheet: View {
                         // stepping on it here would race the "stay on today at launch" behavior.
                         guard hasCompletedInitialTimelinePositioning else { return }
                         if isReloading {
+                            externalReloadViewportAnchor = scrollRestorer.captureAnchor()
                             freezesViewportDrivenUpdatesUntil = Date.distantFuture
                         } else {
                             // Don't force an immediate re-read here: latestDateFrames can still
@@ -2518,6 +2535,10 @@ private struct ContinuousTimelineSheet: View {
                             // pipeline (which reports real, settled frames) resume driving date
                             // tracking on its own.
                             freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.3)
+                            if let anchor = externalReloadViewportAnchor {
+                                scrollRestorer.restore(anchor, fallbackBottomDistance: anchor.bottomDistance)
+                            }
+                            externalReloadViewportAnchor = nil
                         }
                     }
                     .onChange(of: scenePhase) { oldPhase, newPhase in
@@ -2535,6 +2556,13 @@ private struct ContinuousTimelineSheet: View {
                         if newPhase == .active {
                             if oldPhase != .active {
                                 freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.6)
+                                if let anchor = viewportAnchorBeforeBackground {
+                                    // SwiftUI may remount the LazyVStack while inactive. Keep
+                                    // the same content offset as well as the same date state;
+                                    // freezing frame reads alone cannot prevent a physical jump.
+                                    scrollRestorer.restore(anchor, fallbackBottomDistance: anchor.bottomDistance)
+                                }
+                                viewportAnchorBeforeBackground = nil
                                 // Belt-and-suspenders: don't just rely on the freeze window
                                 // timing out safely — deterministically put the date state back
                                 // to what it was right before backgrounding, in case a bad
@@ -2550,6 +2578,7 @@ private struct ContinuousTimelineSheet: View {
                         } else {
                             if oldPhase == .active {
                                 activeTimelineDateBeforeBackground = activeTimelineDate
+                                viewportAnchorBeforeBackground = scrollRestorer.captureAnchor()
                             }
                             freezesViewportDrivenUpdatesUntil = Date.distantFuture
                         }

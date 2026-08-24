@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct DiFangKeWatchApp: App {
+    @WKApplicationDelegateAdaptor(WatchAppDelegate.self) private var appDelegate
     @StateObject private var store = WatchStore()
 
     var body: some Scene {
@@ -9,9 +10,6 @@ struct DiFangKeWatchApp: App {
             WatchHomeView()
                 .environmentObject(store)
                 .tint(.teal)
-        }
-        .backgroundTask(.appRefresh(WatchStore.backgroundRefreshTaskID)) {
-            await store.handleBackgroundRefresh()
         }
     }
 }

@@ -198,6 +198,12 @@ private struct DayTimelineRing: View {
     let date: Date
 
     private let calendar = Calendar.current
+    // Circle() sizes itself to fill the whole view and .stroke centers its line on
+    // that edge, so half of every stroke's width would otherwise fall outside the
+    // widget's bounds — exactly where accessoryCircular's system clip mask crops it,
+    // leaving only the inner half of the ring and a lopped-off rounded cap. Insetting
+    // by half the thickest stroke keeps every segment's outer edge inside the mask.
+    private let maxLineWidth: CGFloat = 6.2
 
     var body: some View {
         ZStack {
@@ -218,6 +224,7 @@ private struct DayTimelineRing: View {
                 )
             }
         }
+        .padding(maxLineWidth / 2)
         .rotationEffect(.degrees(-90))
     }
 

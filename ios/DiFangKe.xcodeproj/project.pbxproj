@@ -31,6 +31,7 @@
 		8F4D2CA46A1B43D0A6C7E2B1 /* ShareCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2CA36A1B43D0A6C7E2B1 /* ShareCards.swift */; };
 		923B7C1655C4BB80D929DDCF /* Aptabase in Frameworks */ = {isa = PBXBuildFile; productRef = 68EA130148C5349D5CF940EE /* Aptabase */; };
 		93AB9A1A347A786C40F60D26 /* MapPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D750760587987B7CCDAB5FF /* MapPickerView.swift */; };
+		986B8BEFFA27A2D1458D6808 /* WatchAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7B718C7D98A9A3EE8FC38DC /* WatchAppDelegate.swift */; };
 		988AA12CFD19A21CA1592A1D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A099643BEA06307F4508FC0 /* SettingsView.swift */; };
 		9F3F925B82CF4EEDED4E3AFF /* AddPlaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35E218304D15330402004958 /* AddPlaceSheet.swift */; };
 		A037B11166D8EC00960EEADB /* WatchSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E022A8CC3D9B5C3F524EC0E6 /* WatchSyncManager.swift */; };
@@ -222,6 +223,7 @@
 		C6D2DE392F90E39800466878 /* HealthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthManager.swift; sourceTree = "<group>"; };
 		C6FC95002F9A67B2004E1FE6 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiFangKeWatchApp.swift; sourceTree = "<group>"; };
+		D7B718C7D98A9A3EE8FC38DC /* WatchAppDelegate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchAppDelegate.swift; sourceTree = "<group>"; };
 		E022A8CC3D9B5C3F524EC0E6 /* WatchSyncManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = WatchSyncManager.swift; path = Services/WatchSyncManager.swift; sourceTree = "<group>"; };
 		F44E7F2A482D33533D342882 /* PlacePickerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacePickerViewModel.swift; sourceTree = "<group>"; };
 		FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIService.swift; sourceTree = "<group>"; };
@@ -452,6 +454,7 @@
 				A1D3F501AA001001AA001001 /* Assets.xcassets */,
 				A1D3F503AA001001AA001001 /* AppIcon.icon */,
 				C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */,
+				D7B718C7D98A9A3EE8FC38DC /* WatchAppDelegate.swift */,
 				C6B399C338BB4612145C364B /* WatchHomeView.swift */,
 				A1D3F510AA001001AA001010 /* WatchMapView.swift */,
 				75C47077CF83E07E81527983 /* WatchStore.swift */,
@@ -632,6 +635,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				FE83FA99A0DCD7ACEF34A49F /* DiFangKeWatchApp.swift in Sources */,
+				986B8BEFFA27A2D1458D6808 /* WatchAppDelegate.swift in Sources */,
 				441650B9A8F33BB36DD1822C /* WatchHomeView.swift in Sources */,
 				A1D3F511AA001001AA001011 /* WatchMapView.swift in Sources */,
 				D9F2FA2BC5D3F85EF9E1621C /* WatchStore.swift in Sources */,
@@ -824,7 +828,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.3.13;
+				MARKETING_VERSION = 1.3.14;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -953,7 +957,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.3.13;
+				MARKETING_VERSION = 1.3.14;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

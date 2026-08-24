@@ -1,7 +1,6 @@
 import Foundation
 import WatchConnectivity
 import WidgetKit
-import WatchKit
 
 struct WatchActivityOption: Codable, Hashable, Identifiable {
     let id: String
@@ -68,13 +67,15 @@ struct WatchSnapshot: Codable, Hashable {
 final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     private let complicationSnapshotKey = "watchComplicationSnapshot"
     private let complicationGroupID = "group.com.ct106.difangke"
-    static let backgroundRefreshTaskID = "com.ct106.difangke.watch.refresh"
     /// watchOS delivers a queued `updateApplicationContext` payload only once the app
     /// process launches and its session activates — it does not wake the app on its
     /// own. Without a periodic background refresh, the complication is stuck showing
     /// whatever was current the last time someone opened the app, silently ticking
-    /// its duration forward against stale data.
-    private let backgroundRefreshInterval: TimeInterval = 15 * 60
+    /// its duration forward against stale data. Scheduling and handling that refresh
+    /// lives in `WatchAppDelegate` — `WKApplication.scheduleBackgroundRefresh` requires
+    /// a `WKApplicationDelegate` that implements `handleBackgroundTasks`, and crashes
+    /// immediately on launch if none is registered.
+    static let backgroundRefreshInterval: TimeInterval = 15 * 60
     @Published private(set) var snapshot = WatchSnapshot.placeholder
     @Published private(set) var requestedActivityPickerFootprintID: String?
 
@@ -83,28 +84,6 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         guard WCSession.isSupported() else { return }
         WCSession.default.delegate = self
         WCSession.default.activate()
-        scheduleNextBackgroundRefresh()
-    }
-
-    /// Runs inside the `.appRefresh` background task. Waking the process is enough:
-    /// it re-activates the WatchConnectivity session, which triggers delivery of any
-    /// application context the phone already sent while the app wasn't running.
-    /// We just linger briefly on the budgeted background time so that delivery (and
-    /// the resulting complication reload) has a chance to land before the task ends.
-    func handleBackgroundRefresh() async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                continuation.resume()
-            }
-        }
-        scheduleNextBackgroundRefresh()
-    }
-
-    private func scheduleNextBackgroundRefresh() {
-        WKApplication.shared().scheduleBackgroundRefresh(
-            withPreferredDate: Date().addingTimeInterval(backgroundRefreshInterval),
-            userInfo: nil
-        ) { _ in }
     }
 
     var currentActivity: WatchActivityOption? {

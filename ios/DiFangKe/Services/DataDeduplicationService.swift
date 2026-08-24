@@ -69,6 +69,32 @@ enum DataDeduplicationService {
         return report.transportsDeleted
     }
 
+    /// Cleans up only the records that can affect a rebuilt calendar day.  This
+    /// is deliberately narrower than the launch-time maintenance pass: two
+    /// automatic builders can observe different raw-point windows during one
+    /// sync and leave adjacent copies of the same route behind.
+    @discardableResult
+    static func deduplicateTransports(intersecting date: Date, context: ModelContext) -> Int {
+        let startOfDay = Calendar.current.startOfDay(for: date)
+        let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay) ?? startOfDay
+        let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime < endOfDay && $0.endTime > startOfDay
+        })
+
+        var report = Report()
+        let transports = (try? context.fetch(descriptor)) ?? []
+        deduplicateTransports(transports, context: context, report: &report)
+        if report.transportsDeleted > 0 {
+            do {
+                try context.save()
+                print("[TimelineAuto] removed \(report.transportsDeleted) duplicate transport(s) for \(startOfDay)")
+            } catch {
+                print("[TimelineAuto] failed to save duplicate transport cleanup: \(error)")
+            }
+        }
+        return report.transportsDeleted
+    }
+
     private static func deduplicatePlaces(_ places: [Place], footprints: [Footprint], context: ModelContext, report: inout Report) -> [UUID: UUID] {
         var rewriteMap: [UUID: UUID] = [:]
         var remainingPlaces = places

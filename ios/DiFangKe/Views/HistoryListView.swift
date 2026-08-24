@@ -164,12 +164,14 @@ struct HistoryListView: View {
     @State private var hasScrolledMonth = false
     
     var onDateSelected: ((Date) -> Void)? = nil
+    var onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil
 
-    init(initialDate: Date = Date(), showImportOnAppear: Bool = false, onDateSelected: ((Date) -> Void)? = nil) {
+    init(initialDate: Date = Date(), showImportOnAppear: Bool = false, onDateSelected: ((Date) -> Void)? = nil, onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil) {
         let normalizedDate = Calendar.current.startOfDay(for: initialDate)
         self.initialDate = normalizedDate
         self.showImportOnAppear = showImportOnAppear
         self.onDateSelected = onDateSelected
+        self.onStatisticsVisibilityChanged = onStatisticsVisibilityChanged
         _selectedDate = State(initialValue: normalizedDate)
     }
     
@@ -186,9 +188,16 @@ struct HistoryListView: View {
         .background(Color.dfkBackground)
         .onAppear {
             rebuildIndex()
+            onStatisticsVisibilityChanged?(viewMode == .statistics)
             if showImportOnAppear {
                 checkPhotoPermission()
             }
+        }
+        .onChange(of: viewMode) { _, mode in
+            onStatisticsVisibilityChanged?(mode == .statistics)
+        }
+        .onDisappear {
+            onStatisticsVisibilityChanged?(false)
         }
         .onChange(of: allFootprints) { rebuildIndex() }
         .onChange(of: allTransportRecords) { rebuildIndex() }
@@ -295,7 +304,7 @@ struct HistoryListView: View {
                 .environment(locationManager)
                 .contentVisibility(for: viewMode, matching: .favorites)
 
-            HistoryStatisticsView(isActive: viewMode == .statistics)
+            HistoryStatisticsView()
                 .contentVisibility(for: viewMode, matching: .statistics)
         }
     }

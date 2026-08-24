@@ -3,6 +3,10 @@ import SwiftData
 import Charts
 import MapKit
 
+extension Notification.Name {
+    static let dfkShareHistoryStatistics = Notification.Name("dfkShareHistoryStatistics")
+}
+
 enum StatisticsRange: Hashable {
     case last7Days
     case last30Days
@@ -120,10 +124,6 @@ private actor StatisticsGeographyResolver {
 
 struct HistoryStatisticsView: View {
     @Environment(\.modelContext) private var modelContext
-    // `contentArea` in HistoryListView keeps every tab mounted at once (only
-    // faded with .opacity), so an unconditional share button here would stay
-    // attached to the shared nav bar even while another tab is showing.
-    var isActive: Bool = true
     
     @State private var allFootprints: [Footprint] = []
     @State private var manualTransports: [TransportManualSelection] = []
@@ -204,26 +204,15 @@ struct HistoryStatisticsView: View {
             }
         }
         .background(Color.dfkBackground)
-        .toolbar {
-            // The outer HistoryListView toolbar already owns the close button
-            // for every tab — no need for a second one here.
-            if isActive {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        prepareStatsShare()
-                    } label: {
-                        Image(systemName: "square.and.arrow.up")
-                    }
-                    .accessibilityLabel("分享统计")
-                }
-            }
-        }
         .onChange(of: selectedRange) { _, _ in
             stopGeographyBackfill()
             geographicBackfillAttempts.removeAll()
             updateAiSummary()
             updateMapPosition()
             resolveRankingGeographies()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .dfkShareHistoryStatistics)) { _ in
+            prepareStatsShare()
         }
         .onAppear {
             fetchData()
