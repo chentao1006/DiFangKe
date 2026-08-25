@@ -8,45 +8,55 @@ struct WatchHomeView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottomLeading) {
-                TabView(selection: $selectedPage) {
-                    ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
-                        FutureTripPage(trip: trip)
-                            .tag("future-\(trip.id)")
+            GeometryReader { geometry in
+                ZStack {
+                    TabView(selection: $selectedPage) {
+                        ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
+                            FutureTripPage(trip: trip)
+                                .tag("future-\(trip.id)")
+                        }
+                        CurrentPlaceView()
+                            .tag("current")
+                        ForEach(store.snapshot.recentDays ?? []) { day in
+                            DayTimelinePage(day: day)
+                                .tag("day-\(day.date.timeIntervalSince1970)")
+                        }
                     }
-                    CurrentPlaceView()
-                        .tag("current")
-                    ForEach(store.snapshot.recentDays ?? []) { day in
-                        DayTimelinePage(day: day)
-                            .tag("day-\(day.date.timeIntervalSince1970)")
-                    }
-                }
-                .tabViewStyle(.page(indexDisplayMode: .automatic))
+                    .tabViewStyle(.page(indexDisplayMode: .automatic))
 
-                if selectedPage != "current" {
-                    Button {
-                        selectedPage = "current"
-                    } label: {
-                        Image(systemName: "location")
+                    if selectedPage != "current" {
+                        VStack {
+                            Spacer()
+                            HStack {
+                                Button {
+                                    selectedPage = "current"
+                                } label: {
+                                    Image(systemName: "location")
+                                }
+                                Spacer()
+                            }
+                        }
+                        .padding(.leading, 8)
+                        .padding(.bottom, 8)
+                        .accessibilityLabel("回到当下")
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .padding(.leading, 8)
+
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Button {
+                                showingStatistics = true
+                            } label: {
+                                Image(systemName: "chart.bar")
+                            }
+                        }
+                    }
+                    .padding(.trailing, 8)
                     .padding(.bottom, 8)
-                    .accessibilityLabel("回到当下")
+                    .accessibilityLabel("统计")
                 }
-            }
-            .overlay(alignment: .bottomTrailing) {
-                Button {
-                    showingStatistics = true
-                } label: {
-                    Image(systemName: "chart.bar")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .padding(.trailing, 8)
-                .padding(.bottom, 8)
-                .accessibilityLabel("统计")
+                .frame(width: geometry.size.width, height: geometry.size.height)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -245,12 +255,6 @@ private struct WatchStatisticsView: View {
         items.filter { $0.isTransport == true }
     }
 
-    private var totalDuration: TimeInterval {
-        footprintItems.reduce(0) { total, item in
-            total + max(0, item.endTime.timeIntervalSince(item.startTime))
-        }
-    }
-
     private var rankedPlaces: [(name: String, duration: TimeInterval, count: Int)] {
         let grouped = Dictionary(grouping: footprintItems.filter { !$0.title.isEmpty }, by: \.title)
         var ranked: [(name: String, duration: TimeInterval, count: Int)] = []
@@ -260,6 +264,31 @@ private struct WatchStatisticsView: View {
                 duration += max(0, item.endTime.timeIntervalSince(item.startTime))
             }
             ranked.append((name: name, duration: duration, count: items.count))
+        }
+        ranked.sort { lhs, rhs in
+            lhs.duration == rhs.duration ? lhs.count > rhs.count : lhs.duration > rhs.duration
+        }
+        return Array(ranked.prefix(3))
+    }
+
+    private var rankedActivities: [(name: String, icon: String, colorHex: String?, duration: TimeInterval, count: Int)] {
+        let activityItems = footprintItems.filter {
+            guard let name = $0.activityName?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+            return !name.isEmpty
+        }
+        let grouped = Dictionary(grouping: activityItems, by: { $0.activityName!.trimmingCharacters(in: .whitespacesAndNewlines) })
+        var ranked: [(name: String, icon: String, colorHex: String?, duration: TimeInterval, count: Int)] = []
+        for (name, items) in grouped {
+            let duration = items.reduce(0) { total, item in
+                total + max(0, item.endTime.timeIntervalSince(item.startTime))
+            }
+            ranked.append((
+                name: name,
+                icon: items.first?.icon ?? "figure.walk",
+                colorHex: items.first?.colorHex,
+                duration: duration,
+                count: items.count
+            ))
         }
         ranked.sort { lhs, rhs in
             lhs.duration == rhs.duration ? lhs.count > rhs.count : lhs.duration > rhs.duration
@@ -279,9 +308,33 @@ private struct WatchStatisticsView: View {
                 WatchStatisticRow(title: "活跃天数", value: "\(days.filter { !$0.timeline.isEmpty }.count) 天", icon: "calendar")
                 WatchStatisticRow(title: "足迹", value: "\(footprintItems.count) 个", icon: "mappin.and.ellipse")
                 WatchStatisticRow(title: "交通", value: "\(transportItems.count) 段", icon: "car")
-                WatchStatisticRow(title: "停留时长", value: durationText(totalDuration), icon: "clock")
                 if range == .last7Days {
                     WatchStatisticRow(title: "今日里程", value: distanceText(store.snapshot.todayDistance), icon: "figure.walk")
+                }
+            }
+
+            Section("活动偏好") {
+                if rankedActivities.isEmpty {
+                    Text("暂无活动数据")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(rankedActivities.enumerated()), id: \.offset) { index, activity in
+                        HStack(spacing: 7) {
+                            Text("\(index + 1)")
+                                .font(.caption.bold())
+                                .foregroundStyle(.tint)
+                                .frame(width: 14)
+                            Image(systemName: activity.icon)
+                                .foregroundStyle(activityColor(activity.colorHex))
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(activity.name).lineLimit(1)
+                                Text("\(activity.count) 次 · \(durationText(activity.duration))")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
                 }
             }
 

@@ -1092,6 +1092,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     // 地补齐当天尚未结算的停留和行程。
                     await triggerTimelineSift()
                 }
+                // "往年今日" was previously evaluated only after a new location
+                // callback.  Open the app after 10 AM even when stationary so
+                // today's memory is still considered once the data store is ready.
+                checkDailyPastMemories()
                 checkLiveActivity()
             }
         }
@@ -2436,6 +2440,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     private func checkDailyPastMemories() {
+        // A location callback may arrive before SwiftData has finished binding
+        // the context.  Do not consume today's one attempt until the query can
+        // actually run.
+        guard modelContext != nil else { return }
+
         let now = Date()
         let calendar = Calendar.current
         let hour = calendar.component(.hour, from: now)
@@ -2446,16 +2455,32 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         let dateString = formatter.string(from: now)
+        let defaults = UserDefaults.standard
+
+        // Older versions consumed the daily check when this default-on setting
+        // had no stored value.  Let those users recover immediately after the
+        // update, without changing an explicitly disabled preference.
+        let defaultEnabledMigrationKey = "didMigratePastMemoriesNotificationDefault"
+        if !defaults.bool(forKey: defaultEnabledMigrationKey) {
+            if defaults.object(forKey: "isPastMemoriesNotificationEnabled") == nil {
+                defaults.removeObject(forKey: "lastPastMemoriesCheckDate")
+            }
+            defaults.set(true, forKey: defaultEnabledMigrationKey)
+        }
         
         // 检查今天是否已经运行过
-        let lastCheck = UserDefaults.standard.string(forKey: "lastPastMemoriesCheckDate")
+        let lastCheck = defaults.string(forKey: "lastPastMemoriesCheckDate")
         guard lastCheck != dateString else { return }
         
-        // 立即标记为已检查，防止并发 location updates 触发多次
-        UserDefaults.standard.set(dateString, forKey: "lastPastMemoriesCheckDate")
-        
-        // 检查设置是否开启
-        guard UserDefaults.standard.bool(forKey: "isPastMemoriesNotificationEnabled") else { return }
+        // Keep the default consistent with SettingsView's @AppStorage default.
+        // `bool(forKey:)` returns false for a key that was never stored, which
+        // silently disabled this reminder for existing users.
+        let isEnabled = defaults.object(forKey: "isPastMemoriesNotificationEnabled") as? Bool ?? true
+        guard isEnabled else { return }
+
+        // Mark only after the context and setting gates pass, preventing a
+        // startup location callback from permanently consuming today's check.
+        defaults.set(dateString, forKey: "lastPastMemoriesCheckDate")
         
         Task { @MainActor in
             await sendPastMemoriesNotificationIfAvailable(for: now)
@@ -2750,7 +2775,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         if let last = history.first {
             lastVisitDate = last.startTime
             let days = Calendar.current.dateComponents([.day], from: lastVisitDate!, to: startTime).day ?? 0
-            if days >= 365 {
+            if days >= 180 {
                 isLongTimeNoSee = true
             }
         } else {

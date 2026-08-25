@@ -9,7 +9,6 @@ struct DiFangKeWatchApp: App {
         WindowGroup {
             WatchHomeView()
                 .environmentObject(store)
-                .tint(.teal)
         }
     }
 }

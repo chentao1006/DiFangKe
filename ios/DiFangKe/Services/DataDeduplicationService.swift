@@ -398,7 +398,16 @@ enum DataDeduplicationService {
             func coverage(_ route: [CLLocation], by otherRoute: [CLLocation]) -> Double {
                 Double(route.filter { distanceToRoute($0, otherRoute) <= tolerance }.count) / Double(route.count)
             }
-            return min(coverage(firstRoute, by: secondRoute), coverage(secondRoute, by: firstRoute)) >= 0.7
+            let forwardCoverage = coverage(firstRoute, by: secondRoute)
+            let reverseCoverage = coverage(secondRoute, by: firstRoute)
+            if min(forwardCoverage, reverseCoverage) >= 0.7 {
+                return true
+            }
+
+            // A delayed gap-fill can be a strict sub-route of the normal
+            // automatic record it touches.  Treat that as a duplicate while
+            // keeping independent nearby trips with different paths intact.
+            return intervalGap <= 10 * 60 && max(forwardCoverage, reverseCoverage) >= 0.85
         }()
         guard hasSameRouteEndpoints || hasSubstantialRouteOverlap else { return false }
 

@@ -2076,19 +2076,25 @@ class PersistentTimelineBuilder {
                 if (!gapPoints.isEmpty || isLongDistance)
                     && pathDist > AppConfig.shared.transportMinDistanceThreshold
                     && !overlapsDeletedTransportOverride(start: actualStartTime, end: actualEndTime, deletedRanges: deletedTransportRanges) {
+                    // The displayed interval is trimmed to the first/last raw
+                    // movement point above.  Classification must use that same
+                    // interval: dividing by the larger footprint-to-footprint
+                    // gap can label a 2 km / 2 min route as walking.
+                    let routeDuration = actualEndTime.timeIntervalSince(actualStartTime)
+                    guard routeDuration > 0 else { continue }
                     let ptsData = (try? JSONEncoder().encode(pts)) ?? Data()
-                    let speed = pathDist / duration
+                    let speed = pathDist / routeDuration
                     let currentLocName = current.endName
                     let nextLocName = next.startName
                     
                     // --- 异步获取健康和传感器数据 ---
                     #if !WIDGET_EXTENSION
-                let metrics = await HealthManager.shared.fetchMetrics(from: gapStart, to: gapEnd)
+                let metrics = await HealthManager.shared.fetchMetrics(from: actualStartTime, to: actualEndTime)
 #else
                 let metrics = (steps: 0, distance: 0.0, floors: 0)
 #endif
                     #if !WIDGET_EXTENSION
-                let motionType = await HealthManager.shared.queryMostFrequentActivity(from: gapStart, to: gapEnd)
+                let motionType = await HealthManager.shared.queryMostFrequentActivity(from: actualStartTime, to: actualEndTime)
 #else
                 let motionType = MotionType.unknown
 #endif
@@ -2098,7 +2104,7 @@ class PersistentTimelineBuilder {
                         stepCount: metrics.steps,
                         walkingDistance: metrics.distance,
                         floorsClimbed: metrics.floors,
-                        duration: duration,
+                        duration: routeDuration,
                         distanceMeters: pathDist,
                         pointCount: pts.count,
                         preferredAutomotive: preferredAuto,
@@ -2924,6 +2930,14 @@ class PersistentTimelineBuilder {
 
         let startDiff = abs(first.startTime.timeIntervalSince(second.startTime))
         let endDiff = abs(first.endTime.timeIntervalSince(second.endTime))
+        let intervalGap: TimeInterval
+        if first.endTime <= second.startTime {
+            intervalGap = second.startTime.timeIntervalSince(first.endTime)
+        } else if second.endTime <= first.startTime {
+            intervalGap = first.startTime.timeIntervalSince(second.endTime)
+        } else {
+            intervalGap = 0
+        }
         guard startDiff <= 20 * 60, endDiff <= 20 * 60,
               first.distance > 0, second.distance > 0,
               abs(first.distance - second.distance) <= max(300, max(first.distance, second.distance) * 0.25),
@@ -2970,7 +2984,14 @@ class PersistentTimelineBuilder {
 
         let forwardCoverage = routeCoverage(firstRoute, by: secondRoute)
         let reverseCoverage = routeCoverage(secondRoute, by: firstRoute)
-        return min(forwardCoverage, reverseCoverage) >= 0.7
+        if min(forwardCoverage, reverseCoverage) >= 0.7 {
+            return true
+        }
+
+        // A late gap bridge can contain only the beginning or the end of an
+        // already-persisted automatic trip.  It is still a duplicate when that
+        // shorter route is almost entirely covered and the two windows touch.
+        return intervalGap <= 10 * 60 && max(forwardCoverage, reverseCoverage) >= 0.85
     }
     
     private static func departureTailSplitIndex(points: [CLLocation], clusterStartIndex: Int, clusterEndIndex: Int, clusterPoints: [CLLocation]) -> Int? {
