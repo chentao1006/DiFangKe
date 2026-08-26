@@ -9,54 +9,46 @@ struct WatchHomeView: View {
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
-                ZStack {
-                    TabView(selection: $selectedPage) {
-                        ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
-                            FutureTripPage(trip: trip)
-                                .tag("future-\(trip.id)")
-                        }
-                        CurrentPlaceView()
-                            .tag("current")
-                        ForEach(store.snapshot.recentDays ?? []) { day in
-                            DayTimelinePage(day: day)
-                                .tag("day-\(day.date.timeIntervalSince1970)")
-                        }
+                TabView(selection: $selectedPage) {
+                    ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
+                        FutureTripPage(trip: trip)
+                            .tag("future-\(trip.id)")
                     }
-                    .tabViewStyle(.page(indexDisplayMode: .automatic))
-
+                    CurrentPlaceView()
+                        .tag("current")
+                    ForEach(store.snapshot.recentDays ?? []) { day in
+                        DayTimelinePage(day: day)
+                            .tag("day-\(day.date.timeIntervalSince1970)")
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .automatic))
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .overlay(alignment: .bottomLeading) {
                     if selectedPage != "current" {
-                        VStack {
-                            Spacer()
-                            HStack {
-                                Button {
-                                    selectedPage = "current"
-                                } label: {
-                                    Image(systemName: "location")
-                                }
-                                Spacer()
-                            }
+                        Button {
+                            selectedPage = "current"
+                        } label: {
+                            Image(systemName: "location")
                         }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                         .padding(.leading, 8)
                         .padding(.bottom, 8)
                         .accessibilityLabel("回到当下")
                     }
-
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Spacer()
-                            Button {
-                                showingStatistics = true
-                            } label: {
-                                Image(systemName: "chart.bar")
-                            }
-                        }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    Button {
+                        showingStatistics = true
+                    } label: {
+                        Image(systemName: "chart.bar")
                     }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                     .padding(.trailing, 8)
                     .padding(.bottom, 8)
                     .accessibilityLabel("统计")
                 }
-                .frame(width: geometry.size.width, height: geometry.size.height)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -313,6 +305,28 @@ private struct WatchStatisticsView: View {
                 }
             }
 
+            Section("常去地点") {
+                if rankedPlaces.isEmpty {
+                    Text("暂无足迹数据")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(rankedPlaces.enumerated()), id: \.offset) { index, place in
+                        HStack(spacing: 7) {
+                            Text("\(index + 1)")
+                                .font(.caption.bold())
+                                .foregroundStyle(.tint)
+                                .frame(width: 14)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(place.name).lineLimit(1)
+                                Text("\(place.count) 次 · \(durationText(place.duration))")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+
             Section("活动偏好") {
                 if rankedActivities.isEmpty {
                     Text("暂无活动数据")
@@ -330,28 +344,6 @@ private struct WatchStatisticsView: View {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(activity.name).lineLimit(1)
                                 Text("\(activity.count) 次 · \(durationText(activity.duration))")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-            }
-
-            Section("常去地点") {
-                if rankedPlaces.isEmpty {
-                    Text("暂无足迹数据")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(rankedPlaces.enumerated()), id: \.offset) { index, place in
-                        HStack(spacing: 7) {
-                            Text("\(index + 1)")
-                                .font(.caption.bold())
-                                .foregroundStyle(.tint)
-                                .frame(width: 14)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(place.name).lineLimit(1)
-                                Text("\(place.count) 次 · \(durationText(place.duration))")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
