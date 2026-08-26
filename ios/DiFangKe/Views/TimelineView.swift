@@ -1955,6 +1955,8 @@ private struct ContinuousTimelineSheet: View {
     @State private var lastEarlierDatePrefetchTime: Date?
     @State private var isShowingCalendar = false
     @State private var isShowingHistory = false
+    @State private var isHistoryContentReady = false
+    @State private var historyContentPreparationTask: Task<Void, Never>?
     @State private var isHistoryStatisticsActive = false
     @State private var earlierDatePrefetchTask: Task<Void, Never>?
     @State private var scrollMetrics = ContinuousTimelineScrollMetrics()
@@ -2176,14 +2178,23 @@ private struct ContinuousTimelineSheet: View {
                     )
                     .sheet(isPresented: $isShowingHistory) {
                         NavigationStack {
-                            HistoryListView(initialDate: activeTimelineDate, showImportOnAppear: requestedHistoryImport, onDateSelected: { selectedDate in
-                                isShowingHistory = false
-                                scrollToDate(selectedDate, using: proxy)
-                            }, onStatisticsVisibilityChanged: { isActive in
-                                isHistoryStatisticsActive = isActive
-                            })
-                            .onDisappear {
-                                requestedHistoryImport = false
+                            Group {
+                                if isHistoryContentReady {
+                                    HistoryListView(initialDate: activeTimelineDate, showImportOnAppear: requestedHistoryImport, onDateSelected: { selectedDate in
+                                        isShowingHistory = false
+                                        scrollToDate(selectedDate, using: proxy)
+                                    }, onStatisticsVisibilityChanged: { isActive in
+                                        isHistoryStatisticsActive = isActive
+                                    })
+                                    .onDisappear {
+                                        requestedHistoryImport = false
+                                    }
+                                } else {
+                                    ProgressView()
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                        .background(Color.dfkBackground)
+                                        .accessibilityLabel("正在打开历史")
+                                }
                             }
                             .toolbar {
                                 ToolbarItem(placement: .topBarTrailing) {
@@ -2205,6 +2216,27 @@ private struct ContinuousTimelineSheet: View {
                                     }
                                 }
                             }
+                        }
+                    }
+                    .onChange(of: isShowingHistory) { _, isPresented in
+                        historyContentPreparationTask?.cancel()
+
+                        guard isPresented else {
+                            isHistoryContentReady = false
+                            isHistoryStatisticsActive = false
+                            requestedHistoryImport = false
+                            return
+                        }
+
+                        // Yield one event-loop turn so the sheet can begin its
+                        // transition, then mount HistoryListView. The history
+                        // view itself waits for its index before mounting the
+                        // month grid, avoiding an empty-ring first frame.
+                        isHistoryContentReady = false
+                        historyContentPreparationTask = Task { @MainActor in
+                            await Task.yield()
+                            guard !Task.isCancelled, isShowingHistory else { return }
+                            isHistoryContentReady = true
                         }
                     }
                     .sheet(isPresented: $showingAddPlaceSheet) {

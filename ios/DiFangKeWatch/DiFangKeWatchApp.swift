@@ -3,7 +3,7 @@ import SwiftUI
 @main
 struct DiFangKeWatchApp: App {
     @WKApplicationDelegateAdaptor(WatchAppDelegate.self) private var appDelegate
-    @StateObject private var store = WatchStore()
+    @StateObject private var store = WatchStore.shared
 
     var body: some Scene {
         WindowGroup {

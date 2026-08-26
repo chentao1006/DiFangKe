@@ -65,6 +65,10 @@ struct WatchSnapshot: Codable, Hashable {
 }
 
 final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
+    /// The connectivity delegate must exist even when watchOS wakes the process
+    /// for a complication transfer without constructing the SwiftUI scene.
+    static let shared = WatchStore()
+
     private let complicationSnapshotKey = "watchComplicationSnapshot"
     private let complicationGroupID = "group.com.ct106.difangke"
     /// watchOS delivers a queued `updateApplicationContext` payload only once the app
@@ -81,6 +85,10 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
 
     override init() {
         super.init()
+        activateSession()
+    }
+
+    func activateSession() {
         guard WCSession.isSupported() else { return }
         WCSession.default.delegate = self
         WCSession.default.activate()
@@ -119,6 +127,12 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
 #endif
 
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) { apply(applicationContext) }
+
+    /// `transferCurrentComplicationUserInfo` is the iPhone's high-priority path
+    /// for new complication data. Unlike application context it can wake this app
+    /// in the background, so persist and reload the WidgetKit timeline as soon as
+    /// it is delivered.
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) { apply(userInfo) }
 
     /// Fast path for when the watch is reachable: the phone sends the same payload via
     /// sendMessage so the complication updates immediately instead of waiting for the

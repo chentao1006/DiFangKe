@@ -1,6 +1,5 @@
 import SwiftUI
 import SwiftData
-import Charts
 import MapKit
 
 extension Notification.Name {
@@ -126,7 +125,6 @@ struct HistoryStatisticsView: View {
     @Environment(\.modelContext) private var modelContext
     
     @State private var allFootprints: [Footprint] = []
-    @State private var manualTransports: [TransportManualSelection] = []
     @State private var transportRecords: [TransportRecord] = []
     @State private var activityTypes: [ActivityType] = []
     @State private var allPlaces: [Place] = []
@@ -151,7 +149,7 @@ struct HistoryStatisticsView: View {
     @State private var activeYearForSegment: Int = Calendar.current.component(.year, from: Date())
     @State private var sharePayload: DFKShareCardPayload?
     @State private var frequentPlaceRankScope: FrequentPlaceRankScope = .city
-    @State private var activityRankScope: ActivityRankScope = .footprints
+    @State private var hasManuallySelectedFrequentPlaceRankScope = false
     @State private var geographicBackfillAttempts: [UUID: Int] = [:]
     @State private var isResolvingGeographies = false
     @State private var geographyBackfillTask: Task<Void, Never>?
@@ -196,7 +194,7 @@ struct HistoryStatisticsView: View {
                         heatmapSection
                         frequentPlacesSection
                         activityRankSection
-                        trendSection
+                        transportRankSection
                         Spacer(minLength: 60)
                     }
                     .padding(.top, 8)
@@ -207,6 +205,8 @@ struct HistoryStatisticsView: View {
         .onChange(of: selectedRange) { _, _ in
             stopGeographyBackfill()
             geographicBackfillAttempts.removeAll()
+            hasManuallySelectedFrequentPlaceRankScope = false
+            updateDefaultFrequentPlaceRankScope()
             updateAiSummary()
             updateMapPosition()
             resolveRankingGeographies()
@@ -216,6 +216,7 @@ struct HistoryStatisticsView: View {
         }
         .onAppear {
             fetchData()
+            updateDefaultFrequentPlaceRankScope()
             updateAiSummary()
             updateMapPosition()
             resolveRankingGeographies()
@@ -710,7 +711,13 @@ struct HistoryStatisticsView: View {
                         .accessibilityLabel("正在补齐国家和城市")
                 }
 
-                Picker("地点排行维度", selection: $frequentPlaceRankScope) {
+                Picker("地点排行维度", selection: Binding(
+                    get: { frequentPlaceRankScope },
+                    set: { scope in
+                        frequentPlaceRankScope = scope
+                        hasManuallySelectedFrequentPlaceRankScope = true
+                    }
+                )) {
                     ForEach(FrequentPlaceRankScope.allCases) { scope in
                         Text(scope.rawValue).tag(scope)
                     }
@@ -782,125 +789,98 @@ struct HistoryStatisticsView: View {
     // MARK: - Activity Rank Section
     private var activityRankSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                sectionHeader("活动偏好", icon: "medal.fill", horizontalPadding: 0)
-                Picker("活动排行维度", selection: $activityRankScope) {
-                    ForEach(ActivityRankScope.allCases) { scope in
-                        Text(scope.rawValue).tag(scope)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .controlSize(.small)
-                .frame(width: 112)
-            }
-            .padding(.horizontal, 20)
+            sectionHeader("活动偏好", icon: "medal.fill")
             
-            let data = getActivityRankData(for: activityRankScope)
-            let maxCount = data.first?.count ?? 1
+            let data = getActivityRankData(for: .footprints)
             
             if data.isEmpty {
                 placeholderView("暂无活动数据")
             } else {
-                VStack(spacing: 16) {
-                    ForEach(data) { item in
-                        HStack(spacing: 12) {
-                            // Icon + Name
-                            HStack(spacing: 8) {
-                                Image(systemName: item.icon)
-                                    .font(.system(size: 16))
-                                    .foregroundColor(item.color)
-                                    .frame(width: 22)
-                                Text(item.name)
-                                    .font(.system(size: 15, weight: .medium))
-                            }
-                            .frame(width: 80, alignment: .leading)
-                            
-                            // Horizontal Bar
-                            GeometryReader { geo in
-                                let width = geo.size.width * CGFloat(item.count) / CGFloat(maxCount)
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(item.color.gradient)
-                                    .frame(width: max(6, width))
-                            }
-                            .frame(height: 12)
-                        }
-                        .padding(.horizontal, 20)
-                    }
-                }
-                .padding(.vertical, 24)
-                .background(Color.white.opacity(0.05))
-                .cornerRadius(24)
-                .padding(.horizontal, 16)
+                preferenceRankList(
+                    items: data,
+                    barValue: { $0.totalDuration },
+                    compressesLongTail: true,
+                    valueText: { formatRankDuration($0.totalDuration) }
+                )
             }
         }
     }
-    
-    // MARK: - Trend Section
-    private var trendSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("活动时间分布", icon: "chart.bar.fill")
-            
-            let data = getTrendData()
-            
+
+    private var transportRankSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            sectionHeader("交通偏好", icon: "car.fill")
+
+            let data = getActivityRankData(for: .transport)
+
             if data.isEmpty {
-                placeholderView("暂无活动或交通时段")
+                placeholderView("暂无交通数据")
             } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    Chart {
-                        ForEach(data) { item in
-                            RectangleMark(
-                                x: .value("日期", item.date, unit: .day),
-                                yStart: .value("开始", item.startHour),
-                                yEnd: .value("结束", item.endHour)
-                            )
-                            .foregroundStyle(item.color)
-                        }
-                    }
-                    .chartXScale(domain: trendDateDomain)
-                    // A RectangleMark is centered on its day. Reserve room at
-                    // both ends so the first/last column stays inside the plot
-                    // instead of spilling into the trailing time labels.
-                    .chartXScale(range: .plotDimension(padding: 56))
-                    .chartYScale(domain: 0...24)
-                    .chartYScale(range: .plotDimension(padding: 14))
-                    .chartYAxis {
-                        // 0/24 sit at the very top/bottom of the plot, so the anchor
-                        // has to hang the label INTO the visible area (0 upward from
-                        // its tick, 24 downward from its tick) or it clips off-screen.
-                        // Using the same AxisValueLabel as every other tick — rather
-                        // than a separately positioned overlay — is what keeps these
-                        // two lined up with the rest of the column.
-                        AxisMarks(position: .leading, values: Array(stride(from: 0, through: 24, by: 3))) { value in
-                            AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                            if let hour = value.as(Int.self) {
-                                AxisValueLabel(anchor: hour == 24 ? .topTrailing : (hour == 0 ? .bottomTrailing : .trailing)) {
-                                    Text("\(hour):00")
-                                        .font(.system(size: 9))
-                                }
-                            }
-                        }
-                    }
-                    .chartXAxis {
-                        AxisMarks(values: trendAxisDates) { value in
-                            AxisTick()
-                            AxisValueLabel {
-                                if let date = value.as(Date.self) {
-                                    Text(trendAxisLabel(for: date))
-                                        .font(.system(size: 9))
-                                        .fixedSize(horizontal: true, vertical: false)
-                                }
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 220)
-                }
-                .padding(.vertical, 20)
-                .background(Color.white.opacity(0.05))
-                .cornerRadius(24)
-                .padding(.horizontal, 16)
+                preferenceRankList(
+                    items: data,
+                    barValue: { Double($0.count) },
+                    compressesLongTail: false,
+                    valueText: { formatRankMileage($0.totalDistance) }
+                )
             }
         }
+    }
+
+    private func preferenceRankList(
+        items: [RankItem],
+        barValue: @escaping (RankItem) -> Double,
+        compressesLongTail: Bool,
+        valueText: @escaping (RankItem) -> String
+    ) -> some View {
+        let maxBarValue = max(1, items.map(barValue).max() ?? 1)
+        return VStack(spacing: 16) {
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: item.icon)
+                            .font(.system(size: 16))
+                            .foregroundColor(item.color)
+                            .frame(width: 22)
+                        Text(item.name)
+                            .font(.system(size: 15, weight: .medium))
+                    }
+                    .frame(width: 80, alignment: .leading)
+
+                    GeometryReader { geo in
+                        let value = max(0, barValue(item))
+                        let fraction = preferenceBarFraction(
+                            value: value,
+                            maxValue: maxBarValue,
+                            compressesLongTail: compressesLongTail
+                        )
+                        let width = geo.size.width * CGFloat(fraction)
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(item.color.gradient)
+                            .frame(width: fraction > 0 ? max(12, width) : 0)
+                    }
+                    .frame(height: 12)
+
+                    Text(valueText(item))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 62, alignment: .trailing)
+                }
+                .padding(.horizontal, 20)
+            }
+        }
+        .padding(.vertical, 24)
+        .background(Color.white.opacity(0.05))
+        .cornerRadius(24)
+        .padding(.horizontal, 16)
+    }
+
+    private func preferenceBarFraction(value: Double, maxValue: Double, compressesLongTail: Bool) -> Double {
+        guard value > 0, maxValue > 0 else { return 0 }
+        guard compressesLongTail else { return value / maxValue }
+
+        // Use one hour as the reference interval so a long "在家" record does
+        // not visually erase shorter, meaningful activities.
+        let referenceDuration: Double = 3_600
+        return log1p(value / referenceDuration) / log1p(maxValue / referenceDuration)
     }
     
     private func sectionHeader(_ title: String, icon: String, horizontalPadding: CGFloat = 20) -> some View {
@@ -1004,6 +984,26 @@ struct HistoryStatisticsView: View {
             .sorted { $0.duration > $1.duration }
     }
 
+    private func updateDefaultFrequentPlaceRankScope() {
+        guard !hasManuallySelectedFrequentPlaceRankScope else { return }
+
+        let countries = Set(filteredFootprints.compactMap { footprint in
+            footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty })
+        if countries.count > 1 {
+            frequentPlaceRankScope = .country
+            return
+        }
+
+        let cities = Set(filteredFootprints.compactMap { footprint -> String? in
+            guard let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines), !city.isEmpty else {
+                return nil
+            }
+            return "\(footprint.countryCode ?? "")|\(city)"
+        })
+        frequentPlaceRankScope = cities.count == 1 ? .place : .city
+    }
+
     private func rankName(
         for scope: FrequentPlaceRankScope,
         placeName: String,
@@ -1077,40 +1077,51 @@ struct HistoryStatisticsView: View {
         let id = UUID()
         let name: String
         let count: Int
+        let totalDuration: TimeInterval
+        let totalDistance: Double
         let color: Color
         let icon: String
     }
     
     private func getActivityRankData(for scope: ActivityRankScope) -> [RankItem] {
-        var counts: [String: Int] = [:]
+        var totals: [String: (count: Int, duration: TimeInterval, distance: Double)] = [:]
         
         if scope == .footprints {
             for fp in filteredFootprints {
                 if let type = fp.getActivityType(from: activityTypes)?.name {
-                    counts[type, default: 0] += 1
+                    var total = totals[type, default: (0, 0, 0)]
+                    total.count += 1
+                    total.duration += fp.duration
+                    totals[type] = total
                 }
             }
         } else {
-            for transport in filteredManualTransports {
-                if let type = TransportType(rawValue: transport.vehicleType) {
-                    counts[type.localizedName, default: 0] += 1
+            for transport in filteredTransportRecords {
+                if let type = TransportType(rawValue: transport.manualTypeRaw ?? transport.typeRaw) {
+                    var total = totals[type.localizedName, default: (0, 0, 0)]
+                    total.count += 1
+                    total.distance += transport.distance
+                    totals[type.localizedName] = total
                 }
             }
         }
         
-        return counts.map { name, count in
+        return totals.map { name, total in
             // 优先匹配预定义活动
             if let activity = activityTypes.first(where: { $0.name == name }) {
-                return RankItem(name: name, count: count, color: activity.color, icon: activity.icon)
+                return RankItem(name: name, count: total.count, totalDuration: total.duration, totalDistance: total.distance, color: activity.color, icon: activity.icon)
             }
             
             // 匹配交通工具类型
             if let transportType = TransportType.allCases.first(where: { $0.localizedName == name }) {
-                return RankItem(name: name, count: count, color: .dfkAccent, icon: transportType.sfSymbol)
+                return RankItem(name: name, count: total.count, totalDuration: total.duration, totalDistance: total.distance, color: .dfkAccent, icon: transportType.sfSymbol)
             }
             
-            return RankItem(name: name, count: count, color: .gray, icon: "mappin.and.ellipse")
-        }.sorted { 
+            return RankItem(name: name, count: total.count, totalDuration: total.duration, totalDistance: total.distance, color: .gray, icon: "mappin.and.ellipse")
+        }.sorted {
+            if scope == .footprints, $0.totalDuration != $1.totalDuration {
+                return $0.totalDuration > $1.totalDuration
+            }
             if $0.count == $1.count {
                 return $0.name < $1.name
             }
@@ -1118,22 +1129,24 @@ struct HistoryStatisticsView: View {
         }
     }
 
-    private var filteredManualTransports: [TransportManualSelection] {
-        let calendar = Calendar.current
-        return manualTransports.filter { transport in
-            switch selectedRange {
-            case .last7Days:
-                return transport.startTime >= calendar.date(byAdding: .day, value: -7, to: Date())!
-            case .last30Days:
-                return transport.startTime >= calendar.date(byAdding: .day, value: -30, to: Date())!
-            case .last90Days:
-                return transport.startTime >= calendar.date(byAdding: .day, value: -90, to: Date())!
-            case .lastYear:
-                return transport.startTime >= calendar.date(byAdding: .day, value: -365, to: Date())!
-            case .customYear(let year):
-                return calendar.component(.year, from: transport.startTime) == year
-            }
+    private func formatRankDuration(_ duration: TimeInterval) -> String {
+        let totalMinutes = Int(duration / 60)
+        guard totalMinutes >= 60 else {
+            return "\(totalMinutes)分钟"
         }
+
+        let hours = Double(totalMinutes) / 60
+        if hours < 10 {
+            return String(format: "%.1f小时", hours)
+        }
+        return "\(Int(hours))小时"
+    }
+
+    private func formatRankMileage(_ distance: Double) -> String {
+        if distance < 1_000 {
+            return "\(Int(distance.rounded()))米"
+        }
+        return String(format: "%.1f公里", distance / 1_000)
     }
 
     private var filteredTransportRecords: [TransportRecord] {
@@ -1154,132 +1167,6 @@ struct HistoryStatisticsView: View {
         }
     }
     
-    struct TrendItem: Identifiable {
-        let id = UUID()
-        let date: Date
-        let startHour: Double
-        let endHour: Double
-        let color: Color
-    }
-    
-    private func getTrendData() -> [TrendItem] {
-        let calendar = Calendar.current
-        var segments: [TrendItem] = []
-
-        func appendSegment(start: Date, end: Date, color: Color) {
-            var cursor = start
-            while cursor < end {
-                let dayStart = calendar.startOfDay(for: cursor)
-                guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { break }
-                let segmentEnd = min(end, dayEnd)
-                let startHour = cursor.timeIntervalSince(dayStart) / 3600
-                let endHour = max(startHour + 0.08, segmentEnd.timeIntervalSince(dayStart) / 3600)
-                segments.append(TrendItem(date: dayStart, startHour: startHour, endHour: min(24, endHour), color: color))
-                cursor = dayEnd
-            }
-        }
-
-        for footprint in filteredFootprints {
-            appendSegment(
-                start: footprint.startTime,
-                end: footprint.endTime,
-                color: footprint.getActivityType(from: activityTypes)?.color ?? .dfkAccent
-            )
-        }
-        for transport in filteredManualTransports {
-            let color = TransportType(rawValue: transport.vehicleType).map(transportTrendColor) ?? .secondary
-            appendSegment(start: transport.startTime, end: transport.endTime, color: color)
-        }
-        return segments
-    }
-
-    private var trendDateDomain: ClosedRange<Date> {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        switch selectedRange {
-        case .last7Days:
-            return calendar.date(byAdding: .day, value: -7, to: today)!...today
-        case .last30Days:
-            return calendar.date(byAdding: .day, value: -30, to: today)!...today
-        case .last90Days:
-            return calendar.date(byAdding: .day, value: -90, to: today)!...today
-        case .lastYear:
-            return calendar.date(byAdding: .day, value: -365, to: today)!...today
-        case .customYear(let year):
-            let start = calendar.date(from: DateComponents(year: year, month: 1, day: 1))!
-            let end = calendar.date(from: DateComponents(year: year, month: 12, day: 31))!
-            return start...end
-        }
-    }
-
-    private var trendAxisDates: [Date] {
-        let calendar = Calendar.current
-        let domain = trendDateDomain
-        switch selectedRange {
-        case .lastYear, .customYear:
-            return trendMonthAxisDates(every: 2)
-        case .last7Days, .last30Days, .last90Days:
-            break
-        }
-        let targetCount: Int
-        switch selectedRange {
-        case .last7Days: targetCount = 5
-        case .last30Days, .last90Days: targetCount = 7
-        case .lastYear, .customYear: targetCount = 5
-        }
-        let totalDays = max(1, calendar.dateComponents([.day], from: domain.lowerBound, to: domain.upperBound).day ?? 1)
-        let step = max(1, Int(ceil(Double(totalDays) / Double(targetCount - 1))))
-        var dates = stride(from: 0, through: totalDays, by: step).compactMap {
-            calendar.date(byAdding: .day, value: $0, to: domain.lowerBound)
-        }
-        if dates.last != domain.upperBound {
-            dates.append(domain.upperBound)
-        }
-        return dates
-    }
-
-    private func trendAxisLabel(for date: Date) -> String {
-        switch selectedRange {
-        case .last7Days, .last30Days, .last90Days:
-            return date.formatted(.dateTime.month().day())
-        case .lastYear, .customYear:
-            return date.formatted(.dateTime.month())
-        }
-    }
-
-    private func trendMonthAxisDates(every months: Int) -> [Date] {
-        let calendar = Calendar.current
-        let domain = trendDateDomain
-        let firstMonth = calendar.date(from: calendar.dateComponents([.year, .month], from: domain.lowerBound))!
-        var dates = [domain.lowerBound]
-        var cursor = calendar.date(byAdding: .month, value: months, to: firstMonth)!
-        while cursor <= domain.upperBound {
-            // Avoid repeating the opening month label at the other end of a
-            // year-long range; the axis is intentionally month-only here.
-            if calendar.component(.month, from: cursor) != calendar.component(.month, from: domain.lowerBound) {
-                dates.append(cursor)
-            }
-            cursor = calendar.date(byAdding: .month, value: months, to: cursor)!
-        }
-        return dates
-    }
-
-    private func transportTrendColor(_ type: TransportType) -> Color {
-        switch type {
-        case .slow: .green
-        case .running: .orange
-        case .bicycle: .teal
-        case .ebike: .mint
-        case .motorcycle: .pink
-        case .car: .blue
-        case .bus: .indigo
-        case .subway: .purple
-        case .train: .brown
-        case .airplane: .cyan
-        case .ship: .blue.opacity(0.7)
-        }
-    }
-
     private func resolveRankingGeographies() {
         let pending = filteredFootprints.filter {
             ($0.countryCode == nil || $0.countryName == nil || $0.cityName == nil)
@@ -1341,6 +1228,7 @@ struct HistoryStatisticsView: View {
         // A single refresh per completed batch keeps the ranking current
         // without repeatedly rebuilding the map and every chart.
         allFootprints = Array(allFootprints)
+        updateDefaultFrequentPlaceRankScope()
     }
 
     @MainActor
@@ -1381,13 +1269,6 @@ struct HistoryStatisticsView: View {
         )
         if let fetched = try? modelContext.fetch(footprintDescriptor) {
             allFootprints = fetched
-        }
-        
-        let transportDescriptor = FetchDescriptor<TransportManualSelection>(
-            predicate: #Predicate<TransportManualSelection> { $0.isDeleted == false }
-        )
-        if let fetched = try? modelContext.fetch(transportDescriptor) {
-            manualTransports = fetched
         }
 
         let transportRecordDescriptor = FetchDescriptor<TransportRecord>(

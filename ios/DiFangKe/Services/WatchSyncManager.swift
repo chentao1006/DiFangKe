@@ -75,6 +75,13 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
     private let lastHourlySyncKey = "lastWatchHourlySyncTimestamp"
     private var footprintDataChangedObserver: NSObjectProtocol?
     private var pendingSnapshotSync: Task<Void, Never>?
+    private var pendingBackgroundSnapshotTransfer: WCSessionUserInfoTransfer?
+    /// `updateApplicationContext` does not launch a suspended Watch app. Keep the
+    /// last payload we sent through the complication channel so actual timeline
+    /// changes can use that high-priority path without spending its budget on
+    /// repeated location callbacks that produce the same snapshot.
+    private var lastComplicationSnapshotData: Data?
+    private var lastBackgroundSnapshotData: Data?
 
     func start(context: ModelContext) {
         modelContext = context
@@ -124,6 +131,30 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
             session.sendMessage(payload, replyHandler: nil, errorHandler: nil)
         }
         try? session.updateApplicationContext(payload)
+
+        // This is the delivery-guaranteed fallback for the budgeted complication
+        // channel above. Keep at most one snapshot in the queue: the Watch only
+        // needs the newest state, and an old footprint must never arrive after a
+        // newer transport. Unlike application context, user-info transfers remain
+        // queued for background delivery if the Watch app is not running.
+        if data != lastBackgroundSnapshotData {
+            pendingBackgroundSnapshotTransfer?.cancel()
+            pendingBackgroundSnapshotTransfer = session.transferUserInfo(payload)
+            lastBackgroundSnapshotData = data
+        }
+
+        // Application context is deliberately a latest-value cache and will not
+        // wake a terminated Watch app. A complication update needs to arrive when
+        // a new footprint or transport is saved, not only at the next opportunistic
+        // Watch background refresh. This is the dedicated, high-priority transfer
+        // Apple provides for that job. It is budgeted, so only send when the data
+        // actually changed; normal context delivery remains the fallback.
+        if data != lastComplicationSnapshotData,
+           session.isComplicationEnabled,
+           session.remainingComplicationUserInfoTransfers > 0 {
+            session.transferCurrentComplicationUserInfo(payload)
+            lastComplicationSnapshotData = data
+        }
     }
 
     /// A best-effort hourly catch-up for the installed companion app. Location-triggered

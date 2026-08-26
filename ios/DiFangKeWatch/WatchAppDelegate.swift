@@ -6,6 +6,10 @@ import WatchKit
 /// that keeps the complication from going stale (see the comment on `WatchStore`).
 final class WatchAppDelegate: NSObject, WKApplicationDelegate {
     func applicationDidFinishLaunching() {
+        // A complication/user-info delivery may launch the app while no
+        // WindowGroup is created. Install the WCSession delegate here instead
+        // of waiting for SwiftUI to build WatchHomeView's state object.
+        WatchStore.shared.activateSession()
         Self.scheduleNextBackgroundRefresh()
     }
 
@@ -15,6 +19,9 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
                 task.setTaskCompletedWithSnapshot(false)
                 continue
             }
+            // The fallback wake must also establish the connectivity delegate.
+            // SwiftUI may not construct a WindowGroup during this background run.
+            WatchStore.shared.activateSession()
             // WatchStore already activated the WatchConnectivity session at launch;
             // waking the process is what lets it flush any application context the
             // phone sent while we were suspended. Linger briefly so that delivery —

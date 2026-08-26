@@ -125,7 +125,6 @@ private struct WatchComplicationView: View {
     private var dayTimelineRing: some View {
         DayTimelineRing(
             items: entry.snapshot?.todayTimeline ?? [],
-            currentFootprintID: entry.snapshot?.currentFootprintID,
             date: entry.date
         )
     }
@@ -194,7 +193,6 @@ private struct WatchComplicationView: View {
 /// remains legible when records overlap.
 private struct DayTimelineRing: View {
     let items: [ComplicationTimelineItem]
-    let currentFootprintID: String?
     let date: Date
 
     private let calendar = Calendar.current
@@ -203,7 +201,7 @@ private struct DayTimelineRing: View {
     // widget's bounds — exactly where accessoryCircular's system clip mask crops it,
     // leaving only the inner half of the ring and a lopped-off rounded cap. Insetting
     // by half the thickest stroke keeps every segment's outer edge inside the mask.
-    private let maxLineWidth: CGFloat = 6.2
+    private let maxLineWidth: CGFloat = 4.0
 
     var body: some View {
         ZStack {
@@ -220,7 +218,7 @@ private struct DayTimelineRing: View {
                 segment(
                     for: item,
                     color: color(from: item.colorHex),
-                    lineWidth: item.id == currentFootprintID ? 6.2 : 4.0
+                    lineWidth: 4.0
                 )
             }
         }

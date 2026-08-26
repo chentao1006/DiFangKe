@@ -109,27 +109,73 @@ private func timelineIconStyle(for item: DaySummary.TimelineIcon, colorScheme: C
 
 
 
-private extension View {
-    func contentVisibility(for mode: HistoryListView.ViewMode, matching target: HistoryListView.ViewMode) -> some View {
-        self
-            .opacity(mode == target ? 1 : 0)
-            .allowsHitTesting(mode == target)
-            .accessibilityHidden(mode != target)
-    }
-}
-
 struct IdentifiableDate: Identifiable {
     var id: Date { date }
     let date: Date
+}
+
+private struct HistoryFootprintIndexEntry: Equatable {
+    let id: UUID
+    let startTime: Date
+    let endTime: Date
+    let status: String
+}
+
+private struct HistoryTransportIndexEntry: Equatable {
+    let id: UUID
+    let startTime: Date
+    let endTime: Date
+    let status: String
+}
+
+private struct HistoryFutureTripIndexEntry: Equatable {
+    let id: UUID
+    let arrivalDate: Date
+    let hasPlanDate: Bool
+}
+
+private struct HistoryCalendarIndexSource: Equatable {
+    let footprints: [HistoryFootprintIndexEntry]
+    let transports: [HistoryTransportIndexEntry]
+    let futureTrips: [HistoryFutureTripIndexEntry]
+}
+
+private struct HistoryCalendarDayIndex {
+    let footprintsByDay: [Date: [Footprint]]
+    let transportsByDay: [Date: [TransportRecord]]
+    let futureTripsByDay: [Date: [FutureTrip]]
+}
+
+@MainActor
+private final class HistoryCalendarIndexCache {
+    static let shared = HistoryCalendarIndexCache()
+
+    private var source: HistoryCalendarIndexSource?
+    private var index: HistoryCalendarDayIndex?
+
+    func index(matching source: HistoryCalendarIndexSource) -> HistoryCalendarDayIndex? {
+        guard self.source == source else { return nil }
+        return index
+    }
+
+    /// A newly-mounted SwiftData query initially reports an empty collection.
+    /// Keep the last complete calendar around so that transient snapshot never
+    /// produces a blank month before the real query result arrives.
+    func latestIndex() -> HistoryCalendarDayIndex? {
+        index
+    }
+
+    func store(_ index: HistoryCalendarDayIndex, for source: HistoryCalendarIndexSource) {
+        self.source = source
+        self.index = index
+    }
 }
 
 struct HistoryListView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(LocationManager.self) private var locationManager
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
-    @Query private var allManualSelections: [TransportManualSelection]
     @Query(sort: \TransportRecord.startTime, order: .reverse) private var allTransportRecords: [TransportRecord]
-    @Query private var allInsights: [DailyInsight]
     @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
     @Query(sort: \FutureTrip.arrivalDate) private var futureTrips: [FutureTrip]
     
@@ -162,6 +208,13 @@ struct HistoryListView: View {
     }
 
     @State private var hasScrolledMonth = false
+    @State private var isCalendarIndexReady = false
+    @State private var isCalendarInitialPositioned = false
+    @State private var calendarIndexRefreshTask: Task<Void, Never>?
+    @State private var hasOpenedFavorites = false
+    @State private var hasOpenedStatistics = false
+    @State private var loadingTab: ViewMode?
+    @State private var tabActivationTask: Task<Void, Never>?
     
     var onDateSelected: ((Date) -> Void)? = nil
     var onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil
@@ -178,16 +231,32 @@ struct HistoryListView: View {
     var body: some View {
         VStack(spacing: 0) {
             pickerSection
-            contentArea
-                .overlay(alignment: .topTrailing) {
-                    yearJumpOverlay
+            ZStack {
+                if isCalendarIndexReady {
+                    contentArea
+                        .overlay(alignment: .topTrailing) {
+                            yearJumpOverlay
+                        }
+                        // Keep the calendar in the hierarchy so its lazy stack
+                        // can lay out and perform the initial scroll, but never
+                        // expose the top-of-list intermediate frame.
+                        .opacity(isCalendarInitialPositioned ? 1 : 0)
+                        .allowsHitTesting(isCalendarInitialPositioned)
+                        .accessibilityHidden(!isCalendarInitialPositioned)
                 }
+
+                if !isCalendarInitialPositioned {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityLabel("正在加载历史")
+                }
+            }
         }
         .navigationTitle("往昔足迹")
         .navigationBarTitleDisplayMode(.inline)
         .background(Color.dfkBackground)
         .onAppear {
-            rebuildIndex()
+            prepareCalendarIndex()
             onStatisticsVisibilityChanged?(viewMode == .statistics)
             if showImportOnAppear {
                 checkPhotoPermission()
@@ -195,14 +264,16 @@ struct HistoryListView: View {
         }
         .onChange(of: viewMode) { _, mode in
             onStatisticsVisibilityChanged?(mode == .statistics)
+            activateTabIfNeeded(mode)
         }
         .onDisappear {
+            calendarIndexRefreshTask?.cancel()
+            tabActivationTask?.cancel()
             onStatisticsVisibilityChanged?(false)
         }
-        .onChange(of: allFootprints) { rebuildIndex() }
-        .onChange(of: allTransportRecords) { rebuildIndex() }
-        .onChange(of: futureTrips) { rebuildIndex() }
-        .onChange(of: allActivityTypes) { rebuildIndex() }
+        .onChange(of: allFootprints) { scheduleCalendarIndexRefresh() }
+        .onChange(of: allTransportRecords) { scheduleCalendarIndexRefresh() }
+        .onChange(of: futureTrips) { scheduleCalendarIndexRefresh() }
         .sheet(item: $showingDate) { item in
             TimelineView(initialDate: item.date)
                 .environment(locationManager)
@@ -291,21 +362,95 @@ struct HistoryListView: View {
     
     private var contentArea: some View {
         ZStack {
-            HistoryMonthView(footprintsByDay: footprintsByDay, transportsByDay: transportsByDay, futureTripsByDay: futureTripsByDay, allActivityTypes: allActivityTypes, targetDate: selectedDate, earliestDate: earliestHistoryDate, latestDate: latestHistoryDate, hasScrolled: $hasScrolledMonth, showingRawPointsDate: $showingRawPointsDate) { date in
-                if let onDateSelected = onDateSelected {
+            HistoryMonthView(
+                footprintsByDay: footprintsByDay,
+                transportsByDay: transportsByDay,
+                futureTripsByDay: futureTripsByDay,
+                allActivityTypes: allActivityTypes,
+                targetDate: selectedDate,
+                earliestDate: earliestHistoryDate,
+                latestDate: latestHistoryDate,
+                hasScrolled: $hasScrolledMonth,
+                showingRawPointsDate: $showingRawPointsDate,
+                onInitialPositioned: {
+                    isCalendarInitialPositioned = true
+                }
+            ) { date in
+                if let onDateSelected {
                     onDateSelected(date)
                 } else {
                     showingDate = IdentifiableDate(date: date)
                 }
             }
-            .contentVisibility(for: viewMode, matching: .month)
+            .opacity(viewMode == .month ? 1 : 0)
+            .allowsHitTesting(viewMode == .month)
+            .accessibilityHidden(viewMode != .month)
 
-            HistoryFavoritesView(onUpdate: rebuildIndex)
-                .environment(locationManager)
-                .contentVisibility(for: viewMode, matching: .favorites)
+            // These views are created lazily on their first selection, then kept
+            // alive. That avoids initial history-page work while preserving the
+            // results and scroll state for every subsequent tab switch.
+            if hasOpenedFavorites {
+                HistoryFavoritesView(onUpdate: rebuildIndex)
+                    .environment(locationManager)
+                    .opacity(viewMode == .favorites ? 1 : 0)
+                    .allowsHitTesting(viewMode == .favorites)
+                    .accessibilityHidden(viewMode != .favorites)
+            }
 
-            HistoryStatisticsView()
-                .contentVisibility(for: viewMode, matching: .statistics)
+            if hasOpenedStatistics {
+                HistoryStatisticsView()
+                    .opacity(viewMode == .statistics ? 1 : 0)
+                    .allowsHitTesting(viewMode == .statistics)
+                    .accessibilityHidden(viewMode != .statistics)
+            }
+
+            if let loadingTab {
+                tabLoadingIndicator(for: loadingTab)
+            }
+        }
+    }
+
+    private func tabLoadingIndicator(for tab: ViewMode) -> some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text(tab == .favorites ? "正在加载收藏" : "正在加载统计")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.dfkBackground)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func activateTabIfNeeded(_ tab: ViewMode) {
+        tabActivationTask?.cancel()
+
+        guard tab != .month else {
+            loadingTab = nil
+            return
+        }
+
+        let hasOpened = tab == .favorites ? hasOpenedFavorites : hasOpenedStatistics
+        guard !hasOpened else {
+            loadingTab = nil
+            return
+        }
+
+        // Present the indicator first. Creating either tab starts SwiftData
+        // queries; deferring that work by one display turn keeps the segmented
+        // control responsive instead of appearing to ignore the tap.
+        loadingTab = tab
+        tabActivationTask = Task { @MainActor in
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 16_000_000)
+            guard !Task.isCancelled, viewMode == tab else { return }
+
+            if tab == .favorites {
+                hasOpenedFavorites = true
+            } else {
+                hasOpenedStatistics = true
+            }
+            loadingTab = nil
         }
     }
     
@@ -351,6 +496,20 @@ struct HistoryListView: View {
     @State private var transportsByDay: [Date: [TransportRecord]] = [:]
     @State private var futureTripsByDay: [Date: [FutureTrip]] = [:]
 
+    private var calendarIndexSource: HistoryCalendarIndexSource {
+        HistoryCalendarIndexSource(
+            footprints: allFootprints.map {
+                HistoryFootprintIndexEntry(id: $0.footprintID, startTime: $0.startTime, endTime: $0.endTime, status: $0.statusValue)
+            },
+            transports: allTransportRecords.map {
+                HistoryTransportIndexEntry(id: $0.recordID, startTime: $0.startTime, endTime: $0.endTime, status: $0.statusRaw)
+            },
+            futureTrips: futureTrips.map {
+                HistoryFutureTripIndexEntry(id: $0.id, arrivalDate: $0.arrivalDate, hasPlanDate: $0.hasPlanDate)
+            }
+        )
+    }
+
     /// Days a [start, end) span meaningfully overlaps, skipping any day where the
     /// overlap is under `minOverlap` (e.g. a span that ends right at midnight would
     /// otherwise flag the next day too, even though it has ~0s of actual time on it).
@@ -372,6 +531,12 @@ struct HistoryListView: View {
     }
 
     private func rebuildIndex() {
+        let source = calendarIndexSource
+        if let cached = HistoryCalendarIndexCache.shared.index(matching: source) {
+            applyCalendarIndex(cached)
+            return
+        }
+
         let calendar = Calendar.current
         var fpMap: [Date: [Footprint]] = [:]
         var tpMap: [Date: [TransportRecord]] = [:]
@@ -394,9 +559,45 @@ struct HistoryListView: View {
             tripMap[day, default: []].append(trip)
         }
         
-        self.footprintsByDay = fpMap
-        self.transportsByDay = tpMap
-        self.futureTripsByDay = tripMap
+        let index = HistoryCalendarDayIndex(
+            footprintsByDay: fpMap,
+            transportsByDay: tpMap,
+            futureTripsByDay: tripMap
+        )
+        applyCalendarIndex(index)
+        HistoryCalendarIndexCache.shared.store(index, for: source)
+    }
+
+    private func applyCalendarIndex(_ index: HistoryCalendarDayIndex) {
+        footprintsByDay = index.footprintsByDay
+        transportsByDay = index.transportsByDay
+        futureTripsByDay = index.futureTripsByDay
+    }
+
+    private func prepareCalendarIndex() {
+        // Do this synchronously: it makes a subsequent open draw the complete
+        // previous month immediately, before SwiftData publishes its first value.
+        if let cached = HistoryCalendarIndexCache.shared.latestIndex() {
+            applyCalendarIndex(cached)
+            isCalendarIndexReady = true
+        } else {
+            isCalendarIndexReady = false
+        }
+        scheduleCalendarIndexRefresh()
+    }
+
+    private func scheduleCalendarIndexRefresh() {
+        calendarIndexRefreshTask?.cancel()
+        calendarIndexRefreshTask = Task { @MainActor in
+            // @Query updates each collection independently. Coalesce their first
+            // delivery, rather than rendering an empty/partial calendar between
+            // those updates.
+            await Task.yield()
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            rebuildIndex()
+            isCalendarIndexReady = true
+        }
     }
     
     private func checkPhotoPermission() {
@@ -568,6 +769,7 @@ struct HistoryMonthView: View {
     let latestDate: Date
     @Binding var hasScrolled: Bool
     @Binding var showingRawPointsDate: IdentifiableDate?
+    let onInitialPositioned: () -> Void
     let onDayTap: (Date) -> Void
     
     @State private var rawPointsDialogDate: IdentifiableDate?
@@ -588,6 +790,19 @@ struct HistoryMonthView: View {
     private var scrollTargetKey: String {
         let earliestMonthID = (earliestDate.startOfMonth ?? earliestDate).dayID
         return targetDate.dayID + "-" + earliestMonthID + "-" + String(monthsCount)
+    }
+
+    private var targetScrollAnchor: UnitPoint {
+        let calendar = Calendar.current
+        let latestMonth = latestDate.startOfMonth ?? latestDate
+
+        // Centering an item in the final month asks the scroll view to create
+        // space below its real content. It looks centred initially, then snaps
+        // back as soon as a user starts dragging. Bottom alignment is clamped
+        // to the real content edge and keeps the initial position physical.
+        return calendar.isDate(targetDate, equalTo: latestMonth, toGranularity: .month)
+            ? .bottom
+            : .center
     }
     
     var body: some View {
@@ -616,6 +831,7 @@ struct HistoryMonthView: View {
                     try? await Task.sleep(nanoseconds: 100_000_000)
                     await scrollToTarget(proxy: proxy)
                 }
+                onInitialPositioned()
             }
         }
     }
@@ -626,9 +842,9 @@ struct HistoryMonthView: View {
 
         proxy.scrollTo("month-" + startOfMonth.dayID, anchor: .top)
         try? await Task.sleep(nanoseconds: 80_000_000)
-        proxy.scrollTo("day-" + targetDate.dayID, anchor: .center)
+        proxy.scrollTo("day-" + targetDate.dayID, anchor: targetScrollAnchor)
         try? await Task.sleep(nanoseconds: 80_000_000)
-        proxy.scrollTo("day-" + targetDate.dayID, anchor: .center)
+        proxy.scrollTo("day-" + targetDate.dayID, anchor: targetScrollAnchor)
         hasScrolled = true
     }
 
@@ -775,8 +991,7 @@ struct MonthDayCell: View {
                 startTime: footprint.startTime,
                 endTime: footprint.endTime,
                 color: Color(hex: activity?.colorHex ?? "") ?? .dfkAccent,
-                isTransport: false,
-                isCurrent: Calendar.current.isDateInToday(date) && footprint.footprintID == latestFootprintID
+                isTransport: false
             )
         }
         let transportSegments = transports.map { transport in
@@ -785,15 +1000,10 @@ struct MonthDayCell: View {
                 startTime: transport.startTime,
                 endTime: transport.endTime,
                 color: .dfkAccent,
-                isTransport: true,
-                isCurrent: false
+                isTransport: true
             )
         }
         return (footprintSegments + transportSegments).sorted { $0.startTime < $1.startTime }
-    }
-
-    private var latestFootprintID: UUID? {
-        footprints.max { $0.startTime < $1.startTime }?.footprintID
     }
 
     var body: some View {
@@ -832,7 +1042,6 @@ private struct MonthDayTimelineSegment: Identifiable {
     let endTime: Date
     let color: Color
     let isTransport: Bool
-    let isCurrent: Bool
 }
 
 /// The calendar's compact counterpart to the Watch day ring.  A data day has
@@ -858,7 +1067,7 @@ private struct MonthDayTimelineRing: View {
                 transportArc(for: segment)
             }
             ForEach(segments.filter { !$0.isTransport }) { segment in
-                arc(for: segment, lineWidth: segment.isCurrent ? 5.4 : 3.5)
+                arc(for: segment, lineWidth: 3.5)
             }
             ForEach(plannedTrips.filter(\.hasArrivalTime), id: \.id) { trip in
                 planMarker(for: trip)
