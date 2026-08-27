@@ -9,46 +9,42 @@ struct WatchHomeView: View {
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
-                TabView(selection: $selectedPage) {
-                    ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
-                        FutureTripPage(trip: trip)
-                            .tag("future-\(trip.id)")
-                    }
-                    CurrentPlaceView()
-                        .tag("current")
-                    ForEach(store.snapshot.recentDays ?? []) { day in
-                        DayTimelinePage(day: day)
-                            .tag("day-\(day.date.timeIntervalSince1970)")
-                    }
-                }
-                .tabViewStyle(.page(indexDisplayMode: .automatic))
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .overlay(alignment: .bottomLeading) {
-                    if selectedPage != "current" {
-                        Button {
-                            selectedPage = "current"
-                        } label: {
-                            Image(systemName: "location")
+                ZStack {
+                    TabView(selection: $selectedPage) {
+                        ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
+                            FutureTripPage(trip: trip)
+                                .tag("future-\(trip.id)")
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .padding(.leading, 8)
-                        .padding(.bottom, 8)
-                        .accessibilityLabel("回到当下")
+                        CurrentPlaceView()
+                            .tag("current")
+                        ForEach(store.snapshot.recentDays ?? []) { day in
+                            DayTimelinePage(day: day)
+                                .tag("day-\(day.date.timeIntervalSince1970)")
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .automatic))
+
+                    VStack {
+                        Spacer()
+                        HStack {
+                            if selectedPage != "current" {
+                                CornerButton(systemImage: "location", accessibilityLabel: "回到当下") {
+                                    selectedPage = "current"
+                                }
+                            }
+                            Spacer()
+                            CornerButton(systemImage: "chart.bar", accessibilityLabel: "统计") {
+                                showingStatistics = true
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        // .page's automatic dot indicator reserves its own bottom inset;
+                        // this negative padding cancels it out so the buttons sit at the
+                        // same physical inset as the top-left toolbar button.
+                        .padding(.bottom, -18)
                     }
                 }
-                .overlay(alignment: .bottomTrailing) {
-                    Button {
-                        showingStatistics = true
-                    } label: {
-                        Image(systemName: "chart.bar")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .padding(.trailing, 8)
-                    .padding(.bottom, 8)
-                    .accessibilityLabel("统计")
-                }
+                .frame(width: geometry.size.width, height: geometry.size.height)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -77,6 +73,32 @@ struct WatchHomeView: View {
             return today
         }
         return WatchDaySnapshot(date: Calendar.current.startOfDay(for: Date()), timeline: store.snapshot.todayTimeline ?? [])
+    }
+}
+
+private struct CornerButton: View {
+    let systemImage: String
+    let accessibilityLabel: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 32, height: 32)
+        .modifier(GlassCircleBackground())
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+private struct GlassCircleBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(watchOS 26.0, *) {
+            content.glassEffect(.regular, in: Circle())
+        } else {
+            content.background(Circle().fill(.thinMaterial))
+        }
     }
 }
 

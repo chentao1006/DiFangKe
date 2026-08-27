@@ -559,7 +559,9 @@ class TimelineBuilder {
                         var handled = false
                         if let l1 = l1, let l2 = l2 {
                             let dist = CLLocation(latitude: l1.latitude, longitude: l1.longitude).distance(from: CLLocation(latitude: l2.latitude, longitude: l2.longitude))
-                            if dist > max(AppConfig.shared.transportMinDistanceThreshold, AppConfig.shared.mergeDistanceThreshold) {
+                            let gapDuration = t.startTime.timeIntervalSince(lastProcessedTime)
+                            if dist > max(AppConfig.shared.transportMinDistanceThreshold, AppConfig.shared.mergeDistanceThreshold)
+                                && gapDuration >= AppConfig.shared.transportMinDurationThreshold {
                                 addSynthesizedTransport(from: lastProcessedTime, to: t.startTime, l1: l1, l2: l2, items: &items)
                                 handled = true
                             }
@@ -644,7 +646,9 @@ class TimelineBuilder {
                     var handled = false
                     if let l1 = l1, let l2 = l2 {
                         let dist = CLLocation(latitude: l1.latitude, longitude: l1.longitude).distance(from: CLLocation(latitude: l2.latitude, longitude: l2.longitude))
-                        if dist > max(AppConfig.shared.transportMinDistanceThreshold, AppConfig.shared.mergeDistanceThreshold) {
+                        let gapDuration = end.timeIntervalSince(lastProcessedTime)
+                        if dist > max(AppConfig.shared.transportMinDistanceThreshold, AppConfig.shared.mergeDistanceThreshold)
+                            && gapDuration >= AppConfig.shared.transportMinDurationThreshold {
                             addSynthesizedTransport(from: lastProcessedTime, to: end, l1: l1, l2: l2, items: &items)
                             handled = true
                         }
@@ -2082,6 +2086,9 @@ class PersistentTimelineBuilder {
                     // gap can label a 2 km / 2 min route as walking.
                     let routeDuration = actualEndTime.timeIntervalSince(actualStartTime)
                     guard routeDuration > 0 else { continue }
+                    // 缝隙桥接出的短促交通同样要过最短时长门槛，避免上一段交通的尾部轨迹
+                    // 被重复识别成一段新的交通（长距离例外：飞机/高铁允许无点合成，routeDuration 可能很短）
+                    guard isLongDistance || routeDuration >= AppConfig.shared.transportMinDurationThreshold else { continue }
                     let ptsData = (try? JSONEncoder().encode(pts)) ?? Data()
                     let speed = pathDist / routeDuration
                     let currentLocName = current.endName
