@@ -240,23 +240,6 @@ fun SettingsScreen(
                     }
                 )
             }
-            item {
-                SettingsToggleItem(
-                    title = "行程计划提醒",
-                    subtitle = "在设定的行程时间提醒您前往计划地点",
-                    checked = isFutureTripNotificationEnabled,
-                    onCheckedChange = { isEnabled ->
-                        if (isEnabled) {
-                            checkNotificationPermission {
-                                viewModel.setFutureTripNotificationEnabled(true)
-                            }
-                        } else {
-                            viewModel.setFutureTripNotificationEnabled(false)
-                        }
-                    }
-                )
-            }
-
             // ── 系统配置 ──────────────────────────────────────────────
             item { SettingsHeader("系统配置") }
             item {

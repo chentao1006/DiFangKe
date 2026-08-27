@@ -263,11 +263,9 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
                 )
             )
         }
-        let futureTrips = FutureTrip.dayOrdered((try? context.fetch(FetchDescriptor<FutureTrip>())) ?? [])
-            .filter { !$0.isCompleted && $0.hasPlanDate && ($0.isOrdered ? $0.arrivalDate >= now : $0.effectiveArrivalDate(now: now) >= now) }
-            .prefix(10)
-            .map { WatchTripSnapshot(id: $0.id.uuidString, placeName: $0.placeName, distance: nil, arrivalDate: $0.arrivalDate, hasArrivalTime: $0.hasArrivalTime) }
-        let nextTrip = futureTrips.first
+        // Do not expose legacy trip-plan data on the Watch after retirement.
+        let futureTrips: [WatchTripSnapshot] = []
+        let nextTrip: WatchTripSnapshot? = nil
 
         return WatchSnapshot(
             currentFootprintID: latest?.footprintID.uuidString,

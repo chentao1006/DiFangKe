@@ -11,10 +11,6 @@ struct WatchHomeView: View {
             GeometryReader { geometry in
                 ZStack {
                     TabView(selection: $selectedPage) {
-                        ForEach((store.snapshot.futureTrips ?? []).reversed()) { trip in
-                            FutureTripPage(trip: trip)
-                                .tag("future-\(trip.id)")
-                        }
                         CurrentPlaceView()
                             .tag("current")
                         ForEach(store.snapshot.recentDays ?? []) { day in

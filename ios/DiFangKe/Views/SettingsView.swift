@@ -16,7 +16,6 @@ struct SettingsView: View {
     @AppStorage("isDailyNotificationEnabled") private var isDailyNotificationEnabled = true
     @AppStorage("isHighlightNotificationEnabled") private var isHighlightNotificationEnabled = true
     @AppStorage("isPastMemoriesNotificationEnabled") private var isPastMemoriesNotificationEnabled = true
-    @AppStorage("isFutureTripNotificationEnabled") private var isFutureTripNotificationEnabled = true
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
     @AppStorage("aiServiceType") private var aiServiceType = "public"
     @AppStorage(LocationAccuracyMode.userDefaultsKey) private var locationAccuracyModeRaw = LocationAccuracyMode.automatic.rawValue
@@ -242,19 +241,6 @@ struct SettingsView: View {
                         }
                     }
                 
-                Toggle("行程计划提醒", isOn: $isFutureTripNotificationEnabled)
-                    .onChange(of: isFutureTripNotificationEnabled) { _, newValue in
-                        if newValue {
-                            NotificationManager.shared.requestAuthorization { granted in
-                                if !granted {
-                                    isFutureTripNotificationEnabled = false
-                                    showingSettingsAlert = true
-                                }
-                            }
-                        } else {
-                            NotificationManager.shared.cancelAllFutureTripNotifications()
-                        }
-                    }
             }
             
             Section(header: Text("系统配置"), footer: Text("智能分析服务将根据您的地点历史自动建议标题。")) {
@@ -333,7 +319,6 @@ struct SettingsView: View {
                     isDailyNotificationEnabled = false
                     isHighlightNotificationEnabled = false
                     isPastMemoriesNotificationEnabled = false
-                    isFutureTripNotificationEnabled = false
                 }
             }
         }

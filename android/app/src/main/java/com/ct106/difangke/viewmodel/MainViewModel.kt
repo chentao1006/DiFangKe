@@ -91,8 +91,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         db.futureTripDao().observeAvailableDates(),
         availableRawDates,
         midnightRefreshTick
-    ) { footprintDates, tripDates, rawDates, _ ->
-            val dates: MutableSet<Date> = (footprintDates + tripDates).mapNotNull {
+        ) { footprintDates, _, rawDates, _ ->
+            val dates: MutableSet<Date> = footprintDates.mapNotNull {
                 try { sdf.parse(it)?.let { d -> zeroTime(d) } } catch(e: Exception) { null }
             }.toMutableSet()
             val today = zeroTime(Date())
@@ -109,7 +109,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             db.footprintDao().observeBetween(start, end),
             db.transportRecordDao().observeForDay(start, end),
             db.futureTripDao().observeForDay(start, end)
-        ) { fps, tps, trips ->
+        ) { fps, tps, _ ->
             // 足迹的时间范围要限制在0点到次日0点：裁切跨天记录
             val boundedFps = fps.map { fp ->
                 val bStart = if (fp.startTime.before(start)) start else fp.startTime
@@ -126,7 +126,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else tp
             }
 
-            mergeTimelineItems(boundedFps, boundedTps, trips)
+            mergeTimelineItems(boundedFps, boundedTps, emptyList())
         }.flowOn(Dispatchers.Default)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -639,19 +639,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     val allFutureTripsForEditor: Flow<List<FutureTripEntity>> = db.futureTripDao().observeAll()
-        .map { FutureTripEntity.dayOrdered(it) }
+        .map { emptyList<FutureTripEntity>() }
         .flowOn(Dispatchers.Default)
 
     val undatedFutureTrips: Flow<List<FutureTripEntity>> = db.futureTripDao().observeUndated()
-        .map { FutureTripEntity.dayOrdered(it).filterNot { trip -> trip.isCompleted } }
+        .map { emptyList<FutureTripEntity>() }
         .flowOn(Dispatchers.Default)
 
     fun loadTimelineItemsForRange(start: Date, end: Date, onLoaded: (List<TimelineItem>) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             val items = (
                 db.footprintDao().getBetween(start, end).map { TimelineItem.FootprintItem(it) } +
-                    db.transportRecordDao().getActiveBetween(start, end).map { TimelineItem.TransportItem(it) } +
-                    db.futureTripDao().getForRange(start, end).filterNot { it.isCompleted }.map { TimelineItem.FutureTripItem(it) }
+                    db.transportRecordDao().getActiveBetween(start, end).map { TimelineItem.TransportItem(it) }
                 ).sortedBy { it.startTime }
             withContext(Dispatchers.Main) { onLoaded(items) }
         }
@@ -842,20 +841,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         transports: List<TransportRecordEntity>,
         trips: List<FutureTripEntity>
     ): List<TimelineItem> {
-        val activeTrips = trips.filter { !it.isCompleted }
-        val orderedTrips = FutureTripEntity.dayOrdered(activeTrips)
-        val tripSortTimes = futureTripSortTimes(orderedTrips, orderedTrips.firstOrNull()?.arrivalDate ?: Date())
         return (
             footprints.map { TimelineItem.FootprintItem(it) } +
-                transports.map { TimelineItem.TransportItem(it) } +
-                orderedTrips.map { TimelineItem.FutureTripItem(it) }
-            ).sortedBy { item ->
-                if (item is TimelineItem.FutureTripItem) {
-                    tripSortTimes[item.trip.tripID] ?: item.trip.arrivalDate
-                } else {
-                    item.startTime
-                }
-            }
+                transports.map { TimelineItem.TransportItem(it) }
+            ).sortedBy { it.startTime }
     }
 
     private fun futureTripSortTimes(trips: List<FutureTripEntity>, day: Date): Map<String, Date> {

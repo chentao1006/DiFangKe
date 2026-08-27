@@ -479,7 +479,6 @@ class LocationTrackingService : Service() {
 
                 // 与 iOS 保持一致：抵达当天计划或未定日期计划的地点后自动完成。
                 // 只在服务收到真实定位点时执行，避免 UI 打开地图时误触发状态变化。
-                completeArrivedFutureTrips(lat, lon, time)
 
                 // 3. 候选停留保存
                 candidate?.let {

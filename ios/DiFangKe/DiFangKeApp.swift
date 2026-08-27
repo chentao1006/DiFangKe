@@ -46,6 +46,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // 设置通知代理以响应通知点击
         UNUserNotificationCenter.current().delegate = self
         NotificationManager.shared.registerNotificationCategories()
+        // The trip-planning feature has been retired. Clear any requests that
+        // were scheduled by an older version before the user can receive one.
+        NotificationManager.shared.cancelAllFutureTripNotifications()
         // The initial install path does not necessarily visit Settings or
         // receive a cloud-settings update.  Ensure the user's persisted daily
         // reminder is always present after launch.
@@ -183,18 +186,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     userInfo: notificationInfo
                 )
                 
-            } else if type == "future_trip",
-                      let tripIDString = userInfo["tripID"] as? String,
-                      let tripID = UUID(uuidString: tripIDString) {
-                
-                LocationManager.shared.deepLinkFutureTripID = tripID
-                
-                let notificationInfo: [String: Any] = ["type": "future_trip", "tripID": tripIDString]
-                NotificationCenter.default.post(
-                    name: NSNotification.Name("DFKDeepLinkNotification"),
-                    object: nil,
-                    userInfo: notificationInfo
-                )
             }
         }
         
@@ -397,9 +388,6 @@ struct DiFangKeApp: App {
             let container = try await Task.detached(priority: .userInitiated) {
                 try ModelContainer(for: schema, configurations: [modelConfiguration])
             }.value
-            await MainActor.run {
-                FutureTripMigrationService.migrateLegacyTripsIfNeeded(context: ModelContext(container))
-            }
             await MainActor.run {
                 self.modelContainer = container
                 UserDefaults.standard.set(shouldEnableCloudKit, forKey: "activeModelContainerUsesCloudKit")

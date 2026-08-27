@@ -45,6 +45,7 @@ class DiFangKeApp : Application() {
             if (preferences.isPastMemoriesNotificationEnabled.first()) {
                 com.ct106.difangke.service.PastMemoriesWorker.schedule(this@DiFangKeApp)
             }
+            // Retired feature: cancel work left behind by older versions.
             com.ct106.difangke.service.FutureTripReminderWorker.rescheduleAll(this@DiFangKeApp)
         }
     }
@@ -86,14 +87,5 @@ class DiFangKeApp : Application() {
             }
         )
 
-        notificationManager.createNotificationChannel(
-            NotificationChannel(
-                NotificationHelper.CHANNEL_FUTURE_TRIP,
-                "行程计划提醒",
-                NotificationManager.IMPORTANCE_DEFAULT
-            ).apply {
-                description = "计划行程到达时间提醒"
-            }
-        )
     }
 }

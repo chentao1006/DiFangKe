@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.FootprintEntity
+import com.ct106.difangke.data.db.entity.FutureTripEntity
 import com.ct106.difangke.service.OpenAIService
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -100,17 +101,9 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                         set(Calendar.MILLISECOND, 0)
                     }.time
                 }
-                val futureTripsByDate = allFutureTrips
-                    .filter { trip -> trip.hasPlanDate && !trip.isCompleted }
-                    .groupBy { trip ->
-                        Calendar.getInstance().apply {
-                            time = trip.arrivalDate
-                            set(Calendar.HOUR_OF_DAY, 0)
-                            set(Calendar.MINUTE, 0)
-                            set(Calendar.SECOND, 0)
-                            set(Calendar.MILLISECOND, 0)
-                        }.time
-                    }
+                // Legacy trip plans remain in Room for upgrade compatibility,
+                // but do not contribute to the history calendar.
+                val futureTripsByDate = emptyMap<Date, List<FutureTripEntity>>()
                 val transportsByDate = allTransports.groupBy { transport ->
                     Calendar.getInstance().apply {
                         time = transport.day

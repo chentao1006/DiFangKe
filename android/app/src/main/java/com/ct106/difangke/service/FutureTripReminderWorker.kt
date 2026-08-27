@@ -72,12 +72,10 @@ class FutureTripReminderWorker(
 
         suspend fun rescheduleAll(context: Context) {
             val app = DiFangKeApp.instance
-            val enabled = app.preferences.isFutureTripNotificationEnabled.first()
+            // Plans are no longer supported. This pass only clears work that
+            // a previous app version may have scheduled.
             app.database.futureTripDao().getAll().forEach { trip ->
                 cancel(context, trip.tripID)
-                if (enabled && !trip.isCompleted && trip.hasPlanDate) {
-                    schedule(context, trip.tripID, trip.arrivalDate, trip.hasArrivalTime)
-                }
             }
         }
     }

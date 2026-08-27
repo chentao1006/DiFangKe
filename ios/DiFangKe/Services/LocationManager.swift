@@ -4791,6 +4791,16 @@ class TripLiveActivityManager {
     private var currentActivity: Activity<TripActivityAttributes>?
 
     func updateLiveActivity(location: CLLocation, modelContext: ModelContext?) {
+        // Trip plans are no longer an active feature. End any activity created
+        // by an older app version and skip all plan completion/selection work.
+        if let currentActivity {
+            Task {
+                await currentActivity.end(nil, dismissalPolicy: .immediate)
+            }
+        }
+        currentActivity = nil
+        return
+
         guard let context = modelContext else { return }
         
         if currentActivity == nil {

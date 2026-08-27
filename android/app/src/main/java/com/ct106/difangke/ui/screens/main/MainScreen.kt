@@ -934,11 +934,6 @@ private fun TimelineSheetHeader(
             }
             DropdownMenu(expanded = showMoreMenu, onDismissRequest = { showMoreMenu = false }) {
                 DropdownMenuItem(
-                    text = { Text("新增行程计划") },
-                    leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
-                    onClick = { showMoreMenu = false; onAddFutureTrip() }
-                )
-                DropdownMenuItem(
                     text = { Text("重要地点") },
                     leadingIcon = { Icon(Icons.Default.Place, contentDescription = null) },
                     onClick = { showMoreMenu = false; onManagePlaces() }

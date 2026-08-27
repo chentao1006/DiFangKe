@@ -177,7 +177,9 @@ struct HistoryListView: View {
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
     @Query(sort: \TransportRecord.startTime, order: .reverse) private var allTransportRecords: [TransportRecord]
     @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
-    @Query(sort: \FutureTrip.arrivalDate) private var futureTrips: [FutureTrip]
+    // Existing trip-plan records remain in the store for upgrade safety but
+    // are intentionally excluded from history and calendar presentation.
+    private var futureTrips: [FutureTrip] { [] }
     
     let initialDate: Date
     let showImportOnAppear: Bool

@@ -131,7 +131,9 @@ private struct ContinuousTimelineView: View {
     @Environment(LocationManager.self) private var locationManager
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
     @Query(sort: \Place.name) private var allPlaces: [Place]
-    @Query(sort: \FutureTrip.arrivalDate) private var futureTrips: [FutureTrip]
+    // Retain the persisted model for a non-destructive upgrade, but do not
+    // surface retired trip-plan records anywhere in the timeline.
+    private var futureTrips: [FutureTrip] { [] }
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var isTimelinePresented = true
     @State private var showLocationSettingsAlert = false
@@ -2512,15 +2514,6 @@ private struct ContinuousTimelineSheet: View {
                                 }
                                 .returnToTodayButtonStyle()
                                 .accessibilityLabel("回到当下")
-                            } else {
-                                Button {
-                                    futureTripTimelineAnchorDate = Calendar.current.startOfDay(for: activeTimelineDate)
-                                    isShowingFutureTripModal = true
-                                } label: {
-                                    Label("行程计划", systemImage: "plus")
-                                }
-                                .returnToTodayButtonStyle()
-                                .accessibilityLabel("行程计划")
                             }
                         }
                     .onChange(of: dates) { oldDates, newDates in
@@ -2804,12 +2797,6 @@ private struct ContinuousTimelineSheet: View {
                     } label: {
                         Label("选择日期范围分享", systemImage: "calendar.badge.plus")
                     }
-                    Divider()
-                    Button {
-                        prepareFuturePlansShare()
-                    } label: {
-                        Label("分享未来计划", systemImage: "calendar.badge.clock")
-                    }
                 } label: {
                     Image(systemName: "square.and.arrow.up")
                 }
@@ -2996,37 +2983,6 @@ private struct ContinuousTimelineSheet: View {
                     $0.longitude.isFinite &&
                     CLLocationCoordinate2DIsValid($0)
                 }
-        }
-    }
-
-    private func prepareFuturePlansShare() {
-        let calendar = Calendar.current
-        let start = calendar.startOfDay(for: Date())
-        let selectedTrips = futureTrips.filter { !$0.hasPlanDate || $0.arrivalDate >= start }
-        let rangeText = "未来计划"
-        let coordinates = selectedTrips.map(\.coordinate)
-        let loadingPayload = DFKShareCardFactory.loadingPayload(kind: .plan, rangeText: rangeText, coordinates: coordinates)
-        sharePayload = loadingPayload
-        let payloadID = loadingPayload.id
-        var payload = DFKShareCardFactory.planPayload(
-            title: "计划行程",
-            rangeText: rangeText,
-            trips: selectedTrips,
-            activities: activityTypes
-        )
-        payload.id = payloadID
-        DFKShareImageLoader.loadPlanMapImages(
-            plans: payload.plans
-        ) { mapImages in
-            DFKShareImageLoader.loadBackgroundMapImages(coordinates: coordinates) { backgroundImages in
-                payload.backgroundMapImage = backgroundImages.light ?? backgroundImages.dark
-                payload.backgroundMapLightImage = backgroundImages.light
-                payload.backgroundMapDarkImage = backgroundImages.dark
-                payload.contentMapImage = mapImages.light ?? mapImages.dark
-                payload.contentMapLightImage = mapImages.light
-                payload.contentMapDarkImage = mapImages.dark
-                sharePayload = payload
-            }
         }
     }
 
