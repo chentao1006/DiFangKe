@@ -7,6 +7,7 @@ import WidgetKit
 
 @MainActor
 final class WidgetDataSyncManager {
+    private static let inferredRouteDistanceThreshold: CLLocationDistance = 500
     static let shared = WidgetDataSyncManager()
     // Keep this in sync with the widget reader. Bump it whenever the widget
     // renderer changes so WidgetKit cannot reuse an image drawn with old rules.
@@ -610,9 +611,14 @@ final class WidgetDataSyncManager {
             if current.isSyntheticPadding == true || next.isSyntheticPadding == true {
                 isDashed = true
             } else if let currentTime = current.timestamp, let nextTime = next.timestamp {
-                isDashed = abs(nextTime.timeIntervalSince(currentTime)) > 3 * 60
+                let timeGap = abs(nextTime.timeIntervalSince(currentTime))
+                let distanceGap = CLLocation(latitude: current.lat, longitude: current.lon)
+                    .distance(from: CLLocation(latitude: next.lat, longitude: next.lon))
+                isDashed = timeGap > 3 * 60 || distanceGap > Self.inferredRouteDistanceThreshold
             } else {
-                isDashed = false
+                // Keep widget snapshots consistent with the app: coordinates
+                // without sample times are inferred connections.
+                isDashed = true
             }
 
             if currentDashed == nil {

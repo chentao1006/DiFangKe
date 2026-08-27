@@ -968,7 +968,7 @@ struct DFKMapView: View {
     private func transportMapContent() -> some MapContent {
         let foregroundLineWidth: CGFloat = isInteractive ? 3 : 2
         let dashedOpacity: Double = 0.4
-        let dashedLineWidth: CGFloat = isInteractive ? 1.5 : 1.1
+        let dashedLineWidth: CGFloat = isInteractive ? 1.3 : 1.0
 
         ForEach(transportItems) { transport in
             ForEach(transport.lineSegments) { segment in
@@ -1884,7 +1884,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 context.coordinator.overlayStyles[ObjectIdentifier(line)] = OverlayStyle(
                     strokeColor: UIColor(Color.dfkAccent).withAlphaComponent(segment.isDashed ? 0.4 : 0.8),
                     fillColor: nil,
-                    lineWidth: segment.isDashed ? 1.6 : 3,
+                    lineWidth: segment.isDashed ? 1.4 : 3,
                     dashPattern: segment.isDashed ? [8 as NSNumber, 8 as NSNumber] : nil
                 )
                 mapView.addOverlay(line)

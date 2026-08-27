@@ -402,6 +402,10 @@ struct TransportLineSegment: Identifiable {
 }
 
 extension Transport {
+    /// A direct jump this long has no route shape between its two samples.
+    /// Display it as inferred rather than implying a recorded GPS trace.
+    private static let inferredRouteDistanceThreshold: CLLocationDistance = 500
+
     var lineSegments: [TransportLineSegment] {
         let validPoints = pathPoints.filter {
             $0.coordinate.latitude.isFinite &&
@@ -422,9 +426,15 @@ extension Transport {
             if current.isSyntheticPadding || next.isSyntheticPadding {
                 isDashed = true
             } else if let currentTime = current.timestamp, let nextTime = next.timestamp {
-                isDashed = abs(nextTime.timeIntervalSince(currentTime)) > 3 * 60
+                let timeGap = abs(nextTime.timeIntervalSince(currentTime))
+                let distanceGap = CLLocation(latitude: current.coordinate.latitude, longitude: current.coordinate.longitude)
+                    .distance(from: CLLocation(latitude: next.coordinate.latitude, longitude: next.coordinate.longitude))
+                isDashed = timeGap > 3 * 60 || distanceGap > Self.inferredRouteDistanceThreshold
             } else {
-                isDashed = false
+                // A legacy/synthesized route can contain coordinates but no
+                // sample times.  Its straight connection is inferred, not an
+                // observed GPS trace, so do not render it as a solid route.
+                isDashed = true
             }
 
             if isCurrentlyDashed == nil {

@@ -625,7 +625,14 @@ struct TimelineEditView: View {
     private func pointsData(for transport: Transport) -> Data {
         let coordinates = transport.pathPoints.isEmpty
             ? transport.points.map { CodableCoordinate(lat: $0.latitude, lon: $0.longitude) }
-            : transport.pathPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) }
+            : transport.pathPoints.map {
+                CodableCoordinate(
+                    lat: $0.coordinate.latitude,
+                    lon: $0.coordinate.longitude,
+                    timestamp: $0.timestamp,
+                    isSyntheticPadding: $0.isSyntheticPadding
+                )
+            }
         return (try? JSONEncoder().encode(coordinates)) ?? Data()
     }
     

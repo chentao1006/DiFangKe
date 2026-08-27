@@ -2143,7 +2143,26 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let rawLocation = locations.last else { return }
+        // Core Location can batch a whole background interval into one callback.
+        // Keeping only `locations.last` turns every such batch into a straight
+        // route segment, even though the system delivered all intermediate GPS
+        // samples.  Process each sample chronologically so the existing
+        // drift checks and five-second persistence throttle apply per point.
+        let chronologicalLocations = locations.sorted(by: { $0.timestamp < $1.timestamp })
+        for (index, rawLocation) in chronologicalLocations.enumerated() {
+            processLocationUpdate(
+                rawLocation,
+                from: manager,
+                isLatestInBatch: index == chronologicalLocations.count - 1
+            )
+        }
+    }
+
+    private func processLocationUpdate(
+        _ rawLocation: CLLocation,
+        from manager: CLLocationManager,
+        isLatestInBatch: Bool
+    ) {
         
         // 全局纠正：进入中国境内后，立即将 WGS-84 转换为 GCJ-02
         // 这样后续所有逻辑（足迹存储、地标匹配、UI显示）都统一使用火星坐标系
@@ -2154,8 +2173,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         accuracy = location.horizontalAccuracy
         
 #if canImport(ActivityKit)
-        if #available(iOS 16.1, *) {
-            TripLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: self.modelContext)
+        if isLatestInBatch {
+            if #available(iOS 16.1, *) {
+                TripLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: self.modelContext)
+            }
         }
 #endif
 
@@ -2295,7 +2316,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             location.distance(from: $0) > geocodeThrottleDist
         } ?? true
         
-        if shouldGeocode {
+        if isLatestInBatch && shouldGeocode {
             lastGeocodedLocation = location
             geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
                 if let placemark = placemarks?.first {
@@ -2334,17 +2355,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
             scheduleLiveFootprintMerge()
         }
-        // 同步最后位置给小组件
-        let sharedDefaults = widgetSharedDefaults()
-        sharedDefaults.set(location.coordinate.latitude, forKey: "lastLat")
-        sharedDefaults.set(location.coordinate.longitude, forKey: "lastLon")
-        sharedDefaults.set(Date().timeIntervalSince1970, forKey: "lastLocationTime")
-
-        // 提醒小组件更新位置
-        Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
-        
-        // 同步今日地图显示区域给小组件
-        self.updateSharedWidgetRegion()
+        if isLatestInBatch {
+            // A batched callback only needs one visible-state/widget refresh;
+            // every sample above has already been persisted independently.
+            let sharedDefaults = widgetSharedDefaults()
+            sharedDefaults.set(location.coordinate.latitude, forKey: "lastLat")
+            sharedDefaults.set(location.coordinate.longitude, forKey: "lastLon")
+            sharedDefaults.set(Date().timeIntervalSince1970, forKey: "lastLocationTime")
+            Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
+            self.updateSharedWidgetRegion()
+        }
         
         let preferredID = RawLocationStore.shared.preferredRecordingDeviceID()
         let isPrimary = preferredID.isEmpty || preferredID == RawLocationStore.shared.currentDeviceIdentifier
@@ -2407,8 +2427,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
         
-        // --- 10 AM 往年今日检查 ---
-        checkDailyPastMemories()
+        if isLatestInBatch {
+            // --- 10 AM 往年今日检查 ---
+            checkDailyPastMemories()
+        }
     }
 
     private func hasConfirmedDeparture(

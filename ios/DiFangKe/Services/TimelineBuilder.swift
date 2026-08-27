@@ -738,7 +738,14 @@ class TimelineBuilder {
             type: TransportType.from(speed: speed, duration: duration, distanceMeters: distance, pointCount: 2),
             distance: distance,
             averageSpeed: speed,
-            points: [l1, l2]
+            points: [l1, l2],
+            // This route bridges a period with no raw location samples.  Keep
+            // that provenance on both endpoints so the map never presents the
+            // inferred straight connection as an observed solid route.
+            pathPoints: [
+                TransportPathPoint(coordinate: l1, timestamp: start, isSyntheticPadding: true),
+                TransportPathPoint(coordinate: l2, timestamp: end, isSyntheticPadding: true)
+            ]
         )
         items.append(.transport(t))
     }
@@ -2806,13 +2813,19 @@ class PersistentTimelineBuilder {
 
                     // Calculate distance including footprint connections if available
                     var augmentedPoints = transportPoints
+                    var hasSyntheticStartPadding = false
                     if let last = lastFp {
                         let endpoint = CodableCoordinate(
                             lat: augmentedPoints.first!.coordinate.latitude,
                             lon: augmentedPoints.first!.coordinate.longitude,
                             timestamp: augmentedPoints.first!.timestamp
                         )
-                        let footprintCoord = CodableCoordinate(lat: last.latitude, lon: last.longitude, timestamp: last.endTime)
+                        let footprintCoord = CodableCoordinate(
+                            lat: last.latitude,
+                            lon: last.longitude,
+                            timestamp: last.endTime,
+                            isSyntheticPadding: true
+                        )
                         if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: endpoint, footprint: footprintCoord) {
                             let footprintLocation = CLLocation(
                                 coordinate: CLLocationCoordinate2D(latitude: last.latitude, longitude: last.longitude),
@@ -2822,6 +2835,7 @@ class PersistentTimelineBuilder {
                                 timestamp: last.endTime
                             )
                             augmentedPoints.insert(footprintLocation, at: 0)
+                            hasSyntheticStartPadding = true
                         }
                         if startName == "起点" {
                             startName = last.address ?? "起点"
@@ -2835,7 +2849,16 @@ class PersistentTimelineBuilder {
                     let pathDist = TimelineBuilder.calculateDistance(augmentedPoints)
                     let avgSpeed = tEnd.timeIntervalSince(tStart) > 0 ? pathDist / tEnd.timeIntervalSince(tStart) : 0
                     
-                    let augmentedPtsData = (try? JSONEncoder().encode(augmentedPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) })) ?? ptsData
+                    let augmentedPtsData = (try? JSONEncoder().encode(
+                        augmentedPoints.enumerated().map { index, point in
+                            CodableCoordinate(
+                                lat: point.coordinate.latitude,
+                                lon: point.coordinate.longitude,
+                                timestamp: point.timestamp,
+                                isSyntheticPadding: index == 0 && hasSyntheticStartPadding
+                            )
+                        }
+                    )) ?? ptsData
 
                     // --- 异步获取健康和传感器数据 ---
                     #if !WIDGET_EXTENSION
