@@ -64,6 +64,7 @@ struct WatchTimelineItem: Codable {
 struct WatchDaySnapshot: Codable {
     let date: Date
     let timeline: [WatchTimelineItem]
+    let distance: Double
 }
 
 @MainActor
@@ -255,12 +256,14 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
         let recentDays = (0..<14).compactMap { offset -> WatchDaySnapshot? in
             guard let dayStart = calendar.date(byAdding: .day, value: -offset, to: todayStart),
                   let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return nil }
+            let dayFootprints = recentFootprints.filter { $0.startTime >= dayStart && $0.startTime < dayEnd }
             return WatchDaySnapshot(
                 date: dayStart,
                 timeline: timeline(
-                    footprints: recentFootprints.filter { $0.startTime >= dayStart && $0.startTime < dayEnd },
+                    footprints: dayFootprints,
                     transports: recentTransports.filter { $0.startTime < dayEnd && $0.endTime >= dayStart }
-                )
+                ),
+                distance: dayFootprints.compactMap(\.walkingDistance).reduce(0, +)
             )
         }
         // Do not expose legacy trip-plan data on the Watch after retirement.

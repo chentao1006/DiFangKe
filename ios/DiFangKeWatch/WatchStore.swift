@@ -40,6 +40,7 @@ struct WatchTimelineItem: Codable, Hashable, Identifiable {
 struct WatchDaySnapshot: Codable, Hashable, Identifiable {
     let date: Date
     let timeline: [WatchTimelineItem]
+    let distance: Double
 
     var id: Date { date }
 }

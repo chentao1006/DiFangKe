@@ -25,7 +25,9 @@ struct WatchHomeView: View {
                         HStack {
                             if selectedPage != "current" {
                                 CornerButton(systemImage: "location", accessibilityLabel: "回到当下") {
-                                    selectedPage = "current"
+                                    withAnimation {
+                                        selectedPage = "current"
+                                    }
                                 }
                             }
                             Spacer()
@@ -34,10 +36,13 @@ struct WatchHomeView: View {
                             }
                         }
                         .padding(.horizontal, 14)
-                        // .page's automatic dot indicator reserves its own bottom inset;
-                        // this negative padding cancels it out so the buttons sit at the
-                        // same physical inset as the top-left toolbar button.
-                        .padding(.bottom, -18)
+                        // .page's automatic dot indicator reserves its own bottom inset.
+                        // Use offset (not negative padding) to cancel it out — offset moves
+                        // the hit-testing region along with the render position, whereas
+                        // negative padding here pushed the buttons outside the ZStack's
+                        // laid-out frame, landing them in the TabView's own gesture area
+                        // and making them untappable even though they looked correctly placed.
+                        .offset(y: 21)
                     }
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height)
@@ -68,7 +73,7 @@ struct WatchHomeView: View {
         if let today = store.snapshot.recentDays?.first(where: { Calendar.current.isDateInToday($0.date) }) {
             return today
         }
-        return WatchDaySnapshot(date: Calendar.current.startOfDay(for: Date()), timeline: store.snapshot.todayTimeline ?? [])
+        return WatchDaySnapshot(date: Calendar.current.startOfDay(for: Date()), timeline: store.snapshot.todayTimeline ?? [], distance: store.snapshot.todayDistance)
     }
 }
 
@@ -83,6 +88,7 @@ private struct CornerButton: View {
         }
         .buttonStyle(.plain)
         .frame(width: 32, height: 32)
+        .contentShape(Circle())
         .modifier(GlassCircleBackground())
         .accessibilityLabel(accessibilityLabel)
     }
@@ -105,8 +111,16 @@ private struct CurrentPlaceView: View {
     var body: some View {
         let snapshot = store.snapshot
         VStack(spacing: 8) {
-            Image(systemName: "location.fill")
-                .foregroundStyle(.blue)
+            if store.hasReceivedSnapshot {
+                Image(systemName: "location.fill")
+                    .foregroundStyle(.blue)
+            } else {
+                Image("AppIconGlyph")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 32, height: 32)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
             Text(snapshot.placeName)
                 .font(.title3.bold())
                 .multilineTextAlignment(.center)
@@ -318,9 +332,7 @@ private struct WatchStatisticsView: View {
                 WatchStatisticRow(title: "活跃天数", value: "\(days.filter { !$0.timeline.isEmpty }.count) 天", icon: "calendar")
                 WatchStatisticRow(title: "足迹", value: "\(footprintItems.count) 个", icon: "mappin.and.ellipse")
                 WatchStatisticRow(title: "交通", value: "\(transportItems.count) 段", icon: "car")
-                if range == .last7Days {
-                    WatchStatisticRow(title: "今日里程", value: distanceText(store.snapshot.todayDistance), icon: "figure.walk")
-                }
+                WatchStatisticRow(title: "里程", value: distanceText(days.reduce(0) { $0 + $1.distance }), icon: "figure.walk")
             }
 
             Section("常去地点") {

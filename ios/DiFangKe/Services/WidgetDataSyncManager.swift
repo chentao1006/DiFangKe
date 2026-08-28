@@ -11,7 +11,7 @@ final class WidgetDataSyncManager {
     static let shared = WidgetDataSyncManager()
     // Keep this in sync with the widget reader. Bump it whenever the widget
     // renderer changes so WidgetKit cannot reuse an image drawn with old rules.
-    static let snapshotFileVersion = "v13"
+    static let snapshotFileVersion = "v14"
 
     /// Marker outlines are composited after MapKit renders the map, so they
     /// must use the snapshot's requested appearance instead of the app's
@@ -348,7 +348,7 @@ final class WidgetDataSyncManager {
                         ctx.cgContext.addLine(to: point)
                     }
                     ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor)
-                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.1 : 2.5)
+                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.0 : 2.5)
                     ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
                     ctx.cgContext.strokePath()
                 }
@@ -874,7 +874,7 @@ final class WidgetDataSyncManager {
                                     ctx.cgContext.setStrokeColor(
                                         themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
                                     )
-                                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.1 : 2.5)
+                                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.0 : 2.5)
                                     ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
                                     ctx.cgContext.strokePath()
                                 }
