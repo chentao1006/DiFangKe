@@ -1719,6 +1719,7 @@ class PersistentTimelineBuilder {
         await mergeConsecutiveFootprints(for: date, in: context, allRawPoints: allRawPoints, threshold: AppConfig.shared.mergeDistanceThreshold)
         await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredRoadTransport)
         await fillGapsBetweenItems(for: date, in: context, allRawPoints: allRawPoints, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredRoadTransport)
+        await removeDuplicateRouteTransports(for: date, in: context)
         await snapTransportsToFootprints(for: date, in: context, allRawPoints: allRawPoints)
         try? context.save()
         // ----------------------------------------------------
@@ -1939,6 +1940,65 @@ class PersistentTimelineBuilder {
                 return
             }
             i += 1
+        }
+    }
+
+    /// Post-pass safety net for records that predate (or otherwise slipped past)
+    /// the route-coverage check in `isSameAutomaticTrip`/`hasEquivalentTransport`:
+    /// a short "边角料" fragment left sitting next to the longer transport whose
+    /// route already covers it. Unlike `mergeConsecutiveTransports`, this never
+    /// sums distance/points across a cluster — a discarded record's route is
+    /// already covered by the survivor's, so summing would double count the
+    /// same physical distance and inflate the merged trip's length.
+    ///
+    /// Clusters are built by chaining `isSameAutomaticTrip` across ORIGINAL,
+    /// untouched neighboring records (walk~main, then main~car) rather than by
+    /// merging pairs one at a time and re-comparing against an already-widened
+    /// survivor: widening a survivor's time bounds before the next comparison
+    /// would make it look temporally far from a later bookend it should still
+    /// absorb, breaking `isSameAutomaticTrip`'s 20-minute proximity guard.
+    @MainActor
+    static func removeDuplicateRouteTransports(for date: Date, in context: ModelContext) async {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+
+        let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
+        }, sortBy: [SortDescriptor(\.startTime)])
+        let tps = (try? context.fetch(descriptor)) ?? []
+        guard tps.count >= 2 else { return }
+
+        var clusters: [[TransportRecord]] = [[tps[0]]]
+        for record in tps.dropFirst() {
+            if let anchor = clusters[clusters.count - 1].last,
+               anchor.manualTypeRaw == nil, record.manualTypeRaw == nil,
+               isSameAutomaticTrip(anchor, record) {
+                clusters[clusters.count - 1].append(record)
+            } else {
+                clusters.append([record])
+            }
+        }
+
+        for cluster in clusters where cluster.count > 1 {
+            guard let survivor = cluster.max(by: { $0.distance < $1.distance }) else { continue }
+            let startTime = cluster.map(\.startTime).min() ?? survivor.startTime
+            let endTime = cluster.map(\.endTime).max() ?? survivor.endTime
+            survivor.startTime = startTime
+            survivor.endTime = endTime
+            let duration = endTime.timeIntervalSince(startTime)
+            survivor.averageSpeed = duration > 0 ? survivor.distance / duration : 0
+            if let earliest = cluster.min(by: { $0.startTime < $1.startTime }), earliest !== survivor,
+               earliest.startLocation != "起点", !earliest.startLocation.isEmpty {
+                survivor.startLocation = earliest.startLocation
+            }
+            if let latest = cluster.max(by: { $0.endTime < $1.endTime }), latest !== survivor,
+               latest.endLocation != "终点", latest.endLocation != "正在获取位置...", !latest.endLocation.isEmpty {
+                survivor.endLocation = latest.endLocation
+            }
+            for record in cluster where record !== survivor {
+                context.delete(record)
+            }
         }
     }
 
@@ -2966,7 +3026,7 @@ class PersistentTimelineBuilder {
         }
     }
 
-    private static func isSameAutomaticTrip(_ first: TransportRecord, _ second: TransportRecord) -> Bool {
+    static func isSameAutomaticTrip(_ first: TransportRecord, _ second: TransportRecord) -> Bool {
         let overlap = max(0, min(first.endTime, second.endTime).timeIntervalSince(max(first.startTime, second.startTime)))
         let shorterDuration = min(
             first.endTime.timeIntervalSince(first.startTime),
@@ -2988,7 +3048,6 @@ class PersistentTimelineBuilder {
         }
         guard startDiff <= 20 * 60, endDiff <= 20 * 60,
               first.distance > 0, second.distance > 0,
-              abs(first.distance - second.distance) <= max(300, max(first.distance, second.distance) * 0.25),
               let firstPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: first.pointsData),
               let secondPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: second.pointsData),
               firstPoints.count >= 2, secondPoints.count >= 2 else {
@@ -2998,6 +3057,11 @@ class PersistentTimelineBuilder {
         // 同一段路线可能因为 Health/Motion 的结果变化，被拆成“步行 + 汽车”
         // 两条相邻记录。仅比较首尾点不可靠：每次识别都会裁掉不同的 GPS 头尾。
         // 在插入阶段比较整条路线，才能从源头拦住第二条记录。
+        //
+        // 注意：这里刻意不再用总里程比值做前置过滤——被裁剪出来的“边角料”
+        // 片段（例如起步/停车时误判成步行的一小段）往往只有主行程的十分之一
+        // 距离，如果先按里程比值拦截，下面真正精确的路线覆盖率判断永远不会
+        // 被执行，边角料就会被当成一段独立的新交通保留下来。
         let firstRoute = firstPoints.map { CLLocation(latitude: $0.lat, longitude: $0.lon) }
         let secondRoute = secondPoints.map { CLLocation(latitude: $0.lat, longitude: $0.lon) }
 

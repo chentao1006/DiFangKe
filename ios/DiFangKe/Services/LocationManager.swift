@@ -2253,7 +2253,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
             
             // A: 通用逻辑 - 5分钟以上且位移在 150m 内 (应对室内漂移)
-            if duration > 300 && distance < 150.0 { return true }
+            // 必须同时要求当前瞬时速度也很低：拥堵路段的电动车/自行车常常
+            // 蠕行前进（净位移 5 分钟内 <150m），但瞬时速度并不为 0，且 CoreMotion
+            // 对这种走走停停的低速骑行经常识别失败（既不是 .cycling 也不是
+            // .automotive，触发不了上面的 C 规则）。若只看位移就判定为停留，
+            // 会把还在骑行途中的这一段错误降为低频采样，制造出真实的记录空档，
+            // 时间线因此把这段连续骑行渲染成实线-虚线交替。
+            if duration > 300 && distance < 150.0 && speed < 1.0 { return true }
             
             // B: 地点粘性 - 如果在已知地点范围内已超过 1 分钟，且当前速度极低，则提前进入节能
             if let p = place, duration > 60 && distance < Double(p.radius) + 80.0 && speed < 1.0 {
