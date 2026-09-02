@@ -271,6 +271,18 @@ enum TransportType: String, CaseIterable, Codable {
         duration: TimeInterval,
         pointCount: Int
     ) -> TransportType? {
+        // 城市地铁在隧道内经常只留下少量进、出站定位点。对于中等距离、
+        // 合理运行时长且轨迹稀疏的区间，优先识别为轨道交通；至少保留三个
+        // 点，避免仅靠两个合成端点把普通 GPS 空档误判为地铁。
+        let isSparseUrbanRailTrip =
+            distanceMeters >= 3_000 && distanceMeters <= 30_000 &&
+            duration >= 8 * 60 && duration <= 90 * 60 &&
+            pointCount >= 3 && pointCount <= 6 &&
+            kmh >= 8 && kmh < 45
+        if isSparseUrbanRailTrip {
+            return .subway
+        }
+
         guard distanceMeters >= 10_000, duration >= 20 * 60 else { return nil }
 
         let segmentCount = max(pointCount - 1, 1)

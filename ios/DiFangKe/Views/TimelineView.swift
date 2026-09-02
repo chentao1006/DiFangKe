@@ -875,6 +875,9 @@ private struct ContinuousTimelineView: View {
                     updateVisibleTimelineDates([dayStart])
                     _ = await refreshAvailableTimelineDateCache()
                     _ = await loadTimelineDate(dayStart)
+                    // `todayScrollRequest` drives the sheet's generic scroll handler.
+                    // Supply the notification's day so it does not fall back to today.
+                    targetScrollDate = dayStart
                     todayScrollRequest += 1
                     
                     if let fid = footprintID {
@@ -914,6 +917,9 @@ private struct ContinuousTimelineView: View {
                 updateVisibleTimelineDates([dayStart])
                 _ = await refreshAvailableTimelineDateCache()
                 _ = await loadTimelineDate(dayStart)
+                // A cold-launch notification reaches this path after the initial
+                // timeline load. Preserve its historic day for the pending scroll.
+                targetScrollDate = dayStart
                 todayScrollRequest += 1
                 
                 if let fid = footprintID {
@@ -2000,6 +2006,7 @@ private struct ContinuousTimelineSheet: View {
     @State private var footprintPendingIgnore: Footprint?
     @State private var transportPendingDeletion: Transport?
     @State private var footprintPendingSplit: Footprint?
+    @State private var transportPendingSplit: Transport?
     @State private var pendingMergeCandidate: ContinuousAdjacentFootprintMergeCandidate?
     @State private var pendingTransportMergeCandidate: ContinuousAdjacentTransportMergeCandidate?
     @State private var hasCompletedInitialTimelinePositioning = false
@@ -2138,6 +2145,9 @@ private struct ContinuousTimelineSheet: View {
                     .sheet(item: $footprintPendingSplit, onDismiss: handleFootprintSplitDismissal) { footprint in
                         FootprintSplitView(footprint: footprint)
                             .environment(locationManager)
+                    }
+                    .sheet(item: $transportPendingSplit, onDismiss: handleTransportSplitDismissal) { transport in
+                        TransportSplitView(transport: transport)
                     }
                     .sheet(item: $selectedTransport) { transport in
                         TransportModalView(transport: transport) { newType in
@@ -3310,8 +3320,12 @@ private struct ContinuousTimelineSheet: View {
                             }
                         },
                         onSplit: {
-                            guard case .footprint(let footprint) = item else { return }
-                            footprintPendingSplit = storedFootprint(matching: footprint)
+                            switch item {
+                            case .footprint(let footprint):
+                                footprintPendingSplit = storedFootprint(matching: footprint)
+                            case .transport(let transport):
+                                transportPendingSplit = transport
+                            }
                         },
                         onToggleFavorite: {
                             guard case .footprint(let footprint) = item else { return }
@@ -3527,6 +3541,15 @@ private struct ContinuousTimelineSheet: View {
             NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
         }
         footprintPendingSplit = nil
+    }
+
+    private func handleTransportSplitDismissal() {
+        if let date = transportPendingSplit?.startTime {
+            invalidateAndRefreshTimeline(containing: date)
+        } else {
+            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+        }
+        transportPendingSplit = nil
     }
 
     private func futureTrips(for date: Date) -> [FutureTrip] {
@@ -5065,6 +5088,14 @@ private struct ContinuousTimelineRow: View {
                     onMerge()
                 } label: {
                     Label("合并相邻交通", systemImage: "arrow.triangle.merge")
+                }
+            }
+
+            if case .transport = item {
+                Button {
+                    onSplit()
+                } label: {
+                    Label("拆分交通", systemImage: "slider.horizontal.below.square.filled.and.square")
                 }
             }
 

@@ -37,6 +37,16 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "F00DBA5E0000000000000001"
+               BuildableName = "DiFangKeTests.xctest"
+               BlueprintName = "DiFangKeTests"
+               ReferencedContainer = "container:DiFangKe.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

@@ -45,6 +45,29 @@ struct WatchDaySnapshot: Codable, Hashable, Identifiable {
     var id: Date { date }
 }
 
+struct WatchStatisticsSnapshot: Codable, Hashable {
+    let summaries: [WatchStatisticsSummary]
+    let availableYears: [Int]
+}
+
+struct WatchStatisticsSummary: Codable, Hashable, Identifiable {
+    let id: String
+    let footprintCount: Int
+    let transportCount: Int
+    let frequentPlaces: [WatchStatisticsRankItem]
+    let activities: [WatchStatisticsRankItem]
+}
+
+struct WatchStatisticsRankItem: Codable, Hashable, Identifiable {
+    let name: String
+    let icon: String?
+    let colorHex: String?
+    let duration: TimeInterval
+    let count: Int
+
+    var id: String { name }
+}
+
 struct WatchSnapshot: Codable, Hashable {
     let currentFootprintID: String?
     let placeName: String
@@ -60,9 +83,10 @@ struct WatchSnapshot: Codable, Hashable {
     let activities: [WatchActivityOption]
     let todayTimeline: [WatchTimelineItem]?
     let recentDays: [WatchDaySnapshot]?
+    let statistics: WatchStatisticsSnapshot?
     let futureTrips: [WatchTripSnapshot]?
 
-    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, currentTransportType: nil, currentTransportStartedAt: nil, todayFootprintCount: 0, todayDistance: 0, nextTrip: nil, activities: [], todayTimeline: [], recentDays: [], futureTrips: [])
+    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, currentTransportType: nil, currentTransportStartedAt: nil, todayFootprintCount: 0, todayDistance: 0, nextTrip: nil, activities: [], todayTimeline: [], recentDays: [], statistics: nil, futureTrips: [])
 }
 
 final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
@@ -112,7 +136,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         } else {
             session.transferUserInfo(payload)
         }
-        snapshot = WatchSnapshot(currentFootprintID: snapshot.currentFootprintID, placeName: snapshot.placeName, address: snapshot.address, startedAt: snapshot.startedAt, isTracking: snapshot.isTracking, currentActivityID: activity?.id, currentTransportType: snapshot.currentTransportType, currentTransportStartedAt: snapshot.currentTransportStartedAt, todayFootprintCount: snapshot.todayFootprintCount, todayDistance: snapshot.todayDistance, nextTrip: snapshot.nextTrip, activities: snapshot.activities, todayTimeline: snapshot.todayTimeline, recentDays: snapshot.recentDays, futureTrips: snapshot.futureTrips)
+        snapshot = WatchSnapshot(currentFootprintID: snapshot.currentFootprintID, placeName: snapshot.placeName, address: snapshot.address, startedAt: snapshot.startedAt, isTracking: snapshot.isTracking, currentActivityID: activity?.id, currentTransportType: snapshot.currentTransportType, currentTransportStartedAt: snapshot.currentTransportStartedAt, todayFootprintCount: snapshot.todayFootprintCount, todayDistance: snapshot.todayDistance, nextTrip: snapshot.nextTrip, activities: snapshot.activities, todayTimeline: snapshot.todayTimeline, recentDays: snapshot.recentDays, statistics: snapshot.statistics, futureTrips: snapshot.futureTrips)
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
@@ -142,6 +166,19 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
 
     private func apply(_ context: [String: Any]) {
         let requestedPickerID = context["activityPickerFootprintID"] as? String
+        if let complicationData = context["complicationSnapshot"] as? Data {
+            // This is intentionally decoded by the Widget extension, not by the
+            // Watch-home model. It stays small enough for reliable background
+            // delivery even when the full Watch snapshot contains route history.
+            DispatchQueue.main.async {
+                UserDefaults(suiteName: self.complicationGroupID)?.set(complicationData, forKey: self.complicationSnapshotKey)
+                WidgetCenter.shared.reloadTimelines(ofKind: "DiFangKeWatchComplication")
+                WatchAppDelegate.completeConnectivityBackgroundTasks()
+                if let requestedPickerID {
+                    self.requestedActivityPickerFootprintID = requestedPickerID
+                }
+            }
+        }
         guard let data = context["snapshot"] as? Data,
               let decoded = try? JSONDecoder().decode(WatchSnapshot.self, from: data) else {
             if let requestedPickerID {
@@ -152,6 +189,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         DispatchQueue.main.async {
             self.snapshot = decoded
             self.persistForComplications(decoded)
+            WatchAppDelegate.completeConnectivityBackgroundTasks()
             self.requestedActivityPickerFootprintID = requestedPickerID
         }
     }

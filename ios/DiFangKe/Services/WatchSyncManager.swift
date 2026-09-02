@@ -24,6 +24,7 @@ struct WatchSnapshot: Codable {
     let activities: [WatchActivityOption]
     let todayTimeline: [WatchTimelineItem]
     let recentDays: [WatchDaySnapshot]
+    let statistics: WatchStatisticsSnapshot
     let futureTrips: [WatchTripSnapshot]
 }
 
@@ -67,6 +68,78 @@ struct WatchDaySnapshot: Codable {
     let distance: Double
 }
 
+/// Compact statistics for the Watch. Keep this separate from recentDays so
+/// expanding a statistics range never requires sending full historical routes.
+struct WatchStatisticsSnapshot: Codable {
+    let summaries: [WatchStatisticsSummary]
+    let availableYears: [Int]
+}
+
+struct WatchStatisticsSummary: Codable {
+    let id: String
+    let footprintCount: Int
+    let transportCount: Int
+    let frequentPlaces: [WatchStatisticsRankItem]
+    let activities: [WatchStatisticsRankItem]
+}
+
+struct WatchStatisticsRankItem: Codable {
+    let name: String
+    let icon: String?
+    let colorHex: String?
+    let duration: TimeInterval
+    let count: Int
+}
+
+/// Keep the complication transport independent from the full Watch-home payload.
+/// The latter contains history, route points, and statistics and can grow beyond
+/// WatchConnectivity's transfer limit. The complication only renders these fields.
+private struct WatchComplicationSnapshot: Codable {
+    let currentFootprintID: String?
+    let placeName: String
+    let address: String?
+    let startedAt: Date?
+    let isTracking: Bool
+    let currentActivityID: String?
+    let currentTransportType: String?
+    let currentTransportStartedAt: Date?
+    let todayFootprintCount: Int
+    let todayDistance: Double
+    let activities: [WatchActivityOption]
+    let todayTimeline: [WatchComplicationTimelineItem]
+
+    init(snapshot: WatchSnapshot) {
+        currentFootprintID = snapshot.currentFootprintID
+        placeName = snapshot.placeName
+        address = snapshot.address
+        startedAt = snapshot.startedAt
+        isTracking = snapshot.isTracking
+        currentActivityID = snapshot.currentActivityID
+        currentTransportType = snapshot.currentTransportType
+        currentTransportStartedAt = snapshot.currentTransportStartedAt
+        todayFootprintCount = snapshot.todayFootprintCount
+        todayDistance = snapshot.todayDistance
+        activities = snapshot.activities
+        todayTimeline = snapshot.todayTimeline.map(WatchComplicationTimelineItem.init)
+    }
+}
+
+private struct WatchComplicationTimelineItem: Codable {
+    let id: String
+    let startTime: Date
+    let endTime: Date
+    let colorHex: String?
+    let isTransport: Bool?
+
+    init(_ item: WatchTimelineItem) {
+        id = item.id
+        startTime = item.startTime
+        endTime = item.endTime
+        colorHex = item.colorHex
+        isTransport = item.isTransport
+    }
+}
+
 @MainActor
 final class WatchSyncManager: NSObject, WCSessionDelegate {
     static let shared = WatchSyncManager()
@@ -77,6 +150,9 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
     private var footprintDataChangedObserver: NSObjectProtocol?
     private var pendingSnapshotSync: Task<Void, Never>?
     private var pendingBackgroundSnapshotTransfer: WCSessionUserInfoTransfer?
+    private var cachedStatistics: WatchStatisticsSnapshot?
+    private var statisticsCacheDay: Date?
+    private var needsStatisticsRefresh = true
     /// `updateApplicationContext` does not launch a suspended Watch app. Keep the
     /// last payload we sent through the complication channel so actual timeline
     /// changes can use that high-priority path without spending its budget on
@@ -98,6 +174,7 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
+                    self?.needsStatisticsRefresh = true
                     self?.scheduleImmediateSnapshotSync()
                 }
             }
@@ -121,27 +198,33 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
               WCSession.isSupported(),
               WCSession.default.activationState == .activated,
               WCSession.default.isWatchAppInstalled else { return }
-        guard let data = try? JSONEncoder().encode(makeSnapshot(context: context)) else { return }
-        let payload = ["snapshot": data]
+        let snapshot = makeSnapshot(context: context)
+        guard let complicationData = try? JSONEncoder().encode(WatchComplicationSnapshot(snapshot: snapshot)) else { return }
+        let complicationPayload = ["complicationSnapshot": complicationData]
         // updateApplicationContext always runs so the watch has the latest state whenever
         // it next wakes (background refresh or manual open). sendMessage is a best-effort
         // fast path: it only succeeds while the watch app is reachable, but when it does,
         // the complication updates instantly instead of waiting for the next wake.
         let session = WCSession.default
         if session.isReachable {
-            session.sendMessage(payload, replyHandler: nil, errorHandler: nil)
+            session.sendMessage(complicationPayload, replyHandler: nil, errorHandler: nil)
         }
-        try? session.updateApplicationContext(payload)
+
+        // The complete payload is for the Watch app UI only. It is intentionally not
+        // used by any complication delivery path because it includes historical routes.
+        if let fullData = try? JSONEncoder().encode(snapshot) {
+            try? session.updateApplicationContext(["snapshot": fullData])
+        }
 
         // This is the delivery-guaranteed fallback for the budgeted complication
         // channel above. Keep at most one snapshot in the queue: the Watch only
         // needs the newest state, and an old footprint must never arrive after a
         // newer transport. Unlike application context, user-info transfers remain
         // queued for background delivery if the Watch app is not running.
-        if data != lastBackgroundSnapshotData {
+        if complicationData != lastBackgroundSnapshotData {
             pendingBackgroundSnapshotTransfer?.cancel()
-            pendingBackgroundSnapshotTransfer = session.transferUserInfo(payload)
-            lastBackgroundSnapshotData = data
+            pendingBackgroundSnapshotTransfer = session.transferUserInfo(complicationPayload)
+            lastBackgroundSnapshotData = complicationData
         }
 
         // Application context is deliberately a latest-value cache and will not
@@ -150,11 +233,14 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
         // Watch background refresh. This is the dedicated, high-priority transfer
         // Apple provides for that job. It is budgeted, so only send when the data
         // actually changed; normal context delivery remains the fallback.
-        if data != lastComplicationSnapshotData,
+        if complicationData != lastComplicationSnapshotData,
            session.isComplicationEnabled,
            session.remainingComplicationUserInfoTransfers > 0 {
-            session.transferCurrentComplicationUserInfo(payload)
-            lastComplicationSnapshotData = data
+            // Apple requires an active clock-face complication for this API. The
+            // compact regular user-info transfer above remains the reliable
+            // fallback for Smart Stack and any inactive complication placement.
+            session.transferCurrentComplicationUserInfo(complicationPayload)
+            lastComplicationSnapshotData = complicationData
         }
     }
 
@@ -216,6 +302,18 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
             predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < todayEnd && $0.endTime >= historyStart },
             sortBy: [SortDescriptor(\.startTime)]
         ))) ?? []
+        let refreshStatistics = needsStatisticsRefresh
+            || cachedStatistics == nil
+            || statisticsCacheDay.map { !calendar.isDate($0, inSameDayAs: now) } == true
+        let statisticsFootprints = refreshStatistics
+            ? ((try? context.fetch(FetchDescriptor<Footprint>(sortBy: [SortDescriptor(\.startTime)]))) ?? [])
+            : []
+        let statisticsTransports = refreshStatistics
+            ? ((try? context.fetch(FetchDescriptor<TransportRecord>(
+                predicate: #Predicate { $0.statusRaw != "ignored" },
+                sortBy: [SortDescriptor(\.startTime)]
+            ))) ?? [])
+            : []
         func timeline(footprints: [Footprint], transports: [TransportRecord]) -> [WatchTimelineItem] {
             (footprints.map { footprint in
                 let activity = footprint.activityTypeValue.flatMap { activityByValue[$0] }
@@ -266,6 +364,96 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
                 distance: dayFootprints.compactMap(\.walkingDistance).reduce(0, +)
             )
         }
+        func statisticsSummary(id: String, includes: (Date) -> Bool) -> WatchStatisticsSummary {
+            let footprintsInRange = statisticsFootprints.filter { includes($0.startTime) }
+            let transportsInRange = statisticsTransports.filter { includes($0.startTime) }
+
+            var places: [String: (duration: TimeInterval, count: Int)] = [:]
+            var activityTotals: [String: (icon: String?, colorHex: String?, duration: TimeInterval, count: Int)] = [:]
+            for footprint in footprintsInRange {
+                let placeName = footprint.address?.isEmpty == false ? footprint.address! : "未知地点"
+                let duration = max(0, footprint.endTime.timeIntervalSince(footprint.startTime))
+                var place = places[placeName, default: (0, 0)]
+                place.duration += duration
+                place.count += 1
+                places[placeName] = place
+
+                if let activity = footprint.activityTypeValue.flatMap({ activityByValue[$0] }) {
+                    var total = activityTotals[activity.name, default: (activity.icon, activity.colorHex, 0, 0)]
+                    total.duration += duration
+                    total.count += 1
+                    activityTotals[activity.name] = total
+                }
+            }
+            var frequentPlaces = [WatchStatisticsRankItem]()
+            frequentPlaces.reserveCapacity(places.count)
+            for (name, total) in places {
+                frequentPlaces.append(
+                    WatchStatisticsRankItem(
+                        name: name,
+                        icon: nil,
+                        colorHex: nil,
+                        duration: total.duration,
+                        count: total.count
+                    )
+                )
+            }
+            frequentPlaces.sort { lhs, rhs in
+                lhs.duration == rhs.duration ? lhs.count > rhs.count : lhs.duration > rhs.duration
+            }
+
+            var activities = [WatchStatisticsRankItem]()
+            activities.reserveCapacity(activityTotals.count)
+            for (name, total) in activityTotals {
+                activities.append(
+                    WatchStatisticsRankItem(
+                        name: name,
+                        icon: total.icon,
+                        colorHex: total.colorHex,
+                        duration: total.duration,
+                        count: total.count
+                    )
+                )
+            }
+            activities.sort { lhs, rhs in
+                lhs.duration == rhs.duration ? lhs.count > rhs.count : lhs.duration > rhs.duration
+            }
+
+            return WatchStatisticsSummary(
+                id: id,
+                footprintCount: footprintsInRange.count,
+                transportCount: transportsInRange.count,
+                frequentPlaces: Array(frequentPlaces.prefix(3)),
+                activities: Array(activities.prefix(3))
+            )
+        }
+        let rollingStatisticsRanges: [(id: String, days: Int)] = [
+            ("last7Days", 7),
+            ("last30Days", 30),
+            ("last90Days", 90),
+            ("lastYear", 365)
+        ]
+        var statisticsSummaries = rollingStatisticsRanges.compactMap { range -> WatchStatisticsSummary? in
+            guard let cutoff = calendar.date(byAdding: .day, value: -range.days, to: now) else { return nil }
+            return statisticsSummary(id: range.id) { $0 >= cutoff }
+        }
+        let statisticsYears = Set(statisticsFootprints.map { calendar.component(.year, from: $0.startTime) }).sorted(by: >)
+        statisticsSummaries += statisticsYears.map { year in
+            statisticsSummary(id: "year-\(year)") {
+                calendar.component(.year, from: $0) == year
+            }
+        }
+        let statistics: WatchStatisticsSnapshot
+        if refreshStatistics {
+            statistics = WatchStatisticsSnapshot(summaries: statisticsSummaries, availableYears: statisticsYears)
+            cachedStatistics = statistics
+            statisticsCacheDay = now
+            needsStatisticsRefresh = false
+        } else if let cachedStatistics {
+            statistics = cachedStatistics
+        } else {
+            statistics = WatchStatisticsSnapshot(summaries: statisticsSummaries, availableYears: statisticsYears)
+        }
         // Do not expose legacy trip-plan data on the Watch after retirement.
         let futureTrips: [WatchTripSnapshot] = []
         let nextTrip: WatchTripSnapshot? = nil
@@ -285,6 +473,7 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
             activities: activities,
             todayTimeline: timeline(footprints: footprints, transports: todayTransports),
             recentDays: recentDays,
+            statistics: statistics,
             futureTrips: Array(futureTrips)
         )
     }
@@ -300,6 +489,7 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
         guard let footprint = try? context.fetch(descriptor).first else { return }
         footprint.updateActivityType(to: activityID, in: context)
         try? context.save()
+        needsStatisticsRefresh = true
         syncSnapshot()
         NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
     }

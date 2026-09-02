@@ -200,6 +200,8 @@ struct TransportModalView: View {
                                     HStack(spacing: 6) {
                                         Text(currentStartTime.formatted(.dateTime.hour().minute()) + " - " + currentEndTime.formatted(.dateTime.hour().minute()))
                                             .font(.headline)
+                                            .lineLimit(1)
+                                            .fixedSize(horizontal: true, vertical: false)
                                         Image(systemName: "pencil")
                                             .font(.system(size: 12, weight: .medium))
                                             .foregroundColor(.secondary.opacity(0.42))
@@ -222,15 +224,16 @@ struct TransportModalView: View {
                                             .foregroundColor(Color.dfkAccent)
                                         Text(displayType.localizedName)
                                             .font(.subheadline.bold())
-                                            .foregroundColor(.secondary)
+                                            .foregroundStyle(Color.primary)
                                         Image(systemName: "chevron.up.chevron.down")
                                             .font(.system(size: 10))
-                                            .foregroundColor(.secondary.opacity(0.5))
+                                            .foregroundStyle(Color.primary.opacity(0.5))
                                     }
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 6)
                                     .background(Capsule().fill(Color.secondary.opacity(0.1)))
                                 }
+                                .tint(.primary)
                             }
                             
                             Spacer()
@@ -239,9 +242,11 @@ struct TransportModalView: View {
                                 Text(distanceString)
                                     .font(.headline)
                                     .foregroundColor(Color.dfkAccent)
-                                Text(String(format: "平均速度 %.1f 千米/小时", transport.averageSpeed * 3.6))
+                                Text(String(format: "%.1f 千米/小时", transport.averageSpeed * 3.6))
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
                                 
                                 if let steps = transport.stepCount, steps > 0 {
                                     HStack(spacing: 4) {
@@ -425,6 +430,381 @@ struct TransportModalView: View {
         }
         
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+}
+
+struct TransportSplitView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+
+    let transport: Transport
+    var onSave: (() -> Void)? = nil
+
+    @State private var splitTime = Date()
+    @State private var routePoints: [CodableCoordinate] = []
+
+    private let minimumDuration: TimeInterval = 60
+
+    private var canSplit: Bool {
+        transport.endTime.timeIntervalSince(transport.startTime) >= minimumDuration * 2
+    }
+
+    private var boundedSplitTime: Date {
+        min(
+            max(splitTime, transport.startTime.addingTimeInterval(minimumDuration)),
+            transport.endTime.addingTimeInterval(-minimumDuration)
+        )
+    }
+
+    private var splitRatio: Double {
+        boundedSplitTime.timeIntervalSince(transport.startTime) /
+            max(1, transport.endTime.timeIntervalSince(transport.startTime))
+    }
+
+    private var splitTimeRange: ClosedRange<TimeInterval> {
+        let lowerBound = transport.startTime.addingTimeInterval(minimumDuration).timeIntervalSince1970
+        let upperBound = transport.endTime.addingTimeInterval(-minimumDuration).timeIntervalSince1970
+        return lowerBound...upperBound
+    }
+
+    private var firstRoute: [CodableCoordinate] {
+        routeSegment(from: transport.startTime, to: boundedSplitTime, startRatio: 0, endRatio: splitRatio)
+    }
+
+    private var secondRoute: [CodableCoordinate] {
+        routeSegment(from: boundedSplitTime, to: transport.endTime, startRatio: splitRatio, endRatio: 1)
+    }
+
+    private var previewCoordinates: [CLLocationCoordinate2D] {
+        (firstRoute + secondRoute).map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+    }
+
+    private var firstSegmentCoordinates: [CLLocationCoordinate2D] {
+        firstRoute.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+    }
+
+    private var secondSegmentCoordinates: [CLLocationCoordinate2D] {
+        secondRoute.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+    }
+
+    private var splitCoordinate: CLLocationCoordinate2D? {
+        guard let point = firstRoute.last else { return nil }
+        let coordinate = CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon)
+        guard coordinate.latitude.isFinite,
+              coordinate.longitude.isFinite,
+              CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+        return coordinate
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 18) {
+                    GeometryReader { proxy in
+                        if proxy.size.width > 1 && proxy.size.height > 1 && !previewCoordinates.isEmpty {
+                            TransportSplitMapView(
+                                firstSegment: firstSegmentCoordinates,
+                                secondSegment: secondSegmentCoordinates,
+                                splitCoordinate: splitCoordinate
+                            )
+                        } else {
+                            Color.secondary.opacity(0.05)
+                        }
+                    }
+                    .frame(height: 260)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("拆分时间")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(timeText(boundedSplitTime))
+                                .font(.system(size: 22, weight: .bold, design: .monospaced))
+                        }
+
+                        if canSplit {
+                            Slider(
+                                value: Binding(
+                                    get: { splitTime.timeIntervalSince1970 },
+                                    set: { splitTime = Date(timeIntervalSince1970: $0) }
+                                ),
+                                in: splitTimeRange,
+                                step: 60
+                            )
+                            .tint(.dfkAccent)
+                        } else {
+                            Text("交通时长不足 2 分钟，无法拆分")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        HStack {
+                            Text(timeText(transport.startTime))
+                            Spacer()
+                            Text(timeText(transport.endTime))
+                        }
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(16)
+                    .background(RoundedRectangle(cornerRadius: 14).fill(Color.secondary.opacity(0.05)))
+
+                    HStack(spacing: 12) {
+                        SplitPreviewTransportCard(title: "前半段", start: transport.startTime, end: boundedSplitTime, distance: TimelineBuilder.calculatePathDistance(firstRoute), color: .green)
+                        SplitPreviewTransportCard(title: "后半段", start: boundedSplitTime, end: transport.endTime, distance: TimelineBuilder.calculatePathDistance(secondRoute), color: .blue)
+                    }
+                }
+                .padding(20)
+            }
+            .navigationTitle("拆分交通")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { saveSplit() } label: {
+                        Image(systemName: "checkmark").dfkToolbarConfirmIcon().fontWeight(.bold)
+                    }
+                    .disabled(!canSplit)
+                }
+            }
+        }
+        .onAppear {
+            splitTime = transport.startTime.addingTimeInterval(transport.endTime.timeIntervalSince(transport.startTime) / 2)
+            loadRoute()
+        }
+    }
+
+    private func loadRoute() {
+        guard let record = findRecord(),
+              let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData) else {
+            routePoints = [
+                CodableCoordinate(lat: transport.points.first?.latitude ?? 0, lon: transport.points.first?.longitude ?? 0, timestamp: transport.startTime),
+                CodableCoordinate(lat: transport.points.last?.latitude ?? 0, lon: transport.points.last?.longitude ?? 0, timestamp: transport.endTime)
+            ]
+            return
+        }
+        routePoints = decoded
+    }
+
+    private func routeSegment(from start: Date, to end: Date, startRatio: Double, endRatio: Double) -> [CodableCoordinate] {
+        guard !routePoints.isEmpty else { return [] }
+        let inRange = routePoints.filter { point in
+            guard let timestamp = point.timestamp else { return false }
+            return timestamp > start && timestamp < end
+        }
+        let startPoint = point(at: start, fallbackRatio: startRatio)
+        let endPoint = point(at: end, fallbackRatio: endRatio)
+        return ([startPoint] + inRange + [endPoint]).reduce(into: []) { result, point in
+            if result.last?.lat != point.lat || result.last?.lon != point.lon {
+                result.append(point)
+            }
+        }
+    }
+
+    private func point(at date: Date, fallbackRatio: Double) -> CodableCoordinate {
+        let timedPoints = routePoints.compactMap { point -> CodableCoordinate? in
+            point.timestamp == nil ? nil : point
+        }
+        if let previous = timedPoints.last(where: { ($0.timestamp ?? date) <= date }),
+           let next = timedPoints.first(where: { ($0.timestamp ?? date) >= date }),
+           let previousTime = previous.timestamp,
+           let nextTime = next.timestamp,
+           nextTime > previousTime {
+            let ratio = min(1, max(0, date.timeIntervalSince(previousTime) / nextTime.timeIntervalSince(previousTime)))
+            return CodableCoordinate(
+                lat: previous.lat + (next.lat - previous.lat) * ratio,
+                lon: previous.lon + (next.lon - previous.lon) * ratio,
+                timestamp: date
+            )
+        }
+        if let nearest = routePoints.min(by: {
+            abs(($0.timestamp ?? transport.startTime).timeIntervalSince(date)) < abs(($1.timestamp ?? transport.endTime).timeIntervalSince(date))
+        }) {
+            return CodableCoordinate(lat: nearest.lat, lon: nearest.lon, timestamp: date, isSyntheticPadding: nearest.isSyntheticPadding)
+        }
+        let index = min(max(0, Int((Double(routePoints.count - 1) * fallbackRatio).rounded())), routePoints.count - 1)
+        let fallback = routePoints[index]
+        return CodableCoordinate(lat: fallback.lat, lon: fallback.lon, timestamp: date, isSyntheticPadding: fallback.isSyntheticPadding)
+    }
+
+    private func saveSplit() {
+        guard canSplit, let record = findRecord() else { return }
+        let split = roundedToMinute(boundedSplitTime)
+        let oldEnd = record.endTime
+        let ratio = split.timeIntervalSince(record.startTime) / max(1, record.endTime.timeIntervalSince(record.startTime))
+        let firstPoints = routeSegment(from: record.startTime, to: split, startRatio: 0, endRatio: ratio)
+        let secondPoints = routeSegment(from: split, to: record.endTime, startRatio: ratio, endRatio: 1)
+        let manualType = record.manualTypeRaw ?? record.typeRaw
+
+        record.endTime = split
+        record.day = Calendar.current.startOfDay(for: record.startTime)
+        record.endLocation = "中途"
+        record.manualTypeRaw = manualType
+        record.pointsData = (try? JSONEncoder().encode(firstPoints)) ?? record.pointsData
+        record.distance = TimelineBuilder.calculatePathDistance(firstPoints)
+        record.averageSpeed = record.distance / max(1, record.endTime.timeIntervalSince(record.startTime))
+        record.stepCount = splitMetric(record.stepCount, ratio: ratio, second: false)
+
+        let newRecord = TransportRecord(
+            day: Calendar.current.startOfDay(for: split),
+            startTime: split,
+            endTime: oldEnd,
+            startLocation: "中途",
+            endLocation: transport.endLocation,
+            typeRaw: record.typeRaw,
+            distance: TimelineBuilder.calculatePathDistance(secondPoints),
+            averageSpeed: 0,
+            pointsData: (try? JSONEncoder().encode(secondPoints)) ?? Data(),
+            stepCount: splitMetric(transport.stepCount, ratio: ratio, second: true)
+        )
+        newRecord.averageSpeed = newRecord.distance / max(1, oldEnd.timeIntervalSince(split))
+        newRecord.manualTypeRaw = manualType
+        modelContext.insert(newRecord)
+        try? modelContext.save()
+        TimelineBuilder.timelineCache.removeValue(forKey: Calendar.current.startOfDay(for: transport.startTime))
+        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+        Aptabase.shared.trackEvent("transport_split")
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        onSave?()
+        dismiss()
+    }
+
+    private func findRecord() -> TransportRecord? {
+        let id = transport.id
+        let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == id })
+        return try? modelContext.fetch(descriptor).first
+    }
+
+    private func splitMetric(_ value: Int?, ratio: Double, second: Bool) -> Int? {
+        guard let value else { return nil }
+        let first = Int((Double(value) * ratio).rounded())
+        return second ? max(0, value - first) : first
+    }
+
+    private func roundedToMinute(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: (date.timeIntervalSince1970 / 60).rounded() * 60)
+    }
+
+    private func timeText(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
+    }
+}
+
+private struct SplitPreviewTransportCard: View {
+    let title: String
+    let start: Date
+    let end: Date
+    let distance: Double
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(color)
+            Text("\(start.formatted(date: .omitted, time: .shortened))–\(end.formatted(date: .omitted, time: .shortened))")
+                .font(.caption.monospacedDigit())
+            Text(distance >= 1000 ? String(format: "%.1f 公里", distance / 1000) : String(format: "%.0f 米", distance))
+                .font(.headline)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 14).fill(color.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(color.opacity(0.35), lineWidth: 1))
+    }
+}
+
+private struct TransportSplitMapView: UIViewRepresentable {
+    let firstSegment: [CLLocationCoordinate2D]
+    let secondSegment: [CLLocationCoordinate2D]
+    let splitCoordinate: CLLocationCoordinate2D?
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> MKMapView {
+        let mapView = MKMapView(frame: .zero)
+        mapView.delegate = context.coordinator
+        mapView.mapType = .standard
+        mapView.pointOfInterestFilter = .excludingAll
+        mapView.showsCompass = false
+        return mapView
+    }
+
+    func updateUIView(_ mapView: MKMapView, context: Context) {
+        let first = validCoordinates(firstSegment)
+        let second = validCoordinates(secondSegment)
+        let marker = splitCoordinate.flatMap { validCoordinates([$0]).first }
+        let key = "\(first.map(coordinateKey).joined(separator: ","))|\(second.map(coordinateKey).joined(separator: ","))|\(marker.map(coordinateKey) ?? "")"
+        guard key != context.coordinator.renderKey else { return }
+        context.coordinator.renderKey = key
+
+        mapView.removeOverlays(mapView.overlays)
+        mapView.removeAnnotations(mapView.annotations)
+        if first.count >= 2 {
+            let overlay = MKPolyline(coordinates: first, count: first.count)
+            overlay.title = "first"
+            mapView.addOverlay(overlay)
+        }
+        if second.count >= 2 {
+            let overlay = MKPolyline(coordinates: second, count: second.count)
+            overlay.title = "second"
+            mapView.addOverlay(overlay)
+        }
+        if let marker {
+            let annotation = MKPointAnnotation()
+            annotation.coordinate = marker
+            annotation.title = "拆分点"
+            mapView.addAnnotation(annotation)
+        }
+
+        let route = first + second
+        guard let initial = route.first else { return }
+        let rect = route.dropFirst().reduce(MKMapRect(origin: MKMapPoint(initial), size: MKMapSize(width: 1, height: 1))) { rect, coordinate in
+            rect.union(MKMapRect(origin: MKMapPoint(coordinate), size: MKMapSize(width: 1, height: 1)))
+        }
+        mapView.setVisibleMapRect(rect, edgePadding: UIEdgeInsets(top: 34, left: 34, bottom: 34, right: 34), animated: context.coordinator.hasRendered)
+        context.coordinator.hasRendered = true
+    }
+
+    private func validCoordinates(_ coordinates: [CLLocationCoordinate2D]) -> [CLLocationCoordinate2D] {
+        coordinates.filter { coordinate in
+            coordinate.latitude.isFinite && coordinate.longitude.isFinite && CLLocationCoordinate2DIsValid(coordinate)
+        }
+    }
+
+    private func coordinateKey(_ coordinate: CLLocationCoordinate2D) -> String {
+        String(format: "%.6f,%.6f", coordinate.latitude, coordinate.longitude)
+    }
+
+    final class Coordinator: NSObject, MKMapViewDelegate {
+        var renderKey = ""
+        var hasRendered = false
+
+        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            guard let line = overlay as? MKPolyline else { return MKOverlayRenderer(overlay: overlay) }
+            let renderer = MKPolylineRenderer(polyline: line)
+            renderer.strokeColor = line.title == "first" ? .systemGreen : .systemBlue
+            renderer.lineWidth = 4
+            renderer.lineCap = .round
+            renderer.lineJoin = .round
+            return renderer
+        }
+
+        func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            let identifier = "transport-split-marker"
+            let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
+                ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+            view.annotation = annotation
+            view.markerTintColor = .systemRed
+            view.glyphImage = UIImage(systemName: "scissors")
+            view.displayPriority = .required
+            return view
+        }
     }
 }
 

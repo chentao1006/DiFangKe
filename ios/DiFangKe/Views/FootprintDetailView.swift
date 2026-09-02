@@ -2485,17 +2485,12 @@ struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             let identifier = "split-marker"
-            let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) ?? MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+            let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
+                ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
             view.annotation = annotation
-            view.frame = CGRect(x: 0, y: 0, width: 22, height: 22)
-            view.backgroundColor = .clear
-            view.layer.cornerRadius = 11
-            view.layer.shadowColor = UIColor.black.cgColor
-            view.layer.shadowOpacity = 0.25
-            view.layer.shadowRadius = 4
-            view.layer.shadowOffset = CGSize(width: 0, height: 2)
-            view.image = Self.splitMarkerImage
-            view.centerOffset = .zero
+            view.markerTintColor = .systemRed
+            view.glyphImage = UIImage(systemName: "scissors")
+            view.displayPriority = .required
             return view
         }
 
@@ -2505,16 +2500,6 @@ struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
             return (0..<maxCount).map { coordinates[Int((Double($0) * step).rounded())] }
         }
 
-        private static var splitMarkerImage: UIImage {
-            let size = CGSize(width: 22, height: 22)
-            let renderer = UIGraphicsImageRenderer(size: size)
-            return renderer.image { context in
-                UIColor.white.setFill()
-                context.cgContext.fillEllipse(in: CGRect(origin: .zero, size: size))
-                UIColor.systemRed.setFill()
-                context.cgContext.fillEllipse(in: CGRect(x: 4, y: 4, width: 14, height: 14))
-            }
-        }
     }
 }
 

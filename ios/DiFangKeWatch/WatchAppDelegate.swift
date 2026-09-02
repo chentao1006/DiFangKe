@@ -5,6 +5,9 @@ import WatchKit
 /// this class exists solely to satisfy that requirement and drive the periodic wake
 /// that keeps the complication from going stale (see the comment on `WatchStore`).
 final class WatchAppDelegate: NSObject, WKApplicationDelegate {
+    private static var pendingConnectivityTasks = [WKWatchConnectivityRefreshBackgroundTask]()
+    private static var connectivityTaskTimeout: DispatchWorkItem?
+
     func applicationDidFinishLaunching() {
         // A complication/user-info delivery may launch the app while no
         // WindowGroup is created. Install the WCSession delegate here instead
@@ -15,6 +18,16 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
 
     func handle(_ backgroundTasks: Set<WKRefreshBackgroundTask>) {
         for task in backgroundTasks {
+            if let connectivityTask = task as? WKWatchConnectivityRefreshBackgroundTask {
+                // WatchConnectivity background delivery reaches this method before
+                // WCSessionDelegate. Do not complete it yet: doing so suspends the
+                // process before WatchStore can persist the new complication data.
+                Self.pendingConnectivityTasks.append(connectivityTask)
+                WatchStore.shared.activateSession()
+                Self.scheduleConnectivityTaskTimeout()
+                continue
+            }
+
             guard let refreshTask = task as? WKApplicationRefreshBackgroundTask else {
                 task.setTaskCompletedWithSnapshot(false)
                 continue
@@ -31,6 +44,27 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
                 refreshTask.setTaskCompletedWithSnapshot(false)
             }
         }
+    }
+
+    /// Called by WatchStore only after a connectivity payload has been written to
+    /// the App Group and WidgetKit has been asked to reload its timeline.
+    static func completeConnectivityBackgroundTasks() {
+        connectivityTaskTimeout?.cancel()
+        connectivityTaskTimeout = nil
+        let tasks = pendingConnectivityTasks
+        pendingConnectivityTasks.removeAll()
+        for task in tasks {
+            task.setTaskCompletedWithSnapshot(false)
+        }
+    }
+
+    private static func scheduleConnectivityTaskTimeout() {
+        connectivityTaskTimeout?.cancel()
+        let timeout = DispatchWorkItem {
+            completeConnectivityBackgroundTasks()
+        }
+        connectivityTaskTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeout)
     }
 
     static func scheduleNextBackgroundRefresh() {

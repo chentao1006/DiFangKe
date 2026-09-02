@@ -155,6 +155,13 @@ enum DataDeduplicationService {
                 var duplicates: [Footprint] = []
                 
                 sorted.removeAll { candidate in
+                    // A split is represented by two independently persisted
+                    // `.manual` footprints.  Never turn either side of that
+                    // user-authored boundary into a deduplication candidate,
+                    // even when an older device syncs an overlapping snapshot.
+                    guard keeper.status != .manual, candidate.status != .manual else {
+                        return false
+                    }
                     let startDiff = abs(candidate.startTime.timeIntervalSince(keeper.startTime))
                     let endDiff = abs(candidate.endTime.timeIntervalSince(keeper.endTime))
                     // Start and end within 5 minutes of each other

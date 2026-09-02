@@ -89,6 +89,7 @@
 		DCF7DA8245034788006DA387 /* Footprint.swift in Sources */ = {isa = PBXBuildFile; fileRef = A49FF8D1053B68159E4D2EEC /* Footprint.swift */; };
 		E59B828958C2254FFEEE593D /* LocationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F466FD610098E71DB17C54D /* LocationManager.swift */; };
 		E5CF6588D5181064FB5CB42D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 76746EBFA55AE24E965803B1 /* Assets.xcassets */; };
+		F00DBA5E0000000000000003 /* ManualFootprintBoundaryRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000002 /* ManualFootprintBoundaryRegressionTests.swift */; };
 		FE83FA99A0DCD7ACEF34A49F /* DiFangKeWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */; };
 /* End PBXBuildFile section */
 
@@ -113,6 +114,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = C67848122FA24C0C002DF823;
 			remoteInfo = DiFangKeWidgetExtension;
+		};
+		F00DBA5E000000000000000C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 22478D1FFB0A8791BF88398D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D8BD734948CCEF7A2C9FAA84;
+			remoteInfo = DiFangKe;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -225,6 +233,8 @@
 		C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiFangKeWatchApp.swift; sourceTree = "<group>"; };
 		D7B718C7D98A9A3EE8FC38DC /* WatchAppDelegate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchAppDelegate.swift; sourceTree = "<group>"; };
 		E022A8CC3D9B5C3F524EC0E6 /* WatchSyncManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = WatchSyncManager.swift; path = Services/WatchSyncManager.swift; sourceTree = "<group>"; };
+		F00DBA5E0000000000000002 /* ManualFootprintBoundaryRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualFootprintBoundaryRegressionTests.swift; sourceTree = "<group>"; };
+		F00DBA5E0000000000000004 /* DiFangKeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DiFangKeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F44E7F2A482D33533D342882 /* PlacePickerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacePickerViewModel.swift; sourceTree = "<group>"; };
 		FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -298,12 +308,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F00DBA5E0000000000000007 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		060C5744364D60F6DF54D207 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				F00DBA5E0000000000000004 /* DiFangKeTests.xctest */,
 				A71100000000000000000002 /* DiFangKeWatchWidget.appex */,
 				0109B5C3A46C595F984A0148 /* 地方客.app */,
 				C67848132FA24C0C002DF823 /* DiFangKeWidgetExtension.appex */,
@@ -445,6 +463,7 @@
 				060C5744364D60F6DF54D207 /* Products */,
 				DD08A6A7E588B5B0B2C24C92 /* DiFangKeWatch */,
 				A71100000000000000000007 /* DiFangKeWatchWidget */,
+				F00DBA5E0000000000000005 /* DiFangKeTests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -461,6 +480,14 @@
 				9F3945441A99914928D9C615 /* DiFangKeWatch.entitlements */,
 			);
 			path = DiFangKeWatch;
+			sourceTree = "<group>";
+		};
+		F00DBA5E0000000000000005 /* DiFangKeTests */ = {
+			isa = PBXGroup;
+			children = (
+				F00DBA5E0000000000000002 /* ManualFootprintBoundaryRegressionTests.swift */,
+			);
+			path = DiFangKeTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -549,6 +576,23 @@
 			productReference = 0109B5C3A46C595F984A0148 /* 地方客.app */;
 			productType = "com.apple.product-type.application";
 		};
+		F00DBA5E0000000000000001 /* DiFangKeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F00DBA5E000000000000000A /* Build configuration list for PBXNativeTarget "DiFangKeTests" */;
+			buildPhases = (
+				F00DBA5E0000000000000006 /* Sources */,
+				F00DBA5E0000000000000007 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				F00DBA5E000000000000000B /* PBXTargetDependency */,
+			);
+			name = DiFangKeTests;
+			productName = DiFangKeTests;
+			productReference = F00DBA5E0000000000000004 /* DiFangKeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -584,6 +628,7 @@
 			projectRoot = "";
 			targets = (
 				D8BD734948CCEF7A2C9FAA84 /* DiFangKe */,
+				F00DBA5E0000000000000001 /* DiFangKeTests */,
 				C67848122FA24C0C002DF823 /* DiFangKeWidgetExtension */,
 				11F4AA226D3DCD80D5EBA1FA /* DiFangKeWatch */,
 				A71100000000000000000004 /* DiFangKeWatchWidget */,
@@ -727,6 +772,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F00DBA5E0000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F00DBA5E0000000000000003 /* ManualFootprintBoundaryRegressionTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -745,6 +798,11 @@
 			name = DiFangKeWatch;
 			target = 11F4AA226D3DCD80D5EBA1FA /* DiFangKeWatch */;
 			targetProxy = 07B66A50A3C5E905A8932503 /* PBXContainerItemProxy */;
+		};
+		F00DBA5E000000000000000B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D8BD734948CCEF7A2C9FAA84 /* DiFangKe */;
+			targetProxy = F00DBA5E000000000000000C /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -829,7 +887,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.3.18;
+				MARKETING_VERSION = 1.3.21;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -958,7 +1016,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.3.18;
+				MARKETING_VERSION = 1.3.21;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1043,6 +1101,34 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		F00DBA5E0000000000000008 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.tests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/地方客.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/地方客";
+			};
+			name = Debug;
+		};
+		F00DBA5E0000000000000009 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.tests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/地方客.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/地方客";
 			};
 			name = Release;
 		};
@@ -1144,6 +1230,15 @@
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
+		};
+		F00DBA5E000000000000000A /* Build configuration list for PBXNativeTarget "DiFangKeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F00DBA5E0000000000000008 /* Debug */,
+				F00DBA5E0000000000000009 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
 

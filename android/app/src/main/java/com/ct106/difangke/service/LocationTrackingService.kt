@@ -119,10 +119,33 @@ class LocationTrackingService : Service() {
         private var hasAcquiredFirstLocation = false
         private var initialLocationAcquisitionTimedOut = false
         private var initialLocationFallbackJob: Job? = null
+        private var timelineSiftJob: Job? = null
+        private var lastTimelineSiftAt = 0L
         private val ongoingStayMaxPointGapMs =
                 (AppConfig.TRANSPORT_MAX_GAP_THRESHOLD * 1000).toLong()
 
         private var wasVpnOrProxyActive: Boolean? = null
+
+        /**
+         * Match iOS LocationManager.triggerTimelineSiftDebounced: raw points are
+         * persisted immediately, then the durable timeline is rebuilt at most
+         * once per 15 minutes. Without this, Android only creates footprints
+         * after a manual rebuild or opening a historical raw-only day.
+         */
+        private fun scheduleTimelineSift() {
+                val now = System.currentTimeMillis()
+                if (timelineSiftJob?.isActive == true || now - lastTimelineSiftAt < 15 * 60_000L) {
+                        return
+                }
+                lastTimelineSiftAt = now
+                timelineSiftJob = serviceScope.launch {
+                        runCatching {
+                                PersistentTimelineBuilder(applicationContext).rebuildDay(Date())
+                        }.onFailure { error ->
+                                Log.e(TAG, "Automatic timeline rebuild failed", error)
+                        }
+                }
+        }
 
         private fun isVpnOrProxyActive(): Boolean {
                 val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -374,6 +397,10 @@ class LocationTrackingService : Service() {
                                 if (stateFlow.value !is TrackingState.OngoingStay) {
                                         stateFlow.value = TrackingState.Tracking()
                                 }
+                                // A process restart can leave already-persisted raw points
+                                // without their corresponding footprint until another GPS
+                                // callback arrives. Reconcile them on service recovery too.
+                                scheduleTimelineSift()
                                 Log.i(
                                         TAG,
                                         "Tracking service successfully started and transitioned to Tracking state"
@@ -453,6 +480,10 @@ class LocationTrackingService : Service() {
         ) {
                 // 0. 存储原始点（用于后续分析和轨迹绘制）
                 rawStore.saveRawPoint(lat, lon, accuracy, speed, time.time)
+                // RawLocationStore writes synchronously, so the builder observes this
+                // point and can persist its resulting footprint immediately after the
+                // same debounce used by iOS.
+                scheduleTimelineSift()
 
                 val point =
                         RawLocationStore.RawPoint(

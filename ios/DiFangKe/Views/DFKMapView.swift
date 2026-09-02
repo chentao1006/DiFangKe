@@ -853,7 +853,7 @@ struct DFKMapView: View {
         }
         .padding(2 * constantScale)
         .frame(width: size + 4 * constantScale, height: size * 1.2 + 4 * constantScale)
-        .scaleEffect(isSelected ? 2.0 : 1.0, anchor: .bottom)
+        .scaleEffect(isSelected ? 1.5 : 1.0, anchor: .bottom)
         .contentShape(Rectangle())
         .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFootprintID)
         .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFutureTripID)

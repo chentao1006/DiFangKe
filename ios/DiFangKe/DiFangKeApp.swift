@@ -257,7 +257,6 @@ struct DiFangKeApp: App {
                                     
                                     setupDefaultData(context: context)
                                     WidgetDataSyncManager.shared.updateContainer(container)
-                                    WatchSyncManager.shared.start(context: context)
                                     Task {
                                         try? await Task.sleep(nanoseconds: 8_000_000_000)
                                         await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded()
@@ -390,6 +389,11 @@ struct DiFangKeApp: App {
             }.value
             await MainActor.run {
                 self.modelContainer = container
+                // Watch connectivity is part of the data/recording lifecycle, not
+                // the timeline screen's lifecycle. A location wake can create a
+                // footprint while TimelineView has never appeared; install the
+                // observer and session before any UI is shown in that case.
+                WatchSyncManager.shared.start(context: container.mainContext)
                 UserDefaults.standard.set(shouldEnableCloudKit, forKey: "activeModelContainerUsesCloudKit")
                 if isFirstLaunch {
                     UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")

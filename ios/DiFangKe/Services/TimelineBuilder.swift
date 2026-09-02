@@ -421,6 +421,7 @@ class TimelineBuilder {
     }
 
     private static func shouldPerformUiMerge(_ f1: FootprintLite, _ f2: FootprintLite) -> Bool {
+        guard f1.status != .manual, f2.status != .manual else { return false }
         return checkMergeCondition(
             start1: f1.startTime, end1: f1.endTime, lat1: f1.latitude, lon1: f1.longitude, addr1: f1.address, place1: f1.placeID, activity1: f1.activityTypeValue,
             start2: f2.startTime, end2: f2.endTime, lat2: f2.latitude, lon2: f2.longitude, addr2: f2.address, place2: f2.placeID, activity2: f2.activityTypeValue
@@ -428,6 +429,7 @@ class TimelineBuilder {
     }
 
     private static func shouldPerformUiMerge(_ f1: Footprint, _ f2: Footprint) -> Bool {
+        guard f1.status != .manual, f2.status != .manual else { return false }
         return checkMergeCondition(
             start1: f1.startTime, end1: f1.endTime, lat1: f1.latitude, lon1: f1.longitude, addr1: f1.address, place1: f1.placeID, activity1: f1.activityTypeValue,
             start2: f2.startTime, end2: f2.endTime, lat2: f2.latitude, lon2: f2.longitude, addr2: f2.address, place2: f2.placeID, activity2: f2.activityTypeValue
@@ -468,6 +470,10 @@ class TimelineBuilder {
             if let last = merged.last {
                 switch (last, item) {
                 case (.footprint(let f1), .footprint(let f2)):
+                    guard f1.status != .manual, f2.status != .manual else {
+                        merged.append(item)
+                        continue
+                    }
                     let loc1 = CLLocation(latitude: f1.latitude, longitude: f1.longitude)
                     let loc2 = CLLocation(latitude: f2.latitude, longitude: f2.longitude)
                     let isSamePlace = (f1.placeID != nil && f1.placeID == f2.placeID)
@@ -1990,13 +1996,16 @@ class PersistentTimelineBuilder {
             let endLoc: CLLocationCoordinate2D
             let startName: String
             let endName: String
+            /// Preserve this while coalescing overlaps: a no-sample gap next
+            /// to an existing transport is not evidence of another trip.
+            let includesTransport: Bool
         }
         
         var ranges: [OccupiedRange] = []
         for f in fps {
             let locName = getSimplifiedLocationName(for: f, allPlaces: allPlaces)
             let coord = CLLocationCoordinate2D(latitude: f.latitude, longitude: f.longitude)
-            ranges.append(OccupiedRange(start: f.startTime, end: f.endTime, startLoc: coord, endLoc: coord, startName: locName, endName: locName))
+            ranges.append(OccupiedRange(start: f.startTime, end: f.endTime, startLoc: coord, endLoc: coord, startName: locName, endName: locName, includesTransport: false))
         }
         
         for t in tps {
@@ -2006,7 +2015,7 @@ class PersistentTimelineBuilder {
                 sLoc = CLLocationCoordinate2D(latitude: first.lat, longitude: first.lon)
                 eLoc = CLLocationCoordinate2D(latitude: last.lat, longitude: last.lon)
             }
-            ranges.append(OccupiedRange(start: t.startTime, end: t.endTime, startLoc: sLoc, endLoc: eLoc, startName: t.startLocation, endName: t.endLocation))
+            ranges.append(OccupiedRange(start: t.startTime, end: t.endTime, startLoc: sLoc, endLoc: eLoc, startName: t.startLocation, endName: t.endLocation, includesTransport: true))
         }
         
         ranges.sort { $0.start < $1.start }
@@ -2021,7 +2030,7 @@ class PersistentTimelineBuilder {
                     let newEnd = max(last.end, r.end)
                     let newEndLoc = r.end > last.end ? r.endLoc : last.endLoc
                     let newEndName = r.end > last.end ? r.endName : last.endName
-                    merged[merged.count - 1] = OccupiedRange(start: last.start, end: newEnd, startLoc: last.startLoc, endLoc: newEndLoc, startName: last.startName, endName: newEndName)
+                    merged[merged.count - 1] = OccupiedRange(start: last.start, end: newEnd, startLoc: last.startLoc, endLoc: newEndLoc, startName: last.startName, endName: newEndName, includesTransport: last.includesTransport || r.includesTransport)
                 } else {
                     merged.append(r)
                 }
@@ -2046,6 +2055,14 @@ class PersistentTimelineBuilder {
                 
                 // --- 核心修复：桥接缝隙时，优先查看该时段是否有原始轨迹点 ---
                 let gapPoints = allRawPoints.filter { $0.timestamp >= gapStart && $0.timestamp <= gapEnd }
+                // Do not turn an unobserved connector into a second trip when
+                // it touches a recorded transport. Its endpoints come from a
+                // previous reconstruction pass and can be a stale version of
+                // that same route; without samples there is no evidence of a
+                // separate journey.
+                guard !gapPoints.isEmpty || (!current.includesTransport && !next.includesTransport) else {
+                    continue
+                }
                 let pathDist: Double
                 let pts: [CodableCoordinate]
                 
@@ -2082,10 +2099,11 @@ class PersistentTimelineBuilder {
                 }
 
 
-                // 使用配置中的阈值。核心修复：桥接缝隙优先依靠轨迹点，但对于飞机/高铁等长距离跨度，允许凭空合成交通
-                let isLongDistance = pathDist > 50_000 // 50公里以上允许无点合成
-                if (!gapPoints.isEmpty || isLongDistance)
-                    && pathDist > AppConfig.shared.transportMinDistanceThreshold
+                // 没有原始点并不等于没有出行：地铁、地下停车场等会让 GPS 完全中断。
+                // 只要两端足迹之间存在足够的位移和时间，且用户没有删除过该区间的交通，
+                // 就以两端足迹补一段直线交通。删除覆盖仍是用户明确的“不生成”边界。
+                let isLongDistance = pathDist > 50_000
+                if pathDist > AppConfig.shared.transportMinDistanceThreshold
                     && !overlapsDeletedTransportOverride(start: actualStartTime, end: actualEndTime, deletedRanges: deletedTransportRanges) {
                     // The displayed interval is trimmed to the first/last raw
                     // movement point above.  Classification must use that same
@@ -2094,7 +2112,7 @@ class PersistentTimelineBuilder {
                     let routeDuration = actualEndTime.timeIntervalSince(actualStartTime)
                     guard routeDuration > 0 else { continue }
                     // 缝隙桥接出的短促交通同样要过最短时长门槛，避免上一段交通的尾部轨迹
-                    // 被重复识别成一段新的交通（长距离例外：飞机/高铁允许无点合成，routeDuration 可能很短）
+                    // 被重复识别成一段新的交通（长距离例外：飞机/高铁允许极短行程）
                     guard isLongDistance || routeDuration >= AppConfig.shared.transportMinDurationThreshold else { continue }
                     let ptsData = (try? JSONEncoder().encode(pts)) ?? Data()
                     let speed = pathDist / routeDuration
@@ -2922,7 +2940,7 @@ class PersistentTimelineBuilder {
         let existing = (try? context.fetch(descriptor)) ?? []
         return existing.contains { record in
             // A manual correction owns its time range and should suppress an
-            // automatically inferred replacement.  The comparison also covers
+            // automatically inferred replacement. The comparison also covers
             // near-in-time records with the same route, whose endpoints shifted
             // when delayed sensor data changed the raw-point trimming.
             return isSameAutomaticTrip(record, candidate)

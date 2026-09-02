@@ -35,14 +35,14 @@ struct WatchHomeView: View {
                                 showingStatistics = true
                             }
                         }
-                        .padding(.horizontal, 14)
+                        .padding(.horizontal, 12)
                         // .page's automatic dot indicator reserves its own bottom inset.
                         // Use offset (not negative padding) to cancel it out — offset moves
                         // the hit-testing region along with the render position, whereas
                         // negative padding here pushed the buttons outside the ZStack's
                         // laid-out frame, landing them in the TabView's own gesture area
                         // and making them untappable even though they looked correctly placed.
-                        .offset(y: 21)
+                        .offset(y: 16)
                     }
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height)
@@ -251,11 +251,38 @@ private struct WatchStatisticsView: View {
     @EnvironmentObject private var store: WatchStore
     @State private var range: Range = .last7Days
 
-    private enum Range: String, CaseIterable, Identifiable {
-        case last7Days = "最近7天"
-        case synced = "已同步"
+    private enum Range: Hashable, Identifiable {
+        case last7Days
+        case last30Days
+        case last90Days
+        case lastYear
+        case customYear(Int)
 
-        var id: Self { self }
+        static let rollingRanges: [Self] = [.last7Days, .last30Days, .last90Days, .lastYear]
+
+        var id: String {
+            switch self {
+            case .last7Days: return "last7Days"
+            case .last30Days: return "last30Days"
+            case .last90Days: return "last90Days"
+            case .lastYear: return "lastYear"
+            case .customYear(let year): return "year-\(year)"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .last7Days: return "7天"
+            case .last30Days: return "30天"
+            case .last90Days: return "90天"
+            case .lastYear: return "1年"
+            case .customYear(let year): return String(year)
+            }
+        }
+    }
+
+    private var statisticsSummary: WatchStatisticsSummary? {
+        store.snapshot.statistics?.summaries.first { $0.id == range.id }
     }
 
     private var days: [WatchDaySnapshot] {
@@ -279,15 +306,18 @@ private struct WatchStatisticsView: View {
         items.filter { $0.isTransport == true }
     }
 
-    private var rankedPlaces: [(name: String, duration: TimeInterval, count: Int)] {
+    private var rankedPlaces: [WatchStatisticsRankItem] {
+        if let statisticsSummary {
+            return statisticsSummary.frequentPlaces
+        }
         let grouped = Dictionary(grouping: footprintItems.filter { !$0.title.isEmpty }, by: \.title)
-        var ranked: [(name: String, duration: TimeInterval, count: Int)] = []
+        var ranked: [WatchStatisticsRankItem] = []
         for (name, items) in grouped {
             var duration: TimeInterval = 0
             for item in items {
                 duration += max(0, item.endTime.timeIntervalSince(item.startTime))
             }
-            ranked.append((name: name, duration: duration, count: items.count))
+            ranked.append(WatchStatisticsRankItem(name: name, icon: nil, colorHex: nil, duration: duration, count: items.count))
         }
         ranked.sort { lhs, rhs in
             lhs.duration == rhs.duration ? lhs.count > rhs.count : lhs.duration > rhs.duration
@@ -295,18 +325,21 @@ private struct WatchStatisticsView: View {
         return Array(ranked.prefix(3))
     }
 
-    private var rankedActivities: [(name: String, icon: String, colorHex: String?, duration: TimeInterval, count: Int)] {
+    private var rankedActivities: [WatchStatisticsRankItem] {
+        if let statisticsSummary {
+            return statisticsSummary.activities
+        }
         let activityItems = footprintItems.filter {
             guard let name = $0.activityName?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
             return !name.isEmpty
         }
         let grouped = Dictionary(grouping: activityItems, by: { $0.activityName!.trimmingCharacters(in: .whitespacesAndNewlines) })
-        var ranked: [(name: String, icon: String, colorHex: String?, duration: TimeInterval, count: Int)] = []
+        var ranked: [WatchStatisticsRankItem] = []
         for (name, items) in grouped {
             let duration = items.reduce(0) { total, item in
                 total + max(0, item.endTime.timeIntervalSince(item.startTime))
             }
-            ranked.append((
+            ranked.append(WatchStatisticsRankItem(
                 name: name,
                 icon: items.first?.icon ?? "figure.walk",
                 colorHex: items.first?.colorHex,
@@ -324,15 +357,18 @@ private struct WatchStatisticsView: View {
         List {
             Section {
                 Picker("范围", selection: $range) {
-                    ForEach(Range.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(Range.rollingRanges) { range in
+                        Text(range.title).tag(range)
+                    }
+                    ForEach(store.snapshot.statistics?.availableYears ?? [], id: \.self) { year in
+                        Text(String(year)).tag(Range.customYear(year))
+                    }
                 }
             }
 
             Section("概览") {
-                WatchStatisticRow(title: "活跃天数", value: "\(days.filter { !$0.timeline.isEmpty }.count) 天", icon: "calendar")
-                WatchStatisticRow(title: "足迹", value: "\(footprintItems.count) 个", icon: "mappin.and.ellipse")
-                WatchStatisticRow(title: "交通", value: "\(transportItems.count) 段", icon: "car")
-                WatchStatisticRow(title: "里程", value: distanceText(days.reduce(0) { $0 + $1.distance }), icon: "figure.walk")
+                WatchStatisticRow(title: "足迹", value: "\(statisticsSummary?.footprintCount ?? footprintItems.count) 个", icon: "mappin.and.ellipse")
+                WatchStatisticRow(title: "交通", value: "\(statisticsSummary?.transportCount ?? transportItems.count) 段", icon: "car")
             }
 
             Section("常去地点") {
@@ -368,7 +404,7 @@ private struct WatchStatisticsView: View {
                                 .font(.caption.bold())
                                 .foregroundStyle(.tint)
                                 .frame(width: 14)
-                            Image(systemName: activity.icon)
+                            Image(systemName: activity.icon ?? "figure.walk")
                                 .foregroundStyle(activityColor(activity.colorHex))
                                 .frame(width: 16)
                             VStack(alignment: .leading, spacing: 1) {
@@ -391,9 +427,6 @@ private struct WatchStatisticsView: View {
         return "\(minutes / 60) 小时\(minutes % 60 > 0 ? " \(minutes % 60) 分" : "")"
     }
 
-    private func distanceText(_ distance: Double) -> String {
-        distance >= 1_000 ? String(format: "%.1f 公里", distance / 1_000) : "\(Int(distance.rounded())) 米"
-    }
 }
 
 private struct WatchStatisticRow: View {

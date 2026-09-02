@@ -621,6 +621,14 @@ class PersistentTimelineBuilder(private val context: Context) {
             val base = recentFps[i]
             val next = recentFps[i + 1]
 
+            // A manual split is a durable user-authored boundary.  The two
+            // pieces can intentionally be adjacent and at the same place, so
+            // this automatic maintenance pass must never join either side.
+            if (base.statusValue == "manual" || next.statusValue == "manual") {
+                i++
+                continue
+            }
+
             // 检查地点是否一致（基于 PlaceID 或距离）
             var isSamePlace = false
             if (base.placeID != null && base.placeID == next.placeID) {

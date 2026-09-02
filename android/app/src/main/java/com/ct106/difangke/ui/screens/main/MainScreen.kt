@@ -1290,8 +1290,13 @@ private fun ContinuousTimelineList(
     onVisibleDatesChanged: (Set<Date>) -> Unit,
     onUndatedFutureTripsVisibilityChanged: (Boolean) -> Unit
 ) {
-    val timelineDates = remember(availableDates) {
-        availableDates.map(::normalizeTimelineDate)
+    // Today may not have a persisted footprint yet. Keep it (and an explicitly
+    // selected date) in the list so actions such as "回到当下" always have a
+    // concrete LazyColumn target instead of being overwritten by the viewport
+    // observer's previous visible date.
+    val today = normalizeTimelineDate(Date())
+    val timelineDates = remember(availableDates, selectedDate.time, today.time) {
+        (availableDates + selectedDate + today).map(::normalizeTimelineDate)
             .distinctBy { it.time }
             .sortedByDescending { it.time }
     }

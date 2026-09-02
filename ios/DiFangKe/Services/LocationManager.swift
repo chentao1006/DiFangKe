@@ -807,7 +807,11 @@ final class RawLocationStore {
                     let dPrevToNext = next.distance(from: prev)
                     let avgSpeed = dPrevToNext / tPrevToNext
                     
-                    if avgSpeed < 42 && dist > 800 && current.distance(from: next) > 800 {
+                    // 只有 next 确实回到 prev 附近，才是“从 A 突跳到 B 又回 A”的漂移。
+                    // 不能仅凭 current 与 next 相距较远判定：地铁等稀疏定位会连续跨越
+                    // 多个站点，前后点都相距很远但轨迹完全正常。
+                    let returnedNearPrevious = dPrevToNext <= max(100, dist * 0.5)
+                    if avgSpeed < 42 && dist > 800 && returnedNearPrevious {
                         // 标记 i 到 j-1 所有点为漂移
                         for k in i..<j {
                             driftFlags[k] = true
@@ -1443,25 +1447,21 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let stationaryDuration = now.timeIntervalSince(stop.timestamp)
         guard stationaryDuration > 10 * 60 else { return }
 
-        // During a confirmed long stay, do a low-frequency active probe. This catches
-        // indoor departures where Core Motion, Visit Monitoring, or the region exit
-        // callback may be delayed until the user has already moved several hundred meters.
-        guard lastUpdateGap > 3 * 60 else { return }
-        guard now.timeIntervalSince(lastStationaryProbeTime) > 5 * 60 else { return }
+        // During a confirmed long stay, do only an occasional low-power one-shot
+        // probe. Standard updates are intentionally suspended at this point; keeping
+        // a navigation-grade GPS session alive (or restarting it every few minutes)
+        // makes an all-day stay look like the battery report in iOS Settings.
+        // Region exits, Visits, significant-change monitoring, network changes, and
+        // Core Motion remain the primary departure signals and restore high accuracy.
+        guard lastUpdateGap > 10 * 60 else { return }
+        guard now.timeIntervalSince(lastStationaryProbeTime) > 15 * 60 else { return }
         lastStationaryProbeTime = now
 
         let gapDescription = lastUpdateGap.isFinite ? "\(Int(lastUpdateGap))s" : "unknown duration"
         print("[LocationManager] 🧭 Long stationary stay has no fresh location for \(gapDescription). Requesting departure probe…")
         ensureSignificantMonitoringActive()
-        if currentLocationAccuracyMode == .powerSaving {
-            applyPowerSavingLocationSettings()
-        } else {
-            locationManager.desiredAccuracy = kCLLocationAccuracyBest
-            locationManager.distanceFilter = 5.0
-            locationManager.activityType = .fitness
-        }
+        applyPowerSavingLocationSettings()
         locationManager.requestLocation()
-        locationManager.startUpdatingLocation()
     }
 
     private var shouldRunActiveLocationRecovery: Bool {
@@ -1851,11 +1851,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 let nextLoc = CLLocation(latitude: next.latitude, longitude: next.longitude)
                 let dist = baseLoc.distance(from: nextLoc)
 
-                // 人工编辑仍是保护信号，但不能阻止“同一地点、连续时间”的
-                // 两条足迹合并。时间调整会把足迹标记为 manual；如果这里
-                // 直接跳过，就会留下用户截图中的重复停留记录。
-                let isSamePlace = (base.placeID != nil && base.placeID == next.placeID) || dist <= mergeDist
-                if (base.isUserModifiedForDailySummary || next.isUserModifiedForDailySummary) && !isSamePlace {
+                // `manual` is a durable timeline boundary, not just a hint for
+                // activity inference.  In particular, a user can split one
+                // continuous stay into two records at exactly the same place.
+                // Do not let cold-start maintenance or a later cloud import put
+                // that pair back together; only the explicit UI merge may do so.
+                guard base.status != .manual, next.status != .manual else {
                     i += 1
                     continue
                 }
@@ -2079,14 +2080,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
             let baseLoc = CLLocation(latitude: base.latitude, longitude: base.longitude)
             let nextLoc = CLLocation(latitude: next.latitude, longitude: next.longitude)
-            let isSamePlace = (base.placeID != nil && base.placeID == next.placeID)
-                || baseLoc.distance(from: nextLoc) <= AppConfig.shared.mergeDistanceThreshold
-            // 人工编辑仍不能跨地点合并；但时间调整后的同地点足迹仍要
-            // 按连续停留处理，避免新记录重复出现在时间线上。
-            if (base.isUserModifiedForDailySummary || next.isUserModifiedForDailySummary) && !isSamePlace {
+            // This lightweight path runs after location updates and on launch.
+            // A manual split must be protected here too, including when both
+            // pieces share a place ID and their time ranges touch.
+            guard base.status != .manual, next.status != .manual else {
                 i += 1
                 continue
             }
+
+            let isSamePlace = (base.placeID != nil && base.placeID == next.placeID)
+                || baseLoc.distance(from: nextLoc) <= AppConfig.shared.mergeDistanceThreshold
 
             let calendar = Calendar.current
             let baseIsSameDay = calendar.isDate(base.startTime, inSameDayAs: base.endTime.addingTimeInterval(-0.001))
@@ -2273,14 +2276,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
                 updateRegionMonitoring(isStationary: true)
             } else if isStationary {
-                // 自动模式确认停留后不应继续占用导航级 GPS。围栏、运动传感器和
-                // 后台探测会在离开时调用 forceHighAccuracyBoost，立即恢复高精度。
-                if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters || manager.distanceFilter != 50.0 || manager.activityType != .fitness {
-                    manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-                    manager.distanceFilter = 50.0
-                    manager.activityType = .fitness
-                }
+                // 停留时降为低功耗采样，但不能停止标准定位。围栏、Visit 与显著
+                // 位置变化都是延迟且非可靠的离开唤醒信号；一旦它们漏发，驾驶中
+                // 会只留下出发/到达两端点，时间线只能画成虚线。保留 50m 的低频
+                // 更新可在刚离开时收到首个点，随后本方法会立即恢复高精度记录。
+                applyPowerSavingLocationSettings()
                 updateRegionMonitoring(isStationary: true)
+                manager.startUpdatingLocation()
             } else {
                 // 自动采集增强：只要在移动（不论是步行、骑行还是开车）
                 // 开启增强采样，确保不漏点
@@ -2304,6 +2306,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     }
                 }
                 updateRegionMonitoring(isStationary: false)
+                // This callback may have been the low-power departure probe. Resume
+                // continuous updates only after actual movement is observed.
+                manager.startUpdatingLocation()
             }
         } else {
             // 如果不是自动模式，就仅仅更新唤醒区域，不改变精度（精度在 applyLocationAccuracyMode 中已经设置好）
@@ -2345,9 +2350,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 1. 永久保存原始点（RawLocationStore 内部已实现异步队列写入，不会阻塞主线程）。
         // CLLocationManager 在静止时也可能连续按秒回调；原始轨迹、内存轨迹和实时
         // 足迹分析必须共享同一个节流条件，避免 CSV 虽节流但内存/分析仍堆积秒级点。
-        let shouldSaveRawLocation = location.timestamp.timeIntervalSince(lastRawLocationSaveTimestamp) >= rawLocationMinimumSaveInterval
+        let rawTimestampDelta = location.timestamp.timeIntervalSince(lastRawLocationSaveTimestamp)
+        // requestLocation() 的新点可能先于系统积压的后台批量到达。旧逻辑只接受
+        // 比上次保存“更新”的时间戳，因而会把随后交付的一整批驾驶轨迹全部跳过。
+        // CSV 的读取端本来就会按时间排序；迟到但相隔至少一个节流窗口的样本必须保存。
+        let isDelayedBatchSample = rawTimestampDelta <= -rawLocationMinimumSaveInterval
+        let shouldSaveRawLocation = lastRawLocationSaveTimestamp == .distantPast
+            || rawTimestampDelta >= rawLocationMinimumSaveInterval
+            || isDelayedBatchSample
         if shouldSaveRawLocation {
-            lastRawLocationSaveTimestamp = location.timestamp
+            // 保持最新时间戳作为前向节流的水位线，避免一个迟到样本倒退水位后，
+            // 让后续实时回调全部绕过五秒节流。
+            lastRawLocationSaveTimestamp = max(lastRawLocationSaveTimestamp, location.timestamp)
             RawLocationStore.shared.saveLocation(location) { [weak self] in
                 // syncDay loads from RawLocationStore, so triggering it before this
                 // write completes misses exactly the newly received transition point.
