@@ -47,7 +47,18 @@ struct EditPlaceSheet: View {
                 Section {
                     // Interactive Map Section (Now inside Form to allow scrolling)
                     ZStack {
-                        MapPickerView(selectedCoord: $selectedCoord, radius: $radius, address: $currentCenterAddress, inferredPlaceName: Binding(get: { placeName }, set: { placeName = $0 ?? "未知地点" }), centerTrigger: centerTrigger, shouldSnapToUser: $shouldSnapToUser, userCoord: selectedCoord, radiusTrigger: radiusTrigger)
+                        // A saved place name is user-owned. The map may still
+                        // refresh its address, but reverse geocoding must never
+                        // replace this field while editing.
+                        MapPickerView(
+                            selectedCoord: $selectedCoord,
+                            radius: $radius,
+                            address: $currentCenterAddress,
+                            centerTrigger: centerTrigger,
+                            shouldSnapToUser: $shouldSnapToUser,
+                            userCoord: selectedCoord,
+                            radiusTrigger: radiusTrigger
+                        )
 
                         Circle()
                             .stroke(Color.orange.opacity(0.8), lineWidth: 3)

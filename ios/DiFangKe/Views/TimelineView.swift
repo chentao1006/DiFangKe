@@ -1987,6 +1987,7 @@ private struct ContinuousTimelineSheet: View {
     @State private var calendarBackfillTask: Task<Void, Never>?
     @State private var initialTodayScrollTask: Task<Void, Never>?
     @State private var initialLoadingFallbackTask: Task<Void, Never>?
+    @State private var manualScrollAnchorUpdateTask: Task<Void, Never>?
     @State private var allowsInitialLoadingFallback = false
     @State private var timelineScrollPosition: ScrollTarget?
     @State private var lastUserInteractionTime = Date.distantPast
@@ -2101,7 +2102,7 @@ private struct ContinuousTimelineSheet: View {
         let today = calendar.startOfDay(for: Date())
         let activeDate = calendar.startOfDay(for: activeTimelineDate)
         let daysFromToday = calendar.dateComponents([.day], from: activeDate, to: today).day ?? 0
-        return daysFromToday > 1
+        return daysFromToday > 0
     }
 
     private var canLoadEarlierDates: Bool {
@@ -2624,6 +2625,7 @@ private struct ContinuousTimelineSheet: View {
                     .onDisappear {
                         initialTodayScrollTask?.cancel()
                         initialLoadingFallbackTask?.cancel()
+                        manualScrollAnchorUpdateTask?.cancel()
                         calendarScrollRetryTask?.cancel()
                         calendarBackfillPinTask?.cancel()
                         calendarBackfillTask?.cancel()
@@ -3083,11 +3085,67 @@ private struct ContinuousTimelineSheet: View {
 
     private func applyScrollMetrics(_ metrics: ContinuousTimelineScrollMetrics) {
         guard metrics != scrollMetrics else { return }
+        let previousMetrics = scrollMetrics
+        let didChangeViewportSize = previousMetrics.viewportHeight > 0 &&
+            (abs(metrics.viewportHeight - previousMetrics.viewportHeight) > 1 ||
+             abs(metrics.viewportWidth - previousMetrics.viewportWidth) > 1)
         scrollMetrics = metrics
         latestScrollOffsetY = metrics.topOffsetY
-        if scrollRestorer.isUserInteracting {
+
+        if metrics.isUserInteracting {
             lastUserInteractionTime = Date()
+            abandonProgrammaticScrollPositioning()
+            updateTimelineAnchorForManualScroll()
+            scheduleManualScrollAnchorUpdate()
+        } else if didChangeViewportSize {
+            // Rotation restores the date anchor last selected by the user's
+            // manual scroll, never the date originally opened by a notification.
+            restoreTimelinePositionForViewportChange()
         }
+    }
+
+    private func abandonProgrammaticScrollPositioning() {
+        initialTodayScrollTask?.cancel()
+        calendarScrollRetryTask?.cancel()
+        calendarBackfillPinTask?.cancel()
+        calendarBackfillTask?.cancel()
+        scrollRestorer.cancelRestore()
+
+        initialTodayScrollTask = nil
+        calendarScrollRetryTask = nil
+        calendarBackfillPinTask = nil
+        calendarBackfillTask = nil
+        calendarScrollLockTarget = nil
+        calendarBackfillPinnedDate = nil
+        pendingCalendarBackfillDates = []
+        suppressesViewportUpdatesForBackfill = false
+        backfillViewportSuppressionToken = UUID()
+        timelineScrollPosition = nil
+    }
+
+    private func updateTimelineAnchorForManualScroll() {
+        let anchorDate = headerVisibleDate(
+            in: latestDateFrames,
+            viewportHeight: latestViewportHeight
+        ) ?? activeTimelineDate
+        let normalizedDate = Calendar.current.startOfDay(for: anchorDate)
+        activeTimelineDate = normalizedDate
+        headerVisibleDates = [normalizedDate]
+        visibleDatesChanged([normalizedDate])
+    }
+
+    private func scheduleManualScrollAnchorUpdate() {
+        manualScrollAnchorUpdateTask?.cancel()
+        manualScrollAnchorUpdateTask = Task { @MainActor in
+            await waitForAnyUserInteractionToSettle()
+            guard !Task.isCancelled else { return }
+            updateTimelineAnchorForManualScroll()
+        }
+    }
+
+    private func restoreTimelinePositionForViewportChange() {
+        abandonProgrammaticScrollPositioning()
+        timelineScrollPosition = .date(Calendar.current.startOfDay(for: activeTimelineDate))
     }
 
     private func applyDateFrameUpdate(
@@ -4521,6 +4579,7 @@ private struct ContinuousTimelineScrollMetrics: Equatable {
     var topOffsetY: CGFloat = .infinity
     var contentOffsetY: CGFloat = 0
     var contentHeight: CGFloat = 0
+    var viewportWidth: CGFloat = 0
     var viewportHeight: CGFloat = 0
     var adjustedTopInset: CGFloat = 0
     var adjustedBottomInset: CGFloat = 0
@@ -4603,6 +4662,7 @@ private struct ScrollOffsetObserver: UIViewRepresentable {
                 topOffsetY: scrollView.contentOffset.y + scrollView.adjustedContentInset.top,
                 contentOffsetY: scrollView.contentOffset.y,
                 contentHeight: scrollView.contentSize.height,
+                viewportWidth: scrollView.bounds.width,
                 viewportHeight: scrollView.bounds.height,
                 adjustedTopInset: scrollView.adjustedContentInset.top,
                 adjustedBottomInset: scrollView.adjustedContentInset.bottom,
@@ -4649,6 +4709,7 @@ private final class ContinuousTimelineScrollRestorer {
             topOffsetY: scrollView.contentOffset.y + scrollView.adjustedContentInset.top,
             contentOffsetY: scrollView.contentOffset.y,
             contentHeight: scrollView.contentSize.height,
+            viewportWidth: scrollView.bounds.width,
             viewportHeight: scrollView.bounds.height,
             adjustedTopInset: scrollView.adjustedContentInset.top,
             adjustedBottomInset: scrollView.adjustedContentInset.bottom,
@@ -4693,6 +4754,14 @@ private final class ContinuousTimelineScrollRestorer {
             self?.pendingFallbackBottomDistance = nil
             self?.isRestoring = false
         }
+    }
+
+    func cancelRestore() {
+        restoreTask?.cancel()
+        restoreTask = nil
+        pendingAnchor = nil
+        pendingFallbackBottomDistance = nil
+        isRestoring = false
     }
 
     func applyPendingBottomDistanceIfNeeded() {

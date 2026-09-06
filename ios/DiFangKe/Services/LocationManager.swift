@@ -178,16 +178,19 @@ final class RawLocationStore {
             let url = self.getFileURL(for: location.timestamp)
             let line = "\(location.timestamp.timeIntervalSince1970),\(location.coordinate.latitude),\(location.coordinate.longitude),\(location.horizontalAccuracy),\(location.speed)\n"
             
-            if let data = line.data(using: .utf8) {
+            do {
+                let data = Data(line.utf8)
                 if self.fileManager.fileExists(atPath: url.path) {
-                    if let fileHandle = try? FileHandle(forWritingTo: url) {
-                        fileHandle.seekToEndOfFile()
-                        fileHandle.write(data)
-                        fileHandle.closeFile()
-                    }
+                    let fileHandle = try FileHandle(forWritingTo: url)
+                    defer { try? fileHandle.close() }
+                    try fileHandle.seekToEnd()
+                    try fileHandle.write(contentsOf: data)
                 } else {
-                    try? data.write(to: url)
+                    try data.write(to: url)
                 }
+            } catch {
+                print("[RawLocationStore] Failed to persist sample at \(location.timestamp): \(error)")
+                return
             }
 
             // Timeline reconstruction reads this file.  Run dependent work only
@@ -208,7 +211,6 @@ final class RawLocationStore {
         guard let content = String(data: data, encoding: .utf8) else { return [] }
         
         var locations: [CLLocation] = []
-        var lastValidPoint: CLLocation? = nil
 
         content.enumerateLines { line, _ in
             if line.isEmpty { return }
@@ -231,27 +233,10 @@ final class RawLocationStore {
                     timestamp: Date(timeIntervalSince1970: ts)
                 )
                 
-                // --- 补救措施：加载时过滤存量的离谱漂移点 ---
-                if let last = lastValidPoint {
-                    let dist = loc.distance(from: last)
-                    let time = loc.timestamp.timeIntervalSince(last.timestamp)
-                    if time > 0 {
-                        let calcSpeed = dist / time
-                        // 新增：物理不可能的速度直接过滤（如 5秒内 3公里 = 600m/s）
-                        if calcSpeed > AppConfig.shared.physicalMaxSpeedThreshold { return }
-                        
-                        let hasReportedHighSpeed = speed >= 20.0
-                        let isRidiculous = (accuracy > 400 && dist > 1500 && !hasReportedHighSpeed)
-                            || (calcSpeed > 80.0 && accuracy > 80 && !hasReportedHighSpeed)
-                        if isRidiculous { return } // 跳过该点，不加入列表，且不更新 lastValidPoint
-                    }
-                }
-                
                 locations.append(loc)
-                lastValidPoint = loc
             }
         }
-        return filtered ? RawLocationStore.filterRidiculousSpikes(locations) : locations
+        return normalizedChronologicalLocations(locations, filtered: filtered)
     }
     
     /// 获取最近一段的点。如果提供了 since，则至少获取到 since 那个时间点。
@@ -323,7 +308,6 @@ final class RawLocationStore {
               let content = String(data: data, encoding: .utf8) else { return [] }
         
         var locations: [CLLocation] = []
-        var lastValidPoint: CLLocation? = nil
         
         content.enumerateLines { line, _ in
             if line.isEmpty { return }
@@ -346,27 +330,56 @@ final class RawLocationStore {
                     timestamp: Date(timeIntervalSince1970: ts)
                 )
                 
-                // --- 补救措施：加载时过滤存量的离谱漂移点 ---
-                if let last = lastValidPoint {
-                    let dist = loc.distance(from: last)
-                    let time = loc.timestamp.timeIntervalSince(last.timestamp)
-                    if time > 0 {
-                        let calcSpeed = dist / time
-                        // 新增：物理不可能的速度直接过滤
-                        if calcSpeed > AppConfig.shared.physicalMaxSpeedThreshold { return }
-                        
-                        let hasReportedHighSpeed = speed >= 20.0
-                        let isRidiculous = (accuracy > 400 && dist > 1500 && !hasReportedHighSpeed)
-                            || (calcSpeed > 80.0 && accuracy > 80 && !hasReportedHighSpeed)
-                        if isRidiculous { return }
-                    }
-                }
-                
                 locations.append(loc)
-                lastValidPoint = loc
             }
         }
-        return filtered ? RawLocationStore.filterRidiculousSpikes(locations) : locations
+        return normalizedChronologicalLocations(locations, filtered: filtered)
+    }
+
+    /// Disk append order is not guaranteed to be timestamp order because Core
+    /// Location may deliver a delayed background batch after a newer fix. Route
+    /// validation must always operate on chronological samples.
+    private func normalizedChronologicalLocations(
+        _ locations: [CLLocation], filtered: Bool
+    ) -> [CLLocation] {
+        var bestByTimestamp: [TimeInterval: CLLocation] = [:]
+        for location in locations {
+            let timestamp = location.timestamp.timeIntervalSince1970
+            if let existing = bestByTimestamp[timestamp] {
+                let existingAccuracy = existing.horizontalAccuracy >= 0
+                    ? existing.horizontalAccuracy : .greatestFiniteMagnitude
+                let candidateAccuracy = location.horizontalAccuracy >= 0
+                    ? location.horizontalAccuracy : .greatestFiniteMagnitude
+                if candidateAccuracy < existingAccuracy {
+                    bestByTimestamp[timestamp] = location
+                }
+            } else {
+                bestByTimestamp[timestamp] = location
+            }
+        }
+
+        let chronological = bestByTimestamp.values.sorted { $0.timestamp < $1.timestamp }
+        guard filtered else { return chronological }
+
+        var plausible: [CLLocation] = []
+        for location in chronological {
+            if let last = plausible.last {
+                let elapsed = location.timestamp.timeIntervalSince(last.timestamp)
+                if elapsed > 0 {
+                    let distance = location.distance(from: last)
+                    let calculatedSpeed = distance / elapsed
+                    let hasReportedHighSpeed = location.speed >= 20.0
+                    if calculatedSpeed > AppConfig.shared.physicalMaxSpeedThreshold {
+                        continue
+                    }
+                    let isRidiculous = (location.horizontalAccuracy > 400 && distance > 1500 && !hasReportedHighSpeed)
+                        || (calculatedSpeed > 80.0 && location.horizontalAccuracy > 80 && !hasReportedHighSpeed)
+                    if isRidiculous { continue }
+                }
+            }
+            plausible.append(location)
+        }
+        return RawLocationStore.filterRidiculousSpikes(plausible)
     }
     
     /// 从源文件中彻底删除某个点 (匹配时间戳)
@@ -1303,10 +1316,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     /// 强制激活高精度模式（通常由计步器、运动传感器或网络变化触发，早于 GPS 位移）
     private func forceHighAccuracyBoost() {
+        let isTrackingEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
+        guard isTracking, isTrackingEnabled, isAuthorized else { return }
         // 省电模式下，运动/围栏/网络回调只能唤醒定位，不能偷偷切回高精度。
         if currentLocationAccuracyMode == .powerSaving {
             applyPowerSavingLocationSettings()
-            locationManager.requestLocation()
+            locationManager.startUpdatingLocation()
             return
         }
 
@@ -1315,20 +1330,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 0. 设置 10 分钟出门保护期，覆盖大多数步行出门的起步阶段，防止过早降频造成直线轨迹
         departureBoostEndTime = Date().addingTimeInterval(10 * 60)
         
-        // 1. 确保背景模式配置正确（防止被系统意外重置）
-        locationManager.allowsBackgroundLocationUpdates = true
-        locationManager.pausesLocationUpdatesAutomatically = false
-        
-        // 2. 提升精度，但避免长期停留在导航级满额采样导致发热
-        locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        locationManager.distanceFilter = kCLDistanceFilterNone
-        locationManager.activityType = .other
-        
-        // 3. 核心补救：立即请求一次单次精确定位，强制拉高硬件功率
-        locationManager.requestLocation()
-        
-        // 4. 尝试重启持续更新，确保背景任务刷新
-        locationManager.stopUpdatingLocation()
+        // 在现有会话上提升精度，避免网络/运动事件反复停止连续定位。
+        locationManager.allowsBackgroundLocationUpdates = isAlwaysAuthorized
+        applyContinuousLocationSettings(to: locationManager)
+        // Do not mix requestLocation with continuous updates: starting updates
+        // cancels that single request (CLLocationManager.h). This keeps the
+        // standard service active without deliberately interrupting it.
         locationManager.startUpdatingLocation()
     }
 
@@ -1340,10 +1347,23 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     private func applyPowerSavingLocationSettings() {
         locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-        locationManager.distanceFilter = 50.0
+        // 停留时可以降低定位精度，但不能用 50m 过滤来等待“离开”的首个点。
+        // 一旦红灯、路口减速等短暂低速被误判为停留，50m 会让恢复高频的
+        // didUpdateLocations 回调来得太晚，进而在原始轨迹中制造数分钟空档。
+        // 保留 10m 的唤醒粒度，下一次实际移动会尽快重新进入高频模式。
+        locationManager.distanceFilter = 10.0
         locationManager.activityType = .other
     }
-    
+
+    /// 自动记录不依赖运动分类、已知地点或下一次回调来恢复采样。
+    /// 停留判断只控制足迹和围栏；原始定位始终保持同一套连续采集参数。
+    private func applyContinuousLocationSettings(to manager: CLLocationManager) {
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.distanceFilter = kCLDistanceFilterNone
+        manager.activityType = .fitness
+        manager.pausesLocationUpdatesAutomatically = false
+    }
+
     private func setupNetworkMonitoring() {
         pathMonitor = NWPathMonitor()
         pathMonitor?.pathUpdateHandler = { [weak self] path in
@@ -1417,11 +1437,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             || motion == .automotive
             || uiIsMoving // 扩大监测范围：只要 UI 层认为在移动就介入
 
-        guard let last = lastUpdateTime else {
+        let gap: TimeInterval
+        if let last = lastUpdateTime {
+            gap = now.timeIntervalSince(last)
+        } else if isMovingBySensor {
+            // No fresh fix has arrived since this recording session started.
+            // Cached locations do not update lastUpdateTime, so movement must
+            // still enter the same recovery path after the startup grace period.
+            gap = now.timeIntervalSince(lastStartTrackingAt)
+        } else {
             requestStationaryDepartureProbeIfNeeded(now: now, lastUpdateGap: .infinity)
             return
         }
-        let gap = now.timeIntervalSince(last)
 
         if !isMovingBySensor {
             requestStationaryDepartureProbeIfNeeded(now: now, lastUpdateGap: gap)
@@ -1447,21 +1474,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let stationaryDuration = now.timeIntervalSince(stop.timestamp)
         guard stationaryDuration > 10 * 60 else { return }
 
-        // During a confirmed long stay, do only an occasional low-power one-shot
-        // probe. Standard updates are intentionally suspended at this point; keeping
-        // a navigation-grade GPS session alive (or restarting it every few minutes)
-        // makes an all-day stay look like the battery report in iOS Settings.
-        // Region exits, Visits, significant-change monitoring, network changes, and
-        // Core Motion remain the primary departure signals and restore high accuracy.
+        // Reassert the existing continuous session. requestLocation() cannot run
+        // concurrently with startUpdatingLocation(), and mixing them can cancel the
+        // single request instead of restoring the stream we need for route recording.
         guard lastUpdateGap > 10 * 60 else { return }
         guard now.timeIntervalSince(lastStationaryProbeTime) > 15 * 60 else { return }
         lastStationaryProbeTime = now
 
         let gapDescription = lastUpdateGap.isFinite ? "\(Int(lastUpdateGap))s" : "unknown duration"
-        print("[LocationManager] 🧭 Long stationary stay has no fresh location for \(gapDescription). Requesting departure probe…")
+        print("[LocationManager] 🧭 Long stationary stay has no fresh location for \(gapDescription). Reasserting continuous updates…")
         ensureSignificantMonitoringActive()
-        applyPowerSavingLocationSettings()
-        locationManager.requestLocation()
+        applyContinuousLocationSettings(to: locationManager)
+        locationManager.startUpdatingLocation()
     }
 
     private var shouldRunActiveLocationRecovery: Bool {
@@ -1670,7 +1694,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     /// 请求一次精确定位（用于后台唤醒时让系统知道我们仍需要位置服务）
     func requestSingleLocation() {
-        locationManager.requestLocation()
+        if isTracking {
+            applyLocationAccuracyMode()
+            locationManager.startUpdatingLocation()
+        } else {
+            locationManager.requestLocation()
+        }
     }
     
     /// 后台恢复时自动回填记录空白（从上一条原始轨迹到现在的间隙）
@@ -1738,10 +1767,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 防止应用重启或系统唤醒后先以初始化时的高精度运行。
         applyLocationAccuracyMode()
         
-        // On app open, ask for a fresh fix, but do not let repeated lifecycle hooks
-        // keep waking the GPS chip and heating the device.
+        // On app open, reassert the continuous stream without mixing in
+        // requestLocation(), which Core Location does not support concurrently.
         if now.timeIntervalSince(lastStartTrackingLocationRequestAt) > 60 {
-            locationManager.requestLocation()
+            locationManager.startUpdatingLocation()
             lastStartTrackingLocationRequestAt = now
         }
         
@@ -2166,22 +2195,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         from manager: CLLocationManager,
         isLatestInBatch: Bool
     ) {
-        
+        guard rawLocation.horizontalAccuracy >= 0,
+              CLLocationCoordinate2DIsValid(rawLocation.coordinate) else {
+            return
+        }
+
         // 全局纠正：进入中国境内后，立即将 WGS-84 转换为 GCJ-02
         // 这样后续所有逻辑（足迹存储、地标匹配、UI显示）都统一使用火星坐标系
         let location = rawLocation.gcj02
-        
-        lastLocation = location
-        lastUpdateTime = Date()
-        accuracy = location.horizontalAccuracy
-        
-#if canImport(ActivityKit)
-        if isLatestInBatch {
-            if #available(iOS 16.1, *) {
-                TripLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: self.modelContext)
-            }
-        }
-#endif
+        let isFreshLocation = abs(location.timestamp.timeIntervalSinceNow) < 30
 
         // --- UI 移动状态证据（用于卡片标题稳定显示） ---
         let motion = HealthManager.shared.currentMotionType
@@ -2190,14 +2212,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             || motion == .running
             || motion == .cycling
             || motion == .automotive
-        let isFreshLocation = abs(location.timestamp.timeIntervalSinceNow) < 30
-        let isMovingByGPS = isFreshLocation && location.speed >= 0 && location.speed > 0.5
-        updateUIMovementState(isMovingEvidence: (isMovingBySensor || isMovingByGPS), source: "didUpdateLocations")
-        
         // --- 核心改进：预先过滤离谱漂移点，防止污染原始轨迹 CSV ---
-        if let last = trackingPoints.last {
+        // A background callback can deliver samples older than the newest point
+        // already held in memory. Never compare such a sample with a future point:
+        // the resulting distance / absolute-time calculation can reject valid
+        // intermediate route samples before they reach RawLocationStore.
+        if let last = trackingPoints.last, last.timestamp < location.timestamp {
             let dist = location.distance(from: last)
-            let time = abs(location.timestamp.timeIntervalSince(last.timestamp))
+            let time = location.timestamp.timeIntervalSince(last.timestamp)
             if time > 0 {
                 let calcSpeed = dist / time
                 
@@ -2220,6 +2242,27 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
         }
+
+        if lastLocation == nil || location.timestamp >= lastLocation!.timestamp {
+            lastLocation = location
+            accuracy = location.horizontalAccuracy
+        }
+        // A stale background batch is useful for filling RawLocations, but it
+        // must not convince the watchdog that live delivery has recovered.
+        if isFreshLocation {
+            lastUpdateTime = Date()
+        }
+
+#if canImport(ActivityKit)
+        if isLatestInBatch {
+            if #available(iOS 16.1, *) {
+                TripLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: self.modelContext)
+            }
+        }
+#endif
+
+        let isMovingByGPS = isFreshLocation && location.speed >= 0 && location.speed > 0.5
+        updateUIMovementState(isMovingEvidence: (isMovingBySensor || isMovingByGPS), source: "didUpdateLocations")
         
         // 0. 智能节能：根据速度和停留状态动态调整定位参数
         let place = matchedPlace
@@ -2261,64 +2304,20 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // 时间线因此把这段连续骑行渲染成实线-虚线交替。
             if duration > 300 && distance < 150.0 && speed < 1.0 { return true }
             
-            // B: 地点粘性 - 如果在已知地点范围内已超过 1 分钟，且当前速度极低，则提前进入节能
-            if let p = place, duration > 60 && distance < Double(p.radius) + 80.0 && speed < 1.0 {
-                return true
-            }
-            
+            // 不再根据“已知地点 + 60 秒低速”提前进入节能。交通刚从地点范围内
+            // 出发、在红灯短停或路口减速时都可能满足该条件；此时若降为低频采样，
+            // 离开后会缺少连续的原始轨迹点。统一由上面的 5 分钟低位移规则确认停留。
             return false
         }()
         
         let modeRaw = UserDefaults.standard.string(forKey: LocationAccuracyMode.userDefaultsKey) ?? LocationAccuracyMode.automatic.rawValue
         let currentMode = LocationAccuracyMode(rawValue: modeRaw) ?? .automatic
         
-        if currentMode == .automatic {
-            if let p = place, p.isIgnored {
-                // 已忽略地点也必须保留较密的原始轨迹，否则从家/公司出门会丢掉开头几百米，只是不生成该地点足迹。
-                if manager.desiredAccuracy != kCLLocationAccuracyNearestTenMeters || manager.distanceFilter != 10.0 || manager.activityType != .fitness {
-                    manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-                    manager.distanceFilter = 10.0
-                    manager.activityType = .fitness // ⚠️ 不用 .other — iOS 会极度压缩更新频率
-                }
-                updateRegionMonitoring(isStationary: true)
-            } else if isStationary {
-                // 停留时降为低功耗采样，但不能停止标准定位。围栏、Visit 与显著
-                // 位置变化都是延迟且非可靠的离开唤醒信号；一旦它们漏发，驾驶中
-                // 会只留下出发/到达两端点，时间线只能画成虚线。保留 50m 的低频
-                // 更新可在刚离开时收到首个点，随后本方法会立即恢复高精度记录。
-                applyPowerSavingLocationSettings()
-                updateRegionMonitoring(isStationary: true)
-                manager.startUpdatingLocation()
-            } else {
-                // 自动采集增强：只要在移动（不论是步行、骑行还是开车）
-                // 开启增强采样，确保不漏点
-                let motion = HealthManager.shared.currentMotionType
-                let isMovingBySensor = motion == .walking || motion == .running || motion == .cycling || motion == .automotive
-                
-                // 高速驾驶也使用 fitness 模式，避免 automotiveNavigation 导致后台被系统强制降频或挂起
-                if motion == .automotive || speed > 15.0 {
-                    if manager.desiredAccuracy != kCLLocationAccuracyBest || manager.distanceFilter != 10.0 || manager.activityType != .fitness {
-                        manager.desiredAccuracy = kCLLocationAccuracyBest
-                        manager.distanceFilter = 10.0
-                        manager.activityType = .fitness
-                    }
-                // 只要传感器认为在动，或者速度 > 0.5m/s
-                } else if isMovingBySensor || speed > 0.5 {
-                    let targetAccuracy = kCLLocationAccuracyBest
-                    if manager.desiredAccuracy != targetAccuracy || manager.distanceFilter != kCLDistanceFilterNone || manager.activityType != .fitness {
-                        manager.desiredAccuracy = targetAccuracy
-                        manager.distanceFilter = kCLDistanceFilterNone
-                        manager.activityType = .fitness
-                    }
-                }
-                updateRegionMonitoring(isStationary: false)
-                // This callback may have been the low-power departure probe. Resume
-                // continuous updates only after actual movement is observed.
-                manager.startUpdatingLocation()
-            }
-        } else {
-            // 如果不是自动模式，就仅仅更新唤醒区域，不改变精度（精度在 applyLocationAccuracyMode 中已经设置好）
-            updateRegionMonitoring(isStationary: isStationary)
+        if currentMode == .automatic, isLatestInBatch {
+            applyContinuousLocationSettings(to: manager)
+        }
+        if isLatestInBatch {
+            updateRegionMonitoring(isStationary: isStationary || place?.isIgnored == true)
         }
 
         // 反地理编码更新地址（高速节流至 1000 米，兼顾体验与能效）
@@ -2357,8 +2356,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // CLLocationManager 在静止时也可能连续按秒回调；原始轨迹、内存轨迹和实时
         // 足迹分析必须共享同一个节流条件，避免 CSV 虽节流但内存/分析仍堆积秒级点。
         let rawTimestampDelta = location.timestamp.timeIntervalSince(lastRawLocationSaveTimestamp)
-        // requestLocation() 的新点可能先于系统积压的后台批量到达。旧逻辑只接受
-        // 比上次保存“更新”的时间戳，因而会把随后交付的一整批驾驶轨迹全部跳过。
+        // 较新的实时点可能先于系统积压的后台批量到达。旧逻辑只接受比上次保存
+        // “更新”的时间戳，因而会把随后交付的一整批驾驶轨迹全部跳过。
         // CSV 的读取端本来就会按时间排序；迟到但相隔至少一个节流窗口的样本必须保存。
         let isDelayedBatchSample = rawTimestampDelta <= -rawLocationMinimumSaveInterval
         let shouldSaveRawLocation = lastRawLocationSaveTimestamp == .distantPast
@@ -2389,7 +2388,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let preferredID = RawLocationStore.shared.preferredRecordingDeviceID()
         let isPrimary = preferredID.isEmpty || preferredID == RawLocationStore.shared.currentDeviceIdentifier
         
-        if isPrimary, shouldSaveRawLocation {
+        if isPrimary, shouldSaveRawLocation, !isDelayedBatchSample {
             // 2. 更新内存数据并处理足迹分析
             self.updateTodayTotalPoints()
             self.allTodayPoints.append(location)
@@ -2662,24 +2661,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
-        let motion = HealthManager.shared.currentMotionType
-        let isMovingBySensor = HealthManager.shared.isMoving
-            || motion == .walking
-            || motion == .running
-            || motion == .cycling
-            || motion == .automotive
-
-        print("[LocationManager] ⏸️ Location updates paused by system. isTracking=\(isTracking) moving=\(isMovingBySensor)")
-        guard isTracking, isMovingBySensor else { return }
-        
-        if Date().timeIntervalSince(lastRecoveryBoostTime) < 60 {
-            return
-        }
-        lastRecoveryBoostTime = Date()
-
-        // Best-effort recovery: restart high-accuracy updates and keep Significant Monitoring alive.
-        ensureSignificantMonitoringActive()
-        forceHighAccuracyBoost()
+        let isTrackingEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
+        guard isTracking, isTrackingEnabled, isAuthorized else { return }
+        // 电动车可能被 Core Motion 判为静止，恢复不能等待运动证据或 Timer。
+        print("[LocationManager] Location updates paused; resuming continuous recording.")
+        manager.pausesLocationUpdatesAutomatically = false
+        applyLocationAccuracyMode()
+        manager.startUpdatingLocation()
     }
 
     func locationManagerDidResumeLocationUpdates(_ manager: CLLocationManager) {
@@ -2709,14 +2697,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         switch mode {
         case .automatic:
-            // 自动模式下，根据当前状态重新评估
-            // 我们通过重置相关状态变量，迫使 runLocationWatchdog 或 updateRegionMonitoring 生效
-            // 简单起见，强制触发一次 location update 逻辑
-            locationManager.startUpdatingLocation()
+            applyContinuousLocationSettings(to: locationManager)
         case .high:
-            locationManager.desiredAccuracy = kCLLocationAccuracyBest
-            locationManager.distanceFilter = kCLDistanceFilterNone
-            locationManager.activityType = .fitness
+            applyContinuousLocationSettings(to: locationManager)
         case .balanced:
             locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
             locationManager.distanceFilter = 10.0
@@ -3879,10 +3862,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 if let fps = try? context.fetch(fpDesc) {
                     for fp in fps {
-                        if fp.photoAssetIDs.isEmpty { context.delete(fp) }
+                        if fp.photoAssetIDs.isEmpty, fp.status != .manual {
+                            context.delete(fp)
+                        }
                     }
                 }
-                if let tps = try? context.fetch(tpDesc) { for tp in tps { context.delete(tp) } }
+                if let tps = try? context.fetch(tpDesc) {
+                    for tp in tps where tp.manualTypeRaw == nil {
+                        context.delete(tp)
+                    }
+                }
                 if let insights = try? context.fetch(insightDesc) { for i in insights { context.delete(i) } }
                 
                 try? context.save()
@@ -4211,7 +4200,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             var anyDeleted = false
             if let tps = try? context.fetch(tpDesc) {
-                for tp in tps {
+                for tp in tps where tp.manualTypeRaw == nil {
                     for ts in deletedTimestamps {
                         let pointDate = Date(timeIntervalSince1970: ts)
                         // 如果删除的原始点时间落在该交通段内

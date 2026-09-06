@@ -1034,7 +1034,10 @@ struct TimelineEditView: View {
             statusRaw: "active",
             stepCount: transport.stepCount
         )
-        record.manualTypeRaw = transport.manualType?.rawValue
+        // Saving the timeline editor is an explicit user-owned structural edit,
+        // just like footprints above becoming `.manual`. Freeze the currently
+        // displayed type so automatic cleanup cannot merge the edited boundary.
+        record.manualTypeRaw = transport.manualType?.rawValue ?? transport.type.rawValue
         return record
     }
     
@@ -1177,7 +1180,7 @@ struct TimelineEditView: View {
                     record.distance = transport.distance
                     record.averageSpeed = transport.averageSpeed
                     record.pointsData = pointsData(for: transport)
-                    record.manualTypeRaw = transport.manualType?.rawValue
+                    record.manualTypeRaw = transport.manualType?.rawValue ?? transport.type.rawValue
                     record.statusRaw = "active"
                 } else {
                     modelContext.insert(makePersistentTransportRecord(from: transport, startTime: layout.startTime, endTime: layout.endTime))
