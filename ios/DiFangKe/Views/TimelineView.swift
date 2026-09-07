@@ -5,6 +5,8 @@ import Photos
 import UIKit
 import Aptabase
 
+private let collapsedTimelineDetentHeight: CGFloat = 76
+
 struct TimelineView: View {
     var initialDate: Date?
 
@@ -274,7 +276,7 @@ private struct ContinuousTimelineView: View {
 
     private func sheetHeight(in mapHeight: CGFloat) -> CGFloat {
         if isSideBySide { return 0 }
-        if timelineDetent == .height(88) { return 88 }
+        if timelineDetent == .height(collapsedTimelineDetentHeight) { return collapsedTimelineDetentHeight }
         if timelineDetent == .medium { return mapHeight * 0.5 }
         return mapHeight
     }
@@ -313,10 +315,10 @@ private struct ContinuousTimelineView: View {
         guard !isSideBySide else { return }
 
         lockVisibleTimelineMapForInteraction()
-        guard timelineDetent != .height(88) else { return }
+        guard timelineDetent != .height(collapsedTimelineDetentHeight) else { return }
         skipsNextMapExpansionCameraReset = interactionType != .tap
         withAnimation(.easeOut(duration: 0.2)) {
-            timelineDetent = .height(88)
+            timelineDetent = .height(collapsedTimelineDetentHeight)
         }
     }
 
@@ -412,7 +414,7 @@ private struct ContinuousTimelineView: View {
 
     private var timelineSheet: some View {
         timelineSidebarContent
-            .presentationDetents([.height(88), .medium, .large], selection: $timelineDetent)
+            .presentationDetents([.height(collapsedTimelineDetentHeight), .medium, .large], selection: $timelineDetent)
             .presentationBackground(.clear)
             .presentationDragIndicator(.visible)
             // A selected footprint presents an editor above this sheet. Let its
@@ -767,11 +769,11 @@ private struct ContinuousTimelineView: View {
     }
 
     private func handleTimelineDetentChange(oldValue: PresentationDetent, newValue: PresentationDetent) {
-        if oldValue == .height(88), newValue != .height(88) {
+        if oldValue == .height(collapsedTimelineDetentHeight), newValue != .height(collapsedTimelineDetentHeight) {
             unlockVisibleTimelineMapAfterInteraction()
             return
         }
-        if newValue == .height(88) {
+        if newValue == .height(collapsedTimelineDetentHeight) {
             lockVisibleTimelineMapForInteraction()
             guard !skipsNextMapExpansionCameraReset else {
                 skipsNextMapExpansionCameraReset = false
@@ -1987,7 +1989,6 @@ private struct ContinuousTimelineSheet: View {
     @State private var calendarBackfillTask: Task<Void, Never>?
     @State private var initialTodayScrollTask: Task<Void, Never>?
     @State private var initialLoadingFallbackTask: Task<Void, Never>?
-    @State private var manualScrollAnchorUpdateTask: Task<Void, Never>?
     @State private var allowsInitialLoadingFallback = false
     @State private var timelineScrollPosition: ScrollTarget?
     @State private var lastUserInteractionTime = Date.distantPast
@@ -2048,7 +2049,7 @@ private struct ContinuousTimelineSheet: View {
     @Binding var selectedMapPhotoAssetID: String?
 
     private var isCollapsed: Bool {
-        !isSideBySide && timelineDetent == .height(88)
+        !isSideBySide && timelineDetent == .height(collapsedTimelineDetentHeight)
     }
 
     private var timelineScrollPositionBinding: Binding<ScrollTarget?> {
@@ -2139,7 +2140,7 @@ private struct ContinuousTimelineSheet: View {
                         // Keep the scroll view mounted while collapsed so its
                         // current offset survives re-expansion. Rendering it
                         // transparent prevents its first row from peeking
-                        // below the title bar in the 88pt detent.
+                        // below the title bar in the collapsed detent.
                         mainScrollView(proxy: proxy, viewport: viewport)
                             .opacity(isCollapsed ? 0 : 1)
                             .allowsHitTesting(!isCollapsed)
@@ -2494,6 +2495,9 @@ private struct ContinuousTimelineSheet: View {
                         .scrollPosition(id: timelineScrollPositionBinding, anchor: .bottom)
                         .scrollDisabled(isCollapsed)
                         .coordinateSpace(name: "continuousTimelineScroll")
+                        .onChange(of: viewport.size) { oldSize, newSize in
+                            restoreTimelineDateAfterRotation(from: oldSize, to: newSize, using: proxy)
+                        }
                         .onPreferenceChange(ContinuousTimelineDateFramePreferenceKey.self) { frames in
                             let viewportHeight = viewport.size.height
                             Task { @MainActor in
@@ -2625,7 +2629,6 @@ private struct ContinuousTimelineSheet: View {
                     .onDisappear {
                         initialTodayScrollTask?.cancel()
                         initialLoadingFallbackTask?.cancel()
-                        manualScrollAnchorUpdateTask?.cancel()
                         calendarScrollRetryTask?.cancel()
                         calendarBackfillPinTask?.cancel()
                         calendarBackfillTask?.cancel()
@@ -3085,67 +3088,28 @@ private struct ContinuousTimelineSheet: View {
 
     private func applyScrollMetrics(_ metrics: ContinuousTimelineScrollMetrics) {
         guard metrics != scrollMetrics else { return }
-        let previousMetrics = scrollMetrics
-        let didChangeViewportSize = previousMetrics.viewportHeight > 0 &&
-            (abs(metrics.viewportHeight - previousMetrics.viewportHeight) > 1 ||
-             abs(metrics.viewportWidth - previousMetrics.viewportWidth) > 1)
         scrollMetrics = metrics
         latestScrollOffsetY = metrics.topOffsetY
-
-        if metrics.isUserInteracting {
+        if scrollRestorer.isUserInteracting {
             lastUserInteractionTime = Date()
-            abandonProgrammaticScrollPositioning()
-            updateTimelineAnchorForManualScroll()
-            scheduleManualScrollAnchorUpdate()
-        } else if didChangeViewportSize {
-            // Rotation restores the date anchor last selected by the user's
-            // manual scroll, never the date originally opened by a notification.
-            restoreTimelinePositionForViewportChange()
         }
     }
 
-    private func abandonProgrammaticScrollPositioning() {
-        initialTodayScrollTask?.cancel()
-        calendarScrollRetryTask?.cancel()
-        calendarBackfillPinTask?.cancel()
-        calendarBackfillTask?.cancel()
-        scrollRestorer.cancelRestore()
-
-        initialTodayScrollTask = nil
-        calendarScrollRetryTask = nil
-        calendarBackfillPinTask = nil
-        calendarBackfillTask = nil
-        calendarScrollLockTarget = nil
-        calendarBackfillPinnedDate = nil
-        pendingCalendarBackfillDates = []
-        suppressesViewportUpdatesForBackfill = false
-        backfillViewportSuppressionToken = UUID()
-        timelineScrollPosition = nil
-    }
-
-    private func updateTimelineAnchorForManualScroll() {
-        let anchorDate = headerVisibleDate(
-            in: latestDateFrames,
-            viewportHeight: latestViewportHeight
-        ) ?? activeTimelineDate
-        let normalizedDate = Calendar.current.startOfDay(for: anchorDate)
-        activeTimelineDate = normalizedDate
-        headerVisibleDates = [normalizedDate]
-        visibleDatesChanged([normalizedDate])
-    }
-
-    private func scheduleManualScrollAnchorUpdate() {
-        manualScrollAnchorUpdateTask?.cancel()
-        manualScrollAnchorUpdateTask = Task { @MainActor in
-            await waitForAnyUserInteractionToSettle()
-            guard !Task.isCancelled else { return }
-            updateTimelineAnchorForManualScroll()
+    private func restoreTimelineDateAfterRotation(from oldSize: CGSize, to newSize: CGSize, using proxy: ScrollViewProxy) {
+        guard oldSize.width > 0, oldSize.height > 0,
+              newSize.width > 0, newSize.height > 0,
+              (oldSize.width > oldSize.height) != (newSize.width > newSize.height) else {
+            return
         }
-    }
 
-    private func restoreTimelinePositionForViewportChange() {
-        abandonProgrammaticScrollPositioning()
-        timelineScrollPosition = .date(Calendar.current.startOfDay(for: activeTimelineDate))
+        let anchorDate = Calendar.current.startOfDay(for: activeTimelineDate)
+        guard dates.contains(anchorDate) else { return }
+
+        Task { @MainActor in
+            await Task.yield()
+            guard dates.contains(anchorDate) else { return }
+            proxy.scrollTo(ScrollTarget.date(anchorDate), anchor: .bottom)
+        }
     }
 
     private func applyDateFrameUpdate(
@@ -3745,6 +3709,7 @@ private struct ContinuousTimelineSheet: View {
 
             applySelectedCalendarDate(target)
             calendarScrollLockTarget = nil
+            timelineScrollPosition = nil
             freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.25)
             let backfillDates = pendingCalendarBackfillDates
             pendingCalendarBackfillDates = []
@@ -4579,7 +4544,6 @@ private struct ContinuousTimelineScrollMetrics: Equatable {
     var topOffsetY: CGFloat = .infinity
     var contentOffsetY: CGFloat = 0
     var contentHeight: CGFloat = 0
-    var viewportWidth: CGFloat = 0
     var viewportHeight: CGFloat = 0
     var adjustedTopInset: CGFloat = 0
     var adjustedBottomInset: CGFloat = 0
@@ -4662,7 +4626,6 @@ private struct ScrollOffsetObserver: UIViewRepresentable {
                 topOffsetY: scrollView.contentOffset.y + scrollView.adjustedContentInset.top,
                 contentOffsetY: scrollView.contentOffset.y,
                 contentHeight: scrollView.contentSize.height,
-                viewportWidth: scrollView.bounds.width,
                 viewportHeight: scrollView.bounds.height,
                 adjustedTopInset: scrollView.adjustedContentInset.top,
                 adjustedBottomInset: scrollView.adjustedContentInset.bottom,
@@ -4709,7 +4672,6 @@ private final class ContinuousTimelineScrollRestorer {
             topOffsetY: scrollView.contentOffset.y + scrollView.adjustedContentInset.top,
             contentOffsetY: scrollView.contentOffset.y,
             contentHeight: scrollView.contentSize.height,
-            viewportWidth: scrollView.bounds.width,
             viewportHeight: scrollView.bounds.height,
             adjustedTopInset: scrollView.adjustedContentInset.top,
             adjustedBottomInset: scrollView.adjustedContentInset.bottom,
@@ -4754,14 +4716,6 @@ private final class ContinuousTimelineScrollRestorer {
             self?.pendingFallbackBottomDistance = nil
             self?.isRestoring = false
         }
-    }
-
-    func cancelRestore() {
-        restoreTask?.cancel()
-        restoreTask = nil
-        pendingAnchor = nil
-        pendingFallbackBottomDistance = nil
-        isRestoring = false
     }
 
     func applyPendingBottomDistanceIfNeeded() {
