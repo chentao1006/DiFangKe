@@ -765,8 +765,7 @@ extension FootprintModalView {
                         Button {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
                                 ensureFootprintManaged()
-                                footprint.activityTypeValue = activity.id.uuidString
-                                footprint.status = .manual
+                                setActivitySelection(activity.id.uuidString)
                                 hasChanged = true
                                 if !isDraft { try? modelContext.save() }
                                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -814,11 +813,18 @@ extension FootprintModalView {
         }
     }
 
+    private func setActivitySelection(_ value: String?) {
+        if isDraft {
+            footprint.setManualActivityType(value)
+        } else {
+            footprint.updateActivityType(to: value, in: modelContext)
+        }
+    }
+
     private func clearActivityType() {
         withAnimation {
             ensureFootprintManaged()
-            footprint.activityTypeValue = nil
-            footprint.status = .manual
+            setActivitySelection(nil)
             hasChanged = true
             if !isDraft { try? modelContext.save() }
         }
@@ -827,8 +833,7 @@ extension FootprintModalView {
     private func applyActivityType(_ type: ActivityType) {
         withAnimation {
             ensureFootprintManaged()
-            footprint.activityTypeValue = type.id.uuidString
-            footprint.status = .manual
+            setActivitySelection(type.id.uuidString)
             hasChanged = true
             if !isDraft { try? modelContext.save() }
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -1360,6 +1365,7 @@ private struct FootprintTimeAdjustmentView: View {
         let start = didChangeStart ? roundedStart : oldStart
         let end = didChangeEnd ? max(roundedEnd, start.addingTimeInterval(minimumFootprintDuration)) : max(oldEnd, start.addingTimeInterval(minimumFootprintDuration))
 
+        footprint.allowsAutomaticDurationExtension = false
         footprint.startTime = start
         footprint.endTime = end
         footprint.date = Calendar.current.startOfDay(for: start)
@@ -1724,6 +1730,7 @@ struct FootprintSplitView: View {
         let firstCoordinates = coordinates(from: oldStart, to: firstEnd, fallbackStartRatio: 0, fallbackEndRatio: splitRatio)
         let secondCoordinates = coordinates(from: secondStart, to: oldEnd, fallbackStartRatio: splitRatio, fallbackEndRatio: 1)
 
+        footprint.allowsAutomaticDurationExtension = false
         footprint.endTime = firstEnd
         footprint.date = Calendar.current.startOfDay(for: oldStart)
         footprint.status = .manual

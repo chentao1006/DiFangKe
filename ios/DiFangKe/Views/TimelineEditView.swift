@@ -574,6 +574,7 @@ struct TimelineEditView: View {
             floorsAscended: footprint.floorsAscended
         )
         copy.photoMetadata = footprint.photoMetadata
+        copy.allowsAutomaticDurationExtension = footprint.allowsAutomaticDurationExtension
         return copy
     }
 
@@ -953,6 +954,7 @@ struct TimelineEditView: View {
         case .footprint(let footprint):
             let originalEnd = footprint.endTime
             footprint.endTime = middleTime
+            footprint.allowsAutomaticDurationExtension = false
             footprint.status = .manual
             
             let newFootprint = copyFootprint(footprint)
@@ -960,6 +962,7 @@ struct TimelineEditView: View {
             newFootprint.date = Calendar.current.startOfDay(for: middleTime)
             newFootprint.startTime = middleTime
             newFootprint.endTime = originalEnd
+            newFootprint.allowsAutomaticDurationExtension = false
             newFootprint.status = .manual
             newFootprint.photoAssetIDs = []
             replaceItem(id: originalID, with: [.footprint(footprint), .footprint(newFootprint)])
@@ -1016,6 +1019,8 @@ struct TimelineEditView: View {
             floorsAscended: footprint.floorsAscended
         )
         persistent.photoMetadata = footprint.photoMetadata
+        persistent.allowsAutomaticDurationExtension = footprint.allowsAutomaticDurationExtension &&
+            startTime == footprint.startTime && endTime == footprint.endTime
         return persistent
     }
 
@@ -1055,6 +1060,7 @@ struct TimelineEditView: View {
             base.startTime = startTime
             base.endTime = endTime
             base.date = Calendar.current.startOfDay(for: startTime)
+            base.allowsAutomaticDurationExtension = false
             base.status = .manual
             editableTimelineItems = displayedTimelineItems.filter { !selectedIDs.contains($0.id) || $0.id == base.footprintID.uuidString }
             
@@ -1140,7 +1146,11 @@ struct TimelineEditView: View {
         for item in timelineItems where !finalIDs.contains(item.id) {
             switch item {
             case .footprint(let footprint):
-                modelContext.delete(footprint)
+                let footprintID = footprint.footprintID
+                let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+                if let stored = (try? modelContext.fetch(descriptor))?.first {
+                    modelContext.delete(stored)
+                }
             case .transport(let transport):
                 let recordID = transport.id
                 let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == recordID })
@@ -1153,17 +1163,31 @@ struct TimelineEditView: View {
         for layout in itemLayouts {
             switch layout.item {
             case .footprint(let draft):
-                if let footprint = timelineItems.compactMap({ item -> Footprint? in
-                    if case .footprint(let original) = item, original.footprintID == draft.footprintID {
-                        return original
+                let original = timelineItems.compactMap { item -> Footprint? in
+                    if case .footprint(let footprint) = item, footprint.footprintID == draft.footprintID {
+                        return footprint
                     }
                     return nil
-                }).first {
-                    footprint.startTime = layout.startTime
-                    footprint.endTime = layout.endTime
-                    footprint.date = Calendar.current.startOfDay(for: layout.startTime)
-                    footprint.status = .manual
-                    footprint.activityTypeValue = draft.activityTypeValue
+                }.first
+                let footprintID = draft.footprintID
+                let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+                if let footprint = (try? modelContext.fetch(descriptor))?.first {
+                    let timeWasEdited = original?.startTime != layout.startTime || original?.endTime != layout.endTime
+                    let boundaryWasFixed = draft.status == .manual && !draft.allowsAutomaticDurationExtension &&
+                        (original?.allowsAutomaticDurationExtension == true || original?.status != .manual)
+                    if timeWasEdited || boundaryWasFixed {
+                        footprint.startTime = layout.startTime
+                        footprint.endTime = layout.endTime
+                        footprint.date = Calendar.current.startOfDay(for: layout.startTime)
+                        footprint.allowsAutomaticDurationExtension = false
+                        footprint.status = .manual
+                        footprint.activityTypeValue = draft.activityTypeValue
+                    } else if original?.activityTypeValue != draft.activityTypeValue ||
+                                (draft.status == .manual && original?.status != .manual) {
+                        // Save onto the managed record, preserving any duration
+                        // accumulated while the editor displayed its snapshot.
+                        footprint.setManualActivityType(draft.activityTypeValue)
+                    }
                 } else {
                     modelContext.insert(makePersistentFootprint(from: draft, startTime: layout.startTime, endTime: layout.endTime))
                 }
@@ -1265,8 +1289,7 @@ struct TimelineEditView: View {
         case .footprint(let fp):
             Button {
                 withAnimation {
-                    fp.activityTypeValue = nil
-                    fp.status = .manual
+                    fp.setManualActivityType(nil)
                     hasStagedStructuralChanges = true
                     self.timelineUpdateIdentifier += 1
                     self.timelineLayoutIdentifier += 1
@@ -1277,8 +1300,7 @@ struct TimelineEditView: View {
             ForEach(allActivities) { type in
                 Button {
                     withAnimation {
-                        fp.activityTypeValue = type.id.uuidString
-                        fp.status = .manual
+                        fp.setManualActivityType(type.id.uuidString)
                         hasStagedStructuralChanges = true
                         self.timelineUpdateIdentifier += 1
                         self.timelineLayoutIdentifier += 1

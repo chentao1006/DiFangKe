@@ -170,6 +170,7 @@ private struct ContinuousTimelineView: View {
     @State private var availableTimelineDateSet = Set<Date>()
     @State private var hiddenTimelineDateSet = Set<Date>()
     @State private var visibleTimelineFillTask: Task<Void, Never>?
+    @State private var timelineReloadTask: Task<Void, Never>?
     @State private var midnightTimelineRefreshTask: Task<Void, Never>?
     @State private var isReloadingTimelineExternally = false
     @State private var mapInteractionEnableTask: Task<Void, Never>?
@@ -568,6 +569,7 @@ private struct ContinuousTimelineView: View {
 
     private func handleTimelineDisappear() {
         midnightTimelineRefreshTask?.cancel()
+        timelineReloadTask?.cancel()
         visibleMapUpdateTask?.cancel()
         visibleTimelineFillTask?.cancel()
         mapCameraTransitionTask?.cancel()
@@ -577,8 +579,16 @@ private struct ContinuousTimelineView: View {
     }
 
     private func handleFootprintDataChanged(_: Notification) {
-        reloadLoadedTimeline()
-        Task { await refreshAvailableTimelineDateCache() }
+        // CloudKit imports and one logical timeline save can emit a burst of
+        // store-change notifications. Reloading all mounted days and the map
+        // for every event causes visible stalls and sustained CPU/GPU work.
+        timelineReloadTask?.cancel()
+        timelineReloadTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            reloadLoadedTimeline()
+            _ = await refreshAvailableTimelineDateCache()
+        }
     }
 
     private func scheduleLocationSettingsAlertIfNeeded() {
@@ -1958,18 +1968,11 @@ private struct ContinuousTimelineSheet: View {
     @Environment(\.scenePhase) private var scenePhase
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var activityTypes: [ActivityType]
     @Query(sort: \Place.name) private var allPlaces: [Place]
-    @State private var lastPrefetchOldestDate: Date?
-    @State private var allowsEarlierDatePrefetch = false
-    @State private var latestScrollOffsetY: CGFloat = .infinity
-    @State private var didReachEarliestAvailableDate = false
-    @State private var lastEarlierDatePrefetchTime: Date?
     @State private var isShowingCalendar = false
     @State private var isShowingHistory = false
     @State private var isHistoryContentReady = false
     @State private var historyContentPreparationTask: Task<Void, Never>?
     @State private var isHistoryStatisticsActive = false
-    @State private var earlierDatePrefetchTask: Task<Void, Never>?
-    @State private var scrollMetrics = ContinuousTimelineScrollMetrics()
     @State private var scrollRestorer = ContinuousTimelineScrollRestorer()
     @State private var headerVisibleDates: [Date] = []
     @State private var isViewingUndatedFutureTrips = false
@@ -1987,12 +1990,15 @@ private struct ContinuousTimelineSheet: View {
     @State private var latestDateFrames: [Date: CGRect] = [:]
     @State private var latestViewportHeight: CGFloat = 0
     @State private var calendarBackfillTask: Task<Void, Never>?
+    @State private var dateFrameUpdateCoalescer = ContinuousTimelineDateFrameUpdateCoalescer()
     @State private var initialTodayScrollTask: Task<Void, Never>?
     @State private var initialLoadingFallbackTask: Task<Void, Never>?
     @State private var allowsInitialLoadingFallback = false
+    @State private var scrollNavigationGeneration = UUID()
+    @State private var returnToTodayTask: Task<Void, Never>?
     @State private var timelineScrollPosition: ScrollTarget?
-    @State private var lastUserInteractionTime = Date.distantPast
     @State private var isLoadingMoreEarlier = false
+    @State private var isPreservingViewportForEarlierLoad = false
     @State private var isLoadingMoreLater = false
     @State private var loadingGapAfterDates = Set<Date>()
     @State private var loadingGapBeforeDates = Set<Date>()
@@ -2054,12 +2060,18 @@ private struct ContinuousTimelineSheet: View {
 
     private var timelineScrollPositionBinding: Binding<ScrollTarget?> {
         Binding(
-            get: { timelineScrollPosition },
+            // Prepending dates is preserved directly on UIScrollView using its
+            // content-height delta. Detach SwiftUI's ID-based positioning for
+            // that operation; otherwise both systems adjust the offset and the
+            // timeline visibly bounces before eventually snapping to an edge.
+            get: { isPreservingViewportForEarlierLoad ? nil : timelineScrollPosition },
             set: { newValue in
                 // While a calendar jump is in flight, viewport updates may
                 // report the old (usually today) row. Keep the requested ID
                 // until that destination has actually become visible.
-                guard calendarScrollLockTarget == nil else { return }
+                guard !isPreservingViewportForEarlierLoad,
+                      calendarScrollLockTarget == nil,
+                      returnToTodayTask == nil else { return }
                 timelineScrollPosition = newValue
             }
         )
@@ -2393,11 +2405,7 @@ private struct ContinuousTimelineSheet: View {
     @ViewBuilder
     private func mainScrollView(proxy: ScrollViewProxy, viewport: GeometryProxy) -> some View {
                         ScrollView {
-                            ScrollOffsetObserver(restorer: scrollRestorer) { metrics in
-                                Task { @MainActor in
-                                    applyScrollMetrics(metrics)
-                                }
-                            }
+                            ScrollOffsetObserver(restorer: scrollRestorer)
                             .frame(width: 0, height: 0)
 
                             LazyVStack(alignment: .leading, spacing: 0) {
@@ -2493,15 +2501,17 @@ private struct ContinuousTimelineSheet: View {
                             .scrollTargetLayout()
                         }
                         .scrollPosition(id: timelineScrollPositionBinding, anchor: .bottom)
-                        .scrollDisabled(isCollapsed)
+                        .scrollDisabled(isCollapsed || isPreservingViewportForEarlierLoad)
                         .coordinateSpace(name: "continuousTimelineScroll")
                         .onChange(of: viewport.size) { oldSize, newSize in
                             restoreTimelineDateAfterRotation(from: oldSize, to: newSize, using: proxy)
                         }
                         .onPreferenceChange(ContinuousTimelineDateFramePreferenceKey.self) { frames in
                             let viewportHeight = viewport.size.height
-                            Task { @MainActor in
-                                await Task.yield()
+                            // LazyVStack may publish several geometry snapshots
+                            // in one frame. Keep only the newest one so state/map
+                            // updates cannot form a per-frame feedback loop.
+                            dateFrameUpdateCoalescer.schedule {
                                 applyDateFrameUpdate(frames, viewportHeight: viewportHeight, using: proxy)
                             }
                         }
@@ -2531,14 +2541,7 @@ private struct ContinuousTimelineSheet: View {
                                 .accessibilityLabel("回到当下")
                             }
                         }
-                    .onChange(of: dates) { oldDates, newDates in
-                        if let requestedOldestDate = lastPrefetchOldestDate,
-                           newDates.first == requestedOldestDate {
-                            didReachEarliestAvailableDate = true
-                        } else if newDates.first != oldDates.first {
-                            didReachEarliestAvailableDate = false
-                        }
-
+                    .onChange(of: dates) { _, newDates in
                         if let target = calendarScrollLockTarget, newDates.contains(target) {
                             scheduleLockedCalendarScroll(using: proxy)
                         }
@@ -2566,7 +2569,8 @@ private struct ContinuousTimelineSheet: View {
                         // stepping on it here would race the "stay on today at launch" behavior.
                         guard hasCompletedInitialTimelinePositioning else { return }
                         if isReloading {
-                            externalReloadViewportAnchor = scrollRestorer.captureAnchor()
+                            externalReloadViewportAnchor = returnToTodayTask == nil && calendarScrollLockTarget == nil
+                                ? scrollRestorer.captureAnchor() : nil
                             freezesViewportDrivenUpdatesUntil = Date.distantFuture
                         } else {
                             // Don't force an immediate re-read here: latestDateFrames can still
@@ -2627,11 +2631,14 @@ private struct ContinuousTimelineSheet: View {
                         restoreFutureTripTimelinePosition(using: proxy)
                     }
                     .onDisappear {
+                        returnToTodayTask?.cancel()
+                        scrollRestorer.cancelRestoration()
                         initialTodayScrollTask?.cancel()
                         initialLoadingFallbackTask?.cancel()
                         calendarScrollRetryTask?.cancel()
                         calendarBackfillPinTask?.cancel()
                         calendarBackfillTask?.cancel()
+                        dateFrameUpdateCoalescer.cancel()
                     }
     }
 
@@ -3086,15 +3093,6 @@ private struct ContinuousTimelineSheet: View {
         return Date() < freezesViewportDrivenUpdatesUntil
     }
 
-    private func applyScrollMetrics(_ metrics: ContinuousTimelineScrollMetrics) {
-        guard metrics != scrollMetrics else { return }
-        scrollMetrics = metrics
-        latestScrollOffsetY = metrics.topOffsetY
-        if scrollRestorer.isUserInteracting {
-            lastUserInteractionTime = Date()
-        }
-    }
-
     private func restoreTimelineDateAfterRotation(from oldSize: CGSize, to newSize: CGSize, using proxy: ScrollViewProxy) {
         guard oldSize.width > 0, oldSize.height > 0,
               newSize.width > 0, newSize.height > 0,
@@ -3199,7 +3197,8 @@ private struct ContinuousTimelineSheet: View {
         // Date-frame updates must not overwrite it with the preceding date.
         if isViewingUndatedFutureTrips { return }
 
-        if scrollMetrics.bottomDistance < 8, let bottomDate = dates.last {
+        if (scrollRestorer.currentMetrics?.bottomDistance ?? .infinity) < 8,
+           let bottomDate = dates.last {
             activeTimelineDate = bottomDate
             if headerVisibleDates != [bottomDate] {
                 headerVisibleDates = [bottomDate]
@@ -3477,6 +3476,32 @@ private struct ContinuousTimelineSheet: View {
         }
     }
 
+    /// An explicit destination supersedes every previously captured viewport.
+    /// Data loads may finish, but their old anchors must never win afterward.
+    private func beginExplicitTimelineNavigation() {
+        scrollNavigationGeneration = UUID()
+        isPreservingViewportForEarlierLoad = false
+        returnToTodayTask?.cancel()
+        returnToTodayTask = nil
+        initialTodayScrollTask?.cancel()
+        calendarBackfillTask?.cancel()
+        calendarBackfillPinTask?.cancel()
+        calendarScrollRetryTask?.cancel()
+        calendarScrollRetryTask = nil
+        calendarBackfillPinTask = nil
+        calendarScrollLockTarget = nil
+        calendarBackfillPinnedDate = nil
+        pendingCalendarBackfillDates = []
+        backfillViewportSuppressionToken = UUID()
+        suppressesViewportUpdatesForBackfill = false
+        externalReloadViewportAnchor = nil
+        viewportAnchorBeforeBackground = nil
+        activeTimelineDateBeforeBackground = nil
+        timelineScrollPosition = nil
+        scrollRestorer.cancelRestoration()
+        freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.8)
+    }
+
     private func requestScrollToToday(using proxy: ScrollViewProxy) {
         if let target = targetScrollDate {
             scrollToDate(target, using: proxy)
@@ -3484,19 +3509,28 @@ private struct ContinuousTimelineSheet: View {
             return
         }
         
+        beginExplicitTimelineNavigation()
+        let generation = scrollNavigationGeneration
         if isCollapsed {
             withAnimation(.easeInOut(duration: 0.2)) {
                 timelineDetent = .medium
             }
         }
 
-        Task { @MainActor in
+        returnToTodayTask = Task { @MainActor in
+            defer {
+                if generation == scrollNavigationGeneration { returnToTodayTask = nil }
+            }
+            let today = Calendar.current.startOfDay(for: Date())
+            if !dates.contains(today) { _ = await loadDate(today) }
             for delay in [0, 90_000_000, 220_000_000, 420_000_000] {
                 if delay > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(delay))
                 }
+                guard !Task.isCancelled, generation == scrollNavigationGeneration else { return }
                 scrollToToday(using: proxy)
             }
+            hasCompletedInitialTimelinePositioning = true
         }
     }
 
@@ -3551,7 +3585,6 @@ private struct ContinuousTimelineSheet: View {
         
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 450_000_000)
-            allowsEarlierDatePrefetch = true
             freezesViewportDrivenUpdatesUntil = nil
         }
     }
@@ -3648,6 +3681,8 @@ private struct ContinuousTimelineSheet: View {
     }
 
     private func scrollToDate(_ date: Date, using proxy: ScrollViewProxy) {
+        beginExplicitTimelineNavigation()
+        let generation = scrollNavigationGeneration
         let normalizedDate = Calendar.current.startOfDay(for: date)
         calendarBackfillTask?.cancel()
         calendarScrollRetryTask?.cancel()
@@ -3663,7 +3698,7 @@ private struct ContinuousTimelineSheet: View {
         Task { @MainActor in
             if !dates.contains(normalizedDate) {
                 guard await loadDate(normalizedDate) else {
-                    if calendarScrollLockTarget == normalizedDate {
+                    if generation == scrollNavigationGeneration, calendarScrollLockTarget == normalizedDate {
                         calendarScrollLockTarget = nil
                         pendingCalendarBackfillDates = []
                         freezesViewportDrivenUpdatesUntil = nil
@@ -3674,7 +3709,8 @@ private struct ContinuousTimelineSheet: View {
 
             // A newer calendar selection may have replaced this request while
             // the target date was loading.
-            guard calendarScrollLockTarget == normalizedDate else { return }
+            guard generation == scrollNavigationGeneration,
+                  calendarScrollLockTarget == normalizedDate else { return }
             applySelectedCalendarDate(normalizedDate)
             timelineScrollPosition = .date(normalizedDate)
             scheduleLockedCalendarScroll(using: proxy)
@@ -3685,8 +3721,11 @@ private struct ContinuousTimelineSheet: View {
         guard let target = calendarScrollLockTarget else { return }
         guard calendarScrollRetryTask == nil else { return }
 
+        let generation = scrollNavigationGeneration
         calendarScrollRetryTask = Task { @MainActor in
-            defer { calendarScrollRetryTask = nil }
+            defer {
+                if generation == scrollNavigationGeneration { calendarScrollRetryTask = nil }
+            }
 
             for attempt in 0..<10 {
                 guard !Task.isCancelled else { return }
@@ -3702,12 +3741,14 @@ private struct ContinuousTimelineSheet: View {
                 }
 
                 try? await Task.sleep(nanoseconds: attempt < 3 ? 120_000_000 : 220_000_000)
+                guard !Task.isCancelled, calendarScrollLockTarget == target else { return }
                 if isCalendarScrollTargetVisible(target) {
                     break
                 }
             }
 
             applySelectedCalendarDate(target)
+            hasCompletedInitialTimelinePositioning = true
             calendarScrollLockTarget = nil
             timelineScrollPosition = nil
             freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.25)
@@ -3720,8 +3761,11 @@ private struct ContinuousTimelineSheet: View {
     private func scheduleCalendarBackfillPin(to date: Date, using proxy: ScrollViewProxy) {
         guard calendarBackfillPinTask == nil else { return }
 
+        let generation = scrollNavigationGeneration
         calendarBackfillPinTask = Task { @MainActor in
-            defer { calendarBackfillPinTask = nil }
+            defer {
+                if generation == scrollNavigationGeneration { calendarBackfillPinTask = nil }
+            }
 
             for _ in 0..<4 {
                 guard !Task.isCancelled else { return }
@@ -3785,6 +3829,7 @@ private struct ContinuousTimelineSheet: View {
                 applySelectedCalendarDate(pinnedDate)
                 proxy.scrollTo(ScrollTarget.date(pinnedDate), anchor: .bottom)
                 _ = await loadBackfillDates(batch)
+                guard !Task.isCancelled else { return }
                 applySelectedCalendarDate(pinnedDate)
                 proxy.scrollTo(ScrollTarget.date(pinnedDate), anchor: .bottom)
                 for _ in 0..<3 {
@@ -3811,15 +3856,8 @@ private struct ContinuousTimelineSheet: View {
     }
 
     private var hasUserInteractionSettled: Bool {
-        !scrollRestorer.isUserInteracting && Date().timeIntervalSince(lastUserInteractionTime) >= 0.75
-    }
-
-    private func waitForAnyUserInteractionToSettle() async {
-        while scrollRestorer.isRestoring || !hasUserInteractionSettled {
-            guard !Task.isCancelled else { return }
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 250_000_000)
-        }
+        !scrollRestorer.isUserInteracting
+            && Date().timeIntervalSince(scrollRestorer.lastUserInteractionTime) >= 0.75
     }
 
     private func yieldAfterCalendarBackfillBatch() async {
@@ -3849,14 +3887,27 @@ private struct ContinuousTimelineSheet: View {
     private func requestLoadEarlierDates() {
         guard !isLoadingMoreEarlier else { return }
 
+        let generation = scrollNavigationGeneration
         Task { @MainActor in
+            guard generation == scrollNavigationGeneration else { return }
             isLoadingMoreEarlier = true
-            freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.45)
+            isPreservingViewportForEarlierLoad = true
+            timelineScrollPosition = nil
+            freezesViewportDrivenUpdatesUntil = Date.distantFuture
             let anchorBeforeLoading = scrollRestorer.captureAnchor()
-            let bottomDistanceBeforeLoading = anchorBeforeLoading?.bottomDistance ?? scrollMetrics.bottomDistance
-            scrollRestorer.restore(anchorBeforeLoading, fallbackBottomDistance: bottomDistanceBeforeLoading)
+            let bottomDistanceBeforeLoading = anchorBeforeLoading?.bottomDistance
+                ?? scrollRestorer.currentMetrics?.bottomDistance
+                ?? 0
+            scrollRestorer.beginContinuousRestoration(
+                anchorBeforeLoading,
+                fallbackBottomDistance: bottomDistanceBeforeLoading
+            )
             let didLoad = await loadEarlierDates()
             isLoadingMoreEarlier = false
+            guard generation == scrollNavigationGeneration else {
+                isPreservingViewportForEarlierLoad = false
+                return
+            }
 
             if didLoad {
                 // Inserting history above the viewport increases content height.
@@ -3864,13 +3915,20 @@ private struct ContinuousTimelineSheet: View {
                 // the user's finger remain visually fixed.
                 scrollRestorer.restore(anchorBeforeLoading, fallbackBottomDistance: bottomDistanceBeforeLoading)
                 Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 340_000_000)
-                    guard !scrollRestorer.isRestoring else { return }
+                    for _ in 0..<30 where scrollRestorer.isRestoring {
+                        try? await Task.sleep(nanoseconds: 16_000_000)
+                    }
+                    guard generation == scrollNavigationGeneration else { return }
+                    if scrollRestorer.isRestoring {
+                        scrollRestorer.cancelRestoration()
+                    }
+                    isPreservingViewportForEarlierLoad = false
                     freezesViewportDrivenUpdatesUntil = nil
                     applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
                 }
             } else {
-                didReachEarliestAvailableDate = true
+                scrollRestorer.cancelRestoration()
+                isPreservingViewportForEarlierLoad = false
                 freezesViewportDrivenUpdatesUntil = nil
             }
         }
@@ -3879,11 +3937,14 @@ private struct ContinuousTimelineSheet: View {
     private func requestLoadLaterDates() {
         guard !isLoadingMoreLater else { return }
 
+        let generation = scrollNavigationGeneration
         Task { @MainActor in
+            guard generation == scrollNavigationGeneration else { return }
             isLoadingMoreLater = true
             freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.45)
             let didLoad = await loadLaterDates()
             isLoadingMoreLater = false
+            guard generation == scrollNavigationGeneration else { return }
             freezesViewportDrivenUpdatesUntil = nil
             if !didLoad {
                 applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
@@ -3898,11 +3959,14 @@ private struct ContinuousTimelineSheet: View {
         let datesToLoad = Array(loadableTimelineDates(between: earlierDate, and: laterDate).prefix(calendarBackfillBatchSize))
         guard !datesToLoad.isEmpty else { return }
 
+        let generation = scrollNavigationGeneration
         Task { @MainActor in
+            guard generation == scrollNavigationGeneration else { return }
             loadingGapAfterDates.insert(normalizedEarlierDate)
             freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.45)
             let didLoad = await loadGapDates(datesToLoad)
             loadingGapAfterDates.remove(normalizedEarlierDate)
+            guard generation == scrollNavigationGeneration else { return }
             freezesViewportDrivenUpdatesUntil = nil
             if !didLoad {
                 applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
@@ -3917,19 +3981,24 @@ private struct ContinuousTimelineSheet: View {
         let datesToLoad = Array(loadableTimelineDates(between: earlierDate, and: laterDate).suffix(calendarBackfillBatchSize))
         guard !datesToLoad.isEmpty else { return }
 
+        let generation = scrollNavigationGeneration
         Task { @MainActor in
+            guard generation == scrollNavigationGeneration else { return }
             loadingGapBeforeDates.insert(normalizedLaterDate)
             freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.45)
             let anchorBeforeLoading = scrollRestorer.captureAnchor()
-            let bottomDistanceBeforeLoading = anchorBeforeLoading?.bottomDistance ?? scrollMetrics.bottomDistance
+            let bottomDistanceBeforeLoading = anchorBeforeLoading?.bottomDistance
+                ?? scrollRestorer.currentMetrics?.bottomDistance
+                ?? 0
             scrollRestorer.restore(anchorBeforeLoading, fallbackBottomDistance: bottomDistanceBeforeLoading)
             let didLoad = await loadGapDates(datesToLoad)
             loadingGapBeforeDates.remove(normalizedLaterDate)
+            guard generation == scrollNavigationGeneration else { return }
             if didLoad {
                 scrollRestorer.restore(anchorBeforeLoading, fallbackBottomDistance: bottomDistanceBeforeLoading)
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 340_000_000)
-                    guard !scrollRestorer.isRestoring else { return }
+                    guard generation == scrollNavigationGeneration, !scrollRestorer.isRestoring else { return }
                     freezesViewportDrivenUpdatesUntil = nil
                     applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
                 }
@@ -3937,77 +4006,6 @@ private struct ContinuousTimelineSheet: View {
                 freezesViewportDrivenUpdatesUntil = nil
                 applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
             }
-        }
-    }
-
-    private func prefetchEarlierDatesIfNeeded(scrollOffsetY: CGFloat) {
-        guard allowsEarlierDatePrefetch else { return }
-        guard !scrollRestorer.isRestoring else { return }
-        guard !scrollRestorer.isUserInteracting else { return }
-        guard hasUserInteractionSettled else { return }
-        guard !didReachEarliestAvailableDate else { return }
-        guard let oldestDate = dates.first else { return }
-
-        let prefetchDistance: CGFloat = 520
-        guard scrollOffsetY < prefetchDistance else { return }
-
-        scheduleEarlierDatePrefetch(for: oldestDate)
-    }
-
-    private func scheduleEarlierDatePrefetch(for oldestDate: Date) {
-        guard allowsEarlierDatePrefetch else { return }
-        guard !scrollRestorer.isRestoring else { return }
-        guard !didReachEarliestAvailableDate else { return }
-        guard lastPrefetchOldestDate != oldestDate else { return }
-
-        earlierDatePrefetchTask?.cancel()
-        earlierDatePrefetchTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 900_000_000)
-            guard !Task.isCancelled else { return }
-            guard !scrollRestorer.isRestoring else { return }
-            guard !scrollRestorer.isUserInteracting else { return }
-            guard hasUserInteractionSettled else { return }
-            guard latestScrollOffsetY < 520 else { return }
-            await loadEarlierDatesIfNeeded(for: oldestDate)
-        }
-    }
-
-    private func loadEarlierDatesIfNeeded(for oldestDate: Date) async {
-        guard allowsEarlierDatePrefetch else { return }
-        guard !scrollRestorer.isRestoring else { return }
-        guard !scrollRestorer.isUserInteracting else { return }
-        guard hasUserInteractionSettled else { return }
-        guard !didReachEarliestAvailableDate else { return }
-        guard lastPrefetchOldestDate != oldestDate else { return }
-        let now = Date()
-        if let lastEarlierDatePrefetchTime,
-           now.timeIntervalSince(lastEarlierDatePrefetchTime) < 0.9 {
-            return
-        }
-
-        let anchorBeforeLoading = scrollRestorer.captureAnchor()
-        let bottomDistanceBeforeLoading = anchorBeforeLoading?.bottomDistance ?? scrollMetrics.bottomDistance
-        freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.45)
-        lastEarlierDatePrefetchTime = now
-        lastPrefetchOldestDate = oldestDate
-
-        scrollRestorer.restore(anchorBeforeLoading, fallbackBottomDistance: bottomDistanceBeforeLoading)
-        await waitForAnyUserInteractionToSettle()
-        guard !Task.isCancelled else { return }
-        guard hasUserInteractionSettled else { return }
-        let loadedEarlierDates = await loadEarlierDates()
-
-        if loadedEarlierDates {
-            scrollRestorer.restore(anchorBeforeLoading, fallbackBottomDistance: bottomDistanceBeforeLoading)
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 340_000_000)
-                guard !scrollRestorer.isRestoring else { return }
-                freezesViewportDrivenUpdatesUntil = nil
-                applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
-            }
-        } else {
-            didReachEarliestAvailableDate = true
-            freezesViewportDrivenUpdatesUntil = nil
         }
     }
 
@@ -4292,6 +4290,7 @@ private struct ContinuousTimelineSheet: View {
         base.startTime = min(base.startTime, other.startTime)
         base.endTime = max(base.endTime, other.endTime)
         base.date = Calendar.current.startOfDay(for: base.startTime)
+        base.allowsAutomaticDurationExtension = false
         base.status = .manual
 
         var mergedLocations = base.footprintLocations
@@ -4540,6 +4539,25 @@ private struct ContinuousTimelineUndatedFutureTripsFramePreferenceKey: Preferenc
     }
 }
 
+@MainActor
+private final class ContinuousTimelineDateFrameUpdateCoalescer {
+    private var task: Task<Void, Never>?
+
+    func schedule(_ update: @escaping @MainActor () -> Void) {
+        task?.cancel()
+        task = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard !Task.isCancelled else { return }
+            update()
+        }
+    }
+
+    func cancel() {
+        task?.cancel()
+        task = nil
+    }
+}
+
 private struct ContinuousTimelineScrollMetrics: Equatable {
     var topOffsetY: CGFloat = .infinity
     var contentOffsetY: CGFloat = 0
@@ -4567,10 +4585,9 @@ private struct ContinuousTimelineScrollAnchor {
 
 private struct ScrollOffsetObserver: UIViewRepresentable {
     let restorer: ContinuousTimelineScrollRestorer
-    let onChange: (ContinuousTimelineScrollMetrics) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onChange: onChange)
+        Coordinator()
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -4580,7 +4597,6 @@ private struct ScrollOffsetObserver: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.onChange = onChange
         context.coordinator.restorer = restorer
         DispatchQueue.main.async {
             context.coordinator.attachIfNeeded(from: uiView)
@@ -4588,18 +4604,11 @@ private struct ScrollOffsetObserver: UIViewRepresentable {
     }
 
     final class Coordinator {
-        var onChange: (ContinuousTimelineScrollMetrics) -> Void
-        var restorer: ContinuousTimelineScrollRestorer
+        var restorer = ContinuousTimelineScrollRestorer()
         private weak var scrollView: UIScrollView?
         private var contentOffsetObservation: NSKeyValueObservation?
         private var contentSizeObservation: NSKeyValueObservation?
         private var boundsObservation: NSKeyValueObservation?
-        private var lastPublishedMetrics: ContinuousTimelineScrollMetrics?
-
-        init(onChange: @escaping (ContinuousTimelineScrollMetrics) -> Void) {
-            self.onChange = onChange
-            self.restorer = ContinuousTimelineScrollRestorer()
-        }
 
         func attachIfNeeded(from view: UIView) {
             guard scrollView == nil else { return }
@@ -4608,53 +4617,14 @@ private struct ScrollOffsetObserver: UIViewRepresentable {
             self.scrollView = scrollView
             restorer.attach(scrollView)
             contentOffsetObservation = scrollView.observe(\.contentOffset, options: [.initial, .new]) { [weak self] _, _ in
-                self?.publishMetrics()
+                self?.restorer.recordUserInteractionIfNeeded()
             }
             contentSizeObservation = scrollView.observe(\.contentSize, options: [.initial, .new]) { [weak self] _, _ in
                 self?.restorer.applyPendingBottomDistanceIfNeeded()
-                self?.publishMetrics()
             }
             boundsObservation = scrollView.observe(\.bounds, options: [.initial, .new]) { [weak self] _, _ in
                 self?.restorer.applyPendingBottomDistanceIfNeeded()
-                self?.publishMetrics()
             }
-        }
-
-        private func publishMetrics() {
-            guard let scrollView else { return }
-            let metrics = ContinuousTimelineScrollMetrics(
-                topOffsetY: scrollView.contentOffset.y + scrollView.adjustedContentInset.top,
-                contentOffsetY: scrollView.contentOffset.y,
-                contentHeight: scrollView.contentSize.height,
-                viewportHeight: scrollView.bounds.height,
-                adjustedTopInset: scrollView.adjustedContentInset.top,
-                adjustedBottomInset: scrollView.adjustedContentInset.bottom,
-                isUserInteracting: scrollView.isDragging || scrollView.isDecelerating || scrollView.isTracking
-            )
-            guard shouldPublish(metrics) else { return }
-            lastPublishedMetrics = metrics
-
-            if Thread.isMainThread {
-                onChange(metrics)
-            } else {
-                DispatchQueue.main.async { [weak self] in
-                    self?.onChange(metrics)
-                }
-            }
-        }
-
-        private func shouldPublish(_ metrics: ContinuousTimelineScrollMetrics) -> Bool {
-            guard let lastPublishedMetrics else { return true }
-
-            if metrics.isUserInteracting != lastPublishedMetrics.isUserInteracting { return true }
-            if abs(metrics.contentHeight - lastPublishedMetrics.contentHeight) > 1 { return true }
-            if abs(metrics.viewportHeight - lastPublishedMetrics.viewportHeight) > 1 { return true }
-            if abs(metrics.adjustedTopInset - lastPublishedMetrics.adjustedTopInset) > 1 { return true }
-            if abs(metrics.adjustedBottomInset - lastPublishedMetrics.adjustedBottomInset) > 1 { return true }
-
-            let offsetThreshold: CGFloat = metrics.isUserInteracting ? 24 : 8
-            return abs(metrics.contentOffsetY - lastPublishedMetrics.contentOffsetY) >= offsetThreshold ||
-                abs(metrics.topOffsetY - lastPublishedMetrics.topOffsetY) >= offsetThreshold
         }
     }
 }
@@ -4665,6 +4635,7 @@ private final class ContinuousTimelineScrollRestorer {
     private var pendingAnchor: ContinuousTimelineScrollAnchor?
     private var pendingFallbackBottomDistance: CGFloat?
     private(set) var isRestoring = false
+    private(set) var lastUserInteractionTime = Date.distantPast
 
     var currentMetrics: ContinuousTimelineScrollMetrics? {
         guard let scrollView else { return nil }
@@ -4684,6 +4655,12 @@ private final class ContinuousTimelineScrollRestorer {
         return scrollView.isDragging || scrollView.isDecelerating || scrollView.isTracking
     }
 
+    func recordUserInteractionIfNeeded() {
+        if isUserInteracting {
+            lastUserInteractionTime = Date()
+        }
+    }
+
     func attach(_ scrollView: UIScrollView) {
         self.scrollView = scrollView
     }
@@ -4696,6 +4673,26 @@ private final class ContinuousTimelineScrollRestorer {
             viewportHeight: scrollView.bounds.height,
             adjustedBottomInset: scrollView.adjustedContentInset.bottom
         )
+    }
+
+    func cancelRestoration() {
+        restoreTask?.cancel()
+        restoreTask = nil
+        pendingAnchor = nil
+        pendingFallbackBottomDistance = nil
+        isRestoring = false
+    }
+
+    /// Keep compensating for every content-size change until the caller
+    /// explicitly replaces or cancels this restoration. This is used while an
+    /// async prepend may publish cached and fetched rows at different times.
+    func beginContinuousRestoration(_ anchor: ContinuousTimelineScrollAnchor?, fallbackBottomDistance: CGFloat) {
+        restoreTask?.cancel()
+        restoreTask = nil
+        pendingAnchor = anchor
+        pendingFallbackBottomDistance = fallbackBottomDistance
+        isRestoring = true
+        applyPendingBottomDistanceIfNeeded()
     }
 
     func restore(_ anchor: ContinuousTimelineScrollAnchor?, fallbackBottomDistance: CGFloat) {
@@ -4757,7 +4754,6 @@ private final class ContinuousTimelineScrollRestorer {
         guard abs(scrollView.contentOffset.y - clampedOffsetY) > 0.5 else { return }
         UIView.performWithoutAnimation {
             scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: clampedOffsetY), animated: false)
-            scrollView.layoutIfNeeded()
         }
     }
 }

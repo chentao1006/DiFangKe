@@ -470,7 +470,9 @@ final class WidgetDataSyncManager {
                 cloudKitDatabase: .none // 核心修复：强制禁用小组件同步容器的 CloudKit，防止与主 App 冲突
             )
             do {
-                self.container = try ModelContainer(for: schema, migrationPlan: DiFangKeMigrationPlan.self, configurations: [config])
+                // Match the app's unversioned store. The staged plan cannot
+                // recognize existing installations and fails with Cocoa 134504.
+                self.container = try ModelContainer(for: schema, configurations: [config])
             } catch {
                 print("[WidgetSync] Failed to create fallback container: \(error)")
             }

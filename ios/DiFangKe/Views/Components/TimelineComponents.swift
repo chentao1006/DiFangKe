@@ -1115,6 +1115,7 @@ struct FootprintCardView: View {
         base.startTime = min(base.startTime, other.startTime)
         base.endTime = max(base.endTime, other.endTime)
         base.date = Calendar.current.startOfDay(for: base.startTime)
+        base.allowsAutomaticDurationExtension = false
         base.status = .manual
 
         var mergedLocations = base.footprintLocations
@@ -1171,11 +1172,7 @@ struct FootprintCardView: View {
 
     private func applyActivityType(_ activity: ActivityType?) {
         withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-            if footprint.modelContext == nil {
-                modelContext.insert(footprint)
-            }
-            footprint.activityTypeValue = activity?.id.uuidString
-            footprint.status = .manual
+            footprint.updateActivityType(to: activity?.id.uuidString, in: modelContext)
             try? modelContext.save()
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }

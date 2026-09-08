@@ -123,8 +123,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     LocationManager.shared.startTracking()
                 }
                 
-                // 请求一次精确定位，让系统知道我们仍需要位置服务
-                LocationManager.shared.requestSingleLocation()
+                // 已在追踪中的标准定位会话不需要每次 BG refresh 再次启动。
+                // 重复 startUpdatingLocation 会把静止状态拉回活跃定位，造成
+                // 额外耗电；若会话实际丢失，上面的 isTracking 分支会恢复它。
                 await WidgetDataSyncManager.shared.syncTodayOnly()
                 await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded()
                 WatchSyncManager.shared.syncHourlyIfNeeded()
@@ -205,6 +206,7 @@ struct DiFangKeApp: App {
     @State private var foregroundWidgetSyncTask: Task<Void, Never>?
     @State private var backgroundWidgetSyncTask: Task<Void, Never>?
     @State private var watchHourlySyncTask: Task<Void, Never>?
+    @State private var didRunStartupDataMaintenance = false
     
     init() {
         // We move the heavy ModelContainer initialization to a background task
@@ -245,9 +247,14 @@ struct DiFangKeApp: App {
                                     // Clean up duplicates created by older builds
                                     // before the timeline reads them.  New rebuilds
                                     // are guarded at insertion time as well.
-                                    if DataDeduplicationService.deduplicateTransports(context: context) > 0 {
-                                        TimelineBuilder.timelineCache.removeAll()
-                                        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                                    if !didRunStartupDataMaintenance {
+                                        didRunStartupDataMaintenance = true
+                                        let exactClonesRemoved = DataDeduplicationService.reconcileImportedDuplicates(in: container)
+                                        let transportsRemoved = DataDeduplicationService.deduplicateTransports(context: context)
+                                        if exactClonesRemoved > 0 || transportsRemoved > 0 {
+                                            TimelineBuilder.timelineCache.removeAll()
+                                            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                                        }
                                     }
                                     
                                     let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
@@ -257,10 +264,6 @@ struct DiFangKeApp: App {
                                     
                                     setupDefaultData(context: context)
                                     WidgetDataSyncManager.shared.updateContainer(container)
-                                    Task {
-                                        try? await Task.sleep(nanoseconds: 8_000_000_000)
-                                        await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded()
-                                    }
                                 }
                                 .transition(.opacity)
                         }

@@ -5,6 +5,7 @@ import CoreLocation
 @MainActor
 enum DataDeduplicationService {
     struct Report {
+        var importedDuplicatesDeleted = 0
         var placesDeleted = 0
         var footprintReferencesRewritten = 0
         var footprintsDeleted = 0
@@ -13,18 +14,199 @@ enum DataDeduplicationService {
         var activityTypesDeleted = 0
 
         var didChange: Bool {
-            placesDeleted > 0 || footprintReferencesRewritten > 0 || footprintsDeleted > 0 || transportsDeleted > 0 || transportsRewritten > 0 || activityTypesDeleted > 0
+            importedDuplicatesDeleted > 0 || placesDeleted > 0 || footprintReferencesRewritten > 0 || footprintsDeleted > 0 || transportsDeleted > 0 || transportsRewritten > 0 || activityTypesDeleted > 0
         }
+    }
+
+    /// Reconcile stable backup IDs first: a CloudKit object ID is not the
+    /// application's UUID. Only use exact payload matching across different IDs.
+    /// A separate context keeps a failed cleanup from rolling back UI edits.
+    @discardableResult
+    static func reconcileImportedDuplicates(in container: ModelContainer) -> Int {
+        // Do not race an unsaved user edit in the UI context.
+        guard !container.mainContext.hasChanges else { return 0 }
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        do {
+            let footprints = try context.fetch(FetchDescriptor<Footprint>())
+            let transports = try context.fetch(FetchDescriptor<TransportRecord>())
+            var deleted = try reconcileBackupIdentities(
+                context: context,
+                prefetchedFootprints: footprints,
+                prefetchedTransports: transports
+            )
+            for group in Dictionary(grouping: footprints.filter { !$0.isDeleted }, by: \.startTime).values where group.count > 1 {
+                var keepers: [Footprint] = []
+                for record in group.sorted(by: { $0.footprintID.uuidString < $1.footprintID.uuidString }) {
+                    if keepers.contains(where: { identicalFootprint($0, record) }) {
+                        context.delete(record)
+                        deleted += 1
+                    } else {
+                        keepers.append(record)
+                    }
+                }
+            }
+            for group in Dictionary(grouping: transports.filter { !$0.isDeleted }, by: \.startTime).values where group.count > 1 {
+                var keepers: [TransportRecord] = []
+                for record in group.sorted(by: { $0.recordID.uuidString < $1.recordID.uuidString }) {
+                    if keepers.contains(where: { identicalTransport($0, record) }) {
+                        context.delete(record)
+                        deleted += 1
+                    } else {
+                        keepers.append(record)
+                    }
+                }
+            }
+            guard deleted > 0 else { return 0 }
+            try context.save()
+            print("[DataDeduplication] removed \(deleted) backup/cloud duplicates")
+            return deleted
+        } catch {
+            context.rollback()
+            print("[DataDeduplication] exact clone cleanup failed: \(error)")
+            return 0
+        }
+    }
+
+    /// Shared by backup import and post-CloudKit reconciliation. UUID equality
+    /// is identity, including when ISO8601 backup dates lost subsecond precision.
+    @discardableResult
+    static func reconcileBackupIdentities(
+        context: ModelContext,
+        prefetchedFootprints: [Footprint]? = nil,
+        prefetchedTransports: [TransportRecord]? = nil
+    ) throws -> Int {
+        var deleted = 0
+        func collapse<T: PersistentModel>(_ records: [T], id: KeyPath<T, UUID>,
+                                          score: (T) -> Int, merge: (T, T) -> Void) {
+            for group in Dictionary(grouping: records, by: { $0[keyPath: id] }).values where group.count > 1 {
+                let sorted = group.sorted {
+                    let a = score($0), b = score($1)
+                    if a != b { return a > b }
+                    return String(describing: $0.persistentModelID) < String(describing: $1.persistentModelID)
+                }
+                guard let keeper = sorted.first else { continue }
+                for duplicate in sorted.dropFirst() {
+                    merge(duplicate, keeper)
+                    context.delete(duplicate)
+                    deleted += 1
+                }
+            }
+        }
+        let footprints: [Footprint]
+        if let prefetchedFootprints {
+            footprints = prefetchedFootprints
+        } else {
+            footprints = try context.fetch(FetchDescriptor<Footprint>())
+        }
+        collapse(footprints, id: \.footprintID, score: {
+            // Manual edits/deletions win over an automatic snapshot; among
+            // equivalent statuses the full original wins over legacy RESTORED.
+            ($0.status == .ignored ? 20_000 : $0.status == .manual ? 10_000 : 0)
+                + ($0.locationHash == "RESTORED" ? 0 : 1_000) + footprintKeepScore($0)
+        }, merge: { duplicate, keeper in
+            // Never overwrite manual activity, time boundaries, address or notes.
+            keeper.photoAssetIDs = Array(Set(keeper.photoAssetIDs + duplicate.photoAssetIDs)).sorted()
+            keeper.photoMetadata = (keeper.photoMetadata + duplicate.photoMetadata).reduce(into: []) {
+                if !$0.contains($1) { $0.append($1) }
+            }
+            keeper.stepCount = combinedOptionalMax(keeper.stepCount, duplicate.stepCount)
+            keeper.walkingDistance = combinedOptionalMax(keeper.walkingDistance, duplicate.walkingDistance)
+            keeper.floorsAscended = combinedOptionalMax(keeper.floorsAscended, duplicate.floorsAscended)
+            if keeper.countryCode == nil { keeper.countryCode = duplicate.countryCode }
+            if keeper.countryName == nil { keeper.countryName = duplicate.countryName }
+            if keeper.cityName == nil { keeper.cityName = duplicate.cityName }
+        })
+        let transports: [TransportRecord]
+        if let prefetchedTransports {
+            transports = prefetchedTransports
+        } else {
+            transports = try context.fetch(FetchDescriptor<TransportRecord>())
+        }
+        collapse(transports, id: \.recordID, score: {
+            ($0.statusRaw == "ignored" ? 20_000 : 0) + ($0.manualTypeRaw != nil ? 10_000 : 0)
+                + ($0.stepCount != nil ? 100 : 0)
+        }, merge: { duplicate, keeper in
+            keeper.stepCount = combinedOptionalMax(keeper.stepCount, duplicate.stepCount)
+        })
+        collapse(try context.fetch(FetchDescriptor<Place>()), id: \.placeID,
+                 score: { ($0.isIgnored ? 1_000 : 0) + placeKeepScore($0, referencedPlaceIDs: []) }, merge: { duplicate, keeper in
+            let isIgnored = keeper.isIgnored || duplicate.isIgnored
+            mergePlace(duplicate, into: keeper)
+            keeper.isIgnored = isIgnored
+        })
+        collapse(try context.fetch(FetchDescriptor<ActivityType>()), id: \.id,
+                 score: { $0.isSystem ? 0 : 1 }, merge: { _, _ in })
+        collapse(try context.fetch(FetchDescriptor<FutureTrip>()), id: \.id,
+                 score: { ($0.isCompleted ? 100 : 0) + ($0.placeID != nil ? 10 : 0) },
+                 merge: { duplicate, keeper in
+            if keeper.placeID == nil { keeper.placeID = duplicate.placeID }
+        })
+        return deleted
+    }
+
+    private static func identicalFootprint(_ a: Footprint, _ b: Footprint) -> Bool {
+        guard a.date == b.date else { return false }
+        guard a.startTime == b.startTime else { return false }
+        guard a.endTime == b.endTime else { return false }
+        guard a.latitudeData == b.latitudeData else { return false }
+        guard a.longitudeData == b.longitudeData else { return false }
+        guard a.locationHash == b.locationHash else { return false }
+        guard a.reason == b.reason else { return false }
+        guard a.statusValue == b.statusValue else { return false }
+        guard a.aiScore == b.aiScore else { return false }
+        guard a.placeID == b.placeID else { return false }
+        guard a.photoAssetIDsData == b.photoAssetIDsData else { return false }
+        guard a.photoMetadataData == b.photoMetadataData else { return false }
+        guard a.address == b.address else { return false }
+        guard a.countryCode == b.countryCode else { return false }
+        guard a.countryName == b.countryName else { return false }
+        guard a.cityName == b.cityName else { return false }
+        guard a.isHighlight == b.isHighlight else { return false }
+        guard a.isPlaceSuggestionIgnored == b.isPlaceSuggestionIgnored else { return false }
+        guard a.aiAnalyzed == b.aiAnalyzed else { return false }
+        guard a.isAddressEditedByHand == b.isAddressEditedByHand else { return false }
+        guard a.activityTypeValue == b.activityTypeValue else { return false }
+        guard a.allowsAutomaticDurationExtension == b.allowsAutomaticDurationExtension else { return false }
+        guard a.stepCount == b.stepCount else { return false }
+        guard a.walkingDistance == b.walkingDistance else { return false }
+        guard a.floorsAscended == b.floorsAscended else { return false }
+        return true
+    }
+
+    private static func identicalTransport(_ a: TransportRecord, _ b: TransportRecord) -> Bool {
+        guard a.day == b.day else { return false }
+        guard a.startTime == b.startTime else { return false }
+        guard a.endTime == b.endTime else { return false }
+        guard a.startLocation == b.startLocation else { return false }
+        guard a.endLocation == b.endLocation else { return false }
+        guard a.typeRaw == b.typeRaw else { return false }
+        guard a.distance == b.distance else { return false }
+        guard a.averageSpeed == b.averageSpeed else { return false }
+        guard a.pointsData == b.pointsData else { return false }
+        guard a.manualTypeRaw == b.manualTypeRaw else { return false }
+        guard a.statusRaw == b.statusRaw else { return false }
+        guard a.stepCount == b.stepCount else { return false }
+        return true
     }
 
     static func run(context: ModelContext) -> Report {
         var report = Report()
 
-        let places = (try? context.fetch(FetchDescriptor<Place>())) ?? []
-        let footprints = (try? context.fetch(FetchDescriptor<Footprint>())) ?? []
-        let transports = (try? context.fetch(FetchDescriptor<TransportRecord>())) ?? []
-        let activityTypes = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
-        let futureTrips = (try? context.fetch(FetchDescriptor<FutureTrip>())) ?? []
+        do {
+            // This is the same identity reconciliation used after backup and
+            // CloudKit imports, exposed here so existing affected databases can
+            // be repaired immediately from Data Management.
+            report.importedDuplicatesDeleted = try reconcileBackupIdentities(context: context)
+        } catch {
+            print("[DataDeduplication] backup/cloud identity cleanup failed: \(error)")
+        }
+
+        let places = ((try? context.fetch(FetchDescriptor<Place>())) ?? []).filter { !$0.isDeleted }
+        let footprints = ((try? context.fetch(FetchDescriptor<Footprint>())) ?? []).filter { !$0.isDeleted }
+        let transports = ((try? context.fetch(FetchDescriptor<TransportRecord>())) ?? []).filter { !$0.isDeleted }
+        let activityTypes = ((try? context.fetch(FetchDescriptor<ActivityType>())) ?? []).filter { !$0.isDeleted }
+        let futureTrips = ((try? context.fetch(FetchDescriptor<FutureTrip>())) ?? []).filter { !$0.isDeleted }
 
         print("[DataDeduplication] before places=\(places.count), footprints=\(footprints.count), transports=\(transports.count), activityTypes=\(activityTypes.count)")
 
@@ -46,7 +228,7 @@ enum DataDeduplicationService {
         let remainingFootprints = (try? context.fetchCount(FetchDescriptor<Footprint>())) ?? -1
         let remainingTransports = (try? context.fetchCount(FetchDescriptor<TransportRecord>())) ?? -1
         let remainingActivityTypes = (try? context.fetchCount(FetchDescriptor<ActivityType>())) ?? -1
-        print("[DataDeduplication] deleted places=\(report.placesDeleted), rewrittenFootprints=\(report.footprintReferencesRewritten), deletedFootprints=\(report.footprintsDeleted), deletedTransports=\(report.transportsDeleted), rewrittenTransports=\(report.transportsRewritten), deletedActivityTypes=\(report.activityTypesDeleted)")
+        print("[DataDeduplication] deleted importedDuplicates=\(report.importedDuplicatesDeleted), places=\(report.placesDeleted), rewrittenFootprints=\(report.footprintReferencesRewritten), deletedFootprints=\(report.footprintsDeleted), deletedTransports=\(report.transportsDeleted), rewrittenTransports=\(report.transportsRewritten), deletedActivityTypes=\(report.activityTypesDeleted)")
         print("[DataDeduplication] after places=\(remainingPlaces), footprints=\(remainingFootprints), transports=\(remainingTransports), activityTypes=\(remainingActivityTypes)")
 
         return report
@@ -149,7 +331,10 @@ enum DataDeduplicationService {
     }
 
     private static func deduplicateFootprints(_ footprints: [Footprint], context: ModelContext, report: inout Report) {
-        let groupedByDay = Dictionary(grouping: footprints) { Calendar.current.startOfDay(for: $0.date) }
+        let removed = Footprint.removeAutomaticFootprintsOwnedByManual(footprints, context: context)
+        report.footprintsDeleted += removed.count
+        let retained = footprints.filter { !removed.contains($0.footprintID) }
+        let groupedByDay = Dictionary(grouping: retained) { Calendar.current.startOfDay(for: $0.date) }
         
         for (_, dayFootprints) in groupedByDay {
             var sorted = dayFootprints.sorted { $0.startTime < $1.startTime }

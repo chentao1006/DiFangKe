@@ -1095,11 +1095,19 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var isRebuildingAll: Bool = false
     private var rebuildTask: Task<Void, Never>? = nil
     private var liveFootprintMergeTask: Task<Void, Never>? = nil
+    private var timelineSiftTask: Task<Void, Never>?
     
     // 从 View 同步过来的参数
     var allPlaces: [Place] = []
     var modelContext: ModelContext? {
         didSet {
+            // The app root and timeline both bind the same container context.
+            // Reassigning that identical object must not restart disk loading,
+            // timeline reconstruction, memories checks, and Live Activity work.
+            if let oldValue, let modelContext, oldValue === modelContext {
+                return
+            }
+
             if modelContext != nil {
                 Task {
                     await loadPointsFromStore() // 获得数据库后，后台加载点并同步最后处理时间
@@ -1107,6 +1115,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     // 回补时间线，导致离开后的足迹/交通永远只能靠手动重生成。
                     // syncDay 只填未覆盖缺口，并有交通去重保护，因此可以安全
                     // 地补齐当天尚未结算的停留和行程。
+                    // 把这次启动恢复计入定位触发的 15 分钟窗口，避免紧接着
+                    // 到达的第一个 GPS 点立即再跑一次完整的两轮当日同步。
+                    lastLocationChangeSift = Date()
                     await triggerTimelineSift()
                 }
                 // "往年今日" was previously evaluated only after a new location
@@ -1173,7 +1184,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var locationWatchdogTimer: AnyCancellable?
     private var lastStationaryProbeTime: Date = .distantPast
     private var lastStartTrackingAt: Date = .distantPast
-    private var lastStartTrackingLocationRequestAt: Date = .distantPast
     private var isRequestingAlwaysAuthorization = false
     
     override init() {
@@ -1296,12 +1306,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
             .store(in: &cancellables)
             
-        // 监听 CloudKit 云端数据同步事件（SwiftData 底层通过 CoreData 发出此通知）
+        // Persistent-store notifications also occur around this device's own
+        // CloudKit exports, so never attach full-database maintenance here.
+        // Wait for a quiet window and refresh the UI once. Imported identity
+        // cleanup already runs once at launch and directly after backup import.
         NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange)
-            // 节流处理，避免 iCloud 大量拉取时频繁刷新卡死 UI
-            .throttle(for: .seconds(3.0), scheduler: RunLoop.main, latest: true)
+            .debounce(for: .seconds(5), scheduler: RunLoop.main)
             .sink { _ in
-                print("[LocationManager] ☁️ NSPersistentStoreRemoteChange detected, posting FootprintDataChanged...")
+                print("[LocationManager] ☁️ Store changes settled; refreshing timeline once.")
                 NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
             }
             .store(in: &cancellables)
@@ -1313,6 +1325,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     /// 防抖：避免看门狗/系统回调频繁重启定位导致耗电抖动
     private var lastRecoveryBoostTime: Date = .distantPast
+
+    /// 自动模式在确认长时间停留后使用低功耗定位。这个状态必须跨越后台
+    /// refresh 的“重新确保定位”调用，否则每次后台任务都会把静止中的 GPS
+    /// 拉回最高精度，抵消节能策略。
+    private var isUsingAutomaticStationaryLowPower = false
 
     /// 强制激活高精度模式（通常由计步器、运动传感器或网络变化触发，早于 GPS 位移）
     private func forceHighAccuracyBoost() {
@@ -1326,6 +1343,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
 
         print("🚀 Status change detected! Forcing high accuracy boost...")
+        isUsingAutomaticStationaryLowPower = false
         
         // 0. 设置 10 分钟出门保护期，覆盖大多数步行出门的起步阶段，防止过早降频造成直线轨迹
         departureBoostEndTime = Date().addingTimeInterval(10 * 60)
@@ -1355,8 +1373,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationManager.activityType = .other
     }
 
-    /// 自动记录不依赖运动分类、已知地点或下一次回调来恢复采样。
-    /// 停留判断只控制足迹和围栏；原始定位始终保持同一套连续采集参数。
+    /// 移动中的自动记录使用连续高精度采样。确认长时间静止后会单独切换到
+    /// 低功耗参数；Core Motion、围栏和下一次 10 米定位都会立即恢复这里的参数。
     private func applyContinuousLocationSettings(to manager: CLLocationManager) {
         manager.desiredAccuracy = kCLLocationAccuracyBest
         manager.distanceFilter = kCLDistanceFilterNone
@@ -1474,17 +1492,25 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let stationaryDuration = now.timeIntervalSince(stop.timestamp)
         guard stationaryDuration > 10 * 60 else { return }
 
-        // Reassert the existing continuous session. requestLocation() cannot run
-        // concurrently with startUpdatingLocation(), and mixing them can cancel the
-        // single request instead of restoring the stream we need for route recording.
+        // Keep the existing standard-location session alive. requestLocation()
+        // cannot run concurrently with startUpdatingLocation(), and mixing them
+        // can cancel the single request instead of restoring route recording.
         guard lastUpdateGap > 10 * 60 else { return }
         guard now.timeIntervalSince(lastStationaryProbeTime) > 15 * 60 else { return }
         lastStationaryProbeTime = now
 
         let gapDescription = lastUpdateGap.isFinite ? "\(Int(lastUpdateGap))s" : "unknown duration"
-        print("[LocationManager] 🧭 Long stationary stay has no fresh location for \(gapDescription). Reasserting continuous updates…")
+        print("[LocationManager] 🧭 Long stationary stay has no fresh location for \(gapDescription). Keeping a low-power departure watch…")
         ensureSignificantMonitoringActive()
-        applyContinuousLocationSettings(to: locationManager)
+        // A long confirmed stay must not be promoted back to Best accuracy every
+        // fifteen minutes.  The standard service stays active with a 10 m
+        // delivery filter; Core Motion/region/visit events call
+        // forceHighAccuracyBoost before the user has travelled far enough to
+        // create a route gap.
+        if currentLocationAccuracyMode == .automatic {
+            isUsingAutomaticStationaryLowPower = true
+            applyPowerSavingLocationSettings()
+        }
         locationManager.startUpdatingLocation()
     }
 
@@ -1536,19 +1562,35 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
     
+    @MainActor
     func triggerTimelineSift() async {
         guard let context = modelContext else { return }
-        print("[TimelineAuto] start automatic sync for today")
-        // Keep automatic processing on the same complete two-pass path as the
-        // user's "重新生成本日数据" action.  The light first pass can create or
-        // merge an intermediate segment, and only the consolidation follow-up
-        // exposes the remaining gap as the final footprint/transport pair.
-        await PersistentTimelineBuilder.syncDay(date: Date(), in: context)
-        print("[TimelineAuto] finished automatic sync for today")
-        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
-        // syncDay may have just persisted transport records.  Refresh after the
-        // write so the notification does not retain its earlier 0m snapshot.
-        triggerNotificationSummaryRefresh()
+        // `syncDay` also rejects duplicate work, but callers used to continue
+        // after that rejection and each post another data-change notification,
+        // rebuild the visible timeline/map, and reschedule the daily summary.
+        // Make every concurrent caller join the same whole side-effect chain.
+        if let timelineSiftTask {
+            print("[TimelineAuto] join automatic sync already in progress")
+            await timelineSiftTask.value
+            return
+        }
+
+        let task = Task { @MainActor in
+            print("[TimelineAuto] start automatic sync for today")
+            // Keep automatic processing on the same complete two-pass path as the
+            // user's "重新生成本日数据" action.  The light first pass can create or
+            // merge an intermediate segment, and only the consolidation follow-up
+            // exposes the remaining gap as the final footprint/transport pair.
+            await PersistentTimelineBuilder.syncDay(date: Date(), in: context)
+            print("[TimelineAuto] finished automatic sync for today")
+            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            // syncDay may have just persisted transport records. Refresh after the
+            // write so the notification does not retain its earlier 0m snapshot.
+            triggerNotificationSummaryRefresh()
+        }
+        timelineSiftTask = task
+        await task.value
+        timelineSiftTask = nil
     }
     
     private func siftYesterday() {
@@ -1692,16 +1734,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         print("[LocationManager] ✅ Significant location monitoring & visit monitoring ensured active.")
     }
     
-    /// 请求一次精确定位（用于后台唤醒时让系统知道我们仍需要位置服务）
-    func requestSingleLocation() {
-        if isTracking {
-            applyLocationAccuracyMode()
-            locationManager.startUpdatingLocation()
-        } else {
-            locationManager.requestLocation()
-        }
-    }
-    
     /// 后台恢复时自动回填记录空白（从上一条原始轨迹到现在的间隙）
     /// 当 App 被系统杀死后重新启动时调用，确保不会丢失被杀进程期间的轨迹数据
     func backfillFromLastRecording() {
@@ -1745,34 +1777,31 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             return
         }
 
+        let now = Date()
+        if isTracking, now.timeIntervalSince(lastStartTrackingAt) <= 30 {
+            // App-root, scene-active, and timeline appearance can all request
+            // tracking during the same launch. Keep an authorization upgrade
+            // reflected without reapplying accuracy or restarting monitors.
+            locationManager.allowsBackgroundLocationUpdates = isAlwaysAuthorized
+            locationManager.pausesLocationUpdatesAutomatically = false
+            return
+        }
+
         // 这个值不应依赖上一次进程存活时的 CLLocationManager 配置。若用户仍
         // 授予“始终允许”，每次恢复采集都明确打开后台回调；若被降级为“使用
         // App 期间”，则只允许前台采集，避免留下看似开启、实际无法后台记录的状态。
         locationManager.allowsBackgroundLocationUpdates = isAlwaysAuthorized
         locationManager.pausesLocationUpdatesAutomatically = false
 
-        let now = Date()
-        let shouldRestartUpdates = !isTracking || now.timeIntervalSince(lastStartTrackingAt) > 30
-        if shouldRestartUpdates {
-            locationManager.startUpdatingLocation()
-            locationManager.startMonitoringSignificantLocationChanges()
-            locationManager.startMonitoringVisits()
-            lastStartTrackingAt = now
-        } else {
-            locationManager.startMonitoringSignificantLocationChanges()
-        }
+        locationManager.startUpdatingLocation()
+        locationManager.startMonitoringSignificantLocationChanges()
+        locationManager.startMonitoringVisits()
+        lastStartTrackingAt = now
         isTracking = true
 
         // CLLocationManager 的参数不会跨进程可靠保留；每次恢复记录都重新应用用户选择，
         // 防止应用重启或系统唤醒后先以初始化时的高精度运行。
         applyLocationAccuracyMode()
-        
-        // On app open, reassert the continuous stream without mixing in
-        // requestLocation(), which Core Location does not support concurrently.
-        if now.timeIntervalSince(lastStartTrackingLocationRequestAt) > 60 {
-            locationManager.startUpdatingLocation()
-            lastStartTrackingLocationRequestAt = now
-        }
         
         // 启动/回到前台只恢复定位，不重整已保存的时间线。startTracking() 会在
         // 每次启动和 scene active 时调用；在这里清理、合并或回填历史数据会让
@@ -1792,6 +1821,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
         isTracking = false
+        // A later manual restart must begin with a fresh high-accuracy fix.
+        // Do not carry an old stationary decision across an explicit stop.
+        isUsingAutomaticStationaryLowPower = false
         // 清理当前可能的停留状态
         potentialStopStartLocation = nil
         ongoingTitle = nil
@@ -2271,7 +2303,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 判定是否正在长久停留
         // 我们将其放宽到 150m (从 300m 下调)，并增加已知地点粘性
         let isStationary: Bool = {
-            // ✅ 出门保护期：任何 boost 触发后 3 分钟内，强制维持高频模式
+            // ✅ 出门保护期：任何 boost 触发后 10 分钟内，强制维持高频模式
             // 防止 GPS/传感器还未稳定时，节能逻辑过早将精度降回低频
             if Date() < departureBoostEndTime {
                 return false
@@ -2314,7 +2346,35 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let currentMode = LocationAccuracyMode(rawValue: modeRaw) ?? .automatic
         
         if currentMode == .automatic, isLatestInBatch {
-            applyContinuousLocationSettings(to: manager)
+            // Only lower accuracy after a conservative, fresh, motion-free
+            // dwell.  The broader `isStationary` result is also used for stay
+            // UI/regions after five minutes, but using it directly for power
+            // control would make red lights and slow e-bike traffic lose GPS
+            // samples again.
+            let shouldUseStationaryLowPower: Bool = {
+                guard isStationary,
+                      isFreshLocation,
+                      !isMovingBySensor,
+                      !uiIsMoving,
+                      motion == .stationary,
+                      let startLoc = potentialStopStartLocation else {
+                    return false
+                }
+
+                let dwellDuration = location.timestamp.timeIntervalSince(startLoc.timestamp)
+                let dwellDistance = location.distance(from: startLoc)
+                return dwellDuration >= 10 * 60
+                    && dwellDistance < 80.0
+                    && speed < 0.5
+            }()
+
+            if shouldUseStationaryLowPower {
+                isUsingAutomaticStationaryLowPower = true
+                applyPowerSavingLocationSettings()
+            } else {
+                isUsingAutomaticStationaryLowPower = false
+                applyContinuousLocationSettings(to: manager)
+            }
         }
         if isLatestInBatch {
             updateRegionMonitoring(isStationary: isStationary || place?.isIgnored == true)
@@ -2433,6 +2493,25 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
             
+            // The processor emits a candidate only on departure. Keep an
+            // activity-edited current stay growing while we are still here.
+            if !uiIsMoving, let ongoingStart = potentialStopStartLocation?.timestamp,
+               location.horizontalAccuracy > 0, location.horizontalAccuracy < 100,
+               let context = modelContext {
+                let observedEnd = location.timestamp
+                var descriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
+                    $0.statusValue == "manual" && $0.allowsAutomaticDurationExtension &&
+                    $0.endTime >= ongoingStart && $0.startTime < observedEnd
+                }, sortBy: [SortDescriptor(\.startTime, order: .reverse)])
+                descriptor.fetchLimit = 1
+                if let edited = (try? context.fetch(descriptor))?.first,
+                   Footprint.extendActivityEditedStay(start: max(ongoingStart, edited.startTime),
+                                                      end: observedEnd, coordinate: location.coordinate, context: context) {
+                    try? context.save()
+                    NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                }
+            }
+
             // 4. 触发正在持续停留的 AI 分析 (停留 1 小时后触发第一次，之后每 60 分钟刷新)
             if let start = potentialStopStartLocation?.timestamp {
                 let duration = Date().timeIntervalSince(start)
@@ -2697,14 +2776,21 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         switch mode {
         case .automatic:
-            applyContinuousLocationSettings(to: locationManager)
+            if isUsingAutomaticStationaryLowPower {
+                applyPowerSavingLocationSettings()
+            } else {
+                applyContinuousLocationSettings(to: locationManager)
+            }
         case .high:
+            isUsingAutomaticStationaryLowPower = false
             applyContinuousLocationSettings(to: locationManager)
         case .balanced:
+            isUsingAutomaticStationaryLowPower = false
             locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
             locationManager.distanceFilter = 10.0
             locationManager.activityType = .fitness
         case .powerSaving:
+            isUsingAutomaticStationaryLowPower = false
             applyPowerSavingLocationSettings()
         }
         print("[LocationManager] Applied LocationAccuracyMode: \(mode.rawValue)")
@@ -3055,10 +3141,32 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             rawLocations: effectiveRawLocations
         )
         
+        // All accepted candidates, including an already-owned replay, must
+        // advance ingestion and publish updates through the same completion path.
+        defer { finishCandidateFootprint(candidate, isHistorical: isHistorical, context: context) }
+
         let matchedPlace = self.matchedPlaceFor(coordinate: boundedCandidate.centerCoordinate)
         let effectivePlace = ongoingPlaceOverrideID.flatMap { overrideID in
             allPlaces.first(where: { $0.placeID == overrideID })
         } ?? matchedPlace
+
+        if Footprint.extendActivityEditedStay(start: boundedStart, end: boundedEnd,
+                                              coordinate: boundedCandidate.centerCoordinate, context: context) {
+            return // defer saves, advances ingestion and publishes the update
+        }
+        let available = Footprint.automaticStayIntervals(start: boundedStart, end: boundedEnd, context: context)
+        if available.count != 1 || available.first?.start != boundedStart || available.first?.end != boundedEnd {
+            for interval in available where interval.end.timeIntervalSince(interval.start) >= AppConfig.shared.stayDurationThreshold {
+                let points = effectiveRawLocations.filter { $0.timestamp >= interval.start && $0.timestamp <= interval.end }
+                guard !points.isEmpty else { continue }
+                handleNewCandidateFootprint(CandidateFootprint(
+                    startTime: interval.start, endTime: interval.end,
+                    centerCoordinate: FootprintProcessor.shared.calculateCenter(points),
+                    duration: interval.end.timeIntervalSince(interval.start), rawLocations: points
+                ), isHistorical: isHistorical, context: context)
+            }
+            return
+        }
 
         // 检查是否需要合并之前的记录
         let targetStart = Calendar.current.startOfDay(for: boundedCandidate.startTime)
@@ -3161,6 +3269,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             analyzeFootprint(newFootprint, context: context)
         }
         
+    }
+
+    private func finishCandidateFootprint(_ candidate: CandidateFootprint, isHistorical: Bool, context: ModelContext) {
         // 处理完一个段后，更新进度
         if isHistorical {
             // 背景处理不直接操作 trackingPoints 镜像，仅记录最后处理时间
@@ -3188,7 +3299,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
 
         if !isHistorical {
-            let syncDate = Calendar.current.startOfDay(for: boundedCandidate.startTime)
+            let syncDate = Calendar.current.startOfDay(for: candidate.startTime)
             Task { @MainActor in
                 await PersistentTimelineBuilder.syncDay(date: syncDate, in: context)
                 NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
@@ -3972,32 +4083,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // 4. 处理最后一个间隙（直至当前时间点）
             if dayLimit > currentTime.addingTimeInterval(AppConfig.shared.ongoingStayGracePeriod) {
                 if let gap = identifyGapStay(from: currentTime, to: dayLimit, rawPoints: rawPoints) {
-                    // 核心改进：如果最后一段也是停留，尝试将其与上一段 GAP_STAY 合并（如果是同一个地方），避免产生碎片
-                    var existingLast: Footprint? = nil
-                    await MainActor.run {
-                        var descriptor = FetchDescriptor<Footprint>(
-                            predicate: #Predicate { $0.locationHash == "GAP_STAY" },
-                            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
-                        )
-                        descriptor.fetchLimit = 1
-                        existingLast = (try? self.modelContext?.fetch(descriptor))?.first
-                    }
-                    
-                    if let lastFp = existingLast, 
-                       abs(lastFp.endTime.timeIntervalSince(gap.start)) < AppConfig.shared.stayMergeGapThreshold {
-                        let lastLoc = CLLocation(latitude: lastFp.latitude, longitude: lastFp.longitude)
-                        let gapLoc = CLLocation(latitude: gap.center.latitude, longitude: gap.center.longitude)
-                        if lastLoc.distance(from: gapLoc) < AppConfig.shared.stayDistanceThreshold {
-                            await MainActor.run {
-                                lastFp.endTime = gap.end
-                                try? lastFp.modelContext?.save()
-                            }
-                        } else {
-                            gapsToInsert.append(gap)
-                        }
-                    } else {
-                        gapsToInsert.append(gap)
-                    }
+                    // Use the same insertion/extension checks as interior gaps.
+                    // The old GAP_STAY shortcut bypassed manual time boundaries.
+                    gapsToInsert.append(gap)
                 }
             }
             
@@ -4019,6 +4107,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                                     return overlapEnd.timeIntervalSince(overlapStart) > 60
                                 }
                                 if overlapsTransport { continue }
+
+                                if Footprint.extendActivityEditedStay(start: gap.start, end: gap.end, coordinate: gap.center, context: context) {
+                                    continue
+                                }
+                                let available = Footprint.automaticStayIntervals(start: gap.start, end: gap.end, context: context)
+                                guard available.count == 1, available.first?.start == gap.start,
+                                      available.first?.end == gap.end else { continue }
 
                                 let matchedPlace = self.matchedPlaceFor(coordinate: gap.center)
                                 let candidate = CandidateFootprint(

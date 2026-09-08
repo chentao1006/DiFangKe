@@ -122,6 +122,7 @@ struct FootprintLite: Sendable {
     let maxDiameter: Double
     let aiAnalyzed: Bool
     let activityTypeValue: String?
+    var allowsAutomaticDurationExtension: Bool = false
 }
 
 struct PlaceLite: Sendable {
@@ -175,7 +176,8 @@ class TimelineBuilder {
             isHighlight: fp.isHighlight,
             maxDiameter: calculateMaxDiameter(fp.footprintLocations.map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }), // Added for better merging
             aiAnalyzed: fp.aiAnalyzed,
-            activityTypeValue: fp.activityTypeValue
+            activityTypeValue: fp.activityTypeValue,
+            allowsAutomaticDurationExtension: fp.allowsAutomaticDurationExtension
         )
     }
 
@@ -270,6 +272,7 @@ class TimelineBuilder {
                     aiAnalyzed: fp.aiAnalyzed,
                     activityTypeValue: fp.activityTypeValue
                 )
+                model.allowsAutomaticDurationExtension = fp.allowsAutomaticDurationExtension
                 model.placeID = fp.placeID
                 model.isAddressEditedByHand = fp.isAddressEditedByHand
                 
@@ -1561,7 +1564,12 @@ class PersistentTimelineBuilder {
         let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
             $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
-        let allFps = (try? context.fetch(fpDesc)) ?? []
+        var allFps = (try? context.fetch(fpDesc)) ?? []
+        let removed = Footprint.removeAutomaticFootprintsOwnedByManual(allFps, context: context)
+        if !removed.isEmpty {
+            allFps.removeAll { removed.contains($0.footprintID) }
+            try? context.save()
+        }
         
         let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
             $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
@@ -1792,6 +1800,9 @@ class PersistentTimelineBuilder {
                     window: AppConfig.shared.habitTimeWindow, threshold: AppConfig.shared.habitFrequencyThreshold
                 )
             }
+            let available = Footprint.automaticStayIntervals(start: bridgeFp.startTime, end: bridgeFp.endTime, context: context)
+            guard available.count == 1, available.first?.start == bridgeFp.startTime,
+                  available.first?.end == bridgeFp.endTime else { return }
             context.insert(bridgeFp)
         }
     }
@@ -2423,6 +2434,9 @@ class PersistentTimelineBuilder {
         var hasChanges = false
 
         for fp in fps {
+            // A manually chosen activity or time range must not be deleted or
+            // split by a stale automatic transport proposal.
+            guard fp.status != .manual else { continue }
             let hasUserEdits = fp.isAddressEditedByHand
                 || !(fp.reason ?? "").isEmpty
                 || !fp.photoAssetIDs.isEmpty
@@ -2806,6 +2820,26 @@ class PersistentTimelineBuilder {
                         for: matched.placeID, at: fp.startTime, context: context,
                         window: AppConfig.shared.habitTimeWindow, threshold: AppConfig.shared.habitFrequencyThreshold
                     )
+                }
+
+                // Re-fetch after the health-data await: the user may have edited
+                // this stay while the automatic candidate was being prepared.
+                if Footprint.extendActivityEditedStay(start: fp.startTime, end: fp.endTime,
+                                                      coordinate: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude), context: context) {
+                    i = split ?? j
+                    continue
+                }
+                let available = Footprint.automaticStayIntervals(start: fp.startTime, end: fp.endTime, context: context)
+                guard available.count == 1, available.first?.start == fp.startTime,
+                      available.first?.end == fp.endTime else {
+                    for interval in available {
+                        let remaining = footprintClusterPoints.filter { $0.timestamp >= interval.start && $0.timestamp <= interval.end }
+                        await processPoints(points: remaining, date: date, context: context,
+                                            preferredAuto: preferredAuto, preferredCycling: preferredCycling,
+                                            preferredTransport: preferredTransport, deletedTransportRanges: deletedTransportRanges)
+                    }
+                    i = split ?? j
+                    continue
                 }
 
                 let candidate = CandidateFootprint(

@@ -269,7 +269,13 @@ struct DataManagerView: View {
         let report = DataDeduplicationService.run(context: modelContext)
         if report.didChange {
             self.alertTitle = "清理完成"
-            self.alertMessage = "成功合并或清理了 \(report.footprintsDeleted + report.transportsDeleted + report.placesDeleted + report.activityTypesDeleted) 条重复数据。"
+            let total = report.importedDuplicatesDeleted + report.footprintsDeleted
+                + report.transportsDeleted + report.placesDeleted + report.activityTypesDeleted
+            if report.importedDuplicatesDeleted > 0 {
+                self.alertMessage = "成功合并或清理了 \(total) 条重复数据，其中 \(report.importedDuplicatesDeleted) 条来自备份与 iCloud 的重复恢复。"
+            } else {
+                self.alertMessage = "成功合并或清理了 \(total) 条重复数据。"
+            }
         } else {
             self.alertTitle = "无需清理"
             self.alertMessage = "当前数据库中未发现重复数据。"
@@ -502,6 +508,7 @@ struct BackupDTO: Codable {
     }
 }
 
+@MainActor
 final class BackupService {
     static let shared = BackupService()
     
@@ -599,7 +606,7 @@ final class BackupService {
             if let uuid = UUID(uuidString: p.id) {
                 let isUser = p.isUserDefined ?? true
                 let descriptor = FetchDescriptor<Place>(predicate: #Predicate { $0.placeID == uuid })
-                if (try? context.fetch(descriptor).first) == nil {
+                if (try context.fetch(descriptor).first) == nil {
                     let place = Place(
                         placeID: uuid, 
                         name: p.name, 
@@ -623,7 +630,7 @@ final class BackupService {
         for f in backup.footprints {
             if let footprintUUID = UUID(uuidString: f.id) {
                 let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintUUID })
-                if (try? context.fetch(descriptor).first) == nil {
+                if (try context.fetch(descriptor).first) == nil {
                     let footprint = Footprint(
                         footprintID: footprintUUID,
                         date: f.date,
@@ -655,7 +662,7 @@ final class BackupService {
             for (index, a) in activityDTOs.enumerated() {
                 if let uuid = UUID(uuidString: a.id) {
                     let descriptor = FetchDescriptor<ActivityType>(predicate: #Predicate { $0.id == uuid })
-                    if (try? context.fetch(descriptor).first) == nil {
+                    if (try context.fetch(descriptor).first) == nil {
                         let activity = ActivityType(
                             id: uuid,
                             name: a.name,
@@ -677,7 +684,7 @@ final class BackupService {
             for t in transportDTOs {
                 if let uuid = UUID(uuidString: t.id) {
                     let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == uuid })
-                    if (try? context.fetch(descriptor).first) == nil {
+                    if (try context.fetch(descriptor).first) == nil {
                         let record = TransportRecord(
                             recordID: uuid,
                             day: t.day,
@@ -708,7 +715,7 @@ final class BackupService {
             for t in futureTripDTOs {
                 if let uuid = UUID(uuidString: t.id) {
                     let descriptor = FetchDescriptor<FutureTrip>(predicate: #Predicate { $0.id == uuid })
-                    if (try? context.fetch(descriptor).first) == nil {
+                    if (try context.fetch(descriptor).first) == nil {
                         let trip = FutureTrip(
                             id: uuid,
                             placeName: t.placeName,
@@ -734,7 +741,11 @@ final class BackupService {
             }
         }
         
+        // Covers duplicates already downloaded before/during this import.
+        // Later CloudKit imports run the same identity pass from LocationManager.
+        _ = try DataDeduplicationService.reconcileBackupIdentities(context: context)
         try context.save()
+        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
         CloudSettingsManager.shared.triggerDataSyncPulse()
         return RestoreReport(
             newFootprints: newFootprints, 
