@@ -1378,73 +1378,83 @@ class PersistentTimelineBuilder {
         return nil
     }
     
-    /// 分析历史数据，判断用户更习惯哪种车载/轨道方式（汽车、公交、摩托车、轨交）
-    /// 排除目标日期，防止因用户正在修改当前数据而导致判定结果在“临界点”反复跳变
-    private static func getPreferredAutomotiveType(in context: ModelContext, excluding date: Date) -> TransportType {
+    /// 历史交通偏好统计使用近期加权而非纯计数：14 天半衰期让"最近常用电动车"
+    /// 明显盖过几周前偶尔一次的公交/出租车，避免旧数据长期稀释近期习惯的变化。
+    private static func transportPreferenceWeight(for recordStart: Date, relativeTo referenceDate: Date) -> Double {
+        let daysAgo = max(0, referenceDate.timeIntervalSince(recordStart) / 86_400)
+        let halfLifeDays = 14.0
+        return pow(0.5, daysAgo / halfLifeDays)
+    }
+
+    /// 历史偏好统计所用的记录范围：排除目标日期当天"尚未确认"的自动识别记录，
+    /// 防止用户正在修改当前数据时导致判定结果在"临界点"反复跳变；但当天已经
+    /// 手动改过的记录属于确定的事实，不应被排除——否则当天已经纠正过的电动车
+    /// 无法帮助同一天里后续行程的判断。
+    private static func transportPreferenceDescriptor(excluding date: Date, fetchLimit: Int) -> FetchDescriptor<TransportRecord> {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
-        
         var descriptor = FetchDescriptor<TransportRecord>(
-            predicate: #Predicate { 
-                $0.statusRaw != "ignored" && ($0.startTime < startOfDay || $0.startTime >= endOfDay)
+            predicate: #Predicate {
+                $0.statusRaw != "ignored" &&
+                ($0.startTime < startOfDay || $0.startTime >= endOfDay || $0.manualTypeRaw != nil)
             },
             sortBy: [SortDescriptor(\.startTime, order: .reverse)]
         )
-        descriptor.fetchLimit = 150 
-        
+        descriptor.fetchLimit = fetchLimit
+        return descriptor
+    }
+
+    /// 分析历史数据，判断用户更习惯哪种车载/轨道方式（汽车、公交、摩托车、轨交）
+    private static func getPreferredAutomotiveType(in context: ModelContext, excluding date: Date) -> TransportType {
+        let descriptor = transportPreferenceDescriptor(excluding: date, fetchLimit: 150)
         let recent = (try? context.fetch(descriptor)) ?? []
-        
-        var counts: [TransportType: Int] = [.car: 0, .bus: 0, .motorcycle: 0, .subway: 0]
+
+        var counts: [TransportType: Double] = [.car: 0, .bus: 0, .motorcycle: 0, .subway: 0]
         for record in recent {
             let typeString = record.manualTypeRaw ?? record.typeRaw
             if let type = TransportType(rawValue: typeString), counts.keys.contains(type) {
-                counts[type, default: 0] += 1
+                counts[type, default: 0] += transportPreferenceWeight(for: record.startTime, relativeTo: date)
             }
         }
-        
+
         return counts.max(by: { $0.value < $1.value })?.key ?? .car
     }
-    
+
     /// 分析历史数据，判断用户更习惯自行车还是电动车
     private static func getPreferredCyclingType(in context: ModelContext, excluding date: Date) -> TransportType {
-        let calendar = Calendar.current
-        let startOfDay = calendar.startOfDay(for: date)
-        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
-        
-        var descriptor = FetchDescriptor<TransportRecord>(
-            predicate: #Predicate { 
-                $0.statusRaw != "ignored" && ($0.startTime < startOfDay || $0.startTime >= endOfDay)
-            },
-            sortBy: [SortDescriptor(\.startTime, order: .reverse)]
-        )
-        descriptor.fetchLimit = 150
-        
+        let descriptor = transportPreferenceDescriptor(excluding: date, fetchLimit: 150)
         let recent = (try? context.fetch(descriptor)) ?? []
-        let bikeCount = recent.filter { $0.typeRaw == TransportType.bicycle.rawValue || $0.manualTypeRaw == TransportType.bicycle.rawValue }.count
-        let ebikeCount = recent.filter { $0.typeRaw == TransportType.ebike.rawValue || $0.manualTypeRaw == TransportType.ebike.rawValue }.count
-        
-        return bikeCount >= ebikeCount ? .bicycle : .ebike
+
+        // 每条记录只按"最终生效的类型"计数一次：自动识别成自行车、后来手动
+        // 改成电动车的记录，之前会同时匹配两个独立 filter 而被重复计数。
+        var bikeWeight = 0.0
+        var ebikeWeight = 0.0
+        for record in recent {
+            let typeString = record.manualTypeRaw ?? record.typeRaw
+            guard let type = TransportType(rawValue: typeString) else { continue }
+            let weight = transportPreferenceWeight(for: record.startTime, relativeTo: date)
+            if type == .bicycle {
+                bikeWeight += weight
+            } else if type == .ebike {
+                ebikeWeight += weight
+            }
+        }
+
+        return bikeWeight >= ebikeWeight ? .bicycle : .ebike
     }
 
     /// 获取近期最常用的非步行交通方式，供没有明确传感器类型的路线做先验判断。
     /// 实际分配前仍会按当前速度和距离筛掉不可能的候选类型。
     private static func getPreferredRoadTransportType(in context: ModelContext, excluding date: Date) -> TransportType? {
-        let calendar = Calendar.current
-        let startOfDay = calendar.startOfDay(for: date)
-        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
-        var descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-            $0.statusRaw != "ignored" && ($0.startTime < startOfDay || $0.startTime >= endOfDay)
-        }, sortBy: [SortDescriptor(\.startTime, order: .reverse)])
-        descriptor.fetchLimit = 300
-
+        let descriptor = transportPreferenceDescriptor(excluding: date, fetchLimit: 300)
         let roadTypes = Set(TransportType.allCases).subtracting([.slow, .running])
         let records = (try? context.fetch(descriptor)) ?? []
-        var counts: [TransportType: Int] = [:]
+        var counts: [TransportType: Double] = [:]
         for record in records {
             let rawType = record.manualTypeRaw ?? record.typeRaw
             guard let type = TransportType(rawValue: rawType), roadTypes.contains(type) else { continue }
-            counts[type, default: 0] += 1
+            counts[type, default: 0] += transportPreferenceWeight(for: record.startTime, relativeTo: date)
         }
         guard let highestCount = counts.values.max() else { return nil }
         // CaseIterable provides a stable tie break, so a rebuild does not flip
@@ -1474,10 +1484,19 @@ class PersistentTimelineBuilder {
             let duration = transport.endTime.timeIntervalSince(transport.startTime)
             guard duration > 0, transport.distance >= 1_000 else { continue }
             let kmh = transport.distance / duration * 3.6
-            guard kmh >= 15 else { continue }
+            let stepCount = transport.stepCount ?? 0
+            let minutes = duration / 60
+            let stepsPerMinute = minutes > 0 ? Double(stepCount) / minutes : 0
+            // 普通城市电动车行程常年被红灯/拥堵拉到 15km/h 以下，物理速度上界
+            // 抓不住它们。这里额外用步数兜底：真实步行的步频远高于电动车骑行，
+            // 步数明显低于正常步行水平时，即使均速不算"不可能"也当作误判处理。
+            let hasImpossibleWalkingSpeed = kmh >= 15
+            let hasImplausiblyFewSteps = transport.stepCount != nil && stepsPerMinute < 12 && stepCount < 40
+            guard hasImpossibleWalkingSpeed || (hasImplausiblyFewSteps && kmh >= 3) else { continue }
 
             let inferred = TransportType.from(
                 speed: transport.distance / duration,
+                stepCount: stepCount,
                 duration: duration,
                 distanceMeters: transport.distance,
                 pointCount: 2,
@@ -1635,7 +1654,24 @@ class PersistentTimelineBuilder {
         
         // 补齐末尾缺口
         if currentTime < upperLimit.addingTimeInterval(-AppConfig.shared.gapFillingThreshold) {
-            gaps.append(TimeRange(start: currentTime, end: upperLimit))
+            var trailingGapStart = currentTime
+            // 核心修复：如果末尾缺口前紧贴着一条“自动生成、未被手动修正”的
+            // 交通记录，它很可能只是上一次同步在这段行程还没走完时被迫收尾——
+            // processPoints 只有“遇到真实停留”和“用完了当时能拿到的点位”
+            // 两种退出条件，产生的记录在数据上完全一样，无法区分。继续把
+            // 它后面的新点位当成独立缺口处理，只会让同一段连续行程按“同步
+            // 发生的时刻”而不是“真实是否停留”被切成两段，各自独立判断交通
+            // 方式（这正是步行/汽车被错误拆分的根源）。这里把它重新并回缺口，
+            // 让整段行程用完整时长重新聚类、重新判断交通方式；如果中途真的
+            // 停留过，processPoints 自己会重新切出停留。手动记录、被忽略的
+            // 记录、以及后面确实跟着停留或其他交通的记录不受影响。
+            if let trailingTransport = allTps.first(where: { $0.endTime == currentTime }),
+               trailingTransport.manualTypeRaw == nil {
+                trailingGapStart = trailingTransport.startTime
+                allTps.removeAll { $0 === trailingTransport }
+                context.delete(trailingTransport)
+            }
+            gaps.append(TimeRange(start: trailingGapStart, end: upperLimit))
         }
         
         // 4. 对每个缺口进行处理
@@ -3313,22 +3349,31 @@ class PersistentTimelineBuilder {
     }
 
     static func isSameAutomaticTrip(_ first: TransportRecord, _ second: TransportRecord) -> Bool {
-        let overlap = max(0, min(first.endTime, second.endTime).timeIntervalSince(max(first.startTime, second.startTime)))
-        let shorterDuration = min(
-            first.endTime.timeIntervalSince(first.startTime),
-            second.endTime.timeIntervalSince(second.startTime)
-        )
         // Manual edits still own their saved interval. For automatic routes,
-        // compare the actual observations BEFORE the record-overlap shortcut:
-        // reconstruction/snap/dedup may have widened the persisted interval.
+        // measure overlap (and, below, adjacency) from the actual observed
+        // GPS samples rather than the persisted start/end: reconstruction/
+        // snap/dedup can widen a record's bounds well past its real samples,
+        // which would otherwise let two unrelated trips look like they
+        // overlap. This must recompute `overlap` itself (not just veto the
+        // shortcut below) so that two genuinely back-to-back trips whose
+        // Health/Motion classification flipped mid-trip (e.g. briefly
+        // misread as walking, then correctly as automotive) still show zero
+        // real overlap and fall through to the endpoint-adjacency check
+        // instead of being compared as if their stale bounds overlapped.
+        let overlap: TimeInterval
+        let shorterDuration: TimeInterval
         if first.manualTypeRaw == nil, second.manualTypeRaw == nil,
            let firstRange = observedTimeRange(observedRoutePoints(first)),
            let secondRange = observedTimeRange(observedRoutePoints(second)) {
-            let sampleOverlap = max(0, min(firstRange.end, secondRange.end)
+            overlap = max(0, min(firstRange.end, secondRange.end)
                 .timeIntervalSince(max(firstRange.start, secondRange.start)))
-            guard sampleOverlap / min(firstRange.duration, secondRange.duration) >= 0.8 else {
-                return false
-            }
+            shorterDuration = min(firstRange.duration, secondRange.duration)
+        } else {
+            overlap = max(0, min(first.endTime, second.endTime).timeIntervalSince(max(first.startTime, second.startTime)))
+            shorterDuration = min(
+                first.endTime.timeIntervalSince(first.startTime),
+                second.endTime.timeIntervalSince(second.startTime)
+            )
         }
         if shorterDuration > 0 && overlap / shorterDuration >= 0.8 {
             return true

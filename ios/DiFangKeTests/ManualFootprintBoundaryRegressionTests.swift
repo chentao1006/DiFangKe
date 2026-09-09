@@ -321,11 +321,18 @@ final class DuplicateTransportEndpointRegressionTests: XCTestCase {
         XCTAssertFalse(PersistentTimelineBuilder.isSameAutomaticTrip(returning, outward))
     }
 
-    func testAdjacentObservedTripsWithSameEndpointsRemainSeparate() throws {
+    func testAdjacentObservedTripsWithSameDirectedEndpointsMerge() throws {
+        // Zero real-world gap, same direction, matching A/B endpoints: this
+        // is what a single physical trip looks like when Health/Motion
+        // flips its activity guess partway through (e.g. briefly read as
+        // walking, then correctly as automotive), producing two adjacent
+        // TransportRecords for one continuous movement. Two genuinely
+        // separate trips cannot share this exact shape, since that would
+        // require instantly teleporting back to A with no dwell at all.
         let first = try record(offset: 0, route: [(25, 102), (25.01, 102.01)])
         let second = try record(offset: 600, route: [(25, 102), (25.01, 102.01)])
-        XCTAssertFalse(PersistentTimelineBuilder.isSameAutomaticTrip(first, second))
-        XCTAssertFalse(PersistentTimelineBuilder.isSameAutomaticTrip(second, first))
+        XCTAssertTrue(PersistentTimelineBuilder.isSameAutomaticTrip(first, second))
+        XCTAssertTrue(PersistentTimelineBuilder.isSameAutomaticTrip(second, first))
     }
 
     func testSameSamplesWithShiftedRecordBoundsStillDeduplicate() throws {

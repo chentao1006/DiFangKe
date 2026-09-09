@@ -1368,13 +1368,27 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 停留时可以降低定位精度，但不能用 50m 过滤来等待“离开”的首个点。
         // 一旦红灯、路口减速等短暂低速被误判为停留，50m 会让恢复高频的
         // didUpdateLocations 回调来得太晚，进而在原始轨迹中制造数分钟空档。
-        // 保留 10m 的唤醒粒度，下一次实际移动会尽快重新进入高频模式。
+        // 手动“省电”模式仍保留 10m 的唤醒粒度；自动模式在确认
+        // 长时停留后会停止标准定位，改由其他系统唤醒通道检测离开。
         locationManager.distanceFilter = 10.0
         locationManager.activityType = .other
+        locationManager.pausesLocationUpdatesAutomatically = true
     }
 
-    /// 移动中的自动记录使用连续高精度采样。确认长时间静止后会单独切换到
-    /// 低功耗参数；Core Motion、围栏和下一次 10 米定位都会立即恢复这里的参数。
+    /// A confirmed long stay does not need the standard location service to
+    /// remain active all night. Significant-change, Visit, region-exit and
+    /// Core Motion monitoring remain armed and will call
+    /// `forceHighAccuracyBoost()` before continuous recording resumes.
+    private func enterAutomaticStationaryLowPower() {
+        guard currentLocationAccuracyMode == .automatic else { return }
+        isUsingAutomaticStationaryLowPower = true
+        applyPowerSavingLocationSettings()
+        locationManager.stopUpdatingLocation()
+        print("[LocationManager] 💤 Confirmed long stay; standard location updates paused.")
+    }
+
+    /// 移动中的自动记录使用连续高精度采样。确认长时间静止后会停止
+    /// 标准定位；Core Motion、围栏、Visit 和显著位置变化会恢复这里的参数。
     private func applyContinuousLocationSettings(to manager: CLLocationManager) {
         manager.desiredAccuracy = kCLLocationAccuracyBest
         manager.distanceFilter = kCLDistanceFilterNone
@@ -1492,9 +1506,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let stationaryDuration = now.timeIntervalSince(stop.timestamp)
         guard stationaryDuration > 10 * 60 else { return }
 
-        // Keep the existing standard-location session alive. requestLocation()
-        // cannot run concurrently with startUpdatingLocation(), and mixing them
-        // can cancel the single request instead of restoring route recording.
+        // Do not mix requestLocation() with the standard service. A confirmed
+        // long stay can stop standard updates completely and use the already
+        // armed low-power departure signals instead.
         guard lastUpdateGap > 10 * 60 else { return }
         guard now.timeIntervalSince(lastStationaryProbeTime) > 15 * 60 else { return }
         lastStationaryProbeTime = now
@@ -1503,15 +1517,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         print("[LocationManager] 🧭 Long stationary stay has no fresh location for \(gapDescription). Keeping a low-power departure watch…")
         ensureSignificantMonitoringActive()
         // A long confirmed stay must not be promoted back to Best accuracy every
-        // fifteen minutes.  The standard service stays active with a 10 m
-        // delivery filter; Core Motion/region/visit events call
-        // forceHighAccuracyBoost before the user has travelled far enough to
-        // create a route gap.
+        // fifteen minutes. Core Motion/region/visit/significant-change events
+        // call forceHighAccuracyBoost and restart standard updates on departure.
         if currentLocationAccuracyMode == .automatic {
-            isUsingAutomaticStationaryLowPower = true
-            applyPowerSavingLocationSettings()
+            enterAutomaticStationaryLowPower()
         }
-        locationManager.startUpdatingLocation()
     }
 
     private var shouldRunActiveLocationRecovery: Bool {
@@ -1727,9 +1737,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationManager.startMonitoringSignificantLocationChanges()
         locationManager.startMonitoringVisits()
         
-        // 确保后台定位配置正确
+        // 确保后台定位配置正确。不要在这里禁止系统自动暂停：
+        // 此方法也会在已确认的长时停留期间调用，否则会再次变成
+        // 整夜持续的后台定位会话。
         locationManager.allowsBackgroundLocationUpdates = true
-        locationManager.pausesLocationUpdatesAutomatically = false
         
         print("[LocationManager] ✅ Significant location monitoring & visit monitoring ensured active.")
     }
@@ -2369,8 +2380,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }()
 
             if shouldUseStationaryLowPower {
-                isUsingAutomaticStationaryLowPower = true
-                applyPowerSavingLocationSettings()
+                enterAutomaticStationaryLowPower()
             } else {
                 isUsingAutomaticStationaryLowPower = false
                 applyContinuousLocationSettings(to: manager)
@@ -2742,6 +2752,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
         let isTrackingEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
         guard isTracking, isTrackingEnabled, isAuthorized else { return }
+        if isUsingAutomaticStationaryLowPower || currentLocationAccuracyMode == .powerSaving {
+            // This pause is intentional. Significant-change, Visit, region and
+            // motion monitoring stay active and will wake continuous recording
+            // when departure evidence arrives.
+            print("[LocationManager] Location updates paused during a low-power stay.")
+            return
+        }
         // 电动车可能被 Core Motion 判为静止，恢复不能等待运动证据或 Timer。
         print("[LocationManager] Location updates paused; resuming continuous recording.")
         manager.pausesLocationUpdatesAutomatically = false

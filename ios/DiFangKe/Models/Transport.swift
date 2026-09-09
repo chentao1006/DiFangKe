@@ -195,18 +195,35 @@ enum TransportType: String, CaseIterable, Codable {
         // 1. 优先使用传感器数据 (Core Motion)
         switch effectiveMotionType {
         case .walking:
-            if hasMeaningfulTrip && !hasDominantOnFootEvidence && kmh >= 8 {
-                return preferredCycling
+            // 低速下不同交通方式的加速度特征都可能与步行接近，Core Motion
+            // 把它们误判成"步行"很常见，不只是某一种交通方式。只有步行
+            // 证据本身占主导时才可信；证据不足但构成一次完整行程时，改用
+            // 近期习惯交通方式做先验，而不是无条件直接判成步行——
+            // habitualTransport 本身已经按当前速度/距离过滤过不可能的
+            // 候选，不会越界覆盖。
+            if hasDominantOnFootEvidence { return .slow }
+            if hasMeaningfulTrip {
+                if let habitualTransport { return habitualTransport }
+                if kmh >= 8 { return preferredCycling }
             }
             return .slow
         case .running:
             return .running
         case .cycling:
-            if kmh > 55 { return safePreferredAuto } 
+            if kmh > 55 { return safePreferredAuto }
             return preferredCycling
         case .automotive:
             if kmh > 100 && maxAllowedTypeCategory >= 4 { return .train }
-            if kmh > 80 && safePreferredAuto == .bus { return .car } 
+            if kmh > 80 && safePreferredAuto == .bus { return .car }
+            // safePreferredAuto 只在汽车/公交/摩托车/轨交这几类车载方式里选，
+            // 完全排除了自行车/电动车这类速度也可能落在"车载"区间内的方式。
+            // Core Motion 把它们判成"车载"同样常见，不只是某一种交通方式；
+            // 当前速度对用户近期整体习惯（habitualTransport，任意类型）仍然
+            // 合理时，不能被这份范围更窄的偏好统计盖过。
+            if let habitualTransport,
+               habitualTransport.canBeAutomaticallyInferred(at: kmh, maxCategory: maxAllowedTypeCategory) {
+                return habitualTransport
+            }
             return safePreferredAuto
         default:
             break
