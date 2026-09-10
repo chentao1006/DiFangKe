@@ -143,7 +143,11 @@ struct MiniCalendarView: View {
                 if let date = days[index] {
                     let startOfDay = calendar.startOfDay(for: date)
                     let isAvailable = availableDates.contains(startOfDay)
-                    
+                    // 没数据的格子仍然要能点进去：否则一旦某天的数据被清空（例如 bug
+                    // 或用户手动重置），这一天会从 availableDates 里消失，格子从此
+                    // 再也点不动，用户永远没法翻回那天调出"重新生成"菜单。
+                    let isSelectable = isAvailable || startOfDay <= calendar.startOfDay(for: Date())
+
                     MiniCalendarDayCell(
                         date: date,
                         isSelected: calendar.isDate(date, inSameDayAs: selectedDate),
@@ -152,7 +156,7 @@ struct MiniCalendarView: View {
                         isAvailable: isAvailable
                     )
                     .onTapGesture {
-                        if isAvailable {
+                        if isSelectable {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             selectedDate = date
                             onDateSelected(date)

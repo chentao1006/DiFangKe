@@ -1012,7 +1012,10 @@ struct MonthDayCell: View {
         let hasData = !footprints.isEmpty || !transports.isEmpty || !futureTrips.isEmpty
         let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
         let isTarget = Calendar.current.isDate(date, inSameDayAs: targetDate)
-        
+        // 没数据的格子仍然要能点进去：否则一旦某天的数据被清空（例如 bug 或用户手动
+        // 重置），用户永远没法翻回那天调出"重新生成"菜单。
+        let isSelectable = hasData || Calendar.current.startOfDay(for: date) <= Calendar.current.startOfDay(for: Date())
+
         ZStack {
             if hasData {
                 MonthDayTimelineRing(
@@ -1034,7 +1037,7 @@ struct MonthDayCell: View {
                 else if isTarget { RoundedRectangle(cornerRadius: 12).fill(Color.gray.opacity(0.12)) }
             }
         )
-        .onTapGesture { if hasData { onTap() } }
+        .onTapGesture { if isSelectable { onTap() } }
     }
 }
 

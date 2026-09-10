@@ -4377,17 +4377,43 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
             if let tps = try? context.fetch(tpDesc) { for tp in tps { context.delete(tp) } }
             if let insights = try? context.fetch(insightDesc) { for i in insights { context.delete(i) } }
-            
+
+            // 同步清理当天的手动删除标记（与 resetToday() 保持一致）：否则用户此前手动
+            // 删除过的交通段会一直残留在 TransportManualSelection 里，syncDay 重建时
+            // 会把重叠的缺口当作"已排除"整段跳过，导致哪怕原始 GPS 点还在，重建出来
+            // 也是空的——只清空了旧数据，看起来像是"重新生成"没有真正执行。
+            let manualDesc = FetchDescriptor<TransportManualSelection>(predicate: #Predicate {
+                $0.startTime >= startOfDay && $0.startTime < endOfDay
+            })
+            if let manuals = try? context.fetch(manualDesc) { for m in manuals { context.delete(m) } }
+
             try? context.save()
-            
+
             // 2. 调用新引擎重新构建
-            await PersistentTimelineBuilder.syncDay(date: date, in: context)
-            
+            // syncDay 内部有防重入锁：如果这一天恰好被别的触发源（例如实时定位
+            // 处理、午夜跨天刷新）同时同步，这次调用会被直接跳过并返回 false，
+            // 真正的重建其实发生在那个没被我们等待的并发调用里。如果只 await
+            // 一次就收工，loading 提示会在数据其实还没重建完时提前消失。这里
+            // 循环重试，直到确认这次调用真的执行了同步（或等待超时）为止。
+            var didSync = await PersistentTimelineBuilder.syncDay(date: date, in: context)
+            var retriesRemaining = 20
+            while !didSync && retriesRemaining > 0 {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                didSync = await PersistentTimelineBuilder.syncDay(date: date, in: context)
+                retriesRemaining -= 1
+            }
+
             await MainActor.run {
                 self.isResettingData = false
                 // 显式触动 UI 刷新，重置是用户主动发起的，安全可控
                 self.lastRawDataUpdateTrigger = Date()
-                
+                // 核心修复：必须直接发这个通知——否则界面刷新只能依赖
+                // NSPersistentStoreRemoteChange 那条被 debounce 了5秒的备用通道
+                // （见 startObservingRemoteChanges 附近），导致提示已经消失、
+                // 但时间线还要再等3-5秒才刷新出新内容。resetToday()/
+                // rebuildAffectedTimeline() 都会发这个通知，这里之前漏掉了。
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+
                 // 提醒小组件重置数据
                 Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
             }

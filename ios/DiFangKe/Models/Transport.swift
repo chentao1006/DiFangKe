@@ -43,7 +43,13 @@ enum TransportType: String, CaseIterable, Codable {
         switch self {
         case .slow, .running: return nil
         case .bicycle: return 0...30
-        case .ebike: return 8...50
+        // 电动车常被红绿灯/拥堵拖到很低速度（这一点在下面 244-245、265-266
+        // 行的注释里也承认），下限如果卡在8，会导致哪怕历史上大多数行程都是
+        // 电动车，一旦这一段被拖到8km/h以下，"电动车"这个候选也会直接被
+        // canBeAutomaticallyInferred 排除掉，穿透到只在车/公交/摩托/地铁里
+        // 选、默认给汽车的兜底逻辑。下限降到3——够覆盖堵在路口极慢蠕行的场
+        // 景，但不像降到0那样，让"人根本没动"也变成电动车候选。
+        case .ebike: return 3...50
         case .motorcycle: return 20...110
         case .bus: return 15...100
         case .car: return 15...150

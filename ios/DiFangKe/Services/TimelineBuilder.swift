@@ -1539,28 +1539,39 @@ class PersistentTimelineBuilder {
 
     private static func overlapsDeletedTransportOverride(start: Date, end: Date, deletedRanges: [(start: Date, end: Date)]) -> Bool {
         guard end > start else { return false }
+        let candidateDuration = end.timeIntervalSince(start)
         return deletedRanges.contains { range in
             let overlapStart = max(start, range.start)
             let overlapEnd = min(end, range.end)
             guard overlapEnd > overlapStart else { return false }
 
             let overlapDuration = overlapEnd.timeIntervalSince(overlapStart)
-            let candidateDuration = end.timeIntervalSince(start)
-            let deletedDuration = range.end.timeIntervalSince(range.start)
-            let minDuration = max(1, min(candidateDuration, deletedDuration))
-            return overlapDuration > 300 || overlapDuration >= minDuration * 0.3
+            // 必须相对"缺口自身时长"判断重叠是否显著，不能像之前那样取
+            // min(缺口时长, 被删除交通时长) 当分母——那样一来，只要缺口里
+            // 夹着任意一小段曾被手动删除的交通，重叠相对那一小段自己几乎
+            // 总是占比很高，哪怕缺口长达一整天（例如全天数据被清空重建、
+            // 当天没有任何锚点，缺口退化成横跨全天的一个大缺口）也会被这
+            // 一小段旧的手动删除拖累，导致整个缺口被丢弃、一段都不重建。
+            return overlapDuration > 300 && overlapDuration >= candidateDuration * 0.3
         }
     }
 
+    // 返回值表示这次调用是否真的执行了同步（而不是被重入锁跳过）。调用方如果
+    // 需要确保这一天"确实同步完成"（例如重新生成时要靠这个结果决定何时收起
+    // loading 提示），必须检查这个返回值——同一天可能同时有多处触发 syncDay
+    // （实时定位处理、午夜跨天刷新等），后触发的一方会在这里被直接跳过，如果
+    // 调用方误以为 await 结束就等于同步完成，会把提示提前收起，而真正的重建
+    // 其实发生在没被等待的另一个并发调用里。
+    @discardableResult
     @MainActor
-    static func syncDay(date: Date, in context: ModelContext, runConsolidation: Bool = true) async {
+    static func syncDay(date: Date, in context: ModelContext, runConsolidation: Bool = true) async -> Bool {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
-        
+
         // 防止重入
         guard !syncingDates.contains(startOfDay) else {
             print("[TimelineAuto] skip \(startOfDay): sync already in progress")
-            return
+            return false
         }
         syncingDates.insert(startOfDay)
         defer { syncingDates.remove(startOfDay) }
@@ -1633,7 +1644,7 @@ class PersistentTimelineBuilder {
             upperLimit = now
         } else {
             // 对于历史日期，如果没有数据，则不应有任何填充；如果有数据，则止于最后一条数据的时间点
-            guard let latest = latestDataTime else { return } // 核心防护：历史日期若完全无点，直接结束同步
+            guard let latest = latestDataTime else { return true } // 核心防护：历史日期若完全无点，直接结束同步（这属于"确实同步完成，只是无事可做"，不是被重入锁跳过）
             upperLimit = min(endOfDay, latest)
         }
         
@@ -1774,8 +1785,9 @@ class PersistentTimelineBuilder {
         
         // 优先同步解析当天的地点，这样 indicator 结束时地点都已经解析完了
         await resolveAddresses(for: date, in: context)
-        
+
         startControlledAddressResolution(in: context)
+        return true
     }
 
 
@@ -1896,8 +1908,15 @@ class PersistentTimelineBuilder {
                 continue
             }
             
-            let isCompatible = getCategory(currentType) == getCategory(nextType)
-            
+            // 首尾几乎无缝衔接（不到1分钟）且中间没有足迹打断，说明这段路上人
+            // 根本没有停下来过——物理上不可能中途"下车走两步再上车"，类别不
+            // 同大概率只是速度算出来卡在分类阈值边缘被误判（例如电动车刚起步
+            // 遇红灯，均速被拖到步行区间）。这种情况下放行合并，交给下面
+            // 1937-1951行的重新分类逻辑按合并后的整段速度重判类型，而不是让
+            // "类别必须相同"卡住合并，把一趟连续行程硬生生拆成步行+电动车。
+            let isImmediatelyAdjacent = gap >= -60 && gap <= 60
+            let isCompatible = getCategory(currentType) == getCategory(nextType) || (isImmediatelyAdjacent && !hasFpBetween)
+
             // If they are less than 15 minutes apart and no footprint in between, merge them!
             let crossesDeletedTransport = overlapsDeletedTransportOverride(
                 start: min(current.startTime, next.startTime),

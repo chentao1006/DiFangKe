@@ -344,7 +344,7 @@ private struct ContinuousTimelineView: View {
             loadLaterDates: loadLaterTimeline,
             loadLaterDatesAfter: { date in await loadLaterTimeline(from: date) },
             loadGapDates: loadTimelineDatesForBackfill,
-            loadDate: loadTimelineDate,
+            loadDate: { date, allowEmpty in await loadTimelineDate(date, allowEmpty: allowEmpty) },
             loadBackfillDates: loadTimelineDatesForBackfill,
             calendarBackfillBatchSize: Self.calendarBackfillDateBatchSize,
             availableDates: loadableTimelineDateSet,
@@ -987,11 +987,11 @@ private struct ContinuousTimelineView: View {
         return await loadLaterTimeline(from: newestDate)
     }
 
-    private func loadTimelineDate(_ date: Date) async -> Bool {
+    private func loadTimelineDate(_ date: Date, allowEmpty: Bool = false) async -> Bool {
         let calendar = Calendar.current
         let normalizedDate = calendar.startOfDay(for: date)
         if let items = timelinesByDate[normalizedDate] {
-            guard shouldDisplayTimelineDate(normalizedDate, items: items) else { return false }
+            guard shouldDisplayTimelineDate(normalizedDate, items: items, allowEmpty: allowEmpty) else { return false }
             if !loadedDates.contains(normalizedDate) {
                 loadedDates = Set(loadedDates).union([normalizedDate]).sorted()
             }
@@ -999,20 +999,20 @@ private struct ContinuousTimelineView: View {
             return true
         }
         if let cachedItems = timelineCache.cachedTimeline(for: normalizedDate) {
-            guard shouldDisplayTimelineDate(normalizedDate, items: cachedItems) else { return false }
+            guard shouldDisplayTimelineDate(normalizedDate, items: cachedItems, allowEmpty: allowEmpty) else { return false }
             timelinesByDate[normalizedDate] = cachedItems
             loadedDates = Set(loadedDates).union([normalizedDate]).sorted()
             hiddenTimelineDateSet.remove(normalizedDate)
             return true
         }
-        if timelineCache.isHidden(normalizedDate) {
+        if !allowEmpty, timelineCache.isHidden(normalizedDate) {
             return false
         }
 
         let availableDates = await availableTimelineDatesForLookup()
-        guard availableDates.contains(normalizedDate) || calendar.isDateInToday(normalizedDate) else { return false }
+        guard availableDates.contains(normalizedDate) || calendar.isDateInToday(normalizedDate) || allowEmpty else { return false }
 
-        return await loadVisibleTimelineDates([normalizedDate], visibleDateLimit: 1, defersMapUpdates: true, reloadLoadedDates: true)
+        return await loadVisibleTimelineDates([normalizedDate], visibleDateLimit: 1, defersMapUpdates: true, reloadLoadedDates: true, allowEmpty: allowEmpty)
     }
 
     private func loadTimelineDatesForBackfill(_ dates: [Date]) async -> Bool {
@@ -1252,7 +1252,7 @@ private struct ContinuousTimelineView: View {
         return await loadVisibleTimelineDates(candidateDates, visibleDateLimit: visibleDateLimit, defersMapUpdates: true)
     }
 
-    private func loadVisibleTimelineDates<S: Sequence>(_ candidateDates: S, visibleDateLimit: Int, defersMapUpdates: Bool, reloadLoadedDates: Bool = false) async -> Bool where S.Element == Date {
+    private func loadVisibleTimelineDates<S: Sequence>(_ candidateDates: S, visibleDateLimit: Int, defersMapUpdates: Bool, reloadLoadedDates: Bool = false, allowEmpty: Bool = false) async -> Bool where S.Element == Date {
         guard visibleDateLimit > 0 else { return false }
 
         let calendar = Calendar.current
@@ -1319,7 +1319,7 @@ private struct ContinuousTimelineView: View {
             let items = Self.timelineItems(from: daySnapshot, allPlaces: snapshot.places)
             fetchedTimelines[daySnapshot.date] = items
 
-            if shouldDisplayTimelineDate(daySnapshot.date, items: items) {
+            if shouldDisplayTimelineDate(daySnapshot.date, items: items, allowEmpty: allowEmpty) {
                 loadedVisibleDates.insert(daySnapshot.date)
                 didLoadVisibleDate = true
             } else {
@@ -1475,8 +1475,9 @@ private struct ContinuousTimelineView: View {
         return visibleDates.sorted()
     }
 
-    private func shouldDisplayTimelineDate(_ date: Date, items: [TimelineItem]) -> Bool {
+    private func shouldDisplayTimelineDate(_ date: Date, items: [TimelineItem], allowEmpty: Bool = false) -> Bool {
         if !items.isEmpty { return true }
+        if allowEmpty { return true }
         return Calendar.current.isDateInToday(date)
     }
 
@@ -2042,7 +2043,7 @@ private struct ContinuousTimelineSheet: View {
     let loadLaterDates: () async -> Bool
     let loadLaterDatesAfter: (Date) async -> Bool
     let loadGapDates: ([Date]) async -> Bool
-    let loadDate: (Date) async -> Bool
+    let loadDate: (Date, Bool) async -> Bool
     let loadBackfillDates: ([Date]) async -> Bool
     let calendarBackfillBatchSize: Int
     private let calendarBackfillDateLoadLimit = 1_000
@@ -3522,7 +3523,7 @@ private struct ContinuousTimelineSheet: View {
                 if generation == scrollNavigationGeneration { returnToTodayTask = nil }
             }
             let today = Calendar.current.startOfDay(for: Date())
-            if !dates.contains(today) { _ = await loadDate(today) }
+            if !dates.contains(today) { _ = await loadDate(today, false) }
             for delay in [0, 90_000_000, 220_000_000, 420_000_000] {
                 if delay > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(delay))
@@ -3697,7 +3698,7 @@ private struct ContinuousTimelineSheet: View {
 
         Task { @MainActor in
             if !dates.contains(normalizedDate) {
-                guard await loadDate(normalizedDate) else {
+                guard await loadDate(normalizedDate, true) else {
                     if generation == scrollNavigationGeneration, calendarScrollLockTarget == normalizedDate {
                         calendarScrollLockTarget = nil
                         pendingCalendarBackfillDates = []
