@@ -146,9 +146,10 @@
     <key>SAME_PLACE_MERGE_GAP_THRESHOLD</key>
     <real>3600</real>
     
-    <!-- 触发缺口填充的最小间隙时间（秒） -->
+    <!-- 触发缺口填充的最小间隙时间（秒）：与 TimelineBuilder.fillGap 的
+         "Ignore gaps < 1 min" 保持一致 -->
     <key>GAP_MIN_DURATION_THRESHOLD</key>
-    <real>30</real>
+    <real>60</real>
 
     <!-- 交通对齐阈值（秒） -->
     <key>TRANSPORT_ALIGNMENT_THRESHOLD</key>
@@ -239,5 +240,288 @@
     <!-- 照片关联的最大搜索半径（米） -->
     <key>PHOTO_LINKING_MAX_DISTANCE</key>
     <real>1500</real>
+
+    <!-- 计步器判定"确实在走"的最小单次回调步数增量：低于此值视为原地挪动，
+         不强制标记 isMoving，避免连带把 GPS 拉回最高精度锁定 10 分钟 -->
+    <key>PEDOMETER_MIN_MOVING_STEP_DELTA</key>
+    <integer>3</integer>
+
+    <!-- 计步器启动回溯时长（秒）：从这么久之前开始统计，避免重启时丢失步数状态 -->
+    <key>PEDOMETER_STARTUP_LOOKBACK</key>
+    <real>30</real>
+
+    <!-- ===== LocationManager 调参 ===== -->
+
+    <!-- 轨迹提取的 GPS 精度过滤门槛（米） -->
+    <key>MAX_GPS_ACCURACY_FILTER</key>
+    <real>300</real>
+
+    <!-- 出门保护期时长（秒）：检测到移动信号后，此时长内不允许节能逻辑把精度降回低频 -->
+    <key>DEPARTURE_BOOST_DURATION</key>
+    <real>600</real>
+
+    <!-- 足迹采样的最小时间间隔（秒） -->
+    <key>FOOTPRINT_MIN_SAMPLE_INTERVAL</key>
+    <real>5</real>
+
+    <!-- GPS 上报速度达到此值（km/h）即视为"确有移动"的强证据 -->
+    <key>REPORTED_HIGH_SPEED_THRESHOLD</key>
+    <real>20</real>
+
+    <!-- 漂移判定 B：精度相对上一个点恶化的倍数门槛 -->
+    <key>DRIFT_ACCURACY_DEGRADATION_RATIO</key>
+    <real>3</real>
+    <!-- 漂移判定 B：精度恶化的绝对下限（米） -->
+    <key>DRIFT_ACCURACY_ABSOLUTE_FLOOR</key>
+    <real>150</real>
+
+    <!-- 省电模式"是否静止"判定：停留时长（秒）/位移（米）/速度（m/s）门槛 -->
+    <key>STATIONARY_DWELL_DURATION</key>
+    <real>300</real>
+    <key>STATIONARY_DWELL_DISTANCE</key>
+    <real>150</real>
+    <key>STATIONARY_DWELL_SPEED</key>
+    <real>1</real>
+
+    <!-- 进入自动低功耗静止模式的门槛：停留时长（秒）/位移（米） -->
+    <key>LOW_POWER_DWELL_DURATION</key>
+    <real>600</real>
+    <key>LOW_POWER_DWELL_DISTANCE</key>
+    <real>80</real>
+
+    <!-- 反地理编码节流：高速时使用的速度门槛（m/s）及对应的节流距离（米），
+         低速时使用的节流距离（米） -->
+    <key>GEOCODE_HIGH_SPEED_THRESHOLD</key>
+    <real>10</real>
+    <key>GEOCODE_THROTTLE_DISTANCE_HIGH_SPEED</key>
+    <real>1000</real>
+    <key>GEOCODE_THROTTLE_DISTANCE_NORMAL</key>
+    <real>100</real>
+
+    <!-- 地理围栏复用距离门槛（米） -->
+    <key>REGION_REUSE_DISTANCE_THRESHOLD</key>
+    <real>50</real>
+    <!-- 静止唤醒围栏半径（米） -->
+    <key>STATIONARY_WAKEUP_REGION_RADIUS</key>
+    <real>75</real>
+
+    <!-- 出门确认判定集合：高速位移门槛（米）/精度门槛（米）/位移门槛（米）/
+         长时间停留门槛（秒）/抗漂移下限（米）及对应精度倍数 -->
+    <key>DEPARTURE_HIGH_SPEED_DISTANCE</key>
+    <real>500</real>
+    <key>DEPARTURE_ACCURACY_THRESHOLD</key>
+    <real>100</real>
+    <key>DEPARTURE_DISTANCE_THRESHOLD</key>
+    <real>150</real>
+    <key>DEPARTURE_LONG_STAY_DURATION</key>
+    <real>1800</real>
+    <key>DEPARTURE_DRIFT_RESISTANT_FLOOR</key>
+    <real>300</real>
+    <key>DEPARTURE_DRIFT_RESISTANT_RATIO</key>
+    <real>3</real>
+
+    <!-- 移动中但长时间无定位更新的看门狗：恢复检查间隔（秒）/恢复节流间隔（秒） -->
+    <key>MOVING_RECOVERY_GAP_THRESHOLD</key>
+    <real>45</real>
+    <key>RECOVERY_BOOST_THROTTLE_INTERVAL</key>
+    <real>60</real>
+
+    <!-- 静止探测阶段的最小持续时长（秒）与探测间隔（秒） -->
+    <key>STATIONARY_PROBE_MIN_DURATION</key>
+    <real>600</real>
+    <key>STATIONARY_PROBE_INTERVAL</key>
+    <real>900</real>
+
+    <!-- 位置变化触发时间线重整的防抖间隔（秒） -->
+    <key>TIMELINE_SIFT_DEBOUNCE_INTERVAL</key>
+    <real>900</real>
+
+    <!-- 实时足迹合并任务的延迟（秒） -->
+    <key>LIVE_MERGE_TASK_DELAY</key>
+    <real>3</real>
+
+    <!-- 重复调用 startTracking() 的防抖间隔（秒） -->
+    <key>START_TRACKING_DEBOUNCE_INTERVAL</key>
+    <real>30</real>
+
+    <!-- 近期足迹合并的回溯窗口（秒） -->
+    <key>MERGE_RECENT_FOOTPRINTS_LOOKBACK</key>
+    <real>1800</real>
+
+    <!-- 大足迹按距离拆分：聚类半径上限（米）、半径比例、最小点数 -->
+    <key>SPLIT_CLUSTER_RADIUS_CAP</key>
+    <real>100</real>
+    <key>SPLIT_CLUSTER_RADIUS_RATIO</key>
+    <real>0.8</real>
+    <key>SPLIT_CLUSTER_MIN_POINTS</key>
+    <integer>4</integer>
+
+    <!-- 进行中停留触发 AI 分析的延迟/刷新间隔（秒） -->
+    <key>ONGOING_AI_ANALYSIS_INTERVAL</key>
+    <real>3600</real>
+
+    <!-- 延长活动已编辑停留时的精度门槛（米） -->
+    <key>ACTIVITY_EXTENSION_ACCURACY_THRESHOLD</key>
+    <real>100</real>
+
+    <!-- "新地点/久违地点"提醒判定：地点匹配距离（米）/久违天数/
+         新地点最短停留（秒）/久违提醒最短停留（秒） -->
+    <key>PLACE_MATCH_DISTANCE_THRESHOLD</key>
+    <real>200</real>
+    <key>LONG_TIME_NO_SEE_DAYS</key>
+    <integer>180</integer>
+    <key>NEW_PLACE_MIN_DURATION</key>
+    <real>3600</real>
+    <key>LONG_TIME_NO_SEE_MIN_DURATION</key>
+    <real>600</real>
+
+    <!-- "回顾往日足迹"提醒最早可触发的小时数 -->
+    <key>PAST_MEMORIES_CHECK_HOUR</key>
+    <integer>10</integer>
+
+    <!-- ===== TimelineBuilder 调参 ===== -->
+
+    <!-- 轨迹简化容差分级：按连续段时长（秒）选用不同的简化容差（米） -->
+    <key>ROUTE_SIMPLIFY_TIER1_DURATION</key>
+    <real>10800</real>
+    <key>ROUTE_SIMPLIFY_TIER1_TOLERANCE</key>
+    <real>1500</real>
+    <key>ROUTE_SIMPLIFY_TIER2_DURATION</key>
+    <real>3600</real>
+    <key>ROUTE_SIMPLIFY_TIER2_TOLERANCE</key>
+    <real>1000</real>
+    <key>ROUTE_SIMPLIFY_TIER3_DURATION</key>
+    <real>900</real>
+    <key>ROUTE_SIMPLIFY_TIER3_TOLERANCE</key>
+    <real>500</real>
+    <key>ROUTE_SIMPLIFY_DEFAULT_TOLERANCE</key>
+    <real>250</real>
+
+    <!-- 缺口填充时重新连接到足迹的距离门槛（米） -->
+    <key>GAP_FILL_RECONNECT_DISTANCE</key>
+    <real>150</real>
+
+    <!-- 直线/环路漂移判定：位移门槛（米）、路程与位移比值门槛、路程门槛（米） -->
+    <key>PATH_LOOP_DISPLACEMENT_THRESHOLD</key>
+    <real>500</real>
+    <key>PATH_LOOP_RATIO_THRESHOLD</key>
+    <real>10</real>
+    <key>PATH_LOOP_DISTANCE_THRESHOLD</key>
+    <real>1000</real>
+
+    <!-- 短时高速交通过滤：时长门槛（秒）、速度门槛（km/h） -->
+    <key>TRANSPORT_SHORT_HIGH_SPEED_DURATION</key>
+    <real>60</real>
+    <key>TRANSPORT_SHORT_HIGH_SPEED_SPEED</key>
+    <real>3</real>
+
+    <!-- 交通段合并：时间间隔门槛（秒）、距离门槛（米） -->
+    <key>TRANSPORT_MERGE_TIME_GAP</key>
+    <real>600</real>
+    <key>TRANSPORT_MERGE_DISTANCE</key>
+    <real>180</real>
+
+    <!-- 习惯地点频率衰减半衰期（天） -->
+    <key>HABIT_DECAY_HALF_LIFE_DAYS</key>
+    <real>14</real>
+
+    <!-- 步行速度合理性校验：最小校验距离（米）、不可能的速度（km/h）、
+         最低步频（步/分钟）、最少步数、可疑速度（km/h） -->
+    <key>WALKING_SANITY_MIN_DISTANCE</key>
+    <real>1000</real>
+    <key>WALKING_IMPOSSIBLE_SPEED</key>
+    <real>15</real>
+    <key>WALKING_MIN_STEPS_PER_MINUTE</key>
+    <real>12</real>
+    <key>WALKING_MIN_STEP_COUNT</key>
+    <integer>40</integer>
+    <key>WALKING_SUSPICIOUS_SPEED</key>
+    <real>3</real>
+
+    <!-- 时间线重建时的边界容差（秒） -->
+    <key>RECONSTRUCTION_BOUNDARY_TOLERANCE</key>
+    <real>600</real>
+
+    <!-- 重叠判定：最短重叠时长（秒）、最小重叠比例 -->
+    <key>OVERLAP_MIN_DURATION</key>
+    <real>300</real>
+    <key>OVERLAP_MIN_RATIO</key>
+    <real>0.3</real>
+
+    <!-- "细缝"缺口端点容差（秒） -->
+    <key>GAP_SLIVER_THRESHOLD</key>
+    <real>600</real>
+
+    <!-- 判定"近乎全天覆盖"的缺口门槛（秒） -->
+    <key>FULL_DAY_COVERAGE_GAP_THRESHOLD</key>
+    <real>82800</real>
+
+    <!-- 交通段邻接容差（秒）、交通段合并间隔容差（秒） -->
+    <key>TRANSPORT_ADJACENCY_TOLERANCE</key>
+    <real>60</real>
+    <key>TRANSPORT_MERGE_GAP_TOLERANCE</key>
+    <real>900</real>
+
+    <!-- 跨日/整合逻辑中的短缺口门槛（秒） -->
+    <key>SHORT_GAP_THRESHOLD</key>
+    <real>120</real>
+
+    <!-- 被交通切断后仍保留的最短足迹片段时长（秒） -->
+    <key>MIN_KEPT_SEGMENT_DURATION</key>
+    <real>60</real>
+
+    <!-- 交通记录去重/合并的重叠比例门槛 -->
+    <key>TRANSPORT_OVERLAP_RATIO_THRESHOLD</key>
+    <real>0.8</real>
+
+    <!-- 交通记录匹配的时间容差（秒） -->
+    <key>TRANSPORT_MATCH_TIME_TOLERANCE</key>
+    <real>1200</real>
+
+    <!-- 往返交通识别：时间间隔门槛（秒）、单程最短长度（米）、端点容差（米） -->
+    <key>ROUND_TRIP_INTERVAL_GAP</key>
+    <real>120</real>
+    <key>ROUND_TRIP_MIN_LEG_LENGTH</key>
+    <real>300</real>
+    <key>ROUND_TRIP_ENDPOINT_TOLERANCE</key>
+    <real>150</real>
+
+    <!-- 路线覆盖率门槛：一般 / 更高置信度 -->
+    <key>ROUTE_COVERAGE_MIN_RATIO</key>
+    <real>0.7</real>
+    <key>ROUTE_COVERAGE_HIGH_RATIO</key>
+    <real>0.85</real>
+
+    <!-- 尾部裁剪所需的最小聚类点数 -->
+    <key>TAIL_CLUSTER_MIN_POINTS</key>
+    <integer>3</integer>
+
+    <!-- 尾部裁剪允许的最大时长（秒） -->
+    <key>MAX_TAIL_DURATION</key>
+    <real>300</real>
+
+    <!-- ===== 其他服务调参 ===== -->
+
+    <!-- iCloud KVS 周期同步间隔（秒） -->
+    <key>CLOUD_PERIODIC_SYNC_INTERVAL</key>
+    <real>600</real>
+
+    <!-- 小组件地图：判定为"推测路线"（虚线）的距离缺口门槛（米） -->
+    <key>WIDGET_INFERRED_ROUTE_DISTANCE_THRESHOLD</key>
+    <real>500</real>
+
+    <!-- 小组件"今日"数据刷新的最小间隔（秒） -->
+    <key>WIDGET_TODAY_SYNC_MIN_INTERVAL</key>
+    <real>90</real>
+    <!-- 小组件"历史"数据刷新的最小间隔（秒） -->
+    <key>WIDGET_HISTORY_SYNC_MIN_INTERVAL</key>
+    <real>1200</real>
+
+    <!-- 同名地点去重的距离门槛（米） -->
+    <key>DEDUP_SAME_NAME_DISTANCE_THRESHOLD</key>
+    <real>50</real>
+    <!-- 交通记录去重的时间容差（秒） -->
+    <key>DEDUP_TRANSPORT_TIME_TOLERANCE</key>
+    <real>300</real>
 </dict>
 </plist>

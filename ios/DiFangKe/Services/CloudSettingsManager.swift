@@ -7,7 +7,7 @@ class CloudSettingsManager: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var periodicSyncCancellable: AnyCancellable?
     private let kvs = NSUbiquitousKeyValueStore.default
-    private let periodicSyncInterval: TimeInterval = 600
+    private var periodicSyncInterval: TimeInterval { AppConfig.shared.cloudPeriodicSyncInterval }
     
     private let syncedKeys = [
         "isAiAssistantEnabled",

@@ -865,7 +865,7 @@ final class FootprintProcessor {
     
     // 1.2 去噪参数
     private let minAccuracy: CLLocationAccuracy = 100.0   // 精度过滤
-    private let minTimeInterval: TimeInterval = 5.0       // 时间间隔过滤
+    private var minTimeInterval: TimeInterval { AppConfig.shared.footprintMinSampleInterval }       // 时间间隔过滤
     private var driftDistanceThreshold: CLLocationDistance { AppConfig.shared.stayDistanceThreshold }
     private var driftSpeedThreshold: CLLocationSpeed { AppConfig.shared.driftSpeedThreshold } // m/s，异常飘移速度
     
@@ -880,7 +880,7 @@ final class FootprintProcessor {
     /// 处理新定位点，满足停留条件则返回 CandidateFootprint
     func processNewLocation(_ location: CLLocation, queue: inout [CLLocation], isHistorical: Bool = false) -> CandidateFootprint? {
         // 过滤精度过差的点（进一步放宽到 300 米，确保极端环境下也不丢点）
-        guard location.horizontalAccuracy > 0 && location.horizontalAccuracy < 300 else { return nil }
+        guard location.horizontalAccuracy > 0 && location.horizontalAccuracy < AppConfig.shared.maxGPSAccuracyFilter else { return nil }
               
         // 1.2 时间鲜度过滤：如果是实时点，丢弃 1 分钟前的缓存数据或过时数据
         if !isHistorical {
@@ -897,19 +897,19 @@ final class FootprintProcessor {
             let calculatedSpeed = distance / timeInterval // m/s
             // Core Location 明确报告的高速是高铁等真实移动的强证据。高铁运行时
             // 水平精度常短暂变差，不能让仅依赖计算速度/精度的漂移规则抹掉整段行程。
-            let hasReportedHighSpeed = location.speed >= 20.0
-            
+            let hasReportedHighSpeed = location.speed >= AppConfig.shared.reportedHighSpeedThreshold
+
             // A: 物理不可能性判断：时速超过阈值 (约 220km/h) 且精度不佳，判定为漂移数据
             if calculatedSpeed > AppConfig.shared.driftSpeedMaxPossible
                 && location.horizontalAccuracy > AppConfig.shared.driftAccuracyThreshold
                 && !hasReportedHighSpeed {
                 return nil
             }
-            
+
             // B: 精度断崖式下降判断：如果位移很大 且当前精度比上一点差很多 (>3倍且绝对值>150m)，判定为漂移
             if distance > AppConfig.shared.driftDistanceGap
-                && location.horizontalAccuracy > lastLoc.horizontalAccuracy * 3
-                && location.horizontalAccuracy > 150
+                && location.horizontalAccuracy > lastLoc.horizontalAccuracy * AppConfig.shared.driftAccuracyDegradationRatio
+                && location.horizontalAccuracy > AppConfig.shared.driftAccuracyAbsoluteFloor
                 && !hasReportedHighSpeed {
                 return nil
             }

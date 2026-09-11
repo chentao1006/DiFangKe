@@ -275,4 +275,398 @@ class AppConfig {
     var aptabaseAppKey: String {
         string(forKey: "APTABASE_APP_KEY")
     }
+
+    var pedometerMinMovingStepDelta: Int {
+        int(forKey: "PEDOMETER_MIN_MOVING_STEP_DELTA")
+    }
+
+    var pedometerStartupLookback: Double {
+        double(forKey: "PEDOMETER_STARTUP_LOOKBACK")
+    }
+
+    // MARK: - LocationManager tuning
+
+    var maxGPSAccuracyFilter: Double {
+        double(forKey: "MAX_GPS_ACCURACY_FILTER")
+    }
+
+    var departureBoostDuration: Double {
+        double(forKey: "DEPARTURE_BOOST_DURATION")
+    }
+
+    var footprintMinSampleInterval: Double {
+        double(forKey: "FOOTPRINT_MIN_SAMPLE_INTERVAL")
+    }
+
+    var reportedHighSpeedThreshold: Double {
+        double(forKey: "REPORTED_HIGH_SPEED_THRESHOLD")
+    }
+
+    var driftAccuracyDegradationRatio: Double {
+        double(forKey: "DRIFT_ACCURACY_DEGRADATION_RATIO")
+    }
+
+    var driftAccuracyAbsoluteFloor: Double {
+        double(forKey: "DRIFT_ACCURACY_ABSOLUTE_FLOOR")
+    }
+
+    var stationaryDwellDuration: Double {
+        double(forKey: "STATIONARY_DWELL_DURATION")
+    }
+
+    var stationaryDwellDistance: Double {
+        double(forKey: "STATIONARY_DWELL_DISTANCE")
+    }
+
+    var stationaryDwellSpeed: Double {
+        double(forKey: "STATIONARY_DWELL_SPEED")
+    }
+
+    var lowPowerDwellDuration: Double {
+        double(forKey: "LOW_POWER_DWELL_DURATION")
+    }
+
+    var lowPowerDwellDistance: Double {
+        double(forKey: "LOW_POWER_DWELL_DISTANCE")
+    }
+
+    var geocodeHighSpeedThreshold: Double {
+        double(forKey: "GEOCODE_HIGH_SPEED_THRESHOLD")
+    }
+
+    var geocodeThrottleDistanceHighSpeed: Double {
+        double(forKey: "GEOCODE_THROTTLE_DISTANCE_HIGH_SPEED")
+    }
+
+    var geocodeThrottleDistanceNormal: Double {
+        double(forKey: "GEOCODE_THROTTLE_DISTANCE_NORMAL")
+    }
+
+    var regionReuseDistanceThreshold: Double {
+        double(forKey: "REGION_REUSE_DISTANCE_THRESHOLD")
+    }
+
+    var stationaryWakeupRegionRadius: Double {
+        double(forKey: "STATIONARY_WAKEUP_REGION_RADIUS")
+    }
+
+    var departureHighSpeedDistance: Double {
+        double(forKey: "DEPARTURE_HIGH_SPEED_DISTANCE")
+    }
+
+    var departureAccuracyThreshold: Double {
+        double(forKey: "DEPARTURE_ACCURACY_THRESHOLD")
+    }
+
+    var departureDistanceThreshold: Double {
+        double(forKey: "DEPARTURE_DISTANCE_THRESHOLD")
+    }
+
+    var departureLongStayDuration: Double {
+        double(forKey: "DEPARTURE_LONG_STAY_DURATION")
+    }
+
+    var departureDriftResistantFloor: Double {
+        double(forKey: "DEPARTURE_DRIFT_RESISTANT_FLOOR")
+    }
+
+    var departureDriftResistantRatio: Double {
+        double(forKey: "DEPARTURE_DRIFT_RESISTANT_RATIO")
+    }
+
+    var movingRecoveryGapThreshold: Double {
+        double(forKey: "MOVING_RECOVERY_GAP_THRESHOLD")
+    }
+
+    var recoveryBoostThrottleInterval: Double {
+        double(forKey: "RECOVERY_BOOST_THROTTLE_INTERVAL")
+    }
+
+    var stationaryProbeMinDuration: Double {
+        double(forKey: "STATIONARY_PROBE_MIN_DURATION")
+    }
+
+    var stationaryProbeInterval: Double {
+        double(forKey: "STATIONARY_PROBE_INTERVAL")
+    }
+
+    var timelineSiftDebounceInterval: Double {
+        double(forKey: "TIMELINE_SIFT_DEBOUNCE_INTERVAL")
+    }
+
+    var liveMergeTaskDelay: Double {
+        double(forKey: "LIVE_MERGE_TASK_DELAY")
+    }
+
+    var startTrackingDebounceInterval: Double {
+        double(forKey: "START_TRACKING_DEBOUNCE_INTERVAL")
+    }
+
+    var mergeRecentFootprintsLookback: Double {
+        double(forKey: "MERGE_RECENT_FOOTPRINTS_LOOKBACK")
+    }
+
+    var splitClusterRadiusCap: Double {
+        double(forKey: "SPLIT_CLUSTER_RADIUS_CAP")
+    }
+
+    var splitClusterRadiusRatio: Double {
+        double(forKey: "SPLIT_CLUSTER_RADIUS_RATIO")
+    }
+
+    var splitClusterMinPoints: Int {
+        int(forKey: "SPLIT_CLUSTER_MIN_POINTS")
+    }
+
+    var ongoingAIAnalysisInterval: Double {
+        double(forKey: "ONGOING_AI_ANALYSIS_INTERVAL")
+    }
+
+    var activityExtensionAccuracyThreshold: Double {
+        double(forKey: "ACTIVITY_EXTENSION_ACCURACY_THRESHOLD")
+    }
+
+    var placeMatchDistanceThreshold: Double {
+        double(forKey: "PLACE_MATCH_DISTANCE_THRESHOLD")
+    }
+
+    var longTimeNoSeeDays: Int {
+        int(forKey: "LONG_TIME_NO_SEE_DAYS")
+    }
+
+    var newPlaceMinDuration: Double {
+        double(forKey: "NEW_PLACE_MIN_DURATION")
+    }
+
+    var longTimeNoSeeMinDuration: Double {
+        double(forKey: "LONG_TIME_NO_SEE_MIN_DURATION")
+    }
+
+    var pastMemoriesCheckHour: Int {
+        int(forKey: "PAST_MEMORIES_CHECK_HOUR")
+    }
+
+    // MARK: - TimelineBuilder tuning
+
+    var stationaryDetectionMinPoints: Int {
+        int(forKey: "STATIONARY_DETECTION_MIN_POINTS")
+    }
+
+    var stationaryDetectionSamplingInterval: Int {
+        int(forKey: "STATIONARY_DETECTION_SAMPLING_INTERVAL")
+    }
+
+    var stationaryDetectionWindowSize: Int {
+        int(forKey: "STATIONARY_DETECTION_WINDOW_SIZE")
+    }
+
+    var transportTypeDetectionMinPoints: Int {
+        int(forKey: "TRANSPORT_TYPE_DETECTION_MIN_POINTS")
+    }
+
+    var transportTypeDetectionSamplingInterval: Int {
+        int(forKey: "TRANSPORT_TYPE_DETECTION_SAMPLING_INTERVAL")
+    }
+
+    var transportTypeWindowSize: Int {
+        int(forKey: "TRANSPORT_TYPE_WINDOW_SIZE")
+    }
+
+    var transportTypeWindowMinPoints: Int {
+        int(forKey: "TRANSPORT_TYPE_WINDOW_MIN_POINTS")
+    }
+
+    var transportFinalizeMinPoints: Int {
+        int(forKey: "TRANSPORT_FINALIZE_MIN_POINTS")
+    }
+
+    var gapMinDurationThreshold: Double {
+        double(forKey: "GAP_MIN_DURATION_THRESHOLD")
+    }
+
+    var transportMaxReasonableSpeed: Double {
+        double(forKey: "TRANSPORT_MAX_REASONABLE_SPEED")
+    }
+
+    var routeSimplifyTier1Duration: Double {
+        double(forKey: "ROUTE_SIMPLIFY_TIER1_DURATION")
+    }
+
+    var routeSimplifyTier1Tolerance: Double {
+        double(forKey: "ROUTE_SIMPLIFY_TIER1_TOLERANCE")
+    }
+
+    var routeSimplifyTier2Duration: Double {
+        double(forKey: "ROUTE_SIMPLIFY_TIER2_DURATION")
+    }
+
+    var routeSimplifyTier2Tolerance: Double {
+        double(forKey: "ROUTE_SIMPLIFY_TIER2_TOLERANCE")
+    }
+
+    var routeSimplifyTier3Duration: Double {
+        double(forKey: "ROUTE_SIMPLIFY_TIER3_DURATION")
+    }
+
+    var routeSimplifyTier3Tolerance: Double {
+        double(forKey: "ROUTE_SIMPLIFY_TIER3_TOLERANCE")
+    }
+
+    var routeSimplifyDefaultTolerance: Double {
+        double(forKey: "ROUTE_SIMPLIFY_DEFAULT_TOLERANCE")
+    }
+
+    var gapFillReconnectDistance: Double {
+        double(forKey: "GAP_FILL_RECONNECT_DISTANCE")
+    }
+
+    var pathLoopDisplacementThreshold: Double {
+        double(forKey: "PATH_LOOP_DISPLACEMENT_THRESHOLD")
+    }
+
+    var pathLoopRatioThreshold: Double {
+        double(forKey: "PATH_LOOP_RATIO_THRESHOLD")
+    }
+
+    var pathLoopDistanceThreshold: Double {
+        double(forKey: "PATH_LOOP_DISTANCE_THRESHOLD")
+    }
+
+    var transportShortHighSpeedDuration: Double {
+        double(forKey: "TRANSPORT_SHORT_HIGH_SPEED_DURATION")
+    }
+
+    var transportShortHighSpeedSpeed: Double {
+        double(forKey: "TRANSPORT_SHORT_HIGH_SPEED_SPEED")
+    }
+
+    var transportMergeTimeGap: Double {
+        double(forKey: "TRANSPORT_MERGE_TIME_GAP")
+    }
+
+    var transportMergeDistance: Double {
+        double(forKey: "TRANSPORT_MERGE_DISTANCE")
+    }
+
+    var habitDecayHalfLifeDays: Double {
+        double(forKey: "HABIT_DECAY_HALF_LIFE_DAYS")
+    }
+
+    var walkingSanityMinDistance: Double {
+        double(forKey: "WALKING_SANITY_MIN_DISTANCE")
+    }
+
+    var walkingImpossibleSpeed: Double {
+        double(forKey: "WALKING_IMPOSSIBLE_SPEED")
+    }
+
+    var walkingMinStepsPerMinute: Double {
+        double(forKey: "WALKING_MIN_STEPS_PER_MINUTE")
+    }
+
+    var walkingMinStepCount: Int {
+        int(forKey: "WALKING_MIN_STEP_COUNT")
+    }
+
+    var walkingSuspiciousSpeed: Double {
+        double(forKey: "WALKING_SUSPICIOUS_SPEED")
+    }
+
+    var reconstructionBoundaryTolerance: Double {
+        double(forKey: "RECONSTRUCTION_BOUNDARY_TOLERANCE")
+    }
+
+    var overlapMinDuration: Double {
+        double(forKey: "OVERLAP_MIN_DURATION")
+    }
+
+    var overlapMinRatio: Double {
+        double(forKey: "OVERLAP_MIN_RATIO")
+    }
+
+    var gapSliverThreshold: Double {
+        double(forKey: "GAP_SLIVER_THRESHOLD")
+    }
+
+    var fullDayCoverageGapThreshold: Double {
+        double(forKey: "FULL_DAY_COVERAGE_GAP_THRESHOLD")
+    }
+
+    var transportAdjacencyTolerance: Double {
+        double(forKey: "TRANSPORT_ADJACENCY_TOLERANCE")
+    }
+
+    var transportMergeGapTolerance: Double {
+        double(forKey: "TRANSPORT_MERGE_GAP_TOLERANCE")
+    }
+
+    var shortGapThreshold: Double {
+        double(forKey: "SHORT_GAP_THRESHOLD")
+    }
+
+    var minKeptSegmentDuration: Double {
+        double(forKey: "MIN_KEPT_SEGMENT_DURATION")
+    }
+
+    var transportOverlapRatioThreshold: Double {
+        double(forKey: "TRANSPORT_OVERLAP_RATIO_THRESHOLD")
+    }
+
+    var transportMatchTimeTolerance: Double {
+        double(forKey: "TRANSPORT_MATCH_TIME_TOLERANCE")
+    }
+
+    var roundTripIntervalGap: Double {
+        double(forKey: "ROUND_TRIP_INTERVAL_GAP")
+    }
+
+    var roundTripMinLegLength: Double {
+        double(forKey: "ROUND_TRIP_MIN_LEG_LENGTH")
+    }
+
+    var roundTripEndpointTolerance: Double {
+        double(forKey: "ROUND_TRIP_ENDPOINT_TOLERANCE")
+    }
+
+    var routeCoverageMinRatio: Double {
+        double(forKey: "ROUTE_COVERAGE_MIN_RATIO")
+    }
+
+    var routeCoverageHighRatio: Double {
+        double(forKey: "ROUTE_COVERAGE_HIGH_RATIO")
+    }
+
+    var tailClusterMinPoints: Int {
+        int(forKey: "TAIL_CLUSTER_MIN_POINTS")
+    }
+
+    var maxTailDuration: Double {
+        double(forKey: "MAX_TAIL_DURATION")
+    }
+
+    // MARK: - Other services tuning
+
+    var cloudPeriodicSyncInterval: Double {
+        double(forKey: "CLOUD_PERIODIC_SYNC_INTERVAL")
+    }
+
+    var widgetInferredRouteDistanceThreshold: Double {
+        double(forKey: "WIDGET_INFERRED_ROUTE_DISTANCE_THRESHOLD")
+    }
+
+    var widgetTodaySyncMinInterval: Double {
+        double(forKey: "WIDGET_TODAY_SYNC_MIN_INTERVAL")
+    }
+
+    var widgetHistorySyncMinInterval: Double {
+        double(forKey: "WIDGET_HISTORY_SYNC_MIN_INTERVAL")
+    }
+
+    var dedupSameNameDistanceThreshold: Double {
+        double(forKey: "DEDUP_SAME_NAME_DISTANCE_THRESHOLD")
+    }
+
+    var dedupTransportTimeTolerance: Double {
+        double(forKey: "DEDUP_TRANSPORT_TIME_TOLERANCE")
+    }
 }

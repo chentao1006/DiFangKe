@@ -14,9 +14,9 @@ class HealthManager: ObservableObject {
     @Published var currentActivity: String = "未知"
     @Published var isMoving = false
     @Published var currentMotionType: MotionType = .stationary
-    
-    
-    
+
+    private var lastPedometerStepCount = 0
+
     private init() {
     }
     
@@ -53,7 +53,8 @@ class HealthManager: ObservableObject {
     
     func startActivityTracking() {
         guard CMMotionActivityManager.isActivityAvailable() else { return }
-        
+        lastPedometerStepCount = 0
+
         // 1. 运动状态监控 (提供基础分类)
         activityManager.startActivityUpdates(to: .main) { [weak self] activity in
             guard let self = self, let activity = activity else { return }
@@ -82,11 +83,16 @@ class HealthManager: ObservableObject {
         }
         
         // 2. 计步器监控 (提供极速运动反馈)
-        // 只要步数在增加，就强制标记为 isMoving，这对于解决刚出门时的“漏记”至关重要
+        // 步数增量达到阈值才强制标记为 isMoving，这对于解决刚出门时的“漏记”至关重要；
+        // numberOfSteps 是本次 startUpdates 以来的累计值，仅按“>0”判断会导致走过一步后
+        // 之后每次回调都判定为移动，让站起来走两步这类原地小动作也一直触发移动状态。
         if CMPedometer.isStepCountingAvailable() {
-            pedometer.startUpdates(from: Date().addingTimeInterval(-30)) { [weak self] data, error in // 从 30 秒前开始，避免重启时丢失步数状态
+            pedometer.startUpdates(from: Date().addingTimeInterval(-AppConfig.shared.pedometerStartupLookback)) { [weak self] data, error in // 避免重启时丢失步数状态
                 guard let self = self, let data = data, error == nil else { return }
-                if data.numberOfSteps.intValue > 0 {
+                let stepCount = data.numberOfSteps.intValue
+                let delta = stepCount - self.lastPedometerStepCount
+                self.lastPedometerStepCount = stepCount
+                if delta >= AppConfig.shared.pedometerMinMovingStepDelta {
                     DispatchQueue.main.async {
                         // 如果计步器有增加，且当前不是车载模式，则强制激活移动状态
                         if self.currentMotionType != .automotive {

@@ -7,7 +7,7 @@ import WidgetKit
 
 @MainActor
 final class WidgetDataSyncManager {
-    private static let inferredRouteDistanceThreshold: CLLocationDistance = 500
+    private static var inferredRouteDistanceThreshold: CLLocationDistance { AppConfig.shared.widgetInferredRouteDistanceThreshold }
     static let shared = WidgetDataSyncManager()
     // Keep this in sync with the widget reader. Bump it whenever the widget
     // renderer changes so WidgetKit cannot reuse an image drawn with old rules.
@@ -50,8 +50,8 @@ final class WidgetDataSyncManager {
     
     private var groupID: String { AppConfig.shared.appGroupID }
     private var container: ModelContainer?
-    private let todaySyncMinimumInterval: TimeInterval = 90
-    private let historySyncMinimumInterval: TimeInterval = 20 * 60
+    private var todaySyncMinimumInterval: TimeInterval { AppConfig.shared.widgetTodaySyncMinInterval }
+    private var historySyncMinimumInterval: TimeInterval { AppConfig.shared.widgetHistorySyncMinInterval }
     private var lastTodaySyncAt: Date?
     private var isTodaySyncInFlight = false
     private var hasPendingTodaySync = false

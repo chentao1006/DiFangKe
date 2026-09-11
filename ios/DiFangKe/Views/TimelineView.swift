@@ -3095,8 +3095,14 @@ private struct ContinuousTimelineSheet: View {
     }
 
     private func restoreTimelineDateAfterRotation(from oldSize: CGSize, to newSize: CGSize, using proxy: ScrollViewProxy) {
+        // A real rotation swaps both dimensions of the window. Dragging the
+        // timeline sheet between detents only ever changes its height (the
+        // collapsed detent is shorter than the sheet is wide, medium/large are
+        // taller), which flips the width>height comparison on its own and used
+        // to be misread as a rotation, firing a live scrollTo mid-drag.
         guard oldSize.width > 0, oldSize.height > 0,
               newSize.width > 0, newSize.height > 0,
+              abs(oldSize.width - newSize.width) > 1,
               (oldSize.width > oldSize.height) != (newSize.width > newSize.height) else {
             return
         }

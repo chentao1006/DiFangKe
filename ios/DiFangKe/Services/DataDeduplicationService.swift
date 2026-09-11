@@ -294,7 +294,7 @@ enum DataDeduplicationService {
                 let loc1 = CLLocation(latitude: keeper.latitude, longitude: keeper.longitude)
                 let loc2 = CLLocation(latitude: candidate.latitude, longitude: candidate.longitude)
                 // Same name and within 50 meters, or completely identical UUID
-                if candidate.placeID == keeper.placeID || (sameName && loc1.distance(from: loc2) < 50) {
+                if candidate.placeID == keeper.placeID || (sameName && loc1.distance(from: loc2) < AppConfig.shared.dedupSameNameDistanceThreshold) {
                     duplicates.append(candidate)
                     return true
                 }
@@ -352,8 +352,9 @@ enum DataDeduplicationService {
                     }
                     let startDiff = abs(candidate.startTime.timeIntervalSince(keeper.startTime))
                     let endDiff = abs(candidate.endTime.timeIntervalSince(keeper.endTime))
-                    // Start and end within 5 minutes of each other
-                    if startDiff <= 300 && endDiff <= 300 {
+                    // Start and end within the dedup time tolerance of each other
+                    let tolerance = AppConfig.shared.dedupTransportTimeTolerance
+                    if startDiff <= tolerance && endDiff <= tolerance {
                         duplicates.append(candidate)
                         return true
                     }
