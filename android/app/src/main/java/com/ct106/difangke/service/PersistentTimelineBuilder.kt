@@ -393,6 +393,7 @@ class PersistentTimelineBuilder(private val context: Context) {
                             durationSec = duration,
                             distanceMeters = merged.distance,
                             pointCount = try { JSONArray(merged.pointsJson).length() } catch (e: Exception) { 0 },
+                            observedPointCount = try { maxOf(JSONArray(merged.pointsJson).length() - 4, 0) } catch (e: Exception) { null },
                             preferredAuto = preferredAuto,
                             preferredCycling = preferredCycling,
                             preferredTransport = preferredTransport
@@ -505,6 +506,7 @@ class PersistentTimelineBuilder(private val context: Context) {
             durationSec = gapSec,
             distanceMeters = totalDist,
             pointCount = pts.size,
+            observedPointCount = segmentPoints.size,
             preferredAuto = preferredAuto,
             preferredCycling = preferredCycling,
             preferredTransport = preferredTransport

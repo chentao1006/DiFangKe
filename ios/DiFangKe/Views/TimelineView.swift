@@ -1295,6 +1295,9 @@ private struct ContinuousTimelineView: View {
         beginDeferredTimelineWork(defersMapUpdates: defersMapUpdates)
         defer { endDeferredTimelineWork(defersMapUpdates: defersMapUpdates) }
 
+        if let today = datesToLoad.first(where: { calendar.isDateInToday($0) }) {
+            _ = PersistentTimelineBuilder.fetchTimeline(for: today, in: modelContext)
+        }
         let container = modelContext.container
         let snapshot = await Task.detached(priority: .utility) {
             Self.fetchTimelineSnapshots(for: datesToLoad, in: container)
@@ -3563,7 +3566,7 @@ private struct ContinuousTimelineSheet: View {
 
         // Mirrors scrollToToday's target/anchor choice: when there's an ongoing stay or
         // transport, center that card in the timeline instead of pinning it to the bottom.
-        let hasCurrentStatus = locationManager.potentialStopStartLocation != nil || locationManager.uiIsMoving
+        let hasCurrentStatus = locationManager.isTracking
 
         var transaction = Transaction()
         transaction.disablesAnimations = true
@@ -3876,7 +3879,7 @@ private struct ContinuousTimelineSheet: View {
         let today = Calendar.current.startOfDay(for: Date())
         guard dates.contains(today) else { return }
         applySelectedCalendarDate(today)
-        let hasCurrentStatus = locationManager.potentialStopStartLocation != nil || locationManager.uiIsMoving
+        let hasCurrentStatus = locationManager.isTracking
         let target: ScrollTarget = hasCurrentStatus ? .now : .todayBottom
         let anchor: UnitPoint = hasCurrentStatus ? .center : .bottom
         if animated {
@@ -4297,7 +4300,7 @@ private struct ContinuousTimelineSheet: View {
         base.startTime = min(base.startTime, other.startTime)
         base.endTime = max(base.endTime, other.endTime)
         base.date = Calendar.current.startOfDay(for: base.startTime)
-        base.allowsAutomaticDurationExtension = false
+        base.allowsAutomaticDurationExtension = true
         base.status = .manual
 
         var mergedLocations = base.footprintLocations
@@ -4337,19 +4340,18 @@ private struct ContinuousTimelineSheet: View {
         base.photoMetadata = mergedMetadata
 
         let mergedStart = base.startTime
-        let mergedEnd = base.endTime
         modelContext.delete(other)
         try? modelContext.save()
+        Footprint.resumeMergedCurrentStay(base, context: modelContext)
+        try? modelContext.save()
         CloudSettingsManager.shared.triggerDataSyncPulse()
-        invalidateTimelineAfterMerge(start: mergedStart, end: mergedEnd)
+        invalidateTimelineAfterMerge(start: mergedStart, end: base.endTime)
         Aptabase.shared.trackEvent("footprint_adjacent_merged")
     }
 
     private func mergeAdjacentTransports(_ candidate: ContinuousAdjacentTransportMergeCandidate) {
         let base = candidate.first
         let other = candidate.second
-        let baseDurationBeforeMerge = base.endTime.timeIntervalSince(base.startTime)
-        let otherDurationBeforeMerge = other.endTime.timeIntervalSince(other.startTime)
         let mergedStart = min(base.startTime, other.startTime)
         let mergedEnd = max(base.endTime, other.endTime)
 
@@ -4365,11 +4367,7 @@ private struct ContinuousTimelineSheet: View {
         // ownership even if neither source segment had its type edited before;
         // otherwise the periodic timeline sifter treats the merged record as
         // automatic data and can split/reclassify it on a later launch.
-        let selectedType = base.manualTypeRaw
-            ?? other.manualTypeRaw
-            ?? (baseDurationBeforeMerge >= otherDurationBeforeMerge ? base.typeRaw : other.typeRaw)
-        base.manualTypeRaw = selectedType
-        base.typeRaw = selectedType
+        let explicitlySelectedType = base.manualTypeRaw ?? other.manualTypeRaw
 
         if !other.endLocation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            other.endLocation != "终点",
@@ -4381,6 +4379,17 @@ private struct ContinuousTimelineSheet: View {
         if let pointsData = try? JSONEncoder().encode(mergedPoints) {
             base.pointsData = pointsData
         }
+        let observedCount = mergedPoints.filter { $0.isSyntheticPadding != true && $0.timestamp != nil }.count
+        let inferredType = TransportType.from(
+            speed: base.averageSpeed,
+            stepCount: base.stepCount ?? 0,
+            duration: mergedDuration,
+            distanceMeters: base.distance,
+            pointCount: mergedPoints.count,
+            observedPointCount: observedCount
+        )
+        base.typeRaw = explicitlySelectedType ?? inferredType.rawValue
+        base.manualTypeRaw = base.typeRaw // Preserve the manual merge boundary during timeline rebuilding.
 
         cleanupManualSelection(for: other.recordID)
         modelContext.delete(other)
@@ -5447,13 +5456,16 @@ private struct CurrentStayTimelineCard: View {
     }
 
     private var statusTimestamp: Date? {
+        guard locationManager.isTracking else { return nil }
         if let start = locationManager.potentialStopStartLocation {
             return start.timestamp
         }
         if locationManager.uiIsMoving {
             return locationManager.lastLocation?.timestamp ?? Date()
         }
-        return nil
+        // A tracking session always has a current state. A missing provisional
+        // stop must not make the entire current row disappear.
+        return locationManager.lastLocation?.timestamp ?? Date()
     }
 
     private var canSelectOngoingPlace: Bool {
@@ -5496,7 +5508,7 @@ private struct CurrentStayTimelineCard: View {
     }
 
     private func detailText(for timestamp: Date, now: Date) -> String {
-        if locationManager.potentialStopStartLocation != nil {
+        if locationManager.potentialStopStartLocation != nil || !locationManager.uiIsMoving {
             return "已 \(now.timeIntervalSince(timestamp).formattedTimelineDuration)"
         }
 

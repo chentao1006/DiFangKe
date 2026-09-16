@@ -159,6 +159,7 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
     /// repeated location callbacks that produce the same snapshot.
     private var lastComplicationSnapshotData: Data?
     private var lastBackgroundSnapshotData: Data?
+    private var lastFullSnapshotData: Data?
 
     func start(context: ModelContext) {
         modelContext = context
@@ -210,21 +211,35 @@ final class WatchSyncManager: NSObject, WCSessionDelegate {
             session.sendMessage(complicationPayload, replyHandler: nil, errorHandler: nil)
         }
 
-        // The complete payload is for the Watch app UI only. It is intentionally not
-        // used by any complication delivery path because it includes historical routes.
-        if let fullData = try? JSONEncoder().encode(snapshot) {
+        // The complete payload is for the Watch app UI only; it is never sent through
+        // the budgeted complication channel below because it includes historical routes.
+        let fullData = try? JSONEncoder().encode(snapshot)
+        if let fullData {
+            // updateApplicationContext is a latest-value cache: it reaches the Watch
+            // process the moment it is next running, but never wakes a suspended one.
             try? session.updateApplicationContext(["snapshot": fullData])
         }
 
         // This is the delivery-guaranteed fallback for the budgeted complication
-        // channel above. Keep at most one snapshot in the queue: the Watch only
-        // needs the newest state, and an old footprint must never arrive after a
-        // newer transport. Unlike application context, user-info transfers remain
-        // queued for background delivery if the Watch app is not running.
-        if complicationData != lastBackgroundSnapshotData {
+        // channel below, and also the only channel that reliably wakes a suspended
+        // Watch app: unlike application context, user-info transfers remain queued
+        // for background delivery via WKWatchConnectivityRefreshBackgroundTask.
+        // The full snapshot rides in the same transfer as the compact complication
+        // data so one wake/task/delegate cycle updates both — splitting them into
+        // two independent transfers risked WatchAppDelegate completing the shared
+        // background task after only one of the two had actually been delivered,
+        // letting the system suspend the process before the other one arrived.
+        // Keep at most one snapshot in the queue: the Watch only needs the newest
+        // state, and an old footprint must never arrive after a newer transport.
+        if complicationData != lastBackgroundSnapshotData || fullData != lastFullSnapshotData {
+            var backgroundPayload = complicationPayload
+            if let fullData {
+                backgroundPayload["snapshot"] = fullData
+            }
             pendingBackgroundSnapshotTransfer?.cancel()
-            pendingBackgroundSnapshotTransfer = session.transferUserInfo(complicationPayload)
+            pendingBackgroundSnapshotTransfer = session.transferUserInfo(backgroundPayload)
             lastBackgroundSnapshotData = complicationData
+            lastFullSnapshotData = fullData
         }
 
         // Application context is deliberately a latest-value cache and will not

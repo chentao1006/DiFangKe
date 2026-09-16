@@ -134,19 +134,19 @@ class NotificationManager {
         return true
     }
 
-    func refreshDailySummary(footprintCount: Int, pointsCount: Int, mileage: Double, transportCount: Int = 0, overviewSummary: String? = nil) {
+    func refreshDailySummary(placeCount: Int, pointsCount: Int, mileage: Double, transportCount: Int = 0, overviewSummary: String? = nil) {
         let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }
         
         // Only refresh if footprints or points exist
-        guard footprintCount > 0 || pointsCount > 0 else { return }
+        guard placeCount > 0 || pointsCount > 0 else { return }
         
         let hour = UserDefaults.standard.integer(forKey: "dailyNotificationHour")
         let minute = UserDefaults.standard.integer(forKey: "dailyNotificationMinute")
         let finalHour = UserDefaults.standard.object(forKey: "dailyNotificationHour") != nil ? hour : 21
 
         let mileageStr = mileage < 1000 ? "\(Int(mileage))m" : String(format: "%.1fkm", mileage / 1000.0)
-        let statsInfo = "今日留下 \(footprintCount) 个足迹，行程 \(mileageStr)。"
+        let statsInfo = "今日在 \(placeCount) 个地点留下足迹，行程 \(mileageStr)。"
         let staticPreamble = "忙碌的一天结束了，快来看看你今天留下的足迹吧。"
         
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")

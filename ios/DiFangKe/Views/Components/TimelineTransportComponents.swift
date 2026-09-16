@@ -31,6 +31,9 @@ struct TransportModalView: View {
     @State private var showingTimeAdjustment = false
     @State private var localStartTime: Date? = nil
     @State private var localEndTime: Date? = nil
+    @State private var refreshedTransport: Transport? = nil
+
+    private var displayedTransport: Transport { refreshedTransport ?? transport }
     
     enum LocationType: Identifiable {
         case start, end
@@ -38,18 +41,18 @@ struct TransportModalView: View {
     }
     
     private var currentStartLocation: String {
-        localStartOverride ?? transport.startLocation
+        localStartOverride ?? displayedTransport.startLocation
     }
     
     private var currentEndLocation: String {
-        localEndOverride ?? transport.endLocation
+        localEndOverride ?? displayedTransport.endLocation
     }
 
-    private var currentStartTime: Date { localStartTime ?? transport.startTime }
-    private var currentEndTime: Date { localEndTime ?? transport.endTime }
+    private var currentStartTime: Date { localStartTime ?? displayedTransport.startTime }
+    private var currentEndTime: Date { localEndTime ?? displayedTransport.endTime }
 
     private var validTransportPoints: [CLLocationCoordinate2D] {
-        transport.points.filter {
+        displayedTransport.points.filter {
             $0.latitude.isFinite &&
             $0.longitude.isFinite &&
             CLLocationCoordinate2DIsValid($0)
@@ -72,7 +75,7 @@ struct TransportModalView: View {
     
     // Use the effective type for display
     private var displayType: TransportType {
-        localManualType ?? transport.currentType
+        localManualType ?? displayedTransport.currentType
     }
     
     private var isStartImportantPlace: Bool {
@@ -126,7 +129,7 @@ struct TransportModalView: View {
                                     .tint(.blue)
                             }
                             
-                            ForEach(transport.lineSegments) { segment in
+                            ForEach(displayedTransport.lineSegments) { segment in
                                 MapPolyline(coordinates: segment.coordinates)
                                     .stroke(
                                         Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.7),
@@ -239,16 +242,20 @@ struct TransportModalView: View {
                             Spacer()
                             
                             VStack(alignment: .trailing, spacing: 4) {
-                                Text(distanceString)
-                                    .font(.headline)
-                                    .foregroundColor(Color.dfkAccent)
-                                Text(String(format: "%.1f 千米/小时", transport.averageSpeed * 3.6))
+                                HStack(spacing: 8) {
+                                    Text(distanceString)
+                                        .foregroundColor(Color.dfkAccent)
+                                    Text(durationString)
+                                        .foregroundColor(.secondary)
+                                }
+                                .font(.headline)
+                                Text(String(format: "%.1f 千米/小时", displayedTransport.averageSpeed * 3.6))
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
                                     .lineLimit(1)
                                     .fixedSize(horizontal: true, vertical: false)
                                 
-                                if let steps = transport.stepCount, steps > 0 {
+                                if let steps = displayedTransport.stepCount, steps > 0 {
                                     HStack(spacing: 4) {
                                         Image(systemName: "figure.walk")
                                         Text("\(steps) 步")
@@ -269,16 +276,17 @@ struct TransportModalView: View {
             .sheet(item: $showingSearchSheet) { type in
                 LocationSearchSheet(
                     locationManager: locationManager,
-                    coordinate: type == .start ? transport.points.first : transport.points.last,
+                    coordinate: type == .start ? displayedTransport.points.first : displayedTransport.points.last,
                     forOngoing: false
                 ) { newName in
                     saveLocationOverride(type: type, name: newName)
                 }
             }
             .sheet(isPresented: $showingTimeAdjustment) {
-                TransportTimeAdjustmentView(transport: transport) { start, end in
+                TransportTimeAdjustmentView(transport: displayedTransport) { start, end in
                     localStartTime = start
                     localEndTime = end
+                    reloadDisplayedTransport(for: start)
                     onLocationUpdate?()
                 }
             }
@@ -404,11 +412,31 @@ struct TransportModalView: View {
     }
     
     private var distanceString: String {
-        if transport.distance < 1000 {
-            return String(format: "%.0f 米", transport.distance)
+        if displayedTransport.distance < 1000 {
+            return String(format: "%.0f 米", displayedTransport.distance)
         } else {
-            return String(format: "%.1f 公里", transport.distance / 1000.0)
+            return String(format: "%.1f 公里", displayedTransport.distance / 1000.0)
         }
+    }
+
+    private func reloadDisplayedTransport(for date: Date) {
+        let items = PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
+        let updated = items.compactMap { item -> Transport? in
+            guard case .transport(let candidate) = item, candidate.id == transport.id else { return nil }
+            return candidate
+        }.first
+        guard let updated else { return }
+        refreshedTransport = updated
+        if let region = updated.points.boundingRegion() {
+            position = .region(region)
+        }
+    }
+
+    private var durationString: String {
+        let minutes = max(1, Int(currentEndTime.timeIntervalSince(currentStartTime) / 60))
+        let hours = minutes / 60
+        let remainingMinutes = minutes % 60
+        return hours > 0 ? "\(hours) 小时 \(remainingMinutes) 分钟" : "\(minutes) 分钟"
     }
     
     private func saveChoice(_ type: TransportType) {
@@ -640,16 +668,17 @@ struct TransportSplitView: View {
         let ratio = split.timeIntervalSince(record.startTime) / max(1, record.endTime.timeIntervalSince(record.startTime))
         let firstPoints = routeSegment(from: record.startTime, to: split, startRatio: 0, endRatio: ratio)
         let secondPoints = routeSegment(from: split, to: record.endTime, startRatio: ratio, endRatio: 1)
-        let manualType = record.manualTypeRaw ?? record.typeRaw
+        let explicitlySelectedType = record.manualTypeRaw
 
         record.endTime = split
         record.day = Calendar.current.startOfDay(for: record.startTime)
         record.endLocation = "中途"
-        record.manualTypeRaw = manualType
         record.pointsData = (try? JSONEncoder().encode(firstPoints)) ?? record.pointsData
         record.distance = TimelineBuilder.calculatePathDistance(firstPoints)
         record.averageSpeed = record.distance / max(1, record.endTime.timeIntervalSince(record.startTime))
         record.stepCount = splitMetric(record.stepCount, ratio: ratio, second: false)
+        record.typeRaw = explicitlySelectedType ?? inferredSplitType(for: record, points: firstPoints)
+        record.manualTypeRaw = record.typeRaw // Keep the user-created split boundary stable during rebuilding.
 
         let newRecord = TransportRecord(
             day: Calendar.current.startOfDay(for: split),
@@ -664,7 +693,8 @@ struct TransportSplitView: View {
             stepCount: splitMetric(transport.stepCount, ratio: ratio, second: true)
         )
         newRecord.averageSpeed = newRecord.distance / max(1, oldEnd.timeIntervalSince(split))
-        newRecord.manualTypeRaw = manualType
+        newRecord.typeRaw = explicitlySelectedType ?? inferredSplitType(for: newRecord, points: secondPoints)
+        newRecord.manualTypeRaw = newRecord.typeRaw
         modelContext.insert(newRecord)
         try? modelContext.save()
         TimelineBuilder.timelineCache.removeValue(forKey: Calendar.current.startOfDay(for: transport.startTime))
@@ -674,6 +704,18 @@ struct TransportSplitView: View {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         onSave?()
         dismiss()
+    }
+
+    private func inferredSplitType(for record: TransportRecord, points: [CodableCoordinate]) -> String {
+        let observedCount = points.filter { $0.isSyntheticPadding != true && $0.timestamp != nil }.count
+        return TransportType.from(
+            speed: record.averageSpeed,
+            stepCount: record.stepCount ?? 0,
+            duration: record.endTime.timeIntervalSince(record.startTime),
+            distanceMeters: record.distance,
+            pointCount: points.count,
+            observedPointCount: observedCount
+        ).rawValue
     }
 
     private func findRecord() -> TransportRecord? {
@@ -822,6 +864,7 @@ private struct TransportTimeAdjustmentView: View {
     @State private var rawPoints: [CLLocation] = []
     @State private var isLoadingRawPoints = true
     @State private var hasInitializedRange = false
+    @State private var isRegenerating = false
 
     private let minimumDuration: TimeInterval = 60
 
@@ -836,7 +879,8 @@ private struct TransportTimeAdjustmentView: View {
     }
 
     private var canSave: Bool {
-        hasInitializedRange && draftEnd.timeIntervalSince(draftStart) >= minimumDuration
+        hasInitializedRange && !isLoadingRawPoints && !isRegenerating &&
+            draftEnd.timeIntervalSince(draftStart) >= minimumDuration
     }
 
     var body: some View {
@@ -845,7 +889,7 @@ private struct TransportTimeAdjustmentView: View {
                 VStack(spacing: 18) {
                     GeometryReader { proxy in
                         if proxy.size.width > 1 && proxy.size.height > 1 && !selectedCoordinates.isEmpty {
-                            FootprintTimeAdjustmentMapView(coordinates: selectedCoordinates)
+                            FootprintTimeAdjustmentMapView(coordinates: selectedCoordinates, dotDiameter: 14)
                                 .frame(minWidth: 1, minHeight: 1)
                         } else {
                             Color.secondary.opacity(0.05)
@@ -906,10 +950,15 @@ private struct TransportTimeAdjustmentView: View {
                     Button { dismiss() } label: {
                         Image(systemName: "xmark").dfkToolbarDismissIcon()
                     }
+                    .disabled(isRegenerating)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { saveAdjustment() } label: {
-                        Image(systemName: "checkmark").dfkToolbarConfirmIcon().fontWeight(.bold)
+                        if isRegenerating {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "checkmark").dfkToolbarConfirmIcon().fontWeight(.bold)
+                        }
                     }
                     .disabled(!canSave)
                 }
@@ -919,6 +968,7 @@ private struct TransportTimeAdjustmentView: View {
             setupInitialRange()
             loadRawPoints()
         }
+        .interactiveDismissDisabled(isRegenerating)
     }
 
     private func setupInitialRange() {
@@ -969,8 +1019,10 @@ private struct TransportTimeAdjustmentView: View {
         let dates = touchedDates(start: rangeStart, end: rangeEnd)
         Task {
             let points = await Task.detached {
-                dates.flatMap { RawLocationStore.shared.loadAllDevicesLocations(for: $0) }
-                    .sorted { $0.timestamp < $1.timestamp }
+                let chronological = dates.flatMap {
+                    RawLocationStore.shared.loadAllDevicesLocations(for: $0, filtered: false)
+                }.sorted { $0.timestamp < $1.timestamp }
+                return RawLocationStore.filterRidiculousSpikes(chronological)
             }.value
             await MainActor.run {
                 rawPoints = points
@@ -1019,10 +1071,7 @@ private struct TransportTimeAdjustmentView: View {
         guard let record = findRecord() else { dismiss(); return }
         let start = roundedToMinute(draftStart)
         let end = roundedToMinute(max(draftEnd, start.addingTimeInterval(minimumDuration)))
-        guard minuteKey(record.startTime) != minuteKey(start) || minuteKey(record.endTime) != minuteKey(end) else {
-            dismiss()
-            return
-        }
+        guard !isLoadingRawPoints else { return }
         let oldStart = record.startTime
         let oldEnd = record.endTime
         record.startTime = start
@@ -1037,7 +1086,10 @@ private struct TransportTimeAdjustmentView: View {
         // an expanded boundary.  Rebuild from the same raw points shown on the
         // adjustment map so the saved route and distance match the selected
         // time range.
-        refreshMetrics(record, rawRoute: selectedPoints)
+        let routeWithinSavedRange = rawPoints.filter {
+            $0.timestamp >= start && $0.timestamp <= end
+        }
+        refreshMetrics(record, rawRoute: routeWithinSavedRange)
         let adjacentDates = adjustAdjacentItems(
             oldStart: oldStart,
             oldEnd: oldEnd,
@@ -1046,11 +1098,42 @@ private struct TransportTimeAdjustmentView: View {
             didChangeStart: minuteKey(oldStart) != minuteKey(start),
             didChangeEnd: minuteKey(oldEnd) != minuteKey(end)
         )
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            modelContext.rollback()
+            isRegenerating = false
+            return
+        }
+        isRegenerating = true
+        let affectedDates = touchedDates(start: oldStart, end: oldEnd)
+            .union(touchedDates(start: start, end: end))
+            .union(adjacentDates)
         invalidateCaches(oldStart: oldStart, oldEnd: oldEnd, newStart: start, newEnd: end, additionalDates: adjacentDates)
-        onSave(start, end)
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        dismiss()
+        Task { @MainActor in
+            // Re-run one non-destructive reconstruction pass after the edited
+            // boundaries and route have been committed. A full reset would
+            // delete this manual edit and other user-authored records.
+            for date in affectedDates.sorted() {
+                var didSync = await PersistentTimelineBuilder.syncDay(
+                    date: date, in: modelContext, runConsolidation: false
+                )
+                var retriesRemaining = 20
+                while !didSync && retriesRemaining > 0 {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    didSync = await PersistentTimelineBuilder.syncDay(
+                        date: date, in: modelContext, runConsolidation: false
+                    )
+                    retriesRemaining -= 1
+                }
+                TimelineBuilder.timelineCache.removeValue(forKey: date)
+            }
+            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            onSave(start, end)
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            isRegenerating = false
+            dismiss()
+        }
     }
 
     private func findRecord() -> TransportRecord? {
@@ -1060,7 +1143,7 @@ private struct TransportTimeAdjustmentView: View {
     }
 
     private func refreshMetrics(_ record: TransportRecord, rawRoute: [CLLocation]? = nil) {
-        if let rawRoute, !rawRoute.isEmpty {
+        if let rawRoute {
             let routePoints = rawRoute.map {
                 CodableCoordinate(
                     lat: $0.coordinate.latitude,
@@ -1215,7 +1298,6 @@ private struct TransportTimeAdjustmentView: View {
             .union(additionalDates) {
             TimelineBuilder.timelineCache.removeValue(forKey: date)
         }
-        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil, userInfo: ["date": Calendar.current.startOfDay(for: newStart)])
     }
 
     private func touchedDates(start: Date, end: Date) -> Set<Date> {

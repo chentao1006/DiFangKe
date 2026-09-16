@@ -14,8 +14,17 @@ class HealthManager: ObservableObject {
     @Published var currentActivity: String = "未知"
     @Published var isMoving = false
     @Published var currentMotionType: MotionType = .stationary
+    private(set) var hasReceivedMotionActivity = false
+    private var isActivityTracking = false
 
-    private var lastPedometerStepCount = 0
+    private var lastPedometerStepCount: Int?
+    private var lastPedometerMovementAt: Date = .distantPast
+    private var motionTrackingGeneration = 0
+
+    private var isActivityClassifiedAsMoving: Bool {
+        currentMotionType == .walking || currentMotionType == .running
+            || currentMotionType == .cycling || currentMotionType == .automotive
+    }
 
     private init() {
     }
@@ -53,11 +62,19 @@ class HealthManager: ObservableObject {
     
     func startActivityTracking() {
         guard CMMotionActivityManager.isActivityAvailable() else { return }
-        lastPedometerStepCount = 0
+        guard !isActivityTracking else { return }
+        isActivityTracking = true
+        motionTrackingGeneration += 1
+        let generation = motionTrackingGeneration
+        hasReceivedMotionActivity = false
+        lastPedometerStepCount = nil
+        lastPedometerMovementAt = .distantPast
 
         // 1. 运动状态监控 (提供基础分类)
         activityManager.startActivityUpdates(to: .main) { [weak self] activity in
             guard let self = self, let activity = activity else { return }
+            guard self.isActivityTracking, self.motionTrackingGeneration == generation else { return }
+            self.hasReceivedMotionActivity = true
             
             if activity.walking {
                 self.currentActivity = "步行"
@@ -79,28 +96,36 @@ class HealthManager: ObservableObject {
                 self.currentMotionType = .unknown
             }
             
-            self.isMoving = self.currentMotionType == .walking || self.currentMotionType == .running || self.currentMotionType == .cycling || self.currentMotionType == .automotive
+            self.isMoving = self.isActivityClassifiedAsMoving
+                || Date().timeIntervalSince(self.lastPedometerMovementAt) < AppConfig.shared.uiMovingHoldDuration
         }
         
         // 2. 计步器监控 (提供极速运动反馈)
         // 步数增量达到阈值才强制标记为 isMoving，这对于解决刚出门时的“漏记”至关重要；
-        // numberOfSteps 是本次 startUpdates 以来的累计值，仅按“>0”判断会导致走过一步后
-        // 之后每次回调都判定为移动，让站起来走两步这类原地小动作也一直触发移动状态。
+        // numberOfSteps includes the startup lookback. Treat the first result
+        // as a baseline, not as steps taken after monitoring began.
         if CMPedometer.isStepCountingAvailable() {
-            pedometer.startUpdates(from: Date().addingTimeInterval(-AppConfig.shared.pedometerStartupLookback)) { [weak self] data, error in // 避免重启时丢失步数状态
+            pedometer.startUpdates(from: Date().addingTimeInterval(-AppConfig.shared.pedometerStartupLookback)) { [weak self] data, error in
                 guard let self = self, let data = data, error == nil else { return }
                 let stepCount = data.numberOfSteps.intValue
-                let delta = stepCount - self.lastPedometerStepCount
-                self.lastPedometerStepCount = stepCount
-                if delta >= AppConfig.shared.pedometerMinMovingStepDelta {
-                    DispatchQueue.main.async {
-                        // 如果计步器有增加，且当前不是车载模式，则强制激活移动状态
-                        if self.currentMotionType != .automotive {
-                            self.isMoving = true
-                            if self.currentMotionType == .stationary || self.currentMotionType == .unknown {
-                                self.currentMotionType = .walking
-                            }
-                        }
+                DispatchQueue.main.async {
+                    guard self.isActivityTracking, self.motionTrackingGeneration == generation else { return }
+                    guard let previousCount = self.lastPedometerStepCount else {
+                        self.lastPedometerStepCount = stepCount
+                        return
+                    }
+                    self.lastPedometerStepCount = stepCount
+                    guard stepCount - previousCount >= AppConfig.shared.pedometerMinMovingStepDelta,
+                          self.currentMotionType != .automotive else { return }
+
+                    self.lastPedometerMovementAt = Date()
+                    self.isMoving = true
+                    let holdDuration = AppConfig.shared.uiMovingHoldDuration
+                    DispatchQueue.main.asyncAfter(deadline: .now() + holdDuration) {
+                        guard self.isActivityTracking,
+                              self.motionTrackingGeneration == generation,
+                              Date().timeIntervalSince(self.lastPedometerMovementAt) >= holdDuration else { return }
+                        self.isMoving = self.isActivityClassifiedAsMoving
                     }
                 }
             }
@@ -110,6 +135,12 @@ class HealthManager: ObservableObject {
     func stopActivityTracking() {
         activityManager.stopActivityUpdates()
         pedometer.stopUpdates()
+        isActivityTracking = false
+        motionTrackingGeneration += 1
+        hasReceivedMotionActivity = false
+        lastPedometerStepCount = nil
+        lastPedometerMovementAt = .distantPast
+        isMoving = false
     }
     
     // MARK: - Historical Data

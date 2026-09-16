@@ -359,43 +359,26 @@ final class RawLocationStore {
         }
 
         let chronological = bestByTimestamp.values.sorted { $0.timestamp < $1.timestamp }
-        guard filtered else { return chronological }
-
-        var plausible: [CLLocation] = []
-        for location in chronological {
-            if let last = plausible.last {
-                let elapsed = location.timestamp.timeIntervalSince(last.timestamp)
-                if elapsed > 0 {
-                    let distance = location.distance(from: last)
-                    let calculatedSpeed = distance / elapsed
-                    let hasReportedHighSpeed = location.speed >= 20.0
-                    if calculatedSpeed > AppConfig.shared.physicalMaxSpeedThreshold {
-                        continue
-                    }
-                    let isRidiculous = (location.horizontalAccuracy > 400 && distance > 1500 && !hasReportedHighSpeed)
-                        || (calculatedSpeed > 80.0 && location.horizontalAccuracy > 80 && !hasReportedHighSpeed)
-                    if isRidiculous { continue }
-                }
-            }
-            plausible.append(location)
-        }
-        return RawLocationStore.filterRidiculousSpikes(plausible)
+        // A precise fix returning from a bad cluster looks impossibly fast when
+        // compared with that cluster. Keep it until the drift pass can decide
+        // which side of the jump was wrong using the complete time sequence.
+        return filtered ? RawLocationStore.filterRidiculousSpikes(chronological) : chronological
     }
     
     /// 从源文件中彻底删除某个点 (匹配时间戳)
     /// 用 continuation 桥接到 saveQueue，避免在 Swift Concurrency 线程上做同步阻塞等待
     /// (queue.sync 会触发 "unsafeForcedSync called from Swift Concurrent context")
     func deleteLocation(at timestamp: Double, for date: Date) async {
+        let directory = baseDirectory
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            saveQueue.async { [weak self] in
+            saveQueue.async {
                 defer { continuation.resume() }
-                guard let self = self else { return }
 
                 let formatter = DateFormatter()
                 formatter.dateFormat = "yyyy-MM-dd"
                 let prefix = formatter.string(from: date)
 
-                guard let files = try? self.fileManager.contentsOfDirectory(at: self.baseDirectory, includingPropertiesForKeys: nil) else { return }
+                guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
                 let targetFiles = files.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "csv" }
 
                 for url in targetFiles {
@@ -429,16 +412,16 @@ final class RawLocationStore {
 
     /// 从源文件中批量删除多个点 (匹配时间戳)
     func deleteLocations(at timestamps: Set<Double>, for date: Date) async {
+        let directory = baseDirectory
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            saveQueue.async { [weak self] in
+            saveQueue.async {
                 defer { continuation.resume() }
-                guard let self = self else { return }
 
                 let formatter = DateFormatter()
                 formatter.dateFormat = "yyyy-MM-dd"
                 let prefix = formatter.string(from: date)
 
-                guard let files = try? self.fileManager.contentsOfDirectory(at: self.baseDirectory, includingPropertiesForKeys: nil) else { return }
+                guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
                 let targetFiles = files.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "csv" }
 
                 for url in targetFiles {
@@ -690,6 +673,36 @@ final class RawLocationStore {
         }
         
         var driftFlags = [Bool](repeating: false, count: points.count)
+
+        // A weak, nearly stationary cluster followed by a precise position
+        // confirmed by the next fix can be the wrong side of an impossible jump.
+        // Mark the entire cluster, rather than discarding the accurate return.
+        if points.count >= 6 {
+            for exitIndex in 4..<(points.count - 1) {
+                let exit = points[exitIndex]
+                let confirmation = points[exitIndex + 1]
+                let lastWeak = points[exitIndex - 1]
+                let exitTime = exit.timestamp.timeIntervalSince(lastWeak.timestamp)
+                guard exit.horizontalAccuracy > 0 && exit.horizontalAccuracy <= 100,
+                      confirmation.horizontalAccuracy > 0 && confirmation.horizontalAccuracy <= 150,
+                      confirmation.timestamp.timeIntervalSince(exit.timestamp) <= 120,
+                      exit.distance(from: confirmation) <= 150,
+                      exitTime > 0,
+                      lastWeak.distance(from: exit) >= 2_000,
+                      lastWeak.distance(from: exit) / exitTime > AppConfig.shared.transportMaxReasonableSpeed else { continue }
+
+                let earliest = max(0, exitIndex - 15)
+                for startIndex in earliest..<(exitIndex - 2) {
+                    let cluster = points[startIndex..<exitIndex]
+                    guard lastWeak.timestamp.timeIntervalSince(points[startIndex].timestamp) <= 5 * 60 else { continue }
+                    let weakCount = cluster.filter { $0.horizontalAccuracy >= 150 }.count
+                    guard weakCount * 5 >= cluster.count * 4,
+                          cluster.allSatisfy({ $0.distance(from: lastWeak) <= 100 }) else { continue }
+                    for index in startIndex..<exitIndex { driftFlags[index] = true }
+                    break
+                }
+            }
+        }
         
         // --- Pass 1: 三点回弹检测（核心新算法）---
         // 对于每个点 B(index=i), 检查 A(i-1) 和 C(i+1)
@@ -781,6 +794,17 @@ final class RawLocationStore {
                             continue
                         }
                     }
+                    // An isolated inaccurate fix with no reported high speed
+                    // remains suspect even when there is no visible return.
+                    if current.horizontalAccuracy > 80 && current.speed < 20 {
+                        driftFlags[i] = true
+                        continue
+                    }
+                }
+
+                if dist > 1_500 && current.horizontalAccuracy > 400 && current.speed < 20 {
+                    driftFlags[i] = true
+                    continue
                 }
             }
             
@@ -1171,7 +1195,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 原始轨迹是后续重建足迹的源数据；定位回调可能在静止时按秒到达，
     /// 因此不论系统回调频率如何，最多每五秒持久化一个原始点。
     private var lastRawLocationSaveTimestamp: Date = .distantPast
-    private let rawLocationMinimumSaveInterval: TimeInterval = 5
+    private var lastSavedRawLocation: CLLocation?
+    private var rawLocationMinimumSaveInterval: TimeInterval { AppConfig.shared.footprintMinSampleInterval }
     
     // 标签继承距离阈值
     private var tagInheritanceDistance: CLLocationDistance { AppConfig.shared.tagInheritanceDistance }
@@ -1248,7 +1273,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] isMoving in
-                if isMoving {
+                // Continuous tracking is already running. Repeated activity
+                // callbacks must not erase the stationary observation window.
+                if isMoving, self?.isUsingAutomaticStationaryLowPower == true {
                     self?.forceHighAccuracyBoost()
                 }
                 self?.updateUIMovementState(isMovingEvidence: isMoving, source: "motion:isMoving")
@@ -1274,7 +1301,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
         
         // 无移动证据：必须连续一段时间都没有证据，才允许切回“停留”，避免抖动
-        let holdSeconds: TimeInterval = 120
+        let holdSeconds = AppConfig.shared.uiMovingHoldDuration
         if uiIsMoving, now.timeIntervalSince(lastMovingEvidenceTime) > holdSeconds {
             uiIsMoving = false
             print("[LocationManager] UI moving=false (\(source))")
@@ -1330,6 +1357,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// refresh 的“重新确保定位”调用，否则每次后台任务都会把静止中的 GPS
     /// 拉回最高精度，抵消节能策略。
     private var isUsingAutomaticStationaryLowPower = false
+    var isHoldingStationaryStay: Bool {
+        isUsingAutomaticStationaryLowPower && !uiIsMoving && potentialStopStartLocation != nil
+    }
+    /// Independent of the UI's moving label and the timeline's provisional stay.
+    /// Indoor GPS jitter must not erase the evidence needed to stop standard GPS.
+    private var stationaryLocationWindow: [CLLocation] = []
+    private var stationaryLowPowerAnchor: CLLocation?
 
     /// 强制激活高精度模式（通常由计步器、运动传感器或网络变化触发，早于 GPS 位移）
     private func forceHighAccuracyBoost() {
@@ -1344,6 +1378,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         print("🚀 Status change detected! Forcing high accuracy boost...")
         isUsingAutomaticStationaryLowPower = false
+        stationaryLocationWindow.removeAll()
+        stationaryLowPowerAnchor = nil
         
         // 0. 设置 10 分钟出门保护期，覆盖大多数步行出门的起步阶段，防止过早降频造成直线轨迹
         departureBoostEndTime = Date().addingTimeInterval(10 * 60)
@@ -1381,10 +1417,63 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// `forceHighAccuracyBoost()` before continuous recording resumes.
     private func enterAutomaticStationaryLowPower() {
         guard currentLocationAccuracyMode == .automatic else { return }
+        guard !isUsingAutomaticStationaryLowPower else { return }
         isUsingAutomaticStationaryLowPower = true
         applyPowerSavingLocationSettings()
         locationManager.stopUpdatingLocation()
         print("[LocationManager] 💤 Confirmed long stay; standard location updates paused.")
+    }
+
+    /// A broad ten-minute cluster can use Motion confirmation. A tighter
+    /// five-minute cluster also handles unavailable or falsely moving Motion
+    /// classifications without leaving GPS running indefinitely at home.
+    private func stationaryAnchor(for location: CLLocation, motion: MotionType, isMovingBySensor: Bool) -> CLLocation? {
+        if let last = stationaryLocationWindow.last,
+           location.timestamp.timeIntervalSince(last.timestamp) < AppConfig.shared.lowPowerSampleInterval {
+            return nil
+        }
+        stationaryLocationWindow.append(location)
+        let duration = max(AppConfig.shared.lowPowerDwellDuration,
+                           AppConfig.shared.lowPowerStrictDwellDuration)
+        stationaryLocationWindow.removeAll {
+            location.timestamp.timeIntervalSince($0.timestamp) > duration + AppConfig.shared.lowPowerWindowGracePeriod
+        }
+        func clusteredAnchor(in samples: [CLLocation], dwell: TimeInterval,
+                             radius: CLLocationDistance, fraction: Double) -> CLLocation? {
+            guard let first = samples.first,
+                  location.timestamp.timeIntervalSince(first.timestamp) >= dwell else { return nil }
+            let requiredCount = Int(ceil(Double(samples.count) * fraction))
+            for anchor in samples {
+                let nearbyCount = samples.reduce(0) {
+                    $0 + (anchor.distance(from: $1) < radius ? 1 : 0)
+                }
+                if nearbyCount >= requiredCount && anchor.distance(from: location) < radius {
+                    return anchor
+                }
+            }
+            return nil
+        }
+
+        if HealthManager.shared.hasReceivedMotionActivity,
+           motion == .stationary, !isMovingBySensor,
+           let anchor = clusteredAnchor(in: stationaryLocationWindow,
+                                        dwell: AppConfig.shared.lowPowerDwellDuration,
+                                        radius: AppConfig.shared.lowPowerDwellDistance,
+                                        fraction: AppConfig.shared.lowPowerClusterFraction) {
+            return anchor
+        }
+
+        // A genuinely moving phone should leave a tight spatial cluster. Do
+        // not accept a reported speed above the stationary threshold here.
+        guard location.speed < AppConfig.shared.stationaryDwellSpeed else { return nil }
+        let strictSamples = stationaryLocationWindow.filter {
+            location.timestamp.timeIntervalSince($0.timestamp)
+                <= AppConfig.shared.lowPowerStrictDwellDuration + AppConfig.shared.lowPowerWindowGracePeriod
+        }
+        return clusteredAnchor(in: strictSamples,
+                               dwell: AppConfig.shared.lowPowerStrictDwellDuration,
+                               radius: AppConfig.shared.lowPowerStrictDwellDistance,
+                               fraction: AppConfig.shared.lowPowerStrictClusterFraction)
     }
 
     /// 移动中的自动记录使用连续高精度采样。确认长时间静止后会停止
@@ -1405,8 +1494,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             Task { @MainActor in
                 // 核心逻辑：如果从 WiFi 切换到蜂窝数据，大概率是出门了
                 if self.lastInterfaceType == .wifi && currentType == .cellular {
-                    print("🌐 Network switched from WiFi to Cellular! Likely leaving home/office.")
-                    self.forceHighAccuracyBoost()
+                    // Wi-Fi can drop while the phone stays indoors overnight.
+                    // A network change alone must not undo a confirmed low-power
+                    // stay; Motion, Visit, region exit and significant changes
+                    // remain available to detect departure.
+                    if !self.isUsingAutomaticStationaryLowPower
+                        || HealthManager.shared.isMoving {
+                        print("🌐 Network switched from WiFi to Cellular; boosting location.")
+                        self.forceHighAccuracyBoost()
+                    }
                 }
                 self.lastInterfaceType = currentType
             }
@@ -1460,19 +1556,24 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         let now = Date()
 
-        // Intervene when we believe the user is actually moving OR when uiIsMoving is true.
+        // The UI moving label can remain true after standard GPS stops because
+        // there are no further GPS callbacks to clear its hysteresis. Never let
+        // that presentation state wake a confirmed low-power stay.
         let motion = HealthManager.shared.currentMotionType
         let isMovingBySensor = HealthManager.shared.isMoving
             || motion == .walking
             || motion == .running
             || motion == .cycling
             || motion == .automotive
-            || uiIsMoving // 扩大监测范围：只要 UI 层认为在移动就介入
+        let shouldRecoverMovingUpdates = isMovingBySensor
+            || (!isUsingAutomaticStationaryLowPower
+                && uiIsMoving
+                && now.timeIntervalSince(lastMovingEvidenceTime) < AppConfig.shared.uiMovingHoldDuration)
 
         let gap: TimeInterval
         if let last = lastUpdateTime {
             gap = now.timeIntervalSince(last)
-        } else if isMovingBySensor {
+        } else if shouldRecoverMovingUpdates {
             // No fresh fix has arrived since this recording session started.
             // Cached locations do not update lastUpdateTime, so movement must
             // still enter the same recovery path after the startup grace period.
@@ -1482,7 +1583,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             return
         }
 
-        if !isMovingBySensor {
+        if !shouldRecoverMovingUpdates {
             requestStationaryDepartureProbeIfNeeded(now: now, lastUpdateGap: gap)
             return
         }
@@ -1514,14 +1615,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         lastStationaryProbeTime = now
 
         let gapDescription = lastUpdateGap.isFinite ? "\(Int(lastUpdateGap))s" : "unknown duration"
-        print("[LocationManager] 🧭 Long stationary stay has no fresh location for \(gapDescription). Keeping a low-power departure watch…")
+        print("[LocationManager] 🧭 No fresh location for \(gapDescription); checking departure monitors without changing GPS mode.")
         ensureSignificantMonitoringActive()
-        // A long confirmed stay must not be promoted back to Best accuracy every
-        // fifteen minutes. Core Motion/region/visit/significant-change events
-        // call forceHighAccuracyBoost and restart standard updates on departure.
-        if currentLocationAccuracyMode == .automatic {
-            enterAutomaticStationaryLowPower()
-        }
+        // Do not stop standard updates from this timer: a provisional footprint
+        // start alone is not stationary evidence. The clustered location window
+        // is the sole path into automatic low power.
     }
 
     private var shouldRunActiveLocationRecovery: Bool {
@@ -1789,12 +1887,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
 
         let now = Date()
-        if isTracking, now.timeIntervalSince(lastStartTrackingAt) <= 30 {
+        if isTracking {
             // App-root, scene-active, and timeline appearance can all request
             // tracking during the same launch. Keep an authorization upgrade
             // reflected without reapplying accuracy or restarting monitors.
             locationManager.allowsBackgroundLocationUpdates = isAlwaysAuthorized
-            locationManager.pausesLocationUpdatesAutomatically = false
             return
         }
 
@@ -1835,6 +1932,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // A later manual restart must begin with a fresh high-accuracy fix.
         // Do not carry an old stationary decision across an explicit stop.
         isUsingAutomaticStationaryLowPower = false
+        stationaryLocationWindow.removeAll()
+        stationaryLowPowerAnchor = nil
+        lastSavedRawLocation = nil
+        lastRawLocationSaveTimestamp = .distantPast
         // 清理当前可能的停留状态
         potentialStopStartLocation = nil
         ongoingTitle = nil
@@ -2265,9 +2366,21 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             let time = location.timestamp.timeIntervalSince(last.timestamp)
             if time > 0 {
                 let calcSpeed = dist / time
+                // A precise return after several compact, inaccurate fixes must
+                // reach the raw store so the later cluster filter can compare
+                // both sides. Otherwise the bad cluster becomes the last anchor.
+                let recentWeakPoints = Array(trackingPoints.suffix(15)).filter {
+                    last.timestamp.timeIntervalSince($0.timestamp) <= 5 * 60
+                }
+                let weakCount = recentWeakPoints.filter { $0.horizontalAccuracy >= 150 }.count
+                let isPreciseReturnFromWeakCluster =
+                    location.horizontalAccuracy > 0 && location.horizontalAccuracy <= 100 &&
+                    dist >= 2_000 && recentWeakPoints.count >= 3 &&
+                    weakCount * 5 >= recentWeakPoints.count * 4 &&
+                    recentWeakPoints.allSatisfy { $0.distance(from: last) <= 100 }
                 
                 // 新增：物理不可能的速度直接过滤（如 5秒内 3公里 = 600m/s）
-                if calcSpeed > AppConfig.shared.physicalMaxSpeedThreshold {
+                if calcSpeed > AppConfig.shared.physicalMaxSpeedThreshold && !isPreciseReturnFromWeakCluster {
                     print("Detected impossible jump, skipping point. Speed: \(calcSpeed) m/s")
                     return
                 }
@@ -2279,7 +2392,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 let hasReportedHighSpeed = location.speed >= 20.0
                 let isRidiculous = (location.horizontalAccuracy > 400 && dist > 1500 && !hasReportedHighSpeed)
                     || (calcSpeed > 60.0 && location.horizontalAccuracy > 80 && !hasReportedHighSpeed)
-                if isRidiculous {
+                if isRidiculous && !isPreciseReturnFromWeakCluster {
                     print("Detected ridiculous drift, skipping point. Dist: \(dist), Acc: \(location.horizontalAccuracy)")
                     return 
                 }
@@ -2304,12 +2417,34 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
 #endif
 
-        let isMovingByGPS = isFreshLocation && location.speed >= 0 && location.speed > 0.5
+        // Indoor fixes often report a plausible speed even while jumping around a
+        // building.  Do not let that noise continuously reset the stationary
+        // dwell timer when Core Motion explicitly says the phone is stationary.
+        // A large, reasonably accurate displacement is still accepted so a
+        // misclassified vehicle can wake tracking without waiting for Motion.
+        let distanceFromStop = (stationaryLowPowerAnchor ?? potentialStopStartLocation)
+            .map { location.distance(from: $0) } ?? 0
+        let driftResistantDepartureDistance = max(
+            AppConfig.shared.departureDriftResistantFloor,
+            location.horizontalAccuracy * AppConfig.shared.departureDriftResistantRatio
+        )
+        let hasStrongGPSDepartureEvidence = isFreshLocation
+            && location.horizontalAccuracy >= 0
+            && location.horizontalAccuracy < AppConfig.shared.departureAccuracyThreshold
+            && distanceFromStop > driftResistantDepartureDistance
+        let isMovingByGPS = isFreshLocation
+            && location.speed >= 0
+            && location.speed > AppConfig.shared.stationaryDwellSpeed
+            && (motion != .stationary || hasStrongGPSDepartureEvidence)
         updateUIMovementState(isMovingEvidence: (isMovingBySensor || isMovingByGPS), source: "didUpdateLocations")
         
         // 0. 智能节能：根据速度和停留状态动态调整定位参数
         let place = matchedPlace
         let speed = max(0, location.speed)
+        // Core Location's inferred speed is noisy indoors. Once Core Motion has
+        // an explicit stationary classification, use that stronger signal for
+        // the dwell gate instead of requiring every GPS fix to report < 1 m/s.
+        let stationaryGateSpeed = motion == .stationary ? 0 : speed
         
         // 判定是否正在长久停留
         // 我们将其放宽到 150m (从 300m 下调)，并增加已知地点粘性
@@ -2345,7 +2480,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // .automotive，触发不了上面的 C 规则）。若只看位移就判定为停留，
             // 会把还在骑行途中的这一段错误降为低频采样，制造出真实的记录空档，
             // 时间线因此把这段连续骑行渲染成实线-虚线交替。
-            if duration > 300 && distance < 150.0 && speed < 1.0 { return true }
+            if duration > AppConfig.shared.stationaryDwellDuration
+                && distance < AppConfig.shared.stationaryDwellDistance
+                && stationaryGateSpeed < AppConfig.shared.stationaryDwellSpeed {
+                return true
+            }
             
             // 不再根据“已知地点 + 60 秒低速”提前进入节能。交通刚从地点范围内
             // 出发、在红灯短停或路口减速时都可能满足该条件；此时若降为低频采样，
@@ -2357,37 +2496,30 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let currentMode = LocationAccuracyMode(rawValue: modeRaw) ?? .automatic
         
         if currentMode == .automatic, isLatestInBatch {
-            // Only lower accuracy after a conservative, fresh, motion-free
-            // dwell.  The broader `isStationary` result is also used for stay
-            // UI/regions after five minutes, but using it directly for power
-            // control would make red lights and slow e-bike traffic lose GPS
-            // samples again.
-            let shouldUseStationaryLowPower: Bool = {
-                guard isStationary,
-                      isFreshLocation,
-                      !isMovingBySensor,
-                      !uiIsMoving,
-                      motion == .stationary,
-                      let startLoc = potentialStopStartLocation else {
-                    return false
-                }
+            // The power decision uses its own clustered observation window.
+            // Neither the UI moving label nor a provisional footprint start
+            // can veto a real long indoor stay.
+            let anchor = isFreshLocation
+                ? stationaryAnchor(for: location, motion: motion, isMovingBySensor: isMovingBySensor)
+                : nil
+            let shouldUseStationaryLowPower = anchor != nil
 
-                let dwellDuration = location.timestamp.timeIntervalSince(startLoc.timestamp)
-                let dwellDistance = location.distance(from: startLoc)
-                return dwellDuration >= 10 * 60
-                    && dwellDistance < 80.0
-                    && speed < 0.5
-            }()
-
-            if shouldUseStationaryLowPower {
+            if isUsingAutomaticStationaryLowPower && (isMovingBySensor || hasStrongGPSDepartureEvidence) {
+                forceHighAccuracyBoost()
+            } else if shouldUseStationaryLowPower {
+                stationaryLowPowerAnchor = anchor
+                updateRegionMonitoring(isStationary: true)
+                enterAutomaticStationaryLowPower()
+            } else if isUsingAutomaticStationaryLowPower {
+                // Queued and significant-change callbacks are not, by
+                // themselves, evidence that the user has left the stay.
                 enterAutomaticStationaryLowPower()
             } else {
-                isUsingAutomaticStationaryLowPower = false
                 applyContinuousLocationSettings(to: manager)
             }
         }
         if isLatestInBatch {
-            updateRegionMonitoring(isStationary: isStationary || place?.isIgnored == true)
+            updateRegionMonitoring(isStationary: isUsingAutomaticStationaryLowPower || isStationary || place?.isIgnored == true)
         }
 
         // 反地理编码更新地址（高速节流至 1000 米，兼顾体验与能效）
@@ -2430,13 +2562,30 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // “更新”的时间戳，因而会把随后交付的一整批驾驶轨迹全部跳过。
         // CSV 的读取端本来就会按时间排序；迟到但相隔至少一个节流窗口的样本必须保存。
         let isDelayedBatchSample = rawTimestampDelta <= -rawLocationMinimumSaveInterval
-        let shouldSaveRawLocation = lastRawLocationSaveTimestamp == .distantPast
+        let isRedundantStationaryFix: Bool = {
+            guard !isDelayedBatchSample,
+                  location.speed < AppConfig.shared.stationaryDwellSpeed,
+                  location.horizontalAccuracy < AppConfig.shared.rawStationaryMaxAccuracy,
+                  let saved = lastSavedRawLocation,
+                  saved.horizontalAccuracy < AppConfig.shared.rawStationaryMaxAccuracy,
+                  Calendar.current.isDate(saved.timestamp, inSameDayAs: location.timestamp),
+                  location.timestamp.timeIntervalSince(saved.timestamp) < AppConfig.shared.rawStationaryHeartbeatInterval else {
+                return false
+            }
+            let distance = location.distance(from: saved)
+            return distance < AppConfig.shared.rawStationaryExactDuplicateDistance
+                || (!isMovingBySensor && distance < AppConfig.shared.rawStationaryDuplicateDistance)
+        }()
+        let shouldSaveRawLocation = !isRedundantStationaryFix && (lastRawLocationSaveTimestamp == .distantPast
             || rawTimestampDelta >= rawLocationMinimumSaveInterval
-            || isDelayedBatchSample
+            || isDelayedBatchSample)
         if shouldSaveRawLocation {
             // 保持最新时间戳作为前向节流的水位线，避免一个迟到样本倒退水位后，
             // 让后续实时回调全部绕过五秒节流。
             lastRawLocationSaveTimestamp = max(lastRawLocationSaveTimestamp, location.timestamp)
+            if !isDelayedBatchSample {
+                lastSavedRawLocation = location
+            }
             RawLocationStore.shared.saveLocation(location) { [weak self] in
                 // syncDay loads from RawLocationStore, so triggering it before this
                 // write completes misses exactly the newly received transition point.
@@ -2790,6 +2939,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     func applyLocationAccuracyMode() {
         let modeRaw = UserDefaults.standard.string(forKey: LocationAccuracyMode.userDefaultsKey) ?? LocationAccuracyMode.automatic.rawValue
         let mode = LocationAccuracyMode(rawValue: modeRaw) ?? .automatic
+        let wasAutomaticStationaryLowPower = isUsingAutomaticStationaryLowPower
         
         switch mode {
         case .automatic:
@@ -2810,6 +2960,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             isUsingAutomaticStationaryLowPower = false
             applyPowerSavingLocationSettings()
         }
+        if wasAutomaticStationaryLowPower && mode != .automatic {
+            stationaryLocationWindow.removeAll()
+            stationaryLowPowerAnchor = nil
+            updateRegionMonitoring(isStationary: false)
+            if isTracking {
+                // Changing away from Automatic must resume the standard service,
+                // not only change its parameters. startTracking() intentionally
+                // returns early for an existing session.
+                locationManager.startUpdatingLocation()
+            }
+        }
         print("[LocationManager] Applied LocationAccuracyMode: \(mode.rawValue)")
     }
 
@@ -2817,22 +2978,25 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let identifier = "StationaryWakeupRegion"
         
         if isStationary {
-            guard let center = potentialStopStartLocation?.coordinate else { return }
+            guard let center = (stationaryLowPowerAnchor ?? potentialStopStartLocation)?.coordinate else { return }
+            let radius = max(AppConfig.shared.stationaryWakeupRegionRadius,
+                             AppConfig.shared.lowPowerDwellDistance)
             
             // 检查是否已经存在该区域，并且中心点没有发生大的变化
             if let existingRegion = locationManager.monitoredRegions.first(where: { $0.identifier == identifier }) as? CLCircularRegion {
                 let existingLocation = CLLocation(latitude: existingRegion.center.latitude, longitude: existingRegion.center.longitude)
                 let newLocation = CLLocation(latitude: center.latitude, longitude: center.longitude)
-                if newLocation.distance(from: existingLocation) < 50.0 {
+                if newLocation.distance(from: existingLocation) < AppConfig.shared.regionReuseDistanceThreshold
+                    && existingRegion.radius >= radius {
                     return // 已经有一个相近的区域在监控，不需要重新启动
                 } else {
                     locationManager.stopMonitoring(for: existingRegion)
                 }
             }
             
-            // 使用较小半径尽早触发唤醒；标准定位仍是主通道，围栏只是后台兜底。
-            // 配合 Visit Monitoring 和 NWPathMonitor，实现三重保险
-            let radius: CLLocationDistance = 75.0
+            // The exit region must contain the accepted indoor drift cluster;
+            // otherwise entering low power can immediately fire a false exit.
+            // Motion remains the early departure signal, with region exit as backup.
             let region = CLCircularRegion(center: center, radius: radius, identifier: identifier)
             region.notifyOnEntry = false
             region.notifyOnExit = true
@@ -3626,9 +3790,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
         // Filter out ignored footprints and include ongoing stay
         let validFootprints = todayFootprints.filter { $0.status != .ignored }
-        // A summary reports timeline events, not unique addresses.  Several
-        // visits to the same place are still several footprints.
-        let footprintCount = validFootprints.count
+        // A daily notification counts places, so repeated visits to one place
+        // contribute only once. Prefer the displayed place name because the
+        // same place can have separate Place records after timeline edits.
+        let placeCount = Set(validFootprints.map { footprint -> String in
+            let name = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !name.isEmpty && !["正在解析位置...", "未知位置", "地点记录", "此处"].contains(name) {
+                return "name:\(name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))"
+            }
+            if let placeID = footprint.placeID { return "place:\(placeID.uuidString)" }
+            return "coordinate:\(Int((footprint.latitude * 1000).rounded())),\(Int((footprint.longitude * 1000).rounded()))"
+        }).count
         let transportDescriptor = FetchDescriptor<TransportRecord>(
             predicate: #Predicate { $0.startTime < tomorrowStart && $0.endTime > targetDate && $0.statusRaw == "active" },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]
@@ -3685,7 +3857,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
             await MainActor.run {
                 NotificationManager.shared.refreshDailySummary(
-                    footprintCount: footprintCount,
+                    placeCount: placeCount,
                     pointsCount: rawPoints.count,
                     mileage: mileage,
                     transportCount: todayTransports.count,

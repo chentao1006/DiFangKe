@@ -228,33 +228,281 @@ final class Footprint {
 
     /// Extend only a continuous, observed stay. Never cross a transport or a
     /// separately persisted stay (especially either side of a manual split).
+    @MainActor
     static func extendActivityEditedStay(start: Date, end: Date, coordinate: CLLocationCoordinate2D,
                                         context: ModelContext) -> Bool {
         guard end > start else { return false }
         // Successive GPS batches do not share a timestamp. Allow a short
         // sampling gap while still checking every intervening persisted boundary.
-        let earliestPreviousEnd = start.addingTimeInterval(-60)
-        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
-            $0.statusValue == "manual" && $0.allowsAutomaticDurationExtension &&
-            $0.startTime <= start && $0.endTime >= earliestPreviousEnd && $0.endTime < end
-        }, sortBy: [SortDescriptor(\.startTime, order: .reverse)])
+        #if !WIDGET_EXTENSION
+        let anchor = LocationManager.shared.potentialStopStartLocation
+        let activeCurrentStay = Calendar.current.isDateInToday(end) &&
+            !LocationManager.shared.uiIsMoving &&
+            anchor.map { $0.timestamp <= start &&
+                $0.distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)) < AppConfig.shared.stayDistanceThreshold
+            } == true
+        #else
+        let activeCurrentStay = false
+        #endif
+        let earliestPreviousEnd = activeCurrentStay
+            ? Calendar.current.startOfDay(for: start)
+            : start.addingTimeInterval(-60)
+        let descriptor: FetchDescriptor<Footprint>
+        if activeCurrentStay {
+            descriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
+                $0.statusValue == "manual" && $0.startTime <= end &&
+                $0.endTime >= earliestPreviousEnd && $0.endTime < end
+            }, sortBy: [SortDescriptor(\.startTime, order: .reverse)])
+        } else {
+            descriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
+                $0.statusValue == "manual" && $0.allowsAutomaticDurationExtension &&
+                $0.startTime <= start && $0.endTime >= earliestPreviousEnd && $0.endTime < end
+            }, sortBy: [SortDescriptor(\.startTime, order: .reverse)])
+        }
         guard let existing = (try? context.fetch(descriptor))?.first,
               Calendar.current.isDate(existing.startTime, inSameDayAs: end.addingTimeInterval(-0.001)),
               !existing.footprintLocations.isEmpty,
               CLLocation(latitude: existing.latitude, longitude: existing.longitude)
                 .distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)) < AppConfig.shared.stayDistanceThreshold else { return false }
+        #if !WIDGET_EXTENSION
+        if activeCurrentStay, let anchor,
+           anchor.timestamp > existing.endTime { return false }
+        #endif
         let extensionStart = existing.endTime
         let ownID = existing.footprintID
         let otherStays = FetchDescriptor<Footprint>(predicate: #Predicate {
-            $0.footprintID != ownID && $0.startTime < end && $0.endTime > extensionStart
+            $0.footprintID != ownID && $0.statusValue != "ignored" &&
+            $0.startTime < end && $0.endTime > extensionStart
         })
         let transports = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-            $0.startTime < end && $0.endTime > extensionStart
+            $0.statusRaw != "ignored" && $0.startTime < end && $0.endTime > extensionStart
         })
         guard let stays = try? context.fetch(otherStays), stays.isEmpty,
               let trips = try? context.fetch(transports), trips.isEmpty else { return false }
         existing.endTime = end
+        if activeCurrentStay { existing.allowsAutomaticDurationExtension = true }
         return true
+    }
+
+    /// A user merge of the active stay fixes its past boundaries but still
+    /// permits future observations at that place to extend the merged record.
+    #if !WIDGET_EXTENSION
+    @MainActor
+    static func resumeMergedCurrentStay(_ merged: Footprint, context: ModelContext) {
+        guard Calendar.current.isDateInToday(merged.endTime),
+              let anchor = LocationManager.shared.potentialStopStartLocation,
+              let current = LocationManager.shared.lastLocation,
+              anchor.timestamp <= merged.endTime,
+              (current.timestamp >= merged.startTime ||
+               LocationManager.shared.isHoldingStationaryStay),
+              (Date().timeIntervalSince(current.timestamp) < 30 * 60 ||
+               LocationManager.shared.isHoldingStationaryStay),
+              !merged.footprintLocations.isEmpty else { return }
+        let center = CLLocation(latitude: merged.latitude, longitude: merged.longitude)
+        let radius = AppConfig.shared.stayDistanceThreshold
+        guard center.distance(from: anchor) < radius,
+              center.distance(from: current) < radius else { return }
+        let otherManual = (try? context.fetch(FetchDescriptor<Footprint>()))?.contains {
+            $0.footprintID != merged.footprintID && $0.status == .manual &&
+            $0.startTime >= merged.endTime.addingTimeInterval(-5 * 60) && $0.startTime <= Date()
+        } ?? true
+        let interveningTrip = (try? context.fetch(FetchDescriptor<TransportRecord>()))?.contains {
+            $0.statusRaw != "ignored" && $0.startTime < Date() && $0.endTime > merged.endTime
+        } ?? true
+        guard !otherManual, !interveningTrip else { return }
+        merged.allowsAutomaticDurationExtension = true
+        if LocationManager.shared.isHoldingStationaryStay {
+            let heldCurrent = CLLocation(latitude: current.coordinate.latitude,
+                                         longitude: current.coordinate.longitude)
+            continueCurrentEditedStay(merged, anchor: anchor, current: heldCurrent,
+                                      rawPoints: [], context: context, holdingStationaryStay: true)
+        }
+    }
+    #endif
+
+    /// A time-edited stay may keep growing only when the phone's current stay
+    /// began before its edited end and observed points prove we never left.
+    /// Absorb an automatic same-place fragment created after that edit while
+    /// preserving the manual record's start, activity, address and identity.
+    @discardableResult
+    static func continueCurrentEditedStay(
+        _ manual: Footprint,
+        anchor: CLLocation,
+        current: CLLocation,
+        rawPoints: [CLLocation],
+        context: ModelContext,
+        holdingStationaryStay: Bool = false
+    ) -> Bool {
+        guard manual.status == .manual,
+              Calendar.current.isDateInToday(manual.endTime),
+              anchor.timestamp <= manual.endTime,
+              current.timestamp >= manual.endTime,
+              !manual.footprintLocations.isEmpty else { return false }
+        let center = CLLocation(latitude: manual.latitude, longitude: manual.longitude)
+        let radius = AppConfig.shared.stayDistanceThreshold
+        guard center.distance(from: anchor) < radius,
+              center.distance(from: current) < radius else { return false }
+
+        let allStays = (try? context.fetch(FetchDescriptor<Footprint>())) ?? []
+        let allTransports = (try? context.fetch(FetchDescriptor<TransportRecord>())) ?? []
+        let ownID = manual.footprintID
+        // A later manual stay is an explicit split/visit boundary.
+        guard !allStays.contains(where: {
+            $0.footprintID != ownID && $0.status == .manual &&
+            $0.startTime >= manual.endTime.addingTimeInterval(-5 * 60) &&
+            $0.startTime <= current.timestamp
+        }) else { return false }
+        guard !allStays.contains(where: {
+            $0.footprintID != ownID && $0.status == .manual &&
+            abs($0.endTime.timeIntervalSince(manual.startTime)) <= 5 * 60 &&
+            center.distance(from: CLLocation(latitude: $0.latitude, longitude: $0.longitude)) < radius
+        }) else { return false }
+
+        var changed = false
+        let continuation = rawPoints.filter {
+            $0.timestamp >= manual.endTime && $0.timestamp <= current.timestamp &&
+            $0.horizontalAccuracy > 0 &&
+            $0.horizontalAccuracy < AppConfig.shared.habitAnalysisAccuracyThreshold
+        }
+        let nearbyCount = continuation.filter { center.distance(from: $0) < radius }.count
+        let observedContinuation = continuation.count >= 2 &&
+            nearbyCount * 5 >= continuation.count * 4 &&
+            continuation.allSatisfy({ center.distance(from: $0) < max(500, radius * 2) })
+        let successorGap = max(5 * 60, current.timestamp.timeIntervalSince(manual.endTime))
+        let adjacentAutomaticStay = allStays.contains {
+            $0.footprintID != ownID && $0.status != .manual && $0.status != .ignored &&
+            $0.startTime >= manual.endTime.addingTimeInterval(-60) &&
+            $0.startTime <= manual.endTime.addingTimeInterval(successorGap) &&
+            center.distance(from: CLLocation(latitude: $0.latitude, longitude: $0.longitude)) < radius
+        }
+        guard observedContinuation || adjacentAutomaticStay ||
+              (holdingStationaryStay && manual.allowsAutomaticDurationExtension) else { return false }
+
+        var absorbedIDs = Set<UUID>()
+        while let next = allStays.filter({
+            $0.footprintID != ownID && !absorbedIDs.contains($0.footprintID) &&
+            $0.status != .manual && $0.status != .ignored &&
+            $0.startTime >= manual.endTime.addingTimeInterval(-60) &&
+            $0.startTime <= manual.endTime.addingTimeInterval(successorGap)
+        }).min(by: { $0.startTime < $1.startTime }) {
+            guard next.endTime <= min(Date(), current.timestamp.addingTimeInterval(60)),
+                  center.distance(from: CLLocation(latitude: next.latitude, longitude: next.longitude)) < radius,
+                  !allStays.contains(where: {
+                      $0.footprintID != ownID && $0.footprintID != next.footprintID &&
+                      !absorbedIDs.contains($0.footprintID) && $0.status != .ignored &&
+                      $0.startTime < next.startTime && $0.endTime > manual.endTime
+                  }),
+                  !allTransports.contains(where: {
+                      $0.statusRaw != "ignored" && $0.startTime < next.endTime && $0.endTime > manual.endTime
+                  }) else { break }
+            manual.endTime = max(manual.endTime, next.endTime)
+            manual.footprintLocations.append(contentsOf: next.footprintLocations)
+            var photos = manual.photoAssetIDs
+            for id in next.photoAssetIDs where !photos.contains(id) { photos.append(id) }
+            manual.photoAssetIDs = photos
+            var metadata = manual.photoMetadata
+            for item in next.photoMetadata where !metadata.contains(where: { $0.localIdentifier == item.localIdentifier }) {
+                metadata.append(item)
+            }
+            manual.photoMetadata = metadata
+            absorbedIDs.insert(next.footprintID)
+            context.delete(next)
+            changed = true
+        }
+
+        guard let latest = continuation.last(where: { center.distance(from: $0) < radius })?.timestamp else {
+            let wasExtendable = manual.allowsAutomaticDurationExtension
+            manual.allowsAutomaticDurationExtension = true
+            let now = Date()
+            if holdingStationaryStay && !allStays.contains(where: {
+                $0.footprintID != ownID && !absorbedIDs.contains($0.footprintID) &&
+                $0.status != .ignored && $0.startTime < now && $0.endTime > manual.endTime
+            }) && !allTransports.contains(where: {
+                $0.statusRaw != "ignored" && $0.startTime < now && $0.endTime > manual.endTime
+            }) && now > manual.endTime {
+                manual.endTime = now
+                changed = true
+            }
+            return changed || !wasExtendable
+        }
+        let remainingStay = allStays.contains {
+            $0.footprintID != ownID && !absorbedIDs.contains($0.footprintID) &&
+            $0.status != .ignored && $0.startTime < latest && $0.endTime > manual.endTime
+        }
+        guard !remainingStay else { return changed }
+        if latest > manual.endTime && !allTransports.contains(where: {
+            $0.statusRaw != "ignored" && $0.startTime < latest && $0.endTime > manual.endTime
+        }) {
+            manual.endTime = latest
+            changed = true
+        }
+        let now = Date()
+        if holdingStationaryStay && manual.allowsAutomaticDurationExtension &&
+            !allStays.contains(where: {
+                $0.footprintID != ownID && !absorbedIDs.contains($0.footprintID) &&
+                $0.status != .ignored && $0.startTime < now && $0.endTime > manual.endTime
+            }) && !allTransports.contains(where: {
+                $0.statusRaw != "ignored" && $0.startTime < now && $0.endTime > manual.endTime
+            }) && now > manual.endTime {
+            manual.endTime = now
+            changed = true
+        }
+        let wasExtendable = manual.allowsAutomaticDurationExtension
+        manual.allowsAutomaticDurationExtension = true
+        return changed || !wasExtendable
+    }
+
+    /// Repair a near-contiguous automatic fragment beside a manually kept stay.
+    /// The user's manual record keeps its identity and edited fields; a second
+    /// manual stay or a trip remains an explicit boundary.
+    @MainActor
+    static func absorbAdjacentAutomaticContinuations(
+        _ footprints: [Footprint], transports: [TransportRecord], context: ModelContext
+    ) -> Bool {
+        var ordered = footprints.filter { $0.status != .ignored }
+            .sorted { $0.startTime < $1.startTime }
+        var changed = false
+        var index = 0
+        while index + 1 < ordered.count {
+            let keeper = ordered[index]
+            let next = ordered[index + 1]
+            let gap = next.startTime.timeIntervalSince(keeper.endTime)
+            let radius = AppConfig.shared.stayDistanceThreshold
+            let samePlace = keeper.placeID != nil && keeper.placeID == next.placeID ||
+                CLLocation(latitude: keeper.latitude, longitude: keeper.longitude)
+                    .distance(from: CLLocation(latitude: next.latitude, longitude: next.longitude)) < radius
+            let tripBetween = transports.contains {
+                $0.statusRaw != "ignored" && $0.startTime < next.endTime &&
+                $0.endTime > keeper.endTime
+            }
+            let manualBoundary = ordered.contains {
+                $0.footprintID != keeper.footprintID && $0.footprintID != next.footprintID &&
+                $0.status == .manual && $0.startTime >= keeper.endTime &&
+                $0.startTime <= next.endTime
+            }
+            guard keeper.status == .manual, next.status != .manual,
+                  Calendar.current.isDate(keeper.startTime, inSameDayAs: next.startTime),
+                  gap >= -60, gap <= 5 * 60, samePlace,
+                  !tripBetween, !manualBoundary else {
+                index += 1
+                continue
+            }
+            keeper.endTime = max(keeper.endTime, next.endTime)
+            keeper.footprintLocations.append(contentsOf: next.footprintLocations)
+            var photos = keeper.photoAssetIDs
+            for id in next.photoAssetIDs where !photos.contains(id) { photos.append(id) }
+            keeper.photoAssetIDs = photos
+            var metadata = keeper.photoMetadata
+            for item in next.photoMetadata where !metadata.contains(where: { $0.localIdentifier == item.localIdentifier }) {
+                metadata.append(item)
+            }
+            keeper.photoMetadata = metadata
+            keeper.allowsAutomaticDurationExtension = true
+            context.delete(next)
+            ordered.remove(at: index + 1)
+            changed = true
+        }
+        return changed
     }
 
     @discardableResult

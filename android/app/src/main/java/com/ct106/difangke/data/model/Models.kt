@@ -78,6 +78,7 @@ enum class TransportType(val raw: String) {
             durationSec: Long = 0,
             distanceMeters: Double = 0.0,
             pointCount: Int = 0,
+            observedPointCount: Int? = null,
             preferredAuto: TransportType = CAR,
             preferredCycling: TransportType = BICYCLE,
             preferredTransport: TransportType? = null
@@ -122,7 +123,7 @@ enum class TransportType(val raw: String) {
                 kmh = kmh,
                 distanceMeters = effectiveDistance,
                 durationSec = durationSec,
-                pointCount = pointCount
+                pointCount = observedPointCount ?: pointCount
             )?.let { return it }
 
             // 1. 优先使用传感器数据 (Google Play Services Activity Recognition)
@@ -172,6 +173,14 @@ enum class TransportType(val raw: String) {
             durationSec: Long,
             pointCount: Int
         ): TransportType? {
+            val isSparseUrbanRailTrip =
+                pointCount in 0..2 &&
+                    distanceMeters >= 5_000.0 &&
+                    distanceMeters <= 30_000.0 &&
+                    durationSec in (8 * 60)..(90 * 60) &&
+                    kmh >= 12.0 && kmh < 45.0
+            if (isSparseUrbanRailTrip) return SUBWAY
+
             if (distanceMeters < 10_000.0 || durationSec < 20 * 60) return null
 
             val segmentCount = maxOf(pointCount - 1, 1)

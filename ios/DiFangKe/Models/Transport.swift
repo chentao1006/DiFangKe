@@ -106,6 +106,7 @@ enum TransportType: String, CaseIterable, Codable {
         duration: TimeInterval = 0,
         distanceMeters: Double = 0,
         pointCount: Int = 0,
+        observedPointCount: Int? = nil,
         preferredAutomotive: TransportType = .car,
         preferredCycling: TransportType = .bicycle,
         preferredTransport: TransportType? = nil
@@ -192,7 +193,7 @@ enum TransportType: String, CaseIterable, Codable {
             kmh: kmh,
             distanceMeters: effectiveDistance,
             duration: duration,
-            pointCount: pointCount
+            pointCount: observedPointCount ?? pointCount
         )
         if let longPublicTransitType, !hasStrongOnFootEvidence {
             return longPublicTransitType
@@ -294,14 +295,13 @@ enum TransportType: String, CaseIterable, Codable {
         duration: TimeInterval,
         pointCount: Int
     ) -> TransportType? {
-        // 城市地铁在隧道内经常只留下少量进、出站定位点。对于中等距离、
-        // 合理运行时长且轨迹稀疏的区间，优先识别为轨道交通；至少保留三个
-        // 点，避免仅靠两个合成端点把普通 GPS 空档误判为地铁。
+        // 只按真实定位点衡量轨迹稀疏程度；合成的足迹端点不是采样证据。
+        // 点数不再改变距离门槛，避免同一条路线仅因补点而改变类型。
         let isSparseUrbanRailTrip =
-            distanceMeters >= 3_000 && distanceMeters <= 30_000 &&
+            distanceMeters >= 5_000 && distanceMeters <= 30_000 &&
             duration >= 8 * 60 && duration <= 90 * 60 &&
-            pointCount >= 3 && pointCount <= 6 &&
-            kmh >= 8 && kmh < 45
+            pointCount >= 0 && pointCount <= 2 &&
+            kmh >= 12 && kmh < 45
         if isSparseUrbanRailTrip {
             return .subway
         }

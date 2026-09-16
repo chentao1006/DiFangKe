@@ -1390,6 +1390,13 @@ private struct FootprintTimeAdjustmentView: View {
             didChangeStart: didChangeStart,
             didChangeEnd: didChangeEnd
         )
+        if let anchor = LocationManager.shared.potentialStopStartLocation,
+           let current = LocationManager.shared.lastLocation ?? rawPoints.last {
+            Footprint.continueCurrentEditedStay(
+                footprint, anchor: anchor, current: current,
+                rawPoints: rawPoints, context: modelContext
+            )
+        }
         try? modelContext.save()
         invalidateCaches(oldStart: oldStart, oldEnd: oldEnd, newStart: start, newEnd: end)
         onSave()
@@ -2301,6 +2308,7 @@ struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
     private static let maxRenderedPoints = 1_200
 
     let coordinates: [CLLocationCoordinate2D]
+    var dotDiameter: CGFloat = 7
     var leadingCoordinates: [CLLocationCoordinate2D]? = nil
     var trailingCoordinates: [CLLocationCoordinate2D]? = nil
     var markerCoordinate: CLLocationCoordinate2D? = nil
@@ -2410,7 +2418,7 @@ struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
             let baseKey = "\(coordinates.count)|\(coordinates.first?.rawPointsCoordinateKey ?? "")|\(coordinates.last?.rawPointsCoordinateKey ?? "")"
             let leadingKey = "\(leadingCoordinates.count)|\(leadingCoordinates.first?.rawPointsCoordinateKey ?? "")|\(leadingCoordinates.last?.rawPointsCoordinateKey ?? "")"
             let trailingKey = "\(trailingCoordinates.count)|\(trailingCoordinates.first?.rawPointsCoordinateKey ?? "")|\(trailingCoordinates.last?.rawPointsCoordinateKey ?? "")"
-            let key = "\(baseKey)|\(leadingKey)|\(trailingKey)|\(markerKey)"
+            let key = "\(baseKey)|\(leadingKey)|\(trailingKey)|\(markerKey)|\(parent.dotDiameter)"
             guard key != dataKey else { return }
             dataKey = key
 
@@ -2421,13 +2429,13 @@ struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
             trailingPolyline = nil
             if !leadingCoordinates.isEmpty || !trailingCoordinates.isEmpty {
                 if !leadingCoordinates.isEmpty {
-                    mapView.addOverlay(FootprintTimeDotOverlay(coordinates: leadingCoordinates, color: .systemGreen, diameter: 7))
+                    mapView.addOverlay(FootprintTimeDotOverlay(coordinates: leadingCoordinates, color: .systemGreen, diameter: parent.dotDiameter))
                 }
                 if !trailingCoordinates.isEmpty {
-                    mapView.addOverlay(FootprintTimeDotOverlay(coordinates: trailingCoordinates, color: .systemBlue, diameter: 7))
+                    mapView.addOverlay(FootprintTimeDotOverlay(coordinates: trailingCoordinates, color: .systemBlue, diameter: parent.dotDiameter))
                 }
             } else if !coordinates.isEmpty {
-                mapView.addOverlay(FootprintTimeDotOverlay(coordinates: coordinates, color: UIColor(Color.dfkAccent), diameter: 7))
+                mapView.addOverlay(FootprintTimeDotOverlay(coordinates: coordinates, color: UIColor(Color.dfkAccent), diameter: parent.dotDiameter))
             }
 
             if let marker = parent.markerCoordinate, marker.isRawPointsRenderable {
@@ -2540,14 +2548,15 @@ private final class FootprintTimeDotOverlay: NSObject, MKOverlay {
 private final class FootprintTimeDotOverlayRenderer: MKOverlayRenderer {
     override func draw(_ mapRect: MKMapRect, zoomScale: MKZoomScale, in context: CGContext) {
         guard let dotOverlay = overlay as? FootprintTimeDotOverlay else { return }
-        context.setFillColor(dotOverlay.color.withAlphaComponent(0.72).cgColor)
+        context.setFillColor(dotOverlay.color.withAlphaComponent(0.9).cgColor)
+        context.setStrokeColor(UIColor.white.withAlphaComponent(0.95).cgColor)
 
-        // Keep dot size visually stable across zoom while avoiding extreme GPU workloads
-        // at very small zoomScale values.
-        let scale = max(CGFloat(zoomScale), 0.01)
-        let unclampedDiameter = dotOverlay.diameter / scale
-        let diameter = min(max(unclampedDiameter, 3), 120)
+        // The drawing context scales map units by zoomScale. Clamping the
+        // map-unit diameter made dots shrink to subpixels on a city-wide map.
+        let scale = max(CGFloat(zoomScale), CGFloat.leastNormalMagnitude)
+        let diameter = dotOverlay.diameter / scale
         let radius = diameter / 2
+        context.setLineWidth(2 / scale)
 
         for coordinate in dotOverlay.coordinates {
             let mapPoint = MKMapPoint(coordinate)
@@ -2559,7 +2568,8 @@ private final class FootprintTimeDotOverlayRenderer: MKOverlayRenderer {
                 width: diameter,
                 height: diameter
             )
-            context.fillEllipse(in: rect)
+            context.addEllipse(in: rect)
+            context.drawPath(using: .fillStroke)
         }
     }
 }

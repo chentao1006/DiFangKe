@@ -1115,7 +1115,7 @@ struct FootprintCardView: View {
         base.startTime = min(base.startTime, other.startTime)
         base.endTime = max(base.endTime, other.endTime)
         base.date = Calendar.current.startOfDay(for: base.startTime)
-        base.allowsAutomaticDurationExtension = false
+        base.allowsAutomaticDurationExtension = true
         base.status = .manual
 
         var mergedLocations = base.footprintLocations
@@ -1155,6 +1155,8 @@ struct FootprintCardView: View {
         base.photoMetadata = mergedMetadata
 
         modelContext.delete(other)
+        try? modelContext.save()
+        Footprint.resumeMergedCurrentStay(base, context: modelContext)
         try? modelContext.save()
 
         invalidateTimelineAfterMerge(start: base.startTime, end: base.endTime)

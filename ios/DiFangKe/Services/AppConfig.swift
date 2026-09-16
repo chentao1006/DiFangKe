@@ -252,6 +252,18 @@ class AppConfig {
         double(forKey: "TRANSPORT_GAP_BREAK_THRESHOLD")
     }
 
+    var transportDepartureSpeedSampleDuration: Double {
+        double(forKey: "TRANSPORT_DEPARTURE_SPEED_SAMPLE_DURATION")
+    }
+
+    var transportDepartureMinimumSpeed: Double {
+        double(forKey: "TRANSPORT_DEPARTURE_MINIMUM_SPEED")
+    }
+
+    var transportDepartureMaximumBackfillDuration: Double {
+        double(forKey: "TRANSPORT_DEPARTURE_MAXIMUM_BACKFILL_DURATION")
+    }
+
     var driftRatioThreshold: Double {
         double(forKey: "DRIFT_RATIO_THRESHOLD")
     }
@@ -298,6 +310,22 @@ class AppConfig {
         double(forKey: "FOOTPRINT_MIN_SAMPLE_INTERVAL")
     }
 
+    var rawStationaryDuplicateDistance: Double {
+        double(forKey: "RAW_STATIONARY_DUPLICATE_DISTANCE")
+    }
+
+    var rawStationaryExactDuplicateDistance: Double {
+        double(forKey: "RAW_STATIONARY_EXACT_DUPLICATE_DISTANCE")
+    }
+
+    var rawStationaryMaxAccuracy: Double {
+        double(forKey: "RAW_STATIONARY_MAX_ACCURACY")
+    }
+
+    var rawStationaryHeartbeatInterval: Double {
+        double(forKey: "RAW_STATIONARY_HEARTBEAT_INTERVAL")
+    }
+
     var reportedHighSpeedThreshold: Double {
         double(forKey: "REPORTED_HIGH_SPEED_THRESHOLD")
     }
@@ -328,6 +356,34 @@ class AppConfig {
 
     var lowPowerDwellDistance: Double {
         double(forKey: "LOW_POWER_DWELL_DISTANCE")
+    }
+
+    var lowPowerSampleInterval: Double {
+        double(forKey: "LOW_POWER_SAMPLE_INTERVAL")
+    }
+
+    var lowPowerWindowGracePeriod: Double {
+        double(forKey: "LOW_POWER_WINDOW_GRACE_PERIOD")
+    }
+
+    var lowPowerClusterFraction: Double {
+        double(forKey: "LOW_POWER_CLUSTER_FRACTION")
+    }
+
+    var lowPowerStrictDwellDuration: Double {
+        double(forKey: "LOW_POWER_STRICT_DWELL_DURATION")
+    }
+
+    var lowPowerStrictDwellDistance: Double {
+        double(forKey: "LOW_POWER_STRICT_DWELL_DISTANCE")
+    }
+
+    var lowPowerStrictClusterFraction: Double {
+        double(forKey: "LOW_POWER_STRICT_CLUSTER_FRACTION")
+    }
+
+    var uiMovingHoldDuration: Double {
+        double(forKey: "UI_MOVING_HOLD_DURATION")
     }
 
     var geocodeHighSpeedThreshold: Double {

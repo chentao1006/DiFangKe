@@ -123,15 +123,14 @@ class TransportDetailViewModel(application: Application) : AndroidViewModel(appl
             val totalDuration = (current.endTime.time - current.startTime.time).toDouble().coerceAtLeast(1.0)
             val firstRatio = (split.time - current.startTime.time) / totalDuration
             val secondRatio = 1.0 - firstRatio
-            val protectedType = current.manualTypeRaw ?: current.typeRaw
+            val explicitlySelectedType = current.manualTypeRaw
             val first = current.copy(
                 endTime = split,
                 day = startOfDay(current.startTime),
                 distance = current.distance * firstRatio,
                 averageSpeed = current.averageSpeed,
                 stepCount = current.stepCount?.let { (it * firstRatio).toInt() },
-                manualTypeRaw = protectedType,
-                typeRaw = protectedType
+                manualTypeRaw = null
             )
             val second = current.copy(
                 recordID = UUID.randomUUID().toString(),
@@ -140,12 +139,13 @@ class TransportDetailViewModel(application: Application) : AndroidViewModel(appl
                 distance = current.distance * secondRatio,
                 averageSpeed = current.averageSpeed,
                 stepCount = current.stepCount?.let { it - (first.stepCount ?: 0) },
-                manualTypeRaw = protectedType,
-                typeRaw = protectedType
+                manualTypeRaw = null
             )
-            db.transportRecordDao().update(first)
-            db.transportRecordDao().insert(second)
-            _transport.value = first
+            val classifiedFirst = classifyEditedTransport(first, explicitlySelectedType)
+            val classifiedSecond = classifyEditedTransport(second, explicitlySelectedType)
+            db.transportRecordDao().update(classifiedFirst)
+            db.transportRecordDao().insert(classifiedSecond)
+            _transport.value = classifiedFirst
             _adjacentTransports.value = emptyList()
             Aptabase.instance.trackEvent("transport_split")
             onSplit()
@@ -166,15 +166,14 @@ class TransportDetailViewModel(application: Application) : AndroidViewModel(appl
             val mergedStart = minOf(first.startTime, second.startTime)
             val mergedEnd = maxOf(first.endTime, second.endTime)
             val durationSeconds = (mergedEnd.time - mergedStart.time).coerceAtLeast(1L) / 1000.0
-            val selectedType = first.manualTypeRaw ?: second.manualTypeRaw ?: first.typeRaw
+            val explicitlySelectedType = first.manualTypeRaw ?: second.manualTypeRaw
             // Keep the record currently on screen as the surviving record. The
             // route remains valid after saving, even when the chosen neighbour
             // started earlier in the day.
             val merged = current.copy(
                 startTime = mergedStart,
                 endTime = mergedEnd,
-                typeRaw = selectedType,
-                manualTypeRaw = selectedType,
+                manualTypeRaw = null,
                 startLocation = first.startLocation,
                 endLocation = second.endLocation,
                 distance = first.distance + second.distance,
@@ -182,13 +181,29 @@ class TransportDetailViewModel(application: Application) : AndroidViewModel(appl
                 pointsJson = mergePointsJson(first.pointsJson, second.pointsJson),
                 stepCount = listOfNotNull(first.stepCount, second.stepCount).takeIf { it.isNotEmpty() }?.sum()
             )
-            db.transportRecordDao().update(merged)
+            val classified = classifyEditedTransport(merged, explicitlySelectedType)
+            db.transportRecordDao().update(classified)
             db.transportRecordDao().delete(other)
-            _transport.value = merged
+            _transport.value = classified
             _adjacentTransports.value = emptyList()
             Aptabase.instance.trackEvent("transport_adjacent_merged")
             onMerged()
         }
+    }
+
+    private fun classifyEditedTransport(record: TransportRecordEntity, selectedType: String?): TransportRecordEntity {
+        val duration = ((record.endTime.time - record.startTime.time) / 1000L).coerceAtLeast(1L)
+        val pointCount = runCatching { org.json.JSONArray(record.pointsJson).length() }.getOrDefault(0)
+        val inferred = TransportType.from(
+            speedMs = record.distance / duration,
+            stepCount = record.stepCount ?: 0,
+            durationSec = duration,
+            distanceMeters = record.distance,
+            pointCount = pointCount,
+            observedPointCount = pointCount
+        ).raw
+        val type = selectedType ?: inferred
+        return record.copy(typeRaw = type, manualTypeRaw = type)
     }
 
     private fun mergePointsJson(first: String, second: String): String {

@@ -82,6 +82,15 @@
     <key>TRANSPORT_GAP_BREAK_THRESHOLD</key>
     <real>1800</real>
 
+    <!-- 低功耗唤醒后回推真实出发时间：局部均速采样窗口（秒）、
+         最低有效速度（米/秒）、最大允许回推时长（秒） -->
+    <key>TRANSPORT_DEPARTURE_SPEED_SAMPLE_DURATION</key>
+    <real>120</real>
+    <key>TRANSPORT_DEPARTURE_MINIMUM_SPEED</key>
+    <real>0.5</real>
+    <key>TRANSPORT_DEPARTURE_MAXIMUM_BACKFILL_DURATION</key>
+    <real>300</real>
+
     <!-- 交通探测段最低时长（秒） -->
     <key>TRANSPORT_DETECTION_SEGMENT_DURATION</key>
     <real>60</real>
@@ -246,7 +255,7 @@
     <key>PEDOMETER_MIN_MOVING_STEP_DELTA</key>
     <integer>3</integer>
 
-    <!-- 计步器启动回溯时长（秒）：从这么久之前开始统计，避免重启时丢失步数状态 -->
+    <!-- 计步器启动回溯时长（秒）：首个累计值仅作基线，不当作刚发生的移动 -->
     <key>PEDOMETER_STARTUP_LOOKBACK</key>
     <real>30</real>
 
@@ -263,6 +272,16 @@
     <!-- 足迹采样的最小时间间隔（秒） -->
     <key>FOOTPRINT_MIN_SAMPLE_INTERVAL</key>
     <real>5</real>
+    <!-- 同一静止位置原始点的去重：距离（米）、最大精度误差（米）、保底保存间隔（秒） -->
+    <key>RAW_STATIONARY_DUPLICATE_DISTANCE</key>
+    <real>5</real>
+    <!-- 即使运动传感器误报，也不重复保存几乎相同的坐标（米） -->
+    <key>RAW_STATIONARY_EXACT_DUPLICATE_DISTANCE</key>
+    <real>1</real>
+    <key>RAW_STATIONARY_MAX_ACCURACY</key>
+    <real>20</real>
+    <key>RAW_STATIONARY_HEARTBEAT_INTERVAL</key>
+    <real>300</real>
 
     <!-- GPS 上报速度达到此值（km/h）即视为"确有移动"的强证据 -->
     <key>REPORTED_HIGH_SPEED_THRESHOLD</key>
@@ -287,7 +306,24 @@
     <key>LOW_POWER_DWELL_DURATION</key>
     <real>600</real>
     <key>LOW_POWER_DWELL_DISTANCE</key>
-    <real>80</real>
+    <real>150</real>
+    <!-- 自动静止观察：取样间隔（秒）、窗口余量（秒）、聚集点占比 -->
+    <key>LOW_POWER_SAMPLE_INTERVAL</key>
+    <real>30</real>
+    <key>LOW_POWER_WINDOW_GRACE_PERIOD</key>
+    <real>60</real>
+    <key>LOW_POWER_CLUSTER_FRACTION</key>
+    <real>0.8</real>
+    <!-- 运动分类缺失或误报时，仅凭更紧密的坐标聚集确认静止：时长、半径、占比 -->
+    <key>LOW_POWER_STRICT_DWELL_DURATION</key>
+    <real>300</real>
+    <key>LOW_POWER_STRICT_DWELL_DISTANCE</key>
+    <real>20</real>
+    <key>LOW_POWER_STRICT_CLUSTER_FRACTION</key>
+    <real>0.9</real>
+    <!-- UI 移动状态滞回及看门狗可使用该证据的时长（秒） -->
+    <key>UI_MOVING_HOLD_DURATION</key>
+    <real>120</real>
 
     <!-- 反地理编码节流：高速时使用的速度门槛（m/s）及对应的节流距离（米），
          低速时使用的节流距离（米） -->
@@ -301,9 +337,9 @@
     <!-- 地理围栏复用距离门槛（米） -->
     <key>REGION_REUSE_DISTANCE_THRESHOLD</key>
     <real>50</real>
-    <!-- 静止唤醒围栏半径（米） -->
+    <!-- 静止唤醒围栏半径（米）；须大于室内聚集半径以避免误触发退出 -->
     <key>STATIONARY_WAKEUP_REGION_RADIUS</key>
-    <real>75</real>
+    <real>200</real>
 
     <!-- 出门确认判定集合：高速位移门槛（米）/精度门槛（米）/位移门槛（米）/
          长时间停留门槛（秒）/抗漂移下限（米）及对应精度倍数 -->

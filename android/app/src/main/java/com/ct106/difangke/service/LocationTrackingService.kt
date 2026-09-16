@@ -1325,6 +1325,7 @@ class LocationTrackingService : Service() {
                                 durationSec = gapSec.toLong(),
                                 distanceMeters = totalDist,
                                 pointCount = pts.size,
+                                observedPointCount = rawPoints.size,
                                 preferredTransport = getPreferredTransportType(getStartOfDay(prevFp.endTime))
                         )
                 val record =

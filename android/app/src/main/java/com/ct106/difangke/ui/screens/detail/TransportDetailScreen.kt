@@ -242,13 +242,26 @@ fun TransportDetailScreen(
                             val dist =
                                     if (t.distance < 1000) "${t.distance.toInt()} 米"
                                     else String.format("%.1f 公里", t.distance / 1000.0)
-                            Text(
-                                    text = dist,
-                                    style = MaterialTheme.typography.titleLarge,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    letterSpacing = (-0.5).sp
-                            )
+                            val durationMinutes = (t.endTime.time - t.startTime.time).coerceAtLeast(0L) / 60_000L
+                            val duration = if (durationMinutes >= 60) {
+                                "${durationMinutes / 60} 小时 ${durationMinutes % 60} 分钟"
+                            } else {
+                                "$durationMinutes 分钟"
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                        text = dist,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        letterSpacing = (-0.5).sp
+                                )
+                                Text(
+                                        text = duration,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Text(
                                     text = String.format("平均速度 %.1f 千米/小时", t.averageSpeed * 3.6),
                                     style = MaterialTheme.typography.bodySmall,
