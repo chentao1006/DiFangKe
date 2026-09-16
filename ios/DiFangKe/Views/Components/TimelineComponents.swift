@@ -460,14 +460,12 @@ struct RecordingStatusCard: View {
                     // Title Section
                     Group {
                         if canSelectOngoingPlace {
-                            Menu {
-                                SuggestionsMenuContent(
-                                    locationManager: locationManager,
-                                    coordinate: ongoingSelectionCoordinate,
-                                    forOngoing: true
-                                ) {
-                                    showingOngoingLocationSearch = true
-                                }
+                            SuggestionsMenu(
+                                locationManager: locationManager,
+                                coordinate: ongoingSelectionCoordinate,
+                                forOngoing: true
+                            ) {
+                                showingOngoingLocationSearch = true
                             } label: {
                                 titleLabel
                             }

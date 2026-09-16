@@ -550,7 +550,8 @@ enum DFKGeographicHierarchy {
         let text = address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !text.isEmpty else { return nil }
         let locale = Locale(identifier: "zh_Hans_CN")
-        let countries = Locale.isoRegionCodes.compactMap { code -> (String, String)? in
+        let countries = Locale.Region.isoRegions.compactMap { region -> (String, String)? in
+            let code = region.identifier
             guard code != "CN", let name = locale.localizedString(forRegionCode: code), !name.isEmpty else { return nil }
             return (code, name)
         }.sorted { $0.1.count > $1.1.count }

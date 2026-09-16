@@ -241,12 +241,14 @@ final class Footprint {
             anchor.map { $0.timestamp <= start &&
                 $0.distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)) < AppConfig.shared.stayDistanceThreshold
             } == true
-        #else
-        let activeCurrentStay = false
-        #endif
         let earliestPreviousEnd = activeCurrentStay
             ? Calendar.current.startOfDay(for: start)
             : start.addingTimeInterval(-60)
+        #else
+        // No LocationManager in the widget extension, so there is never an active current stay to extend from today's start.
+        let activeCurrentStay = false
+        let earliestPreviousEnd = start.addingTimeInterval(-60)
+        #endif
         let descriptor: FetchDescriptor<Footprint>
         if activeCurrentStay {
             descriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
@@ -280,7 +282,9 @@ final class Footprint {
         guard let stays = try? context.fetch(otherStays), stays.isEmpty,
               let trips = try? context.fetch(transports), trips.isEmpty else { return false }
         existing.endTime = end
+        #if !WIDGET_EXTENSION
         if activeCurrentStay { existing.allowsAutomaticDurationExtension = true }
+        #endif
         return true
     }
 

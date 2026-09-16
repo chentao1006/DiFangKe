@@ -416,6 +416,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 let captureClusterIDs = cluster.map { $0.localIdentifier }
                 let captureClusterCount = cluster.count
                 let captureTitle = title
+                let captureAddress = address
+                let captureMatchedPlaceID = matchedPlaceID
                 let clusterCompletion = PhotoScanClusterCompletion()
 
                 func createAndAdd(
@@ -455,11 +457,11 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 // the photos. Retain a matched place's own name/address if the
                 // reverse geocoder or the fallback service does not respond.
                 let fallbackItem = DispatchWorkItem {
-                    createAndAdd(t: captureTitle, a: address, pID: matchedPlaceID)
+                    createAndAdd(t: captureTitle, a: captureAddress, pID: captureMatchedPlaceID)
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: fallbackItem)
-                
-                if matchedPlaceID == nil {
+
+                if captureMatchedPlaceID == nil {
                     if let cached = geocodeCache.value(for: cacheKey) {
                         createAndAdd(
                             t: cached.title,
@@ -472,6 +474,9 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     } else {
                         let geocoder = CLGeocoder()
                         geocoder.reverseGeocodeLocation(firstLoc) { [geocoder] placemarks, _ in
+                            // Capturing geocoder keeps it alive until this handler fires;
+                            // CLGeocoder cancels the in-flight request if it deallocates first.
+                            _ = geocoder
                             var resolvedTitle = ""
                             var resolvedAddress: String? = nil
                             if let pm = placemarks?.first {
@@ -540,6 +545,9 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     // imported footprint. Do not defer that work to Statistics.
                     let geocoder = CLGeocoder()
                     geocoder.reverseGeocodeLocation(firstLoc) { [geocoder] placemarks, _ in
+                        // Capturing geocoder keeps it alive until this handler fires;
+                        // CLGeocoder cancels the in-flight request if it deallocates first.
+                        _ = geocoder
                         if let placemark = placemarks?.first {
                             let countryCode = placemark.isoCountryCode
                             let countryName = countryCode.flatMap {
@@ -548,8 +556,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                             let cityName = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea
                             createAndAdd(
                                 t: captureTitle,
-                                a: address,
-                                pID: matchedPlaceID,
+                                a: captureAddress,
+                                pID: captureMatchedPlaceID,
                                 countryCode: countryCode,
                                 countryName: countryName,
                                 cityName: cityName
@@ -559,8 +567,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                                 let hierarchy = await OpenStreetMapGeocoder.shared.lookupInternationalHierarchy(coordinate: firstLoc.coordinate)
                                 createAndAdd(
                                     t: captureTitle,
-                                    a: address,
-                                    pID: matchedPlaceID,
+                                    a: captureAddress,
+                                    pID: captureMatchedPlaceID,
                                     countryCode: hierarchy?.countryCode,
                                     countryName: hierarchy?.countryName,
                                     cityName: hierarchy?.cityName

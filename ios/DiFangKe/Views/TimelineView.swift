@@ -149,7 +149,9 @@ private struct ContinuousTimelineView: View {
     @State private var visibleTimelineItems: [TimelineItem] = []
     @State private var renderedFutureTrips: [FutureTrip] = []
     @State private var visibleTimelineDates = Set<Date>()
+    @State private var visibleTimelineItemIDs = Set<String>()
     @State private var renderedMapItemIDs = Set<String>()
+    @State private var renderedCameraItemIDs = Set<String>()
     @State private var renderedMapDetentKey: String = ""
     @State private var renderedSelectedFootprintID: UUID? = nil
     @State private var renderedSelectedFutureTripID: UUID? = nil
@@ -174,12 +176,10 @@ private struct ContinuousTimelineView: View {
     @State private var midnightTimelineRefreshTask: Task<Void, Never>?
     @State private var isReloadingTimelineExternally = false
     @State private var mapInteractionEnableTask: Task<Void, Never>?
-    @State private var selectedFootprintPhotoFetchTask: Task<Void, Never>?
     @State private var selectedFootprint: Footprint?
     @State private var selectedFutureTripDetail: FutureTrip?
     @State private var selectedTransport: Transport?
     @State private var selectedFutureTripFromMap: FutureTrip?
-    @State private var selectedFootprintPhotos: [PHAsset] = []
     @State private var selectedMapPhotoAssetID: String? = nil
     @State private var showsUndatedFutureTripsOnMap = false
     @State private var isFollowingUserLocation = false
@@ -210,14 +210,6 @@ private struct ContinuousTimelineView: View {
         selectedFootprint?.coordinates ?? []
     }
     
-    private var mapPhotoAssets: [PHAsset] {
-        selectedFootprint != nil ? selectedFootprintPhotos : []
-    }
-    
-    private var mapShowsStandalonePhotos: Bool {
-        selectedFootprint != nil
-    }
-    
     private var mapPrefersActivityIcons: Bool {
         false
     }
@@ -239,8 +231,8 @@ private struct ContinuousTimelineView: View {
             points: mapPoints,
             timelineItems: mapTimelineItems,
             futureTrips: mapFutureTrips,
-            photoAssets: mapPhotoAssets,
-            showsStandalonePhotos: mapShowsStandalonePhotos,
+            photoAssets: [],
+            showsStandalonePhotos: false,
             prefersActivityIcons: mapPrefersActivityIcons,
             selectedFootprintID: selectedFootprint?.footprintID,
             selectedFutureTripID: selectedFutureTripDetail?.id,
@@ -349,6 +341,7 @@ private struct ContinuousTimelineView: View {
             calendarBackfillBatchSize: Self.calendarBackfillDateBatchSize,
             availableDates: loadableTimelineDateSet,
             visibleDatesChanged: updateVisibleTimelineDates,
+            visibleItemIDsChanged: updateVisibleTimelineItemIDs,
             undatedFutureTripsVisibilityChanged: { isVisible in
                 guard showsUndatedFutureTripsOnMap != isVisible else { return }
                 showsUndatedFutureTripsOnMap = isVisible
@@ -574,8 +567,6 @@ private struct ContinuousTimelineView: View {
         visibleTimelineFillTask?.cancel()
         mapCameraTransitionTask?.cancel()
         mapInteractionEnableTask?.cancel()
-        selectedFootprintPhotoFetchTask?.cancel()
-        selectedFootprintPhotos = []
     }
 
     private func handleFootprintDataChanged(_: Notification) {
@@ -724,28 +715,19 @@ private struct ContinuousTimelineView: View {
         if newFootprint != nil, selectedFutureTripDetail != nil {
             selectedFutureTripDetail = nil
         }
-        if let footprint = newFootprint {
-            focusMap(on: footprint)
+        guard let footprint = newFootprint else {
+            // Dismissing the detail only clears its selection. Keep the camera
+            // where the user was viewing instead of restoring the timeline's
+            // full visible range behind the sheet.
+            visibleMapUpdateTask?.cancel()
+            renderedSelectedFootprintID = nil
+            timelineDetent = .medium
+            return
         }
+
+        focusMap(on: footprint)
         refreshVisibleTimelineMap(delayNanoseconds: 0)
-        selectedFootprintPhotoFetchTask?.cancel()
-        if let footprint = newFootprint {
-            timelineDetent = .medium
-            selectedFootprintPhotoFetchTask = Task { @MainActor in
-                let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: footprint.photoAssetIDs, options: nil)
-                var assets: [PHAsset] = []
-                fetchResult.enumerateObjects { asset, _, _ in
-                    if asset.location != nil {
-                        assets.append(asset)
-                    }
-                }
-                guard !Task.isCancelled else { return }
-                selectedFootprintPhotos = assets
-            }
-        } else {
-            selectedFootprintPhotos = []
-            timelineDetent = .medium
-        }
+        timelineDetent = .medium
     }
 
     private func focusMap(on footprint: Footprint) {
@@ -763,7 +745,6 @@ private struct ContinuousTimelineView: View {
         refreshVisibleTimelineMap(delayNanoseconds: 0)
         if newTrip != nil {
             timelineDetent = .medium
-            selectedFootprintPhotos = []
         } else {
             timelineDetent = .medium
         }
@@ -1519,6 +1500,23 @@ private struct ContinuousTimelineView: View {
         refreshVisibleTimelineMap(for: dates)
     }
 
+    private func updateVisibleTimelineItemIDs(_ ids: Set<String>) {
+        guard ids != visibleTimelineItemIDs else { return }
+        visibleTimelineItemIDs = ids
+        refreshVisibleTimelineMap(for: visibleTimelineDates)
+    }
+
+    /// Narrows a day's full item list down to whichever of those items are
+    /// currently scrolled into view in the timeline, so the map camera and
+    /// annotations track the visible viewport rather than the whole day.
+    /// Falls back to the unfiltered list when nothing overlaps yet (e.g. right
+    /// after a day loads, before its rows have published frames).
+    private func filteredForVisibleItems(_ items: [TimelineItem]) -> [TimelineItem] {
+        guard !visibleTimelineItemIDs.isEmpty else { return items }
+        let filtered = items.filter { visibleTimelineItemIDs.contains($0.id) }
+        return filtered.isEmpty ? items : filtered
+    }
+
     private func scheduleVisibleTimelineFill(for dates: Set<Date>) {
         visibleTimelineFillTask?.cancel()
         let datesToFill = dates.filter { date in
@@ -1542,12 +1540,14 @@ private struct ContinuousTimelineView: View {
     private func resetLockedMapCamera(animated: Bool) {
         let lockedDates = mapInteractionLockedVisibleDates ?? (visibleTimelineDates.isEmpty ? [activeTimelineDate] : visibleTimelineDates)
         let items = timelineItemsForVisibleDates(visibleDates: lockedDates)
+        let cameraItems = filteredForVisibleItems(items)
         let visibleFutureTrips = futureTrips(for: lockedDates)
         
         visibleTimelineItems = items
         renderedFutureTrips = visibleFutureTrips
         
         renderedMapItemIDs = mapContentIDs(for: items, futureTrips: visibleFutureTrips)
+        renderedCameraItemIDs = mapContentIDs(for: cameraItems, futureTrips: visibleFutureTrips)
         renderedMapDetentKey = currentMapDetentKey
         renderedSelectedFootprintID = selectedFootprint?.footprintID
         renderedSelectedFutureTripID = selectedFutureTripDetail?.id
@@ -1564,7 +1564,7 @@ private struct ContinuousTimelineView: View {
         } else if items.isEmpty {
             region = adjustedMapRegion(for: visibleFutureTrips.map(\.coordinate)) ?? currentLocationMapRegion()
         } else {
-            region = adjustedMapRegion(for: mapCameraCoordinates(for: items, futureTrips: visibleFutureTrips))
+            region = adjustedMapRegion(for: mapCameraCoordinates(for: cameraItems, futureTrips: visibleFutureTrips))
         }
 
         guard let region else {
@@ -1596,6 +1596,7 @@ private struct ContinuousTimelineView: View {
 
             let mapDates = targetVisibleDates ?? ((isSideBySide || timelineDetent == .large) ? visibleTimelineDates : (mapInteractionLockedVisibleDates ?? visibleTimelineDates))
             let items = timelineItemsForVisibleDates(visibleDates: mapDates)
+            let cameraItems = filteredForVisibleItems(items)
             let visibleFutureTrips = futureTrips(for: mapDates)
             let usesFutureTripCamera = showsUndatedFutureTripsOnMap &&
                 selectedFootprint == nil &&
@@ -1605,6 +1606,7 @@ private struct ContinuousTimelineView: View {
                 visibleTimelineItems = []
                 renderedFutureTrips = visibleFutureTrips
                 renderedMapItemIDs = mapContentIDs(for: [], futureTrips: visibleFutureTrips)
+                renderedCameraItemIDs = mapContentIDs(for: [], futureTrips: visibleFutureTrips)
                 renderedMapDetentKey = currentMapDetentKey
                 renderedSelectedFootprintID = selectedFootprint?.footprintID
                 renderedSelectedFutureTripID = selectedFutureTripDetail?.id
@@ -1633,19 +1635,22 @@ private struct ContinuousTimelineView: View {
             }
 
             let mapItemIDs = mapContentIDs(for: items, futureTrips: visibleFutureTrips)
+            let cameraItemIDs = mapContentIDs(for: cameraItems, futureTrips: visibleFutureTrips)
             let detentKey = currentMapDetentKey
             let selectedFootprintID = selectedFootprint?.footprintID
             let selectedTripID = selectedFutureTripDetail?.id
             let mapStateChanged = mapItemIDs != renderedMapItemIDs || detentKey != renderedMapDetentKey || selectedFootprintID != renderedSelectedFootprintID || selectedTripID != renderedSelectedFutureTripID
+            let cameraStateChanged = cameraItemIDs != renderedCameraItemIDs || detentKey != renderedMapDetentKey || selectedFootprintID != renderedSelectedFootprintID || selectedTripID != renderedSelectedFutureTripID
             renderedMapItemIDs = mapItemIDs
+            renderedCameraItemIDs = cameraItemIDs
             renderedMapDetentKey = detentKey
             renderedSelectedFootprintID = selectedFootprintID
             renderedSelectedFutureTripID = selectedTripID
 
             visibleTimelineItems = items
             renderedFutureTrips = visibleFutureTrips
-            guard mapStateChanged || usesFutureTripCamera else { return }
-            
+            guard mapStateChanged || cameraStateChanged || usesFutureTripCamera else { return }
+
             var coordinates: [CLLocationCoordinate2D] = []
             if usesFutureTripCamera {
                 coordinates = visibleFutureTrips.map(\.coordinate).filter(\.isRenderableMapCoordinate)
@@ -1657,7 +1662,7 @@ private struct ContinuousTimelineView: View {
             } else if let trip = selectedFutureTripDetail {
                 coordinates = [CLLocationCoordinate2D(latitude: trip.latitude, longitude: trip.longitude)]
             } else {
-                coordinates = mapCameraCoordinates(for: items, futureTrips: visibleFutureTrips)
+                coordinates = mapCameraCoordinates(for: cameraItems, futureTrips: visibleFutureTrips)
             }
 
             if let region = adjustedMapRegion(for: coordinates) {
@@ -1720,6 +1725,21 @@ private struct ContinuousTimelineView: View {
             longitudeSpanDelta > longitudeThreshold
     }
 
+    private func isMinorCameraAdjustment(from source: MKCoordinateRegion, to target: MKCoordinateRegion) -> Bool {
+        let referenceLatitudeSpan = max(source.span.latitudeDelta, target.span.latitudeDelta, 0.0001)
+        let referenceLongitudeSpan = max(source.span.longitudeDelta, target.span.longitudeDelta, 0.0001)
+
+        let centerLatitudeDelta = abs(source.center.latitude - target.center.latitude)
+        let centerLongitudeDelta = abs(shortestLongitudeDelta(from: source.center.longitude, to: target.center.longitude))
+        let latitudeSpanDelta = abs(source.span.latitudeDelta - target.span.latitudeDelta)
+        let longitudeSpanDelta = abs(source.span.longitudeDelta - target.span.longitudeDelta)
+
+        return centerLatitudeDelta <= referenceLatitudeSpan * 0.6 &&
+            centerLongitudeDelta <= referenceLongitudeSpan * 0.6 &&
+            latitudeSpanDelta <= referenceLatitudeSpan * 0.6 &&
+            longitudeSpanDelta <= referenceLongitudeSpan * 0.6
+    }
+
     private func moveMapCamera(to target: MKCoordinateRegion, animated: Bool) {
         mapCameraTransitionTask?.cancel()
         let source = displayedMapRegion ?? renderedMapRegion
@@ -1732,6 +1752,21 @@ private struct ContinuousTimelineView: View {
                     cameraPosition = .region(target)
                 }
             } else {
+                cameraPosition = .region(target)
+            }
+            return
+        }
+
+        // Small re-fits are now the common case: as the timeline scrolls, the
+        // camera keeps nudging to match a slightly different set of visible
+        // items. The multi-step flight below is built for large jumps (e.g.
+        // switching to a different day) and is too costly to run on every
+        // minor nudge — each of its steps is its own SwiftUI state mutation
+        // and Map relayout. A single native animation covers a short hop just
+        // as smoothly for a fraction of the work.
+        guard !isMinorCameraAdjustment(from: source, to: target) else {
+            displayedMapRegion = target
+            withAnimation(.easeInOut(duration: 0.35)) {
                 cameraPosition = .region(target)
             }
             return
@@ -1995,6 +2030,8 @@ private struct ContinuousTimelineSheet: View {
     @State private var latestViewportHeight: CGFloat = 0
     @State private var calendarBackfillTask: Task<Void, Never>?
     @State private var dateFrameUpdateCoalescer = ContinuousTimelineDateFrameUpdateCoalescer()
+    @State private var itemFrameUpdateCoalescer = ContinuousTimelineDateFrameUpdateCoalescer()
+    @State private var latestVisibleItemIDs = Set<String>()
     @State private var initialTodayScrollTask: Task<Void, Never>?
     @State private var initialLoadingFallbackTask: Task<Void, Never>?
     @State private var allowsInitialLoadingFallback = false
@@ -2052,6 +2089,7 @@ private struct ContinuousTimelineSheet: View {
     private let calendarBackfillDateLoadLimit = 1_000
     let availableDates: Set<Date>
     let visibleDatesChanged: (Set<Date>) -> Void
+    let visibleItemIDsChanged: (Set<String>) -> Void
     let undatedFutureTripsVisibilityChanged: (Bool) -> Void
     @Binding var isShowingSettings: Bool
     @Binding var pendingFutureTripDelayOptionsID: UUID?
@@ -2398,7 +2436,6 @@ private struct ContinuousTimelineSheet: View {
         }
         .sheet(item: $selectedFootprint) { footprint in
             buildFootprintModalView(for: footprint)
-                .presentationDetents([.large])
         }
         .sheet(item: $selectedFutureTripDetail) { trip in
             buildFutureTripDetailView(for: trip)
@@ -2517,6 +2554,12 @@ private struct ContinuousTimelineSheet: View {
                             // updates cannot form a per-frame feedback loop.
                             dateFrameUpdateCoalescer.schedule {
                                 applyDateFrameUpdate(frames, viewportHeight: viewportHeight, using: proxy)
+                            }
+                        }
+                        .onPreferenceChange(ContinuousTimelineItemFramePreferenceKey.self) { frames in
+                            let viewportHeight = viewport.size.height
+                            itemFrameUpdateCoalescer.schedule {
+                                applyItemFrameUpdate(frames, viewportHeight: viewportHeight)
                             }
                         }
                         .onPreferenceChange(ContinuousTimelineUndatedFutureTripsFramePreferenceKey.self) { frame in
@@ -3166,6 +3209,33 @@ private struct ContinuousTimelineSheet: View {
         return visibleDates
     }
 
+    private func applyItemFrameUpdate(_ frames: [String: CGRect], viewportHeight: CGFloat) {
+        guard !isViewingUndatedFutureTrips else { return }
+        let itemIDs = significantVisibleItemIDs(in: frames, viewportHeight: viewportHeight)
+        guard itemIDs != latestVisibleItemIDs else { return }
+        latestVisibleItemIDs = itemIDs
+        visibleItemIDsChanged(itemIDs)
+    }
+
+    /// Same overlap-with-a-fixed-viewport-band test as `significantVisibleDates`,
+    /// but per timeline row, so the map camera can track only the footprints
+    /// and transport actually scrolled into view rather than a whole day.
+    private func significantVisibleItemIDs(in frames: [String: CGRect], viewportHeight: CGFloat) -> Set<String> {
+        guard viewportHeight > 0 else { return [] }
+        let bandTop: CGFloat = 52
+        let bandBottom = max(bandTop, viewportHeight - 72)
+        let centerY = viewportHeight * 0.5
+
+        return Set(frames.compactMap { id, frame in
+            let intersectionTop = max(frame.minY, bandTop)
+            let intersectionBottom = min(frame.maxY, bandBottom)
+            let intersectionHeight = max(0, intersectionBottom - intersectionTop)
+            let minimumVisibleHeight = min(48, max(16, frame.height * 0.3))
+            let containsCenter = frame.minY <= centerY && frame.maxY >= centerY
+            return intersectionHeight >= minimumVisibleHeight || containsCenter ? id : nil
+        })
+    }
+
     private func bottomVisibleDate(in frames: [Date: CGRect], viewportHeight: CGFloat) -> Date? {
         let bandTop: CGFloat = 52
         let bottomContentProbeY = max(bandTop, viewportHeight - 132)
@@ -3373,6 +3443,14 @@ private struct ContinuousTimelineSheet: View {
                             }
                         }
                     )
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(
+                                key: ContinuousTimelineItemFramePreferenceKey.self,
+                                value: [item.id: geometry.frame(in: .named("continuousTimelineScroll"))]
+                            )
+                        }
+                    }
                 case .currentStay:
                     CurrentStayTimelineCard(locationManager: locationManager)
                         .id(ScrollTarget.now)
@@ -4547,6 +4625,14 @@ private struct ContinuousTimelineDateFramePreferenceKey: PreferenceKey {
     }
 }
 
+private struct ContinuousTimelineItemFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
 private struct ContinuousTimelineUndatedFutureTripsFramePreferenceKey: PreferenceKey {
     static var defaultValue: CGRect? = nil
 
@@ -5425,14 +5511,12 @@ private struct CurrentStayTimelineCard: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 if canSelectOngoingPlace {
-                    Menu {
-                        SuggestionsMenuContent(
-                            locationManager: locationManager,
-                            coordinate: ongoingSelectionCoordinate,
-                            forOngoing: true
-                        ) {
-                            showingOngoingLocationSearch = true
-                        }
+                    SuggestionsMenu(
+                        locationManager: locationManager,
+                        coordinate: ongoingSelectionCoordinate,
+                        forOngoing: true
+                    ) {
+                        showingOngoingLocationSearch = true
                     } label: {
                         Text(resolvedTitle)
                             .font(.title3.weight(.bold))

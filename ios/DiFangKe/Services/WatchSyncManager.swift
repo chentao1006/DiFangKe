@@ -140,8 +140,13 @@ private struct WatchComplicationTimelineItem: Codable {
     }
 }
 
+// WCSessionDelegate is not @MainActor-isolated: WatchConnectivity invokes its
+// methods on an arbitrary background queue, and every method below already
+// hops to main itself (DispatchQueue.main.async) before touching @MainActor
+// state. @preconcurrency tells the compiler to trust that existing contract
+// instead of treating the whole conformance as isolated to this actor.
 @MainActor
-final class WatchSyncManager: NSObject, WCSessionDelegate {
+final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     static let shared = WatchSyncManager()
     private var modelContext: ModelContext?
     private let pendingActivityFootprintKey = "pendingWatchActivityFootprintID"

@@ -96,7 +96,7 @@ struct IMESafeTextView: UIViewRepresentable {
 
 // MARK: - Location Selection Components (Shared)
 
-struct SuggestionsMenuContent: View {
+struct SuggestionsMenu<Label: View>: View {
     let locationManager: LocationManager
     let coordinate: CLLocationCoordinate2D?
     let forOngoing: Bool
@@ -105,12 +105,18 @@ struct SuggestionsMenuContent: View {
     var onSearchRequested: () -> Void
     var onCustomSelection: ((String) -> Void)? = nil
     var onSelectionApplied: (() -> Void)? = nil
+    @ViewBuilder var label: () -> Label
     
     @State private var suggestions: [LocationSuggestion] = []
     @State private var isLoading = false
+
+    private var coordinateKey: String {
+        guard let coordinate else { return "none" }
+        return "\(coordinate.latitude),\(coordinate.longitude)"
+    }
     
     var body: some View {
-        Group {
+        Menu {
             Button {
                 onSearchRequested()
             } label: {
@@ -139,18 +145,17 @@ struct SuggestionsMenuContent: View {
                     }
                 }
             }
+        } label: {
+            label()
         }
-        .onAppear {
-            if let coord = coordinate {
-                isLoading = true
-                Task {
-                    let results = await locationManager.fetchNearbySuggestions(at: coord)
-                    await MainActor.run {
-                        self.suggestions = results
-                        self.isLoading = false
-                    }
-                }
-            }
+        .task(id: coordinateKey) {
+            suggestions = []
+            guard let coordinate else { isLoading = false; return }
+            isLoading = true
+            let results = await locationManager.fetchNearbySuggestions(at: coordinate)
+            guard !Task.isCancelled else { return }
+            suggestions = results
+            isLoading = false
         }
     }
 }

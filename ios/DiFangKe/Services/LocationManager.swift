@@ -3730,6 +3730,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         guard footprint.countryCode == nil || footprint.cityName == nil else { return }
         let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
         let footprintID = footprint.footprintID
+        // Snapshot before crossing into the completion handler: Footprint is a
+        // SwiftData model and not Sendable, so nothing beyond this point may
+        // read from `footprint` directly. The later write re-fetches by ID
+        // from mainContext instead, the same pattern used everywhere else here.
+        let persistedAddress = footprint.address
 
         geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
             Task { @MainActor [weak self] in
@@ -3750,7 +3755,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     cityName = overseas.cityName ?? cityName
                 }
                 if (countryCode == nil || countryName?.isEmpty != false || cityName?.isEmpty != false),
-                   let savedHierarchy = DFKGeographicHierarchy.fromPersistedForeignAddress(footprint.address) {
+                   let savedHierarchy = DFKGeographicHierarchy.fromPersistedForeignAddress(persistedAddress) {
                     countryCode = savedHierarchy.countryCode
                     countryName = savedHierarchy.countryName
                     cityName = savedHierarchy.cityName
@@ -5118,94 +5123,6 @@ class TripLiveActivityManager {
             }
         }
         currentActivity = nil
-        return
-
-        guard let context = modelContext else { return }
-        
-        if currentActivity == nil {
-            currentActivity = Activity<TripActivityAttributes>.activities.first
-        }
-        
-        let descriptor = FetchDescriptor<FutureTrip>(sortBy: [SortDescriptor(\.arrivalDate)])
-        let trips = (try? context.fetch(descriptor)) ?? []
-        let now = Date()
-        let calendar = Calendar.current
-
-        if completeArrivedTrips(location: location, trips: trips, context: context, calendar: calendar) {
-            FutureTrip.postDidChangeNotification()
-        }
-
-        let orderedTrips = FutureTrip.dayOrdered(trips)
-        let candidateTrips = orderedTrips.filter { trip in
-            // Plans without a calendar date are deliberately not eligible for
-            // a Live Activity. Their stored arrivalDate is only a placeholder
-            // for persistence and ordering.
-            guard trip.hasPlanDate, !trip.isCompleted else { return false }
-            if trip.isOrdered {
-                return calendar.isDateInToday(trip.arrivalDate) &&
-                    !hasPendingTimedTripBefore(trip, in: orderedTrips, now: now, calendar: calendar)
-            }
-
-            let timeInterval = trip.effectiveArrivalDate(now: now, calendar: calendar).timeIntervalSince(now)
-            return timeInterval <= 3600
-        }
-
-        if let upcomingTrip = candidateTrips.first {
-            let tripLocation = CLLocation(latitude: upcomingTrip.latitude, longitude: upcomingTrip.longitude)
-            let distance = location.distance(from: tripLocation)
-            let effectiveArrivalDate = upcomingTrip.effectiveArrivalDate(now: now, calendar: calendar)
-            let mins = upcomingTrip.isOrdered ? 0 : max(0, Int(effectiveArrivalDate.timeIntervalSince(now) / 60))
-            
-            let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
-            let matchedIcon = allActivities.first(where: { $0.id.uuidString == upcomingTrip.activityTypeValue || $0.name == upcomingTrip.activityTypeValue })?.icon ?? "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted"
-            
-            let state = TripActivityAttributes.ContentState(
-                currentDistance: distance,
-                remainingMinutes: mins,
-                placeName: upcomingTrip.placeName,
-                arrivalDate: effectiveArrivalDate,
-                latitude: upcomingTrip.latitude,
-                longitude: upcomingTrip.longitude,
-                icon: matchedIcon,
-                hasArrivalTime: upcomingTrip.hasArrivalTime,
-                isOrdered: upcomingTrip.isOrdered,
-                shouldOfferCompletion: upcomingTrip.shouldOfferCompletion(currentDistance: distance, now: now)
-            )
-            
-            Task {
-                await self.ensureTripMapSnapshot(latitude: upcomingTrip.latitude, longitude: upcomingTrip.longitude, tripId: upcomingTrip.id.uuidString)
-                let content = ActivityContent(state: state, staleDate: nil)
-                
-                if let activity = self.currentActivity {
-                    if activity.attributes.tripId != upcomingTrip.id.uuidString {
-                        await activity.end(nil, dismissalPolicy: .immediate)
-                        let attributes = TripActivityAttributes(tripId: upcomingTrip.id.uuidString)
-                        self.currentActivity = try? Activity.request(attributes: attributes, content: content, pushType: nil)
-                    } else {
-                        await activity.update(content)
-                    }
-                } else {
-                    let attributes = TripActivityAttributes(tripId: upcomingTrip.id.uuidString)
-                    do {
-                        self.currentActivity = try Activity.request(attributes: attributes, content: content, pushType: nil)
-                    } catch {
-                        print("Failed to start live activity: \(error)")
-                    }
-                }
-            }
-        } else {
-            if let activity = currentActivity {
-                Task {
-                    await activity.end(nil, dismissalPolicy: .default)
-                }
-                currentActivity = nil
-            }
-            for activity in Activity<TripActivityAttributes>.activities {
-                Task {
-                    await activity.end(nil, dismissalPolicy: .default)
-                }
-            }
-        }
     }
 
     func endActivity(for tripID: UUID) {
@@ -5226,79 +5143,6 @@ class TripLiveActivityManager {
         }
     }
 
-    @discardableResult
-    private func completeArrivedTrips(location: CLLocation, trips: [FutureTrip], context: ModelContext, calendar: Calendar) -> Bool {
-        var didComplete = false
-
-        for trip in trips where !trip.isCompleted && (!trip.hasPlanDate || calendar.isDateInToday(trip.arrivalDate)) {
-            let tripLocation = CLLocation(latitude: trip.latitude, longitude: trip.longitude)
-            guard location.distance(from: tripLocation) < 200 else { continue }
-
-            NotificationManager.shared.cancelFutureTripNotification(for: trip.id)
-            trip.markCompleted()
-            endActivity(for: trip.id)
-            didComplete = true
-        }
-
-        if didComplete {
-            try? context.save()
-        }
-
-        return didComplete
-    }
-
-    private func hasPendingTimedTripBefore(_ trip: FutureTrip, in orderedTrips: [FutureTrip], now: Date, calendar: Calendar) -> Bool {
-        for orderedTrip in orderedTrips {
-            if orderedTrip.id == trip.id {
-                return false
-            }
-
-            guard !orderedTrip.isCompleted,
-                  !orderedTrip.isOrdered,
-                  calendar.isDate(orderedTrip.arrivalDate, inSameDayAs: trip.arrivalDate) else {
-                continue
-            }
-
-            if orderedTrip.effectiveArrivalDate(now: now, calendar: calendar) > now {
-                return true
-            }
-        }
-
-        return false
-    }
-    
-    private func ensureTripMapSnapshot(latitude: Double, longitude: Double, tripId: String) async {
-        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ct106.difangke") else { return }
-        
-        let latStr = String(format: "%.3f", latitude)
-        let lonStr = String(format: "%.3f", longitude)
-        let hashStr = "\(latStr)_\(lonStr)"
-        
-        let lightUrl = container.appendingPathComponent("trip_\(tripId)_\(hashStr)_light.png")
-        let darkUrl = container.appendingPathComponent("trip_\(tripId)_\(hashStr)_dark.png")
-        
-        if FileManager.default.fileExists(atPath: lightUrl.path) && FileManager.default.fileExists(atPath: darkUrl.path) {
-            return
-        }
-        
-        let options = MKMapSnapshotter.Options()
-        options.region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude), span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02))
-        options.size = CGSize(width: 400, height: 200)
-        options.scale = 2.0
-        options.showsBuildings = true
-        
-        do {
-            options.traitCollection = UITraitCollection(userInterfaceStyle: .light)
-            let snapshotLight = try await MKMapSnapshotter(options: options).start()
-            try snapshotLight.image.pngData()?.write(to: lightUrl)
-            
-            options.traitCollection = UITraitCollection(userInterfaceStyle: .dark)
-            let snapshotDark = try await MKMapSnapshotter(options: options).start()
-            try snapshotDark.image.pngData()?.write(to: darkUrl)
-        } catch {
-            print("Failed to generate map snapshot: \(error)")
-        }
-    }
 }
 #endif
 

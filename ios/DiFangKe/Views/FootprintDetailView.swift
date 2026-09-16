@@ -21,7 +21,7 @@ struct FootprintModalView: View {
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
     
     @State private var hasChanged = false
-    @State private var showMap = false
+    @State private var sheetDetent: PresentationDetent = .medium
     @State private var showAI = false
     @FocusState private var addressFocused: Bool
     var autoFocus: Bool = false
@@ -32,9 +32,6 @@ struct FootprintModalView: View {
     @State private var selectedPhotoID: String? = nil
     @State private var showAddPlaceModal = false
     @State private var isUpdatingAddress = false
-    @State private var mapPhotos: [PHAsset] = []
-    
-    @State private var showFullscreenMap = false
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
     @AppStorage("hasSeenPhotoPermissionGuide") private var hasSeenPhotoPermissionGuide = false
     
@@ -95,31 +92,7 @@ struct FootprintModalView: View {
     
     var body: some View {
         NavigationStack {
-            GeometryReader { geometry in
-                let mapHeight = geometry.size.height / 3
-                let isPhoneLandscape = UIDevice.current.userInterfaceIdiom == .phone && geometry.size.width > geometry.size.height
-
-                if isPhoneLandscape {
-                    HStack(spacing: 0) {
-                        footprintDetailContent
-                            .frame(width: geometry.size.width / 2)
-
-                        footprintMap
-                            .frame(width: geometry.size.width / 2)
-                    }
-                } else {
-                    VStack(spacing: 0) {
-                        footprintMap
-                            .frame(height: mapHeight)
-
-                        footprintDetailContent
-                    }
-                }
-            }
-            // Keep the map's GeometryReader height stable when the keyboard
-            // appears. Otherwise focusing the note shrinks the map to a new
-            // third-height and forces MapKit to relayout/reload.
-            .ignoresSafeArea(.keyboard, edges: .bottom)
+            footprintDetailContent
             .navigationTitle(isMinimized ? "" : "足迹详情")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -199,7 +172,6 @@ struct FootprintModalView: View {
                 }
             }
             .onAppear {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { withAnimation(.easeOut(duration: 0.25)) { showMap = true } }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { withAnimation(.easeOut(duration: 0.3)) { showAI = true } }
                 
                 if isAutoPhotoLinkEnabled {
@@ -224,17 +196,12 @@ struct FootprintModalView: View {
                 
                 enrichPlaceIfNeeded()
 
-                refreshMapPhotos()
-                
                 // 第一次进入足迹详情且状态为“未定义”时，强提示授权
                 if !hasSeenPhotoPermissionGuide && PhotoService.shared.authorizationStatus == .notDetermined {
                     // 我们可以在这里简单打个标记，页面底部的大按钮（原本就有的引导位）已经能承担说明作用。
                     // 为了满足用户说的“说明并请求”，我们可以考虑在这里触发一个弹窗或者在该页面显式滚动到该区域（当前卡片已有按钮）。
                     hasSeenPhotoPermissionGuide = true
                 }
-            }
-            .onChange(of: footprint.photoAssetIDs) { _, _ in
-                refreshMapPhotos()
             }
             .sheet(isPresented: $showCamera) {
                 CameraPickerView { image in
@@ -292,9 +259,6 @@ struct FootprintModalView: View {
             .sheet(isPresented: $showAddPlaceModal) {
                 AddToFavoriteModal(footprint: footprint)
             }
-            .sheet(isPresented: $showFullscreenMap) {
-                FullFrameMapView(footprint: footprint, photoAssets: mapPhotos)
-            }
             .alert("确认移除照片？", isPresented: $showingPhotoDeleteAlert) {
                 Button("移除", role: .destructive) { deletePhoto() }
                 Button("取消", role: .cancel) { photoToDelete = nil }
@@ -316,23 +280,22 @@ struct FootprintModalView: View {
             } message: {
                 Text(aiErrorMessage)
             }
-        .onDisappear {
-            if hasChanged {
-                Aptabase.shared.trackEvent("footprint_edited")
-                footprint.status = .manual
-            }
-            if !isDraft {
-                try? modelContext.save()
+            .onDisappear {
+                if hasChanged {
+                    Aptabase.shared.trackEvent("footprint_edited")
+                    footprint.status = .manual
+                }
+                if !isDraft {
+                    try? modelContext.save()
+                }
             }
         }
+        .presentationDetents([.medium, .large], selection: $sheetDetent)
     }
-
-}
 }
 
 private struct FootprintReasonEditor: View {
     @StateObject private var textState: IMETextState
-    @State private var keyboardHeight: CGFloat = 0
     let onCommit: (String) -> Void
     let onBeginEditing: () -> Void
 
@@ -365,35 +328,10 @@ private struct FootprintReasonEditor: View {
         .onDisappear {
             onCommit(textState.text)
         }
-        // The detail layout intentionally ignores the keyboard to keep MapKit
-        // from resizing. Add scrollable space locally instead, so this editor
-        // can still move completely above the keyboard.
-        .padding(.bottom, keyboardHeight)
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
-            guard let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-            let height = max(0, UIScreen.main.bounds.maxY - frame.minY)
-            withAnimation(.easeOut(duration: 0.2)) {
-                keyboardHeight = height
-            }
-        }
     }
 }
 
 extension FootprintModalView {
-    private var footprintMap: some View {
-        FootprintDetailMapView(
-            footprint: footprint,
-            photoAssets: mapPhotos,
-            isInteractive: true,
-            showsStandalonePhotos: true,
-            prefersActivityIcons: true,
-            selectedFootprintID: footprint.footprintID,
-            centersFootprintInVisibleTopArea: true,
-            visibleMapFraction: 1
-        )
-        .opacity(showMap ? 1 : 0)
-    }
-
     private var footprintDetailContent: some View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
@@ -401,7 +339,7 @@ extension FootprintModalView {
                     headerContent
                     footerContent {
                         // Wait for the keyboard's layout pass, then keep the
-                        // focused editor above it without resizing the map.
+                        // focused editor above it.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             withAnimation(.easeOut(duration: 0.2)) {
                                 proxy.scrollTo("footprintReasonEditor", anchor: .top)
@@ -513,30 +451,8 @@ extension FootprintModalView {
                 }
 
                 try? modelContext.save()
-                refreshMapPhotos()
             }
         }
-    }
-
-    private func refreshMapPhotos() {
-        guard !footprint.photoAssetIDs.isEmpty else {
-            mapPhotos = []
-            return
-        }
-
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: footprint.photoAssetIDs, options: nil)
-        var fetchedAssets: [PHAsset] = []
-        assets.enumerateObjects { asset, _, _ in
-            if asset.location != nil {
-                fetchedAssets.append(asset)
-            }
-        }
-
-        let orderedAssets = footprint.photoAssetIDs.compactMap { assetID in
-            fetchedAssets.first(where: { $0.localIdentifier == assetID })
-        }
-
-        mapPhotos = orderedAssets
     }
 
     private func deletePhoto() {
@@ -604,12 +520,10 @@ extension FootprintModalView {
             }
             .buttonStyle(.plain)
 
-            Menu {
-                SuggestionsMenuContent(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint, isDraft: isDraft) {
-                    showingSearchSheet = true
-                } onSelectionApplied: {
-                    markFootprintChanged()
-                }
+            SuggestionsMenu(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint, isDraft: isDraft) {
+                showingSearchSheet = true
+            } onSelectionApplied: {
+                markFootprintChanged()
             } label: {
                 Text(isUpdatingAddress ? "正在重新获取地址..." : displayPlaceText)
                     .font(placeValueFont)

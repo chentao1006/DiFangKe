@@ -38,7 +38,7 @@
 		A1D3F500AA001001AA001001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F501AA001001AA001001 /* Assets.xcassets */; };
 		A1D3F502AA001001AA001001 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F503AA001001AA001001 /* AppIcon.icon */; };
 		A1D3F511AA001001AA001011 /* WatchMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D3F510AA001001AA001010 /* WatchMapView.swift */; };
-		A71100000000000000000001 /* DiFangKeWatchWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A71100000000000000000002 /* DiFangKeWatchWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A71100000000000000000001 /* DiFangKeWatchWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A71100000000000000000002 /* DiFangKeWatchWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		AA4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */; };
 		AC19D6437C18A309FE001E29 /* Views/TimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */; };
 		B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */; };
@@ -125,15 +125,15 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		A71100000000000000000005 /* Embed App Extensions */ = {
+		A71100000000000000000005 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				A71100000000000000000001 /* DiFangKeWatchWidget.appex in Embed App Extensions */,
+				A71100000000000000000001 /* DiFangKeWatchWidget.appex in Embed Foundation Extensions */,
 			);
-			name = "Embed App Extensions";
+			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		C3EA889BD26EA1368565CBFF /* Embed Watch Content */ = {
@@ -500,7 +500,7 @@
 				3A991CCA108EC9D9DCEBFE79 /* Sources */,
 				E79705EEDDC8D808C38510D8 /* Frameworks */,
 				C88A2620765FD3A68CC0B773 /* Resources */,
-				A71100000000000000000005 /* Embed App Extensions */,
+				A71100000000000000000005 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
@@ -601,7 +601,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastSwiftUpdateCheck = 2640;
-				LastUpgradeCheck = 2650;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					C67848122FA24C0C002DF823 = {
 						CreatedOnToolsVersion = 26.4.1;
