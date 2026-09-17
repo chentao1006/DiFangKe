@@ -457,9 +457,11 @@ enum DataDeduplicationService {
                 }) else { continue }
                 let groupStart = group.map(\.startTime).min() ?? keeper.startTime
                 let groupEnd = group.map(\.endTime).max() ?? keeper.endTime
-                keeper.startTime = groupStart
+                keeper.startTime = PersistentTimelineBuilder.automaticTransportStart(
+                    keeper, proposedStart: groupStart, trustedStart: keeper.startTime
+                )
                 keeper.endTime = groupEnd
-                let duration = groupEnd.timeIntervalSince(groupStart)
+                let duration = groupEnd.timeIntervalSince(keeper.startTime)
                 keeper.averageSpeed = duration > 0 ? keeper.distance / duration : 0
                 if let earliest = group.min(by: { $0.startTime < $1.startTime }),
                    earliest !== keeper,

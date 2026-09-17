@@ -23,8 +23,6 @@ struct RawPointsListView: View {
     @State private var dataVersion = 0
     
     // 过滤与排序选项
-    @State private var exportURL: URL?
-    @State private var showingShareSheet = false
     @State private var exportErrorMessage: String?
     @State private var isSelecting = false
     @State private var selection = Set<Int>()
@@ -296,11 +294,6 @@ struct RawPointsListView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showingShareSheet) {
-                if let exportURL {
-                    ActivityView(activityItems: [exportURL])
-                }
-            }
             .alert("确认删除", isPresented: $isShowingDeleteConfirmation) {
                 Button("取消", role: .cancel) { }
                 Button("删除", role: .destructive) {
@@ -432,11 +425,34 @@ struct RawPointsListView: View {
             let filename = "DiFangKe_RawPoints_\(formatter.string(from: date)).csv"
             let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
             try rawPointsCSVData().write(to: tempURL, options: .atomic)
-            exportURL = tempURL
-            showingShareSheet = true
+            presentActivitySheet(items: [tempURL])
         } catch {
             exportErrorMessage = error.localizedDescription
         }
+    }
+
+    /// 直接通过 UIKit 呈现分享面板，而不是用 SwiftUI 的 `.sheet`。
+    /// 本页本身是被上层用 `.sheet(item:)` 弹出的模态页，若再叠加一层
+    /// SwiftUI `.sheet` 来展示 `UIActivityViewController`，在“sheet 套 sheet”
+    /// 的层级下经常会渲染成空白弹窗，因此改为找到当前最上层的 UIViewController
+    /// 直接 present。
+    private func presentActivitySheet(items: [Any]) {
+        guard let windowScene = UIApplication.shared.connectedScenes
+            .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+            var topController = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        else { return }
+
+        while let presented = topController.presentedViewController {
+            topController = presented
+        }
+
+        let activityController = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        if let popover = activityController.popoverPresentationController {
+            popover.sourceView = topController.view
+            popover.sourceRect = CGRect(x: topController.view.bounds.midX, y: topController.view.bounds.midY, width: 0, height: 0)
+            popover.permittedArrowDirections = []
+        }
+        topController.present(activityController, animated: true)
     }
 
     private func rawPointsCSVData() throws -> Data {

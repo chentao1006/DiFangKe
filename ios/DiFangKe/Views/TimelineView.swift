@@ -451,7 +451,7 @@ private struct ContinuousTimelineView: View {
                         .navigationTitle(sidebarNavigationTitle)
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar(removing: .sidebarToggle)
-                        .navigationSplitViewColumnWidth(min: 350, ideal: 420, max: 500)
+                        .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 360)
                         .sheet(item: $selectedFutureTripFromMap) { trip in
                             FutureTripDraftModal(editingTrip: trip)
                         }

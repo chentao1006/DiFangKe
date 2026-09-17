@@ -1094,8 +1094,7 @@ class TimelineBuilder {
         if duration < 60 && kmh < 3 { return nil } // 保持原有的极短距离高速过滤
         
         let maxDiameter = calculateMaxDiameter(points)
-        // 增加对“室内漂移”的过滤：如果最大跨度极小且路径绕圈特别严重（比值 > 阈值），判定为原地漂移
-        if maxDiameter < AppConfig.shared.transportMinDistanceThreshold && distance > maxDiameter * AppConfig.shared.driftRatioThreshold { return nil }
+        guard maxDiameter >= AppConfig.shared.transportMinDistanceThreshold else { return nil }
         
         // 如果虽然时间超过几分钟，但位移还是极小（小于 15 米），大概率是 GPS 抖动
         if distance < 15 { return nil }
@@ -1682,6 +1681,17 @@ class PersistentTimelineBuilder {
             $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         var allTps = (try? context.fetch(tpDesc)) ?? []
+        // Repair older automatic candidates that accumulated jitter into a trip.
+        // Keep raw locations, manual edits, and records without usable geometry.
+        let confined = allTps.filter {
+            $0.manualTypeRaw == nil && !hasMinimumAutomaticTransportSpan($0)
+        }
+        if !confined.isEmpty {
+            for record in confined { context.delete(record) }
+            try? context.save()
+            allTps = (try? context.fetch(tpDesc)) ?? []
+        }
+
         if Footprint.absorbAdjacentAutomaticContinuations(allFps, transports: allTps, context: context) {
             try? context.save()
             allFps = (try? context.fetch(fpDesc)) ?? []
@@ -1698,8 +1708,17 @@ class PersistentTimelineBuilder {
             allTps = (try? context.fetch(tpDesc)) ?? []
         }
 
+        let (allRawPoints, driftTimestamps) = await Task.detached {
+            let raw = RawLocationStore.shared.loadAllDevicesLocations(for: date, filtered: false)
+            let marked = RawLocationStore.markDriftPoints(raw)
+            let valid = marked.filter { !$0.isDriftPoint }.map(\.location)
+            let drift = Set(marked.filter(\.isDriftPoint).map { $0.location.timestamp.timeIntervalSince1970 })
+            return (valid, drift)
+        }.value
+
         if await repairAutomaticTransportStartsAfterDormantGap(
             allTps,
+            rawPoints: allRawPoints,
             startOfDay: startOfDay,
             preferredAuto: preferredAuto,
             preferredCycling: preferredCycling,
@@ -1721,14 +1740,7 @@ class PersistentTimelineBuilder {
         for tp in allTps { sortedRanges.append(TimeRange(start: tp.startTime, end: tp.endTime)) }
         sortedRanges.sort { $0.start < $1.start }
         
-        // 2. 加载锚点之后的原始点位
-        let (allRawPoints, driftTimestamps) = await Task.detached {
-            let raw = RawLocationStore.shared.loadAllDevicesLocations(for: date, filtered: false)
-            let marked = RawLocationStore.markDriftPoints(raw)
-            let valid = marked.filter { !$0.isDriftPoint }.map(\.location)
-            let drift = Set(marked.filter(\.isDriftPoint).map { $0.location.timestamp.timeIntervalSince1970 })
-            return (valid, drift)
-        }.value
+        // 2. 用已加载的原始点修复漂移路线
         if repairRoutesContainingDrift(allTps, validPoints: allRawPoints, driftTimestamps: driftTimestamps, date: date) {
             try? context.save()
         }
@@ -2192,9 +2204,11 @@ class PersistentTimelineBuilder {
             guard let survivor = cluster.max(by: { hasBetterObservedRoute($1, than: $0) }) else { continue }
             let startTime = cluster.map(\.startTime).min() ?? survivor.startTime
             let endTime = cluster.map(\.endTime).max() ?? survivor.endTime
-            survivor.startTime = startTime
+            survivor.startTime = automaticTransportStart(
+                survivor, proposedStart: startTime, trustedStart: survivor.startTime
+            )
             survivor.endTime = endTime
-            let duration = endTime.timeIntervalSince(startTime)
+            let duration = endTime.timeIntervalSince(survivor.startTime)
             survivor.averageSpeed = duration > 0 ? survivor.distance / duration : 0
             if let earliest = cluster.min(by: { $0.startTime < $1.startTime }), earliest !== survivor,
                earliest.startLocation != "起点", earliest.startLocation != "正在获取位置...", !earliest.startLocation.isEmpty {
@@ -3404,6 +3418,23 @@ class PersistentTimelineBuilder {
         }
     }
 
+    /// Accumulated path length is not displacement: jitter and small loops
+    /// must not bypass the configured minimum movement span. Synthetic map
+    /// connectors do not establish movement when real observations exist.
+    private static func hasMinimumAutomaticTransportSpan(_ record: TransportRecord) -> Bool {
+        guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData) else {
+            return true // Insufficient evidence to remove a legacy record.
+        }
+        let valid = decoded.filter {
+            CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon))
+        }
+        let observed = valid.filter { $0.isSyntheticPadding != true }
+        let evidence = observed.isEmpty ? valid : observed
+        guard evidence.count >= 2 else { return true }
+        let coordinates = evidence.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        return TimelineBuilder.calculateMaxDiameter(coordinates) >= AppConfig.shared.transportMinDistanceThreshold
+    }
+
     /// Both automatic builders can propose the same route during one sync.
     /// Saving the accepted record here makes it visible to the next proposal;
     /// a later end-of-sync cleanup is only a repair for records from old builds.
@@ -3413,6 +3444,7 @@ class PersistentTimelineBuilder {
         startOfDay: Date,
         context: ModelContext
     ) {
+        guard hasMinimumAutomaticTransportSpan(candidate) else { return }
         let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay) ?? candidate.endTime
         let manualDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
             $0.statusRaw != "ignored" && $0.manualTypeRaw != nil &&
@@ -3434,6 +3466,7 @@ class PersistentTimelineBuilder {
         startOfDay: Date,
         context: ModelContext
     ) {
+        guard hasMinimumAutomaticTransportSpan(candidate) else { return }
         if let existing = equivalentTransport(candidate, startOfDay: startOfDay, context: context) {
             guard existing.manualTypeRaw == nil else { return }
             // A sparse inferred bridge must not win just because it was saved
@@ -3452,6 +3485,9 @@ class PersistentTimelineBuilder {
             }
             existing.startTime = min(existing.startTime, candidate.startTime)
             existing.endTime = max(existing.endTime, candidate.endTime)
+            existing.startTime = automaticTransportStart(
+                existing, proposedStart: existing.startTime, trustedStart: candidate.startTime
+            )
             let duration = existing.endTime.timeIntervalSince(existing.startTime)
             existing.averageSpeed = duration > 0 ? existing.distance / duration : 0
             try? context.save()
@@ -3464,6 +3500,31 @@ class PersistentTimelineBuilder {
             context.delete(candidate)
             print("[TimelineAuto] failed to persist automatic transport: \(error)")
         }
+    }
+
+    /// Preserve an evidence-backed departure when automatic merging widens bounds.
+    static func automaticTransportStart(
+        _ record: TransportRecord, proposedStart: Date, trustedStart: Date
+    ) -> Date {
+        let locations = observedRoutePoints(record).compactMap { point -> CLLocation? in
+            guard let timestamp = point.timestamp else { return nil }
+            return CLLocation(coordinate: CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon),
+                              altitude: 0, horizontalAccuracy: 0, verticalAccuracy: 0,
+                              timestamp: timestamp)
+        }
+        let observation = transportObservationAfterDormantGap(locations)
+        if observation.points.count < locations.count {
+            return max(proposedStart, observation.inferredStartTime)
+        }
+        // A corrected candidate/keeper must actually start at this route's
+        // first sample (with bounded inference), not at a later route fragment.
+        if let first = locations.first,
+           first.timestamp.timeIntervalSince(proposedStart) > AppConfig.shared.transportGapBreakThreshold,
+           trustedStart <= first.timestamp,
+           first.timestamp.timeIntervalSince(trustedStart) <= AppConfig.shared.transportDepartureMaximumBackfillDuration {
+            return max(proposedStart, trustedStart)
+        }
+        return proposedStart
     }
 
     private static func observedRoutePoints(_ record: TransportRecord) -> [CodableCoordinate] {
@@ -3675,8 +3736,15 @@ class PersistentTimelineBuilder {
             let dormantPrefix = ordered[..<index].allSatisfy {
                 $0.distance(from: anchor) < AppConfig.shared.stayDistanceThreshold
             }
-            guard dormantPrefix else {
-                return TransportObservation(points: ordered, inferredStartTime: ordered[0].timestamp)
+            // A short departure tail or GPS drift before sleep can already
+            // lie outside the stay radius. Permit this short prefix only when
+            // the gap's net displacement is below minimum departure speed.
+            // A long moving prefix must not be discarded by this fallback.
+            let gapSpeed = ordered[index].distance(from: ordered[index - 1]) / gap
+            let prefixDuration = ordered[index - 1].timestamp.timeIntervalSince(anchor.timestamp)
+            let shortDepartureTail = prefixDuration <= AppConfig.shared.transportDepartureMaximumBackfillDuration
+            guard dormantPrefix || (shortDepartureTail && gapSpeed < AppConfig.shared.transportDepartureMinimumSpeed) else {
+                continue
             }
 
             let movementPoints = Array(ordered[index...])
@@ -3714,6 +3782,7 @@ class PersistentTimelineBuilder {
     @MainActor
     private static func repairAutomaticTransportStartsAfterDormantGap(
         _ records: [TransportRecord],
+        rawPoints: [CLLocation],
         startOfDay: Date,
         preferredAuto: TransportType,
         preferredCycling: TransportType,
@@ -3736,20 +3805,30 @@ class PersistentTimelineBuilder {
                     timestamp: timestamp
                 )
             }
-            let observation = transportObservationAfterDormantGap(locations)
-            guard observation.points.count < locations.count,
-                  observation.inferredStartTime > record.startTime,
-                  observation.inferredStartTime < record.endTime else { continue }
+            // Prefer original samples: a replaced route can have discarded
+            // the stationary heartbeat needed to estimate wakeup departure.
+            let original = rawPoints.filter {
+                $0.timestamp >= record.startTime && $0.timestamp <= record.endTime
+            }
+            let evidence = original.count >= 2 ? original : locations
+            let observation = transportObservationAfterDormantGap(evidence)
+            let repairedStart: Date
+            if observation.points.count < evidence.count {
+                repairedStart = observation.inferredStartTime
+            } else {
+                continue
+            }
+            guard repairedStart > record.startTime, repairedStart < record.endTime else { continue }
 
-            record.startTime = observation.inferredStartTime
+            record.startTime = repairedStart
             record.day = startOfDay
-            let duration = record.endTime.timeIntervalSince(observation.inferredStartTime)
+            let duration = record.endTime.timeIntervalSince(repairedStart)
             guard duration > 0 else { continue }
             record.averageSpeed = record.distance / duration
 
 #if !WIDGET_EXTENSION
-            let metrics = await HealthManager.shared.fetchMetrics(from: observation.inferredStartTime, to: record.endTime)
-            let motionType = await HealthManager.shared.queryMostFrequentActivity(from: observation.inferredStartTime, to: record.endTime)
+            let metrics = await HealthManager.shared.fetchMetrics(from: repairedStart, to: record.endTime)
+            let motionType = await HealthManager.shared.queryMostFrequentActivity(from: repairedStart, to: record.endTime)
 #else
             let metrics = (steps: 0, distance: 0.0, floors: 0)
             let motionType = MotionType.unknown

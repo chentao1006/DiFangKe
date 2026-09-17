@@ -124,6 +124,40 @@ private struct WatchComplicationSnapshot: Codable {
     }
 }
 
+/// What actually matters for the complication's *appearance* changing, as
+/// opposed to time simply continuing to pass. Deliberately excludes
+/// `todayDistance` and each timeline item's `endTime`: those advance on
+/// nearly every location callback while the current stay/trip is ongoing,
+/// but the complication doesn't need a push to reflect that — its duration
+/// label already computes itself from `startedAt`/`currentTransportStartedAt`
+/// against the entry's own clock, and the ring/bar shape from an ongoing
+/// item's endTime barely moves tick to tick.
+private struct ComplicationBudgetFingerprint: Codable {
+    let currentFootprintID: String?
+    let placeName: String
+    let address: String?
+    let startedAt: Date?
+    let isTracking: Bool
+    let currentActivityID: String?
+    let currentTransportType: String?
+    let currentTransportStartedAt: Date?
+    let todayFootprintCount: Int
+    let timelineItemIDs: [String]
+
+    init(_ snapshot: WatchComplicationSnapshot) {
+        currentFootprintID = snapshot.currentFootprintID
+        placeName = snapshot.placeName
+        address = snapshot.address
+        startedAt = snapshot.startedAt
+        isTracking = snapshot.isTracking
+        currentActivityID = snapshot.currentActivityID
+        currentTransportType = snapshot.currentTransportType
+        currentTransportStartedAt = snapshot.currentTransportStartedAt
+        todayFootprintCount = snapshot.todayFootprintCount
+        timelineItemIDs = snapshot.todayTimeline.map(\.id)
+    }
+}
+
 private struct WatchComplicationTimelineItem: Codable {
     let id: String
     let startTime: Date
@@ -162,7 +196,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     /// last payload we sent through the complication channel so actual timeline
     /// changes can use that high-priority path without spending its budget on
     /// repeated location callbacks that produce the same snapshot.
-    private var lastComplicationSnapshotData: Data?
+    private var lastComplicationFingerprint: Data?
     private var lastBackgroundSnapshotData: Data?
     private var lastFullSnapshotData: Data?
 
@@ -205,7 +239,8 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
               WCSession.default.activationState == .activated,
               WCSession.default.isWatchAppInstalled else { return }
         let snapshot = makeSnapshot(context: context)
-        guard let complicationData = try? JSONEncoder().encode(WatchComplicationSnapshot(snapshot: snapshot)) else { return }
+        let complicationSnapshot = WatchComplicationSnapshot(snapshot: snapshot)
+        guard let complicationData = try? JSONEncoder().encode(complicationSnapshot) else { return }
         let complicationPayload = ["complicationSnapshot": complicationData]
         // updateApplicationContext always runs so the watch has the latest state whenever
         // it next wakes (background refresh or manual open). sendMessage is a best-effort
@@ -251,16 +286,23 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         // wake a terminated Watch app. A complication update needs to arrive when
         // a new footprint or transport is saved, not only at the next opportunistic
         // Watch background refresh. This is the dedicated, high-priority transfer
-        // Apple provides for that job. It is budgeted, so only send when the data
-        // actually changed; normal context delivery remains the fallback.
-        if complicationData != lastComplicationSnapshotData,
+        // Apple provides for that job. It is budgeted (a fixed number of transfers
+        // per day) — gate it on a fingerprint that excludes the fields which drift
+        // on essentially every location callback (the ongoing item's endTime,
+        // today's cumulative distance) but keep no real information for the
+        // complication, since its duration label already ticks forward on its own
+        // from startedAt. Spending the scarce budget on those non-events was
+        // exhausting it hours into the day, after which updates silently fell back
+        // to the slow queue until the phone app was next opened.
+        if let fingerprint = try? JSONEncoder().encode(ComplicationBudgetFingerprint(complicationSnapshot)),
+           fingerprint != lastComplicationFingerprint,
            session.isComplicationEnabled,
            session.remainingComplicationUserInfoTransfers > 0 {
             // Apple requires an active clock-face complication for this API. The
             // compact regular user-info transfer above remains the reliable
             // fallback for Smart Stack and any inactive complication placement.
             session.transferCurrentComplicationUserInfo(complicationPayload)
-            lastComplicationSnapshotData = complicationData
+            lastComplicationFingerprint = fingerprint
         }
     }
 
