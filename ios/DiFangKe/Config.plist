@@ -314,6 +314,9 @@
     <real>60</real>
     <key>LOW_POWER_CLUSTER_FRACTION</key>
     <real>0.8</real>
+    <!-- 自动静止省电期间单次定位采样间隔（秒）：15 分钟 -->
+    <key>STATIONARY_LOCATION_SAMPLE_INTERVAL</key>
+    <real>900</real>
     <!-- 运动分类缺失或误报时，仅凭更紧密的坐标聚集确认静止：时长、半径、占比 -->
     <key>LOW_POWER_STRICT_DWELL_DURATION</key>
     <real>300</real>

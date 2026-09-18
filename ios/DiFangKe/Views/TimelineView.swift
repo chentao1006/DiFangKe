@@ -2106,17 +2106,23 @@ private struct ContinuousTimelineSheet: View {
             // content-height delta. Detach SwiftUI's ID-based positioning for
             // that operation; otherwise both systems adjust the offset and the
             // timeline visibly bounces before eventually snapping to an edge.
-            get: { isPreservingViewportForEarlierLoad ? nil : timelineScrollPosition },
+            get: { isPreservingPhysicalViewport ? nil : timelineScrollPosition },
             set: { newValue in
                 // While a calendar jump is in flight, viewport updates may
                 // report the old (usually today) row. Keep the requested ID
                 // until that destination has actually become visible.
-                guard !isPreservingViewportForEarlierLoad,
+                guard !isPreservingPhysicalViewport,
                       calendarScrollLockTarget == nil,
                       returnToTodayTask == nil else { return }
                 timelineScrollPosition = newValue
             }
         )
+    }
+
+    private var isPreservingPhysicalViewport: Bool {
+        isPreservingViewportForEarlierLoad || scenePhase != .active ||
+        viewportAnchorBeforeBackground != nil || isReloadingTimelineExternally ||
+        scrollRestorer.isRestoring
     }
 
     private var isShowingFootprintDeletionAlert: Binding<Bool> {
@@ -2617,7 +2623,8 @@ private struct ContinuousTimelineSheet: View {
                         guard hasCompletedInitialTimelinePositioning else { return }
                         if isReloading {
                             externalReloadViewportAnchor = returnToTodayTask == nil && calendarScrollLockTarget == nil
-                                ? scrollRestorer.captureAnchor() : nil
+                                ? (viewportAnchorBeforeBackground ?? scrollRestorer.captureAnchor()) : nil
+                            timelineScrollPosition = nil
                             freezesViewportDrivenUpdatesUntil = Date.distantFuture
                         } else {
                             // Don't force an immediate re-read here: latestDateFrames can still
@@ -2625,9 +2632,14 @@ private struct ContinuousTimelineSheet: View {
                             // Give layout a brief moment, then let the ordinary preference-key
                             // pipeline (which reports real, settled frames) resume driving date
                             // tracking on its own.
-                            freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.3)
+                            freezesViewportDrivenUpdatesUntil = scenePhase == .active
+                                ? Date().addingTimeInterval(0.3) : Date.distantFuture
                             if let anchor = externalReloadViewportAnchor {
-                                scrollRestorer.restore(anchor, fallbackBottomDistance: anchor.bottomDistance)
+                                if scenePhase == .active {
+                                    scrollRestorer.restore(anchor, fallbackBottomDistance: anchor.bottomDistance)
+                                } else {
+                                    scrollRestorer.beginContinuousRestoration(anchor, fallbackBottomDistance: anchor.bottomDistance)
+                                }
                             }
                             externalReloadViewportAnchor = nil
                         }
@@ -2670,6 +2682,11 @@ private struct ContinuousTimelineSheet: View {
                             if oldPhase == .active {
                                 activeTimelineDateBeforeBackground = activeTimelineDate
                                 viewportAnchorBeforeBackground = scrollRestorer.captureAnchor()
+                                // Discard the old row ID before background layout can reuse it.
+                                timelineScrollPosition = nil
+                                if let anchor = viewportAnchorBeforeBackground {
+                                    scrollRestorer.beginContinuousRestoration(anchor, fallbackBottomDistance: anchor.bottomDistance)
+                                }
                             }
                             freezesViewportDrivenUpdatesUntil = Date.distantFuture
                         }
@@ -4833,6 +4850,12 @@ private final class ContinuousTimelineScrollRestorer {
 
     private func apply(anchor: ContinuousTimelineScrollAnchor) {
         guard let scrollView else { return }
+        // A bottom viewport must follow the actual bottom, including changed
+        // sheet height and safe-area insets during foreground layout.
+        if anchor.bottomDistance < 8 {
+            applyBottomDistance(anchor.bottomDistance)
+            return
+        }
         let insertedHeight = scrollView.contentSize.height - anchor.contentHeight
         applyOffsetY(anchor.contentOffsetY + insertedHeight)
     }

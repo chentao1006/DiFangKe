@@ -122,6 +122,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     print("[AppDelegate] Tracking was stopped, restarting...")
                     LocationManager.shared.startTracking()
                 }
+                LocationManager.shared.sampleStationaryLocationIfNeeded()
                 
                 // 已在追踪中的标准定位会话不需要每次 BG refresh 再次启动。
                 // 重复 startUpdatingLocation 会把静止状态拉回活跃定位，造成

@@ -370,6 +370,10 @@ class AppConfig {
         double(forKey: "LOW_POWER_CLUSTER_FRACTION")
     }
 
+    var stationaryLocationSampleInterval: Double {
+        double(forKey: "STATIONARY_LOCATION_SAMPLE_INTERVAL")
+    }
+
     var lowPowerStrictDwellDuration: Double {
         double(forKey: "LOW_POWER_STRICT_DWELL_DURATION")
     }

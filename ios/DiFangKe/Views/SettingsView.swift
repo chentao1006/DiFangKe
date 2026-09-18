@@ -262,8 +262,11 @@ struct SettingsView: View {
                 NavigationLink("数据备份与清理") {
                     DataManagerView()
                 }
+                NavigationLink("手表同步诊断") {
+                    WatchSyncDiagnosticsView()
+                }
             }
-            
+
             Section(header: Text("关于")) {
                 HStack {
                     Text("版本号")

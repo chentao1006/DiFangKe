@@ -1,6 +1,21 @@
 import WidgetKit
 import SwiftUI
 
+/// Mirrors the same-named helper in the Watch app target (WatchAppDelegate.swift) —
+/// this extension is a separate process and can't import that target's types.
+/// Temporary instrumentation to find where the background-update chain breaks.
+private enum WatchDiagnostics {
+    private static let groupID = "group.com.ct106.difangke"
+    private static var defaults: UserDefaults? { UserDefaults(suiteName: groupID) }
+
+    static func record(_ key: String, detail: String? = nil) {
+        defaults?.set(Date(), forKey: "diag_\(key)_at")
+        if let detail {
+            defaults?.set(detail, forKey: "diag_\(key)_detail")
+        }
+    }
+}
+
 private struct ComplicationActivity: Codable {
     let id: String
     let name: String
@@ -50,10 +65,21 @@ private struct ComplicationProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<ComplicationEntry>) -> Void) {
         let now = Date()
+        // If this timestamp never advances during a test, WidgetKit itself is
+        // never re-invoking the provider — a separate failure from whether the
+        // phone ever delivered fresh data in the first place.
+        WatchDiagnostics.record("timelineRequest")
         let snapshot = loadSnapshot()
         // The compact label is not a system .timer, so provide minute-by-minute
         // entries to keep it advancing even while the iPhone has no new data.
-        let entries = (0...60).map { offset in
+        // Span only 15 minutes (not 60): a complication pinned to the active face
+        // gets up to 4 background refresh opportunities per hour from watchOS, so
+        // asking WidgetKit to re-check this provider on that same ~15-minute
+        // cadence lets a delivery that already landed in the shared UserDefaults
+        // reach the display much sooner, instead of sitting unread for up to an
+        // hour behind a self-imposed .atEnd expiry that was tighter than nothing
+        // in the OS actually required.
+        let entries = (0...15).map { offset in
             ComplicationEntry(date: now.addingTimeInterval(TimeInterval(offset * 60)), snapshot: snapshot)
         }
         completion(Timeline(entries: entries, policy: .atEnd))

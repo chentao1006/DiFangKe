@@ -115,6 +115,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
 
     func activateSession() {
         guard WCSession.isSupported() else { return }
+        WatchDiagnostics.record("sessionActivate")
         WCSession.default.delegate = self
         WCSession.default.activate()
     }
@@ -140,7 +141,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
-        apply(session.receivedApplicationContext)
+        apply(session.receivedApplicationContext, source: "activationDidComplete")
     }
 
 #if os(iOS)
@@ -151,20 +152,23 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 #endif
 
-    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) { apply(applicationContext) }
+    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) { apply(applicationContext, source: "applicationContext") }
 
     /// `transferCurrentComplicationUserInfo` is the iPhone's high-priority path
     /// for new complication data. Unlike application context it can wake this app
     /// in the background, so persist and reload the WidgetKit timeline as soon as
     /// it is delivered.
-    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) { apply(userInfo) }
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) { apply(userInfo, source: "userInfo") }
 
     /// Fast path for when the watch is reachable: the phone sends the same payload via
     /// sendMessage so the complication updates immediately instead of waiting for the
     /// next background wake to pick up the queued application context.
-    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) { apply(message) }
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) { apply(message, source: "message") }
 
-    private func apply(_ context: [String: Any]) {
+    private func apply(_ context: [String: Any], source: String) {
+        // Record receipt unconditionally, before any decode attempt, so a payload
+        // that fails to decode still proves *something* arrived from the phone.
+        WatchDiagnostics.record("connectivityReceipt", detail: "\(source):\(context.keys.sorted().joined(separator: ","))")
         let requestedPickerID = context["activityPickerFootprintID"] as? String
         if let complicationData = context["complicationSnapshot"] as? Data {
             // This is intentionally decoded by the Widget extension, not by the
@@ -172,6 +176,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
             // delivery even when the full Watch snapshot contains route history.
             DispatchQueue.main.async {
                 UserDefaults(suiteName: self.complicationGroupID)?.set(complicationData, forKey: self.complicationSnapshotKey)
+                WatchDiagnostics.record("widgetReload", detail: source)
                 WidgetCenter.shared.reloadTimelines(ofKind: "DiFangKeWatchComplication")
                 WatchAppDelegate.completeConnectivityBackgroundTasks()
                 if let requestedPickerID {

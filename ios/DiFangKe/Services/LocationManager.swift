@@ -1419,6 +1419,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         guard currentLocationAccuracyMode == .automatic else { return }
         guard !isUsingAutomaticStationaryLowPower else { return }
         isUsingAutomaticStationaryLowPower = true
+        lastStationaryProbeTime = Date()
         applyPowerSavingLocationSettings()
         locationManager.stopUpdatingLocation()
         print("[LocationManager] 💤 Confirmed long stay; standard location updates paused.")
@@ -1602,24 +1603,23 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     private func requestStationaryDepartureProbeIfNeeded(now: Date, lastUpdateGap: TimeInterval) {
-        guard let stop = potentialStopStartLocation else { return }
-
-        let stationaryDuration = now.timeIntervalSince(stop.timestamp)
-        guard stationaryDuration > 10 * 60 else { return }
-
-        // Do not mix requestLocation() with the standard service. A confirmed
-        // long stay can stop standard updates completely and use the already
-        // armed low-power departure signals instead.
-        guard lastUpdateGap > 10 * 60 else { return }
-        guard now.timeIntervalSince(lastStationaryProbeTime) > 15 * 60 else { return }
+        guard isTracking, isAuthorized,
+              currentLocationAccuracyMode == .automatic,
+              isUsingAutomaticStationaryLowPower else { return }
+        guard now.timeIntervalSince(lastStationaryProbeTime)
+                >= AppConfig.shared.stationaryLocationSampleInterval else { return }
         lastStationaryProbeTime = now
-
-        let gapDescription = lastUpdateGap.isFinite ? "\(Int(lastUpdateGap))s" : "unknown duration"
-        print("[LocationManager] 🧭 No fresh location for \(gapDescription); checking departure monitors without changing GPS mode.")
         ensureSignificantMonitoringActive()
-        // Do not stop standard updates from this timer: a provisional footprint
-        // start alone is not stationary evidence. The clustered location window
-        // is the sole path into automatic low power.
+        // Standard updates are stopped in this state. A one-shot request ends
+        // automatically; the callback can still boost tracking on departure.
+        locationManager.requestLocation()
+        print("[LocationManager] 🧭 Requesting periodic stationary location sample.")
+    }
+
+    /// Also called when iOS grants a background refresh opportunity: timers
+    /// do not run while the application is suspended.
+    func sampleStationaryLocationIfNeeded() {
+        requestStationaryDepartureProbeIfNeeded(now: Date(), lastUpdateGap: .infinity)
     }
 
     private var shouldRunActiveLocationRecovery: Bool {
@@ -1892,6 +1892,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // tracking during the same launch. Keep an authorization upgrade
             // reflected without reapplying accuracy or restarting monitors.
             locationManager.allowsBackgroundLocationUpdates = isAlwaysAuthorized
+            sampleStationaryLocationIfNeeded()
             return
         }
 

@@ -233,22 +233,44 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         }
     }
 
+    /// Temporary instrumentation: records exactly which guard failed or which
+    /// transfer ran, so a failed background update can be diagnosed from the
+    /// phone's own Settings screen instead of guessed at from the Watch side.
+    private nonisolated static let diagKey = "diag_watchSync"
+    // nonisolated: touches only UserDefaults (thread-safe), not any actor-isolated
+    // state. This must be callable from sendMessage's errorHandler below, which
+    // WatchConnectivity invokes on its own background delivery queue, not the
+    // main actor — calling a @MainActor-isolated method from there would be an
+    // actor-isolation violation right at the moment we're trying to diagnose.
+    private nonisolated func recordDiag(_ text: String) {
+        var lines = (UserDefaults.standard.array(forKey: Self.diagKey) as? [String]) ?? []
+        lines.append("\(Date().formatted(date: .omitted, time: .standard)) \(text)")
+        if lines.count > 20 { lines.removeFirst(lines.count - 20) }
+        UserDefaults.standard.set(lines, forKey: Self.diagKey)
+    }
+
     func syncSnapshot() {
-        guard let context = modelContext,
-              WCSession.isSupported(),
-              WCSession.default.activationState == .activated,
-              WCSession.default.isWatchAppInstalled else { return }
+        let session = WCSession.default
+        guard modelContext != nil else { recordDiag("跳过: modelContext 为空"); return }
+        guard WCSession.isSupported() else { recordDiag("跳过: 设备不支持 WatchConnectivity"); return }
+        guard session.activationState == .activated else { recordDiag("跳过: session 未激活 (\(session.activationState.rawValue))"); return }
+        guard session.isWatchAppInstalled else { recordDiag("跳过: 手表 App 未安装"); return }
+        guard let context = modelContext else { return }
         let snapshot = makeSnapshot(context: context)
         let complicationSnapshot = WatchComplicationSnapshot(snapshot: snapshot)
-        guard let complicationData = try? JSONEncoder().encode(complicationSnapshot) else { return }
+        guard let complicationData = try? JSONEncoder().encode(complicationSnapshot) else {
+            recordDiag("跳过: complicationSnapshot 编码失败")
+            return
+        }
         let complicationPayload = ["complicationSnapshot": complicationData]
         // updateApplicationContext always runs so the watch has the latest state whenever
         // it next wakes (background refresh or manual open). sendMessage is a best-effort
         // fast path: it only succeeds while the watch app is reachable, but when it does,
         // the complication updates instantly instead of waiting for the next wake.
-        let session = WCSession.default
         if session.isReachable {
-            session.sendMessage(complicationPayload, replyHandler: nil, errorHandler: nil)
+            session.sendMessage(complicationPayload, replyHandler: nil) { error in
+                self.recordDiag("sendMessage 失败: \(error.localizedDescription)")
+            }
         }
 
         // The complete payload is for the Watch app UI only; it is never sent through
@@ -257,8 +279,13 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         if let fullData {
             // updateApplicationContext is a latest-value cache: it reaches the Watch
             // process the moment it is next running, but never wakes a suspended one.
-            try? session.updateApplicationContext(["snapshot": fullData])
+            do {
+                try session.updateApplicationContext(["snapshot": fullData])
+            } catch {
+                recordDiag("updateApplicationContext 失败: \(error.localizedDescription)")
+            }
         }
+        recordDiag("同步: reachable=\(session.isReachable) complicationEnabled=\(session.isComplicationEnabled) remainingTransfers=\(session.remainingComplicationUserInfoTransfers)")
 
         // This is the delivery-guaranteed fallback for the budgeted complication
         // channel below, and also the only channel that reliably wakes a suspended
@@ -280,6 +307,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             pendingBackgroundSnapshotTransfer = session.transferUserInfo(backgroundPayload)
             lastBackgroundSnapshotData = complicationData
             lastFullSnapshotData = fullData
+            recordDiag("已调用 transferUserInfo (保底通道)")
         }
 
         // Application context is deliberately a latest-value cache and will not
@@ -303,6 +331,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             // fallback for Smart Stack and any inactive complication placement.
             session.transferCurrentComplicationUserInfo(complicationPayload)
             lastComplicationFingerprint = fingerprint
+            recordDiag("已调用 transferCurrentComplicationUserInfo (高优先级通道)")
         }
     }
 

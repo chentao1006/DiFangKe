@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct WatchHomeView: View {
     @EnvironmentObject private var store: WatchStore
@@ -145,6 +146,7 @@ private struct CurrentPlaceView: View {
                 }
                 .tint(activityColor(store.currentActivity?.colorHex))
             }
+            DiagnosticsBlock()
         }
         .scenePadding()
         .sheet(isPresented: $showingActivityPicker) {
@@ -154,6 +156,47 @@ private struct CurrentPlaceView: View {
             guard footprintID == snapshot.currentFootprintID else { return }
             showingActivityPicker = true
         }
+    }
+}
+
+/// Temporary: surfaces each stage of the background-update chain (app launch →
+/// background task → WatchConnectivity receipt → widget timeline reload) so a
+/// stuck complication can be diagnosed just by opening the app, without a debugger.
+private struct DiagnosticsBlock: View {
+    @State private var now = Date()
+    private let timer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            row("启动", WatchDiagnostics.date("appLaunch"))
+            row("后台任务", WatchDiagnostics.date("backgroundTask"), WatchDiagnostics.detail("backgroundTask"))
+            row("收到手机数据", WatchDiagnostics.date("connectivityReceipt"), WatchDiagnostics.detail("connectivityReceipt"))
+            row("小组件请求", WatchDiagnostics.date("timelineRequest"))
+        }
+        .font(.system(size: 9, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .padding(.top, 4)
+        .onReceive(timer) { now = $0 }
+    }
+
+    @ViewBuilder
+    private func row(_ label: String, _ date: Date?, _ detail: String? = nil) -> some View {
+        HStack(spacing: 3) {
+            Text(label)
+            if let date {
+                Text(relative(date))
+                if let detail { Text(detail).lineLimit(1) }
+            } else {
+                Text("从未")
+            }
+        }
+    }
+
+    private func relative(_ date: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 { return "\(seconds)秒前" }
+        if seconds < 3600 { return "\(seconds / 60)分钟前" }
+        return "\(seconds / 3600)小时\((seconds % 3600) / 60)分前"
     }
 }
 
