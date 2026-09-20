@@ -3811,23 +3811,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             predicate: #Predicate { $0.startTime < tomorrowStart && $0.endTime > targetDate && $0.statusRaw == "active" },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]
         )
-        let todayTransports = (try? context.fetch(transportDescriptor)) ?? []
+        let fetchedTodayTransports = (try? context.fetch(transportDescriptor)) ?? []
+        // A legacy automatic record can be active while carrying a zero-length
+        // or otherwise non-moving route.  It must not become an AI "ride" fact
+        // merely because it has a transport type.
+        let todayTransports = fetchedTodayTransports.filter {
+            $0.manualTypeRaw != nil || PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan($0)
+        }
         
-        // Calculate points and mileage using TimelineBuilder logic
+        // Build the notification exclusively from persisted timeline facts.
+        // Raw samples and inferred straight lines between stays are not trips.
         Task.detached(priority: .background) {
-            let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: targetDate)
-            
-            let transportDistance = todayTransports.reduce(0.0) { $0 + ($1.distance > 0 ? $1.distance : 0) }
-            var inferredFootprintDistance: Double = 0
-            let fpCoords = validFootprints.sorted { $0.startTime < $1.startTime }
-            if fpCoords.count >= 2 {
-                for i in 0..<fpCoords.count - 1 {
-                    let loc1 = CLLocation(latitude: fpCoords[i].latitude, longitude: fpCoords[i].longitude)
-                    let loc2 = CLLocation(latitude: fpCoords[i+1].latitude, longitude: fpCoords[i+1].longitude)
-                    inferredFootprintDistance += loc1.distance(from: loc2)
-                }
-            }
-            let mileage = max(transportDistance, inferredFootprintDistance)
+            let mileage = todayTransports.reduce(0.0) { $0 + max(0, $1.distance) }
 
             let overviewStatus = await withCheckedContinuation { continuation in
                 Task { @MainActor in
@@ -3864,7 +3859,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             await MainActor.run {
                 NotificationManager.shared.refreshDailySummary(
                     placeCount: placeCount,
-                    pointsCount: rawPoints.count,
                     mileage: mileage,
                     transportCount: todayTransports.count,
                     overviewSummary: resolvedOverview

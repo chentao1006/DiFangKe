@@ -607,6 +607,12 @@ class OpenAIService {
         for id in tpIds {
             let tpDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == id })
             if let tp = (try? context.fetch(tpDescriptor))?.first {
+                // Callers may supply records from older builds.  Do not turn a
+                // zero-distance automatic record into a factual "电动车/骑行"
+                // statement. Manual transport remains a user-owned fact.
+                guard tp.manualTypeRaw != nil || PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan(tp) else {
+                    continue
+                }
                 transportEventCount += 1
                 let factLine = dailySummaryTransportLine(for: tp)
                 if !factLine.isEmpty {

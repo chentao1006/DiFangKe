@@ -134,12 +134,13 @@ class NotificationManager {
         return true
     }
 
-    func refreshDailySummary(placeCount: Int, pointsCount: Int, mileage: Double, transportCount: Int = 0, overviewSummary: String? = nil) {
+    func refreshDailySummary(placeCount: Int, mileage: Double, transportCount: Int = 0, overviewSummary: String? = nil) {
         let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }
         
-        // Only refresh if footprints or points exist
-        guard placeCount > 0 || pointsCount > 0 else { return }
+        // The daily summary is a view of persisted timeline facts. Raw location
+        // samples must not make an otherwise empty day eligible for a summary.
+        guard placeCount > 0 || transportCount > 0 else { return }
         
         let hour = UserDefaults.standard.integer(forKey: "dailyNotificationHour")
         let minute = UserDefaults.standard.integer(forKey: "dailyNotificationMinute")

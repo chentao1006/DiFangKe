@@ -3421,7 +3421,13 @@ class PersistentTimelineBuilder {
     /// Accumulated path length is not displacement: jitter and small loops
     /// must not bypass the configured minimum movement span. Synthetic map
     /// connectors do not establish movement when real observations exist.
-    private static func hasMinimumAutomaticTransportSpan(_ record: TransportRecord) -> Bool {
+    static func hasMinimumAutomaticTransportSpan(_ record: TransportRecord) -> Bool {
+        // An automatic record with no measurable route is not a trip.  This
+        // also catches legacy/partially-created records whose type was inferred
+        // before their route distance was populated.
+        guard record.distance >= AppConfig.shared.transportMinDistanceThreshold else {
+            return false
+        }
         guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData) else {
             return true // Insufficient evidence to remove a legacy record.
         }
@@ -3430,7 +3436,7 @@ class PersistentTimelineBuilder {
         }
         let observed = valid.filter { $0.isSyntheticPadding != true }
         let evidence = observed.isEmpty ? valid : observed
-        guard evidence.count >= 2 else { return true }
+        guard evidence.count >= 2 else { return false }
         let coordinates = evidence.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
         return TimelineBuilder.calculateMaxDiameter(coordinates) >= AppConfig.shared.transportMinDistanceThreshold
     }
