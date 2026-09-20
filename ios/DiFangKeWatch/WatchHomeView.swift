@@ -172,6 +172,8 @@ private struct DiagnosticsBlock: View {
             row("后台任务", WatchDiagnostics.date("backgroundTask"), WatchDiagnostics.detail("backgroundTask"))
             row("收到手机数据", WatchDiagnostics.date("connectivityReceipt"), WatchDiagnostics.detail("connectivityReceipt"))
             row("小组件请求", WatchDiagnostics.date("timelineRequest"))
+            row("小组件直读成功", WatchDiagnostics.date("widgetReadFromConnectivity"))
+            row("小组件直收推送", WatchDiagnostics.date("widgetDirectDelivery"), WatchDiagnostics.detail("widgetDirectDelivery"))
         }
         .font(.system(size: 9, design: .monospaced))
         .foregroundStyle(.secondary)

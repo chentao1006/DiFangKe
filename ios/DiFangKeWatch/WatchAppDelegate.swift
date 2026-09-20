@@ -1,4 +1,5 @@
 import WatchKit
+import WidgetKit
 
 /// Temporary instrumentation to find exactly where the background-update chain
 /// breaks: app launch → background task delivery → WatchConnectivity receipt →
@@ -66,6 +67,12 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
             // phone sent while we were suspended. Linger briefly so that delivery —
             // and the resulting complication reload — lands before the task ends.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                // Blanket safety net: any background execution window this rare
+                // is worth spending on asking WidgetKit to re-check its data
+                // source, even without a confirmed new delivery — the widget's
+                // own process reads WatchConnectivity independently now too, so
+                // this may have fresher data available than what's on screen.
+                WidgetCenter.shared.reloadTimelines(ofKind: "DiFangKeWatchComplication")
                 Self.scheduleNextBackgroundRefresh()
                 refreshTask.setTaskCompletedWithSnapshot(false)
             }
