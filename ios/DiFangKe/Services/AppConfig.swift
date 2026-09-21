@@ -454,6 +454,10 @@ class AppConfig {
         double(forKey: "TIMELINE_SIFT_DEBOUNCE_INTERVAL")
     }
 
+    var movingTimelineSiftInterval: Double {
+        double(forKey: "MOVING_TIMELINE_SIFT_INTERVAL")
+    }
+
     var liveMergeTaskDelay: Double {
         double(forKey: "LIVE_MERGE_TASK_DELAY")
     }

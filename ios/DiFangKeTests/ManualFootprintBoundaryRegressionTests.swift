@@ -6,6 +6,38 @@ import XCTest
 
 @MainActor
 final class ManualFootprintBoundaryRegressionTests: XCTestCase {
+    func testAutomaticTransportKeepsPreviousStayAsStartAcrossDormantGap() {
+        let departure = Date(timeIntervalSince1970: 1_726_660_000)
+        let stay = CodableCoordinate(
+            lat: 31.2304,
+            lon: 121.4737,
+            timestamp: departure.addingTimeInterval(-3600),
+            isSyntheticPadding: true
+        )
+        let firstDetectedMovement = CodableCoordinate(
+            lat: 31.2384,
+            lon: 121.4937,
+            timestamp: departure
+        )
+        let laterMovement = CodableCoordinate(
+            lat: 31.2400,
+            lon: 121.5000,
+            timestamp: departure.addingTimeInterval(60)
+        )
+
+        let anchored = TimelineBuilder.anchoringAutomaticTransportStart(
+            [firstDetectedMovement, laterMovement],
+            at: stay
+        )
+
+        XCTAssertEqual(anchored.count, 3)
+        XCTAssertEqual(anchored.first?.lat, stay.lat)
+        XCTAssertEqual(anchored.first?.lon, stay.lon)
+        XCTAssertEqual(anchored.first?.isSyntheticPadding, true)
+        XCTAssertEqual(anchored[1].lat, firstDetectedMovement.lat)
+        XCTAssertEqual(anchored[1].lon, firstDetectedMovement.lon)
+    }
+
     func testManualSplitAndCustomActivitiesSurviveRestartAndIncomingOverlap() throws {
         let container = try makeContainer()
         let context = ModelContext(container)

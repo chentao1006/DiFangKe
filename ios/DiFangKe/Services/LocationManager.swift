@@ -1404,25 +1404,34 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 停留时可以降低定位精度，但不能用 50m 过滤来等待“离开”的首个点。
         // 一旦红灯、路口减速等短暂低速被误判为停留，50m 会让恢复高频的
         // didUpdateLocations 回调来得太晚，进而在原始轨迹中制造数分钟空档。
-        // 手动“省电”模式仍保留 10m 的唤醒粒度；自动模式在确认
-        // 长时停留后会停止标准定位，改由其他系统唤醒通道检测离开。
+        // 手动“省电”模式保留 10m 粒度并允许系统暂停；自动模式在确认
+        // 长时停留后会覆盖暂停策略，继续用低精度标准定位监测离开。
         locationManager.distanceFilter = 10.0
         locationManager.activityType = .other
         locationManager.pausesLocationUpdatesAutomatically = true
     }
 
-    /// A confirmed long stay does not need the standard location service to
-    /// remain active all night. Significant-change, Visit, region-exit and
-    /// Core Motion monitoring remain armed and will call
-    /// `forceHighAccuracyBoost()` before continuous recording resumes.
+    /// Automatic mode must keep a cheap standard-location session alive while
+    /// stationary. Region/Visit/significant-change wakeups are intentionally
+    /// coarse and can arrive only after the user has travelled hundreds of
+    /// metres; they are backups, not a substitute for detecting departure.
+    private func applyAutomaticStationaryDepartureWatchSettings() {
+        applyPowerSavingLocationSettings()
+        locationManager.activityType = .fitness
+        locationManager.pausesLocationUpdatesAutomatically = false
+    }
+
+    /// A confirmed long stay uses low-cost standard updates to detect the first
+    /// real departure, while Significant-change, Visit, region-exit and Core
+    /// Motion remain armed as independent backups.
     private func enterAutomaticStationaryLowPower() {
         guard currentLocationAccuracyMode == .automatic else { return }
         guard !isUsingAutomaticStationaryLowPower else { return }
         isUsingAutomaticStationaryLowPower = true
         lastStationaryProbeTime = Date()
-        applyPowerSavingLocationSettings()
-        locationManager.stopUpdatingLocation()
-        print("[LocationManager] 💤 Confirmed long stay; standard location updates paused.")
+        applyAutomaticStationaryDepartureWatchSettings()
+        locationManager.startUpdatingLocation()
+        print("[LocationManager] 💤 Confirmed long stay; low-power departure watch active.")
     }
 
     /// A broad ten-minute cluster can use Motion confirmation. A tighter
@@ -1610,10 +1619,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 >= AppConfig.shared.stationaryLocationSampleInterval else { return }
         lastStationaryProbeTime = now
         ensureSignificantMonitoringActive()
-        // Standard updates are stopped in this state. A one-shot request ends
-        // automatically; the callback can still boost tracking on departure.
-        locationManager.requestLocation()
-        print("[LocationManager] 🧭 Requesting periodic stationary location sample.")
+        // Refresh the inexpensive continuous watch. Do not mix requestLocation
+        // with an active standard session: Core Location can cancel the one-shot
+        // request and report an error instead of improving departure coverage.
+        applyAutomaticStationaryDepartureWatchSettings()
+        locationManager.startUpdatingLocation()
+        print("[LocationManager] 🧭 Refreshing stationary departure watch.")
     }
 
     /// Also called when iOS grants a background refresh opportunity: timers
@@ -1640,13 +1651,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
     
-    private func triggerTimelineSiftDebounced() {
-        // Debounce to max once every 15 mins for location changes
-        if abs(lastLocationChangeSift.timeIntervalSinceNow) > 15 * 60 {
-            lastLocationChangeSift = Date()
-            Task {
-                await triggerTimelineSift()
-            }
+    private func triggerTimelineSiftDebounced(moving: Bool) {
+        let interval = moving
+            ? AppConfig.shared.movingTimelineSiftInterval
+            : AppConfig.shared.timelineSiftDebounceInterval
+        let now = Date()
+        guard now.timeIntervalSince(lastLocationChangeSift) >= interval else { return }
+        lastLocationChangeSift = now
+        Task {
+            await triggerTimelineSift()
         }
     }
 
@@ -2433,10 +2446,23 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             && location.horizontalAccuracy >= 0
             && location.horizontalAccuracy < AppConfig.shared.departureAccuracyThreshold
             && distanceFromStop > driftResistantDepartureDistance
+        // When Motion is unavailable or incorrectly remains stationary, the
+        // low-power standard session is the only prompt departure signal. Use
+        // speed plus accuracy-relative displacement so indoor jitter cannot
+        // promote a single noisy fix to a ten-minute high-accuracy session.
+        let hasLowPowerGPSDepartureEvidence = isUsingAutomaticStationaryLowPower
+            && isFreshLocation
+            && location.horizontalAccuracy >= 0
+            && location.horizontalAccuracy < AppConfig.shared.departureAccuracyThreshold
+            && location.speed > AppConfig.shared.stationaryDwellSpeed
+            && distanceFromStop > max(
+                AppConfig.shared.lowPowerStrictDwellDistance,
+                location.horizontalAccuracy * AppConfig.shared.departureDriftResistantRatio
+            )
         let isMovingByGPS = isFreshLocation
             && location.speed >= 0
             && location.speed > AppConfig.shared.stationaryDwellSpeed
-            && (motion != .stationary || hasStrongGPSDepartureEvidence)
+            && (motion != .stationary || hasStrongGPSDepartureEvidence || hasLowPowerGPSDepartureEvidence)
         updateUIMovementState(isMovingEvidence: (isMovingBySensor || isMovingByGPS), source: "didUpdateLocations")
         
         // 0. 智能节能：根据速度和停留状态动态调整定位参数
@@ -2505,7 +2531,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 : nil
             let shouldUseStationaryLowPower = anchor != nil
 
-            if isUsingAutomaticStationaryLowPower && (isMovingBySensor || hasStrongGPSDepartureEvidence) {
+            if isUsingAutomaticStationaryLowPower
+                && (isMovingBySensor || hasStrongGPSDepartureEvidence || hasLowPowerGPSDepartureEvidence) {
                 forceHighAccuracyBoost()
             } else if shouldUseStationaryLowPower {
                 stationaryLowPowerAnchor = anchor
@@ -2563,6 +2590,19 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // “更新”的时间戳，因而会把随后交付的一整批驾驶轨迹全部跳过。
         // CSV 的读取端本来就会按时间排序；迟到但相隔至少一个节流窗口的样本必须保存。
         let isDelayedBatchSample = rawTimestampDelta <= -rawLocationMinimumSaveInterval
+        let isRedundantConfirmedStationaryFix: Bool = {
+            guard !isDelayedBatchSample,
+                  isUsingAutomaticStationaryLowPower,
+                  !isMovingBySensor,
+                  !hasLowPowerGPSDepartureEvidence,
+                  let anchor = stationaryLowPowerAnchor,
+                  let saved = lastSavedRawLocation,
+                  Calendar.current.isDate(saved.timestamp, inSameDayAs: location.timestamp),
+                  location.timestamp.timeIntervalSince(saved.timestamp) < AppConfig.shared.rawStationaryHeartbeatInterval else {
+                return false
+            }
+            return location.distance(from: anchor) < AppConfig.shared.lowPowerStrictDwellDistance
+        }()
         let isRedundantStationaryFix: Bool = {
             guard !isDelayedBatchSample,
                   location.speed < AppConfig.shared.stationaryDwellSpeed,
@@ -2577,7 +2617,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             return distance < AppConfig.shared.rawStationaryExactDuplicateDistance
                 || (!isMovingBySensor && distance < AppConfig.shared.rawStationaryDuplicateDistance)
         }()
-        let shouldSaveRawLocation = !isRedundantStationaryFix && (lastRawLocationSaveTimestamp == .distantPast
+        let shouldSaveRawLocation = !isRedundantConfirmedStationaryFix
+            && !isRedundantStationaryFix && (lastRawLocationSaveTimestamp == .distantPast
             || rawTimestampDelta >= rawLocationMinimumSaveInterval
             || isDelayedBatchSample)
         if shouldSaveRawLocation {
@@ -2590,7 +2631,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             RawLocationStore.shared.saveLocation(location) { [weak self] in
                 // syncDay loads from RawLocationStore, so triggering it before this
                 // write completes misses exactly the newly received transition point.
-                self?.triggerTimelineSiftDebounced()
+                self?.triggerTimelineSiftDebounced(
+                    moving: isMovingBySensor || isMovingByGPS || hasLowPowerGPSDepartureEvidence
+                )
             }
             scheduleLiveFootprintMerge()
         }
@@ -2902,11 +2945,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
         let isTrackingEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
         guard isTracking, isTrackingEnabled, isAuthorized else { return }
-        if isUsingAutomaticStationaryLowPower || currentLocationAccuracyMode == .powerSaving {
-            // This pause is intentional. Significant-change, Visit, region and
-            // motion monitoring stay active and will wake continuous recording
-            // when departure evidence arrives.
-            print("[LocationManager] Location updates paused during a low-power stay.")
+        if currentLocationAccuracyMode == .powerSaving {
+            print("[LocationManager] Location updates paused in manual power-saving mode.")
+            return
+        }
+        if isUsingAutomaticStationaryLowPower {
+            // Automatic mode promises a continuous route. Coarse wake channels
+            // remain backups, so resume the inexpensive departure watch rather
+            // than waiting hundreds of metres for a region/significant event.
+            print("[LocationManager] Automatic departure watch paused; resuming it.")
+            applyAutomaticStationaryDepartureWatchSettings()
+            manager.startUpdatingLocation()
             return
         }
         // 电动车可能被 Core Motion 判为静止，恢复不能等待运动证据或 Timer。
@@ -2945,7 +2994,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         switch mode {
         case .automatic:
             if isUsingAutomaticStationaryLowPower {
-                applyPowerSavingLocationSettings()
+                applyAutomaticStationaryDepartureWatchSettings()
             } else {
                 applyContinuousLocationSettings(to: locationManager)
             }

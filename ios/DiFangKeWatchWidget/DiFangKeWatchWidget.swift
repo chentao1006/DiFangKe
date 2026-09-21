@@ -1,21 +1,5 @@
 import WidgetKit
 import SwiftUI
-import WatchConnectivity
-
-/// Mirrors the same-named helper in the Watch app target (WatchAppDelegate.swift) —
-/// this extension is a separate process and can't import that target's types.
-/// Temporary instrumentation to find where the background-update chain breaks.
-private enum WatchDiagnostics {
-    private static let groupID = "group.com.ct106.difangke"
-    private static var defaults: UserDefaults? { UserDefaults(suiteName: groupID) }
-
-    static func record(_ key: String, detail: String? = nil) {
-        defaults?.set(Date(), forKey: "diag_\(key)_at")
-        if let detail {
-            defaults?.set(detail, forKey: "diag_\(key)_detail")
-        }
-    }
-}
 
 private struct ComplicationActivity: Codable {
     let id: String
@@ -47,104 +31,6 @@ private struct ComplicationTimelineItem: Codable {
     let isTransport: Bool?
 }
 
-/// Experiment: this extension's process gets invoked by WidgetKit on its own
-/// ~15-minute cadence regardless of whether the main Watch app process ever
-/// gets a background task from the OS (confirmed by on-device diagnostics —
-/// the main app can go a full day with zero background wakes while this
-/// process keeps running on schedule). `receivedApplicationContext` is a
-/// property backed by the system's own synced cache, not a live message that
-/// requires an active delegate session to "arrive" — so it may already be
-/// fresh here even though this process never received a push itself. This
-/// tries to read that cache directly, decoding straight into the existing
-/// ComplicationSnapshot (its fields are a strict subset of the full
-/// WatchSnapshot the phone already sends via updateApplicationContext, so
-/// Codable's default "ignore extra keys" behavior makes this decode safely).
-/// If WCSession isn't usable from this process, or the cache is empty, this
-/// returns nil and the caller falls back to the existing UserDefaults path —
-/// this can only add a data source, never remove the one already working.
-private enum WidgetConnectivityReader {
-    private static let groupID = "group.com.ct106.difangke"
-    private static let snapshotKey = "watchComplicationSnapshot"
-
-    /// A second, independent way to catch fresh data: if this extension's
-    /// process happens to already be alive (WidgetKit keeps re-invoking it on
-    /// its own ~15-minute cadence) at the exact moment the phone pushes a
-    /// transferUserInfo/transferCurrentComplicationUserInfo/updateApplicationContext
-    /// delivery, this delegate receives it directly — no dependency on the
-    /// main Watch app process ever running. Whatever arrives here is written
-    /// straight into the same UserDefaults key the main app writes to, so
-    /// every other read path (this file's own UserDefaults fallback, and the
-    /// main app's own complication persistence) benefits from it too.
-    private final class ConnectivityDelegate: NSObject, WCSessionDelegate {
-        func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {}
-        #if os(iOS)
-        func sessionDidBecomeInactive(_ session: WCSession) {}
-        func sessionDidDeactivate(_ session: WCSession) {}
-        #endif
-
-        func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
-            WidgetConnectivityReader.persistIfDecodable(applicationContext, source: "context")
-        }
-        func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
-            WidgetConnectivityReader.persistIfDecodable(userInfo, source: "userInfo")
-        }
-        func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
-            WidgetConnectivityReader.persistIfDecodable(message, source: "message")
-        }
-    }
-    private static let delegate = ConnectivityDelegate()
-
-    static func loadSnapshot() -> ComplicationSnapshot? {
-        guard WCSession.isSupported() else { return nil }
-        let session = WCSession.default
-        // No activated-once flag: WidgetKit doesn't document that getTimeline/
-        // getSnapshot run serially, and a plain static Bool mutated from two
-        // concurrent calls would be a real data race. activate() is documented
-        // as safe to call repeatedly, so just always call it — cheaper than
-        // adding a lock for a call that's already a no-op once activated.
-        session.delegate = delegate
-        session.activate()
-        guard let data = session.receivedApplicationContext["snapshot"] as? Data,
-              let decoded = try? JSONDecoder().decode(ComplicationSnapshot.self, from: data) else { return nil }
-        // Feed this back into the shared cache too — same reasoning as the
-        // live-delivery delegate methods above: any source that works should
-        // strengthen every other source's fallback.
-        persist(data)
-        return decoded
-    }
-
-    /// Either payload key ("complicationSnapshot", the compact one, or
-    /// "snapshot", the full one) decodes into ComplicationSnapshot without
-    /// modification: its fields are an exact/subset match of both, and
-    /// Codable silently ignores JSON keys the struct doesn't declare.
-    fileprivate static func persistIfDecodable(_ context: [String: Any], source: String) {
-        for key in ["complicationSnapshot", "snapshot"] {
-            guard let data = context[key] as? Data,
-                  (try? JSONDecoder().decode(ComplicationSnapshot.self, from: data)) != nil else { continue }
-            persist(data)
-            WatchDiagnostics.record("widgetDirectDelivery", detail: "\(source):\(key)")
-            // Don't wait for the next ~15-minute self-scheduled getTimeline —
-            // this data is fresher right now than whatever's currently on screen.
-            WidgetCenter.shared.reloadTimelines(ofKind: "DiFangKeWatchComplication")
-        }
-    }
-
-    private static func persist(_ data: Data) {
-        UserDefaults(suiteName: groupID)?.set(data, forKey: snapshotKey)
-    }
-
-    /// Fire-and-forget nudge so every WidgetKit touchpoint (not just
-    /// getTimeline/getSnapshot) keeps this process's session activated —
-    /// widening the window it could catch a live delivery via the delegate
-    /// methods above, even on invocations that don't otherwise need data.
-    static func activateIfNeeded() {
-        guard WCSession.isSupported() else { return }
-        let session = WCSession.default
-        session.delegate = delegate
-        session.activate()
-    }
-}
-
 private struct ComplicationEntry: TimelineEntry {
     let date: Date
     let snapshot: ComplicationSnapshot?
@@ -155,8 +41,7 @@ private struct ComplicationProvider: TimelineProvider {
     private let snapshotKey = "watchComplicationSnapshot"
 
     func placeholder(in context: Context) -> ComplicationEntry {
-        WidgetConnectivityReader.activateIfNeeded()
-        return ComplicationEntry(date: .now, snapshot: nil)
+        ComplicationEntry(date: .now, snapshot: nil)
     }
 
     func getSnapshot(in context: Context, completion: @escaping (ComplicationEntry) -> Void) {
@@ -165,10 +50,6 @@ private struct ComplicationProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<ComplicationEntry>) -> Void) {
         let now = Date()
-        // If this timestamp never advances during a test, WidgetKit itself is
-        // never re-invoking the provider — a separate failure from whether the
-        // phone ever delivered fresh data in the first place.
-        WatchDiagnostics.record("timelineRequest")
         let snapshot = loadSnapshot()
         // The compact label is not a system .timer, so provide minute-by-minute
         // entries to keep it advancing even while the iPhone has no new data.
@@ -190,15 +71,6 @@ private struct ComplicationProvider: TimelineProvider {
     }
 
     private func loadSnapshot() -> ComplicationSnapshot? {
-        // Prefer reading WatchConnectivity's own synced cache directly from this
-        // process — see WidgetConnectivityReader's comment for why. Fall back to
-        // the UserDefaults copy the main app last wrote if that isn't available;
-        // this never regresses the existing behavior, only adds a fresher source
-        // for whenever the main app process hasn't run in a while but this one has.
-        if let fromConnectivity = WidgetConnectivityReader.loadSnapshot() {
-            WatchDiagnostics.record("widgetReadFromConnectivity")
-            return fromConnectivity
-        }
         let data = UserDefaults(suiteName: groupID)?.data(forKey: snapshotKey)
         return data.flatMap { try? JSONDecoder().decode(ComplicationSnapshot.self, from: $0) }
     }

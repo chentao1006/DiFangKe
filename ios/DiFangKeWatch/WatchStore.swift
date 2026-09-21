@@ -89,6 +89,24 @@ struct WatchSnapshot: Codable, Hashable {
     static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, currentTransportType: nil, currentTransportStartedAt: nil, todayFootprintCount: 0, todayDistance: 0, nextTrip: nil, activities: [], todayTimeline: [], recentDays: [], statistics: nil, futureTrips: [])
 }
 
+/// The compact payload the phone sends over the fast/high-priority channels
+/// (sendMessage, transferCurrentComplicationUserInfo) — see WatchSyncManager's
+/// WatchComplicationSnapshot on the phone side, which this mirrors field for
+/// field. It carries "current state" but not history/statistics/routes.
+private struct WatchCompactSnapshot: Codable {
+    let currentFootprintID: String?
+    let placeName: String
+    let address: String?
+    let startedAt: Date?
+    let isTracking: Bool
+    let currentActivityID: String?
+    let currentTransportType: String?
+    let currentTransportStartedAt: Date?
+    let todayFootprintCount: Int
+    let todayDistance: Double
+    let activities: [WatchActivityOption]
+}
+
 final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     /// The connectivity delegate must exist even when watchOS wakes the process
     /// for a complication transfer without constructing the SwiftUI scene.
@@ -115,7 +133,6 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
 
     func activateSession() {
         guard WCSession.isSupported() else { return }
-        WatchDiagnostics.record("sessionActivate")
         WCSession.default.delegate = self
         WCSession.default.activate()
     }
@@ -141,7 +158,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
-        apply(session.receivedApplicationContext, source: "activationDidComplete")
+        apply(session.receivedApplicationContext)
     }
 
 #if os(iOS)
@@ -152,33 +169,46 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 #endif
 
-    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) { apply(applicationContext, source: "applicationContext") }
+    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) { apply(applicationContext) }
 
     /// `transferCurrentComplicationUserInfo` is the iPhone's high-priority path
     /// for new complication data. Unlike application context it can wake this app
     /// in the background, so persist and reload the WidgetKit timeline as soon as
     /// it is delivered.
-    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) { apply(userInfo, source: "userInfo") }
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) { apply(userInfo) }
 
     /// Fast path for when the watch is reachable: the phone sends the same payload via
     /// sendMessage so the complication updates immediately instead of waiting for the
     /// next background wake to pick up the queued application context.
-    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) { apply(message, source: "message") }
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) { apply(message) }
 
-    private func apply(_ context: [String: Any], source: String) {
-        // Record receipt unconditionally, before any decode attempt, so a payload
-        // that fails to decode still proves *something* arrived from the phone.
-        WatchDiagnostics.record("connectivityReceipt", detail: "\(source):\(context.keys.sorted().joined(separator: ","))")
+    private func apply(_ context: [String: Any]) {
         let requestedPickerID = context["activityPickerFootprintID"] as? String
         if let complicationData = context["complicationSnapshot"] as? Data {
-            // This is intentionally decoded by the Widget extension, not by the
-            // Watch-home model. It stays small enough for reliable background
-            // delivery even when the full Watch snapshot contains route history.
+            // This compact payload is the primary source for the Widget
+            // extension (stays small enough for reliable background delivery
+            // even when the full Watch snapshot contains route history), but
+            // it also carries "current state" the app's own Current/Today
+            // screens show. sendMessage and transferCurrentComplicationUserInfo
+            // — the fastest, most frequent channels — send ONLY this payload,
+            // never the full "snapshot" key below. Previously that meant the
+            // complication (fed by this payload) could show newer state than
+            // the app's own live screens (fed only by the slower full-snapshot
+            // deliveries) — a real four-way inconsistency between the app's
+            // current view, its today timeline, the complication, and the
+            // phone. Merging the current-state fields here keeps the app's
+            // own UI in step with whatever the fastest channel just delivered;
+            // todayTimeline/recentDays/statistics are deliberately left as they
+            // were, since this compact payload doesn't carry the richer fields
+            // (title/icon/routes) those need — they still wait for a full sync.
+            let compact = try? JSONDecoder().decode(WatchCompactSnapshot.self, from: complicationData)
             DispatchQueue.main.async {
                 UserDefaults(suiteName: self.complicationGroupID)?.set(complicationData, forKey: self.complicationSnapshotKey)
-                WatchDiagnostics.record("widgetReload", detail: source)
                 WidgetCenter.shared.reloadTimelines(ofKind: "DiFangKeWatchComplication")
                 WatchAppDelegate.completeConnectivityBackgroundTasks()
+                if let compact {
+                    self.mergeCurrentState(compact)
+                }
                 if let requestedPickerID {
                     self.requestedActivityPickerFootprintID = requestedPickerID
                 }
@@ -205,5 +235,31 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         UserDefaults(suiteName: complicationGroupID)?.set(data, forKey: complicationSnapshotKey)
         WidgetCenter.shared.reloadTimelines(ofKind: "DiFangKeWatchComplication")
+    }
+
+    /// Updates only the "current state" fields from a compact delivery,
+    /// preserving whatever today's timeline/recent days/statistics already
+    /// were — the compact payload doesn't carry those, and overwriting them
+    /// with its absence would blank out the Today screen instead of just
+    /// leaving it exactly as current as it already was.
+    private func mergeCurrentState(_ compact: WatchCompactSnapshot) {
+        snapshot = WatchSnapshot(
+            currentFootprintID: compact.currentFootprintID,
+            placeName: compact.placeName,
+            address: compact.address,
+            startedAt: compact.startedAt,
+            isTracking: compact.isTracking,
+            currentActivityID: compact.currentActivityID,
+            currentTransportType: compact.currentTransportType,
+            currentTransportStartedAt: compact.currentTransportStartedAt,
+            todayFootprintCount: compact.todayFootprintCount,
+            todayDistance: compact.todayDistance,
+            nextTrip: snapshot.nextTrip,
+            activities: compact.activities,
+            todayTimeline: snapshot.todayTimeline,
+            recentDays: snapshot.recentDays,
+            statistics: snapshot.statistics,
+            futureTrips: snapshot.futureTrips
+        )
     }
 }

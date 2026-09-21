@@ -374,6 +374,9 @@
     <!-- 位置变化触发时间线重整的防抖间隔（秒） -->
     <key>TIMELINE_SIFT_DEBOUNCE_INTERVAL</key>
     <real>900</real>
+    <!-- 有可靠移动证据时更快生成交通；静止时仍沿用 15 分钟限流 -->
+    <key>MOVING_TIMELINE_SIFT_INTERVAL</key>
+    <real>120</real>
 
     <!-- 实时足迹合并任务的延迟（秒） -->
     <key>LIVE_MERGE_TASK_DELAY</key>

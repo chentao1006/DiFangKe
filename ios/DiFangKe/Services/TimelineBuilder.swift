@@ -1331,6 +1331,19 @@ class TimelineBuilder {
         let threshold = min(AppConfig.shared.stayDistanceThreshold, 120.0)
         return pathLocation.distance(from: footprintLocation) <= threshold
     }
+
+    /// An automatic trip starts from the previous confirmed stay even when
+    /// low-power tracking does not deliver another fix until the user has
+    /// already travelled far away. Keep the first observed fix as route
+    /// evidence and prepend the stay as synthetic (dashed) geometry.
+    static func anchoringAutomaticTransportStart(
+        _ points: [CodableCoordinate],
+        at footprint: CodableCoordinate
+    ) -> [CodableCoordinate] {
+        guard let first = points.first else { return [footprint] }
+        guard first.lat != footprint.lat || first.lon != footprint.lon else { return points }
+        return [footprint] + points
+    }
 }
 
 struct CodableCoordinate: Codable {
@@ -2360,7 +2373,9 @@ class PersistentTimelineBuilder {
                     guard !observedTransportPoints.isEmpty else { continue }
                     var routePoints = observedTransportPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) }
                     let startCoord = CodableCoordinate(lat: current.endLoc.latitude, lon: current.endLoc.longitude, timestamp: current.end, isSyntheticPadding: true)
-                    if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.first, footprint: startCoord) {
+                    if !current.includesTransport {
+                        routePoints = TimelineBuilder.anchoringAutomaticTransportStart(routePoints, at: startCoord)
+                    } else if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.first, footprint: startCoord) {
                         routePoints.insert(startCoord, at: 0)
                     }
                     let endCoord = CodableCoordinate(lat: next.startLoc.latitude, lon: next.startLoc.longitude, timestamp: next.start, isSyntheticPadding: true)
@@ -2493,9 +2508,11 @@ class PersistentTimelineBuilder {
                 let crossesTransport = tps.contains {
                     $0 !== tp && $0.startTime < tp.startTime && $0.endTime > prevFp.endTime
                 }
-                if gap >= 0 && gap < AppConfig.shared.transportAlignmentThreshold && !crossesTransport {
-                    // 核心修复：只更新起点的位置名称和坐标，不修改 startTime
-                    // 保持 startTime 为探测出移动后的第一个轨迹点的时间
+                if gap >= 0 && !crossesTransport {
+                    // A long low-power silence is exactly when the first
+                    // observed moving fix can be far from the real origin.
+                    // Keep the inferred trip time, but anchor its geometry and
+                    // location name to the nearest preceding stay.
                     let locName = getSimplifiedLocationName(for: prevFp, allPlaces: allPlaces)
                     if !locName.isEmpty && locName != "某地" {
                         tp.startLocation = locName
@@ -2541,10 +2558,7 @@ class PersistentTimelineBuilder {
             
             if let prevFp = alignedPreviousFootprint {
                 let fpCoord = CodableCoordinate(lat: prevFp.latitude, lon: prevFp.longitude, timestamp: prevFp.endTime, isSyntheticPadding: true)
-                if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: decodedPoints.first, footprint: fpCoord) &&
-                    (decodedPoints.first?.lat != fpCoord.lat || decodedPoints.first?.lon != fpCoord.lon) {
-                    decodedPoints.insert(fpCoord, at: 0)
-                }
+                decodedPoints = TimelineBuilder.anchoringAutomaticTransportStart(decodedPoints, at: fpCoord)
             }
             
             if let nextFp = alignedNextFootprint {
@@ -3160,7 +3174,8 @@ class PersistentTimelineBuilder {
                             timestamp: last.endTime,
                             isSyntheticPadding: true
                         )
-                        if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: endpoint, footprint: footprintCoord) {
+                        let anchoredStart = TimelineBuilder.anchoringAutomaticTransportStart([endpoint], at: footprintCoord)
+                        if anchoredStart.count > 1 {
                             let footprintLocation = CLLocation(
                                 coordinate: CLLocationCoordinate2D(latitude: last.latitude, longitude: last.longitude),
                                 altitude: 0,
