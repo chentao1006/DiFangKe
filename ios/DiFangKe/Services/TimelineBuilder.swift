@@ -1729,6 +1729,32 @@ class PersistentTimelineBuilder {
             return (valid, drift)
         }.value
 
+        // An earlier sync may already have saved the entire outbound trip,
+        // school stop and return as one automatic transport. Rebuild only
+        // those unedited records that contain a confirmed short stop before
+        // a long location blackout; otherwise gap filling never sees them.
+        var rebuiltDormantGapTrip = false
+        let deletedForRepair = fetchDeletedTransportRanges(from: startOfDay, to: endOfDay, in: context)
+        for record in allTps where record.manualTypeRaw == nil {
+            let evidence = allRawPoints.filter {
+                $0.timestamp >= record.startTime && $0.timestamp <= record.endTime
+            }
+            guard dormantGapStay(in: evidence) != nil,
+                  !overlapsDeletedTransportOverride(start: record.startTime, end: record.endTime,
+                                                    deletedRanges: deletedForRepair) else { continue }
+            context.delete(record)
+            await processPoints(points: evidence, date: date, context: context,
+                                preferredAuto: preferredAuto, preferredCycling: preferredCycling,
+                                preferredTransport: preferredRoadTransport,
+                                deletedTransportRanges: deletedForRepair)
+            rebuiltDormantGapTrip = true
+        }
+        if rebuiltDormantGapTrip {
+            try? context.save()
+            allFps = (try? context.fetch(fpDesc)) ?? []
+            allTps = (try? context.fetch(tpDesc)) ?? []
+        }
+
         if await repairAutomaticTransportStartsAfterDormantGap(
             allTps,
             rawPoints: allRawPoints,
@@ -2394,6 +2420,14 @@ class PersistentTimelineBuilder {
                     pathDist = straightDist
                     pts = [CodableCoordinate(lat: current.endLoc.latitude, lon: current.endLoc.longitude, timestamp: current.end, isSyntheticPadding: true),
                            CodableCoordinate(lat: next.startLoc.latitude, lon: next.startLoc.longitude, timestamp: next.start, isSyntheticPadding: true)]
+                    // With no observed route, the whole footprint-to-footprint
+                    // gap is not evidence of travel. Bias the uncertain start
+                    // toward arrival using a conservative minimum travel pace.
+                    let estimatedTravelTime = straightDist / max(
+                        AppConfig.shared.transportUnobservedMinSpeed,
+                        AppConfig.shared.transportDepartureMinimumSpeed
+                    )
+                    actualStartTime = max(gapStart, gapEnd.addingTimeInterval(-estimatedTravelTime))
                 }
 
 
@@ -2938,6 +2972,59 @@ class PersistentTimelineBuilder {
         }
     }
     
+    struct DormantGapStay {
+        let arrivalIndex: Int
+        let resumeIndex: Int
+        let start: Date
+        let end: Date
+    }
+
+    /// Only infer the minimum five-minute stay when both journeys and a
+    /// stationary cluster are visible. Never turn a bare missing-data gap into
+    /// a stay or stretch the stay beyond five unobserved minutes.
+    static func dormantGapStay(in points: [CLLocation]) -> DormantGapStay? {
+        guard points.count >= 5 else { return nil }
+        let config = AppConfig.shared
+        for resume in 2..<points.count - 1 {
+            let last = points[resume - 1]
+            let next = points[resume]
+            let silence = next.timestamp.timeIntervalSince(last.timestamp)
+            guard silence >= config.transportGapBreakThreshold,
+                  silence <= config.dormantStayMaxGapDuration,
+                  last.horizontalAccuracy > 0,
+                  last.horizontalAccuracy <= config.dormantStayMaxAccuracy,
+                  next.distance(from: last) >= config.transportMinDistanceThreshold else { continue }
+
+            var arrival = resume - 1
+            var scan = arrival - 1
+            var outliers = 0
+            while scan >= 0,
+                  last.timestamp.timeIntervalSince(points[scan].timestamp) <= config.stayDurationThreshold {
+                let point = points[scan]
+                if point.horizontalAccuracy > 0,
+                   point.horizontalAccuracy <= config.dormantStayMaxAccuracy,
+                   point.distance(from: last) < config.dormantStayClusterRadius {
+                    arrival = scan
+                } else {
+                    outliers += 1
+                    if outliers > config.dormantStayMaxOutliers { break }
+                }
+                scan -= 1
+            }
+            let observed = last.timestamp.timeIntervalSince(points[arrival].timestamp)
+            guard observed >= config.dormantStayMinObservedDuration, arrival > 0,
+                  points[..<arrival].contains(where: {
+                      $0.distance(from: last) >= config.transportMinDistanceThreshold
+                  }) else { continue }
+            let end = last.timestamp.addingTimeInterval(config.stayDurationThreshold)
+            guard end < next.timestamp,
+                  end.timeIntervalSince(points[arrival].timestamp) >= config.stayDurationThreshold else { continue }
+            return DormantGapStay(arrivalIndex: arrival, resumeIndex: resume,
+                                  start: points[arrival].timestamp, end: end)
+        }
+        return nil
+    }
+
     @MainActor
     private static func processPoints(
         points: [CLLocation],
@@ -2946,14 +3033,53 @@ class PersistentTimelineBuilder {
         preferredAuto: TransportType = .car,
         preferredCycling: TransportType = .bicycle,
         preferredTransport: TransportType? = nil,
-        deletedTransportRanges: [(start: Date, end: Date)] = []
+        deletedTransportRanges: [(start: Date, end: Date)] = [],
+        precedingFootprint: Footprint? = nil,
+        initialDepartureTime: Date? = nil
     ) async {
         guard points.count >= 2 else { return }
+
+        // A short, well-observed stop followed by a long GPS blackout is not
+        // one continuous trip. The blackout itself is not a measured route.
+        if let stop = dormantGapStay(in: points) {
+            await processPoints(points: Array(points[...stop.arrivalIndex]), date: date,
+                                context: context, preferredAuto: preferredAuto,
+                                preferredCycling: preferredCycling, preferredTransport: preferredTransport,
+                                deletedTransportRanges: deletedTransportRanges)
+
+            let observed = Array(points[stop.arrivalIndex..<stop.resumeIndex])
+            let coordinate = FootprintProcessor.shared.calculateCenter(observed)
+            let footprint = Footprint(
+                date: Calendar.current.startOfDay(for: stop.start),
+                startTime: stop.start, endTime: stop.end,
+                footprintLocations: observed.map(\.coordinate),
+                locationHash: "\(coordinate.latitude),\(coordinate.longitude)",
+                duration: stop.end.timeIntervalSince(stop.start), status: .confirmed
+            )
+            let places = (try? context.fetch(FetchDescriptor<Place>())) ?? []
+            if let place = TimelineBuilder.getPlaceForCoordinate(
+                coordinate, allPlaces: places.map { TimelineBuilder.convertToPlaceLite($0) }
+            ) {
+                footprint.placeID = place.placeID
+                footprint.address = place.name
+            }
+            let available = Footprint.automaticStayIntervals(start: stop.start, end: stop.end, context: context)
+            let ownsInterval = available.count == 1 && available.first?.start == stop.start && available.first?.end == stop.end
+            if ownsInterval { context.insert(footprint) }
+
+            await processPoints(points: Array(points[stop.resumeIndex...]), date: date,
+                                context: context, preferredAuto: preferredAuto,
+                                preferredCycling: preferredCycling, preferredTransport: preferredTransport,
+                                deletedTransportRanges: deletedTransportRanges,
+                                precedingFootprint: ownsInterval ? footprint : nil,
+                                initialDepartureTime: stop.end)
+            return
+        }
         
         let startOfDay = Calendar.current.startOfDay(for: date)
         let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
         
-        var lastFp: Footprint? = nil
+        var lastFp: Footprint? = precedingFootprint
         var i = 0
         while i < points.count {
             // 1. 尝试寻找从 i 开始的一个“停留点簇”
@@ -3129,7 +3255,8 @@ class PersistentTimelineBuilder {
                 let transportObservation = transportObservationAfterDormantGap(transportPoints)
                 transportPoints = transportObservation.points
                 if transportPoints.count >= 2 {
-                    let tStart = transportObservation.inferredStartTime
+                    let tStart = i == 0 ? (initialDepartureTime ?? transportObservation.inferredStartTime)
+                        : transportObservation.inferredStartTime
                     let tEnd = transportPoints.last!.timestamp
                     if overlapsDeletedTransportOverride(start: tStart, end: tEnd, deletedRanges: deletedTransportRanges) {
                         i = k
@@ -3527,12 +3654,7 @@ class PersistentTimelineBuilder {
     static func automaticTransportStart(
         _ record: TransportRecord, proposedStart: Date, trustedStart: Date
     ) -> Date {
-        let locations = observedRoutePoints(record).compactMap { point -> CLLocation? in
-            guard let timestamp = point.timestamp else { return nil }
-            return CLLocation(coordinate: CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon),
-                              altitude: 0, horizontalAccuracy: 0, verticalAccuracy: 0,
-                              timestamp: timestamp)
-        }
+        let locations = transportRouteEvidence(record)
         let observation = transportObservationAfterDormantGap(locations)
         if observation.points.count < locations.count {
             return max(proposedStart, observation.inferredStartTime)
@@ -3540,12 +3662,39 @@ class PersistentTimelineBuilder {
         // A corrected candidate/keeper must actually start at this route's
         // first sample (with bounded inference), not at a later route fragment.
         if let first = locations.first,
-           first.timestamp.timeIntervalSince(proposedStart) > AppConfig.shared.transportGapBreakThreshold,
-           trustedStart <= first.timestamp,
-           first.timestamp.timeIntervalSince(trustedStart) <= AppConfig.shared.transportDepartureMaximumBackfillDuration {
-            return max(proposedStart, trustedStart)
+           first.timestamp.timeIntervalSince(proposedStart) > AppConfig.shared.transportDepartureMaximumBackfillDuration {
+            if trustedStart <= first.timestamp,
+               first.timestamp.timeIntervalSince(trustedStart) <= AppConfig.shared.transportDepartureMaximumBackfillDuration {
+                return max(proposedStart, trustedStart)
+            }
+            // No stationary anchor or nearby trusted candidate survives in
+            // this route. An old merged start cannot be treated as evidence.
+            return first.timestamp
         }
         return proposedStart
+    }
+
+    /// Include a preceding stay only as departure-time evidence. It remains
+    /// synthetic geometry and never counts as a measured moving route point.
+    private static func transportRouteEvidence(_ record: TransportRecord) -> [CLLocation] {
+        let decoded = (try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData)) ?? []
+        let observed = observedRoutePoints(record)
+        var evidence = observed.compactMap { point -> CLLocation? in
+            guard let timestamp = point.timestamp else { return nil }
+            return CLLocation(coordinate: CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon),
+                              altitude: 0, horizontalAccuracy: 0, verticalAccuracy: 0,
+                              timestamp: timestamp)
+        }
+        if let first = evidence.first,
+           let anchor = decoded.filter({ $0.isSyntheticPadding == true && $0.timestamp != nil })
+            .min(by: { $0.timestamp! < $1.timestamp! }),
+           let timestamp = anchor.timestamp, timestamp < first.timestamp,
+           CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: anchor.lat, longitude: anchor.lon)) {
+            evidence.insert(CLLocation(coordinate: CLLocationCoordinate2D(latitude: anchor.lat, longitude: anchor.lon),
+                                       altitude: 0, horizontalAccuracy: 0, verticalAccuracy: 0,
+                                       timestamp: timestamp), at: 0)
+        }
+        return evidence
     }
 
     private static func observedRoutePoints(_ record: TransportRecord) -> [CodableCoordinate] {
@@ -3780,13 +3929,19 @@ class PersistentTimelineBuilder {
                 ? TimelineBuilder.calculateDistance(speedSamples) / sampleDuration
                 : 0
             let reportedSpeed = speedSamples.map(\.speed).filter { $0 >= 0 }.max() ?? 0
-            let departureSpeed = max(
-                max(calculatedSpeed, reportedSpeed),
-                AppConfig.shared.transportDepartureMinimumSpeed
-            )
-            let distanceAtDetection = movementPoints[0].distance(from: ordered[index - 1])
+            let measuredSpeed = max(calculatedSpeed, reportedSpeed)
+            // A missing or unreliable speed is not evidence for a five-minute
+            // backfill. In that case the first moving fix is the safe start.
+            guard measuredSpeed >= AppConfig.shared.transportDepartureMinimumSpeed else {
+                return TransportObservation(points: movementPoints, inferredStartTime: detectedMovementTime)
+            }
+            let departureSpeed = measuredSpeed
+            let locationUncertainty = max(0, movementPoints[0].horizontalAccuracy)
+                + max(0, ordered[index - 1].horizontalAccuracy)
+            let distanceAtDetection = max(0,
+                movementPoints[0].distance(from: ordered[index - 1]) - locationUncertainty)
             let backfillDuration = min(
-                distanceAtDetection / departureSpeed,
+                distanceAtDetection / departureSpeed * AppConfig.shared.transportDepartureBackfillFraction,
                 AppConfig.shared.transportDepartureMaximumBackfillDuration
             )
             let inferredStart = max(
@@ -3816,28 +3971,30 @@ class PersistentTimelineBuilder {
                 .filter { $0.isSyntheticPadding != true && $0.timestamp != nil }
                 .sorted { $0.timestamp! < $1.timestamp! }
             guard observed.count >= 2 else { continue }
-            let locations = observed.compactMap { point -> CLLocation? in
-                guard let timestamp = point.timestamp else { return nil }
-                return CLLocation(
-                    coordinate: CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon),
-                    altitude: 0,
-                    horizontalAccuracy: 0,
-                    verticalAccuracy: 0,
-                    timestamp: timestamp
-                )
-            }
+            let locations = transportRouteEvidence(record)
             // Prefer original samples: a replaced route can have discarded
             // the stationary heartbeat needed to estimate wakeup departure.
             let original = rawPoints.filter {
                 $0.timestamp >= record.startTime && $0.timestamp <= record.endTime
             }
-            let evidence = original.count >= 2 ? original : locations
+            var evidence = original.count >= 2 ? original : locations
+            if let anchor = locations.first, let first = evidence.first,
+               anchor.timestamp < first.timestamp {
+                evidence.insert(anchor, at: 0)
+            }
             let observation = transportObservationAfterDormantGap(evidence)
             let repairedStart: Date
             if observation.points.count < evidence.count {
                 repairedStart = observation.inferredStartTime
             } else {
-                continue
+                if let firstRaw = original.first,
+                   firstRaw.timestamp.timeIntervalSince(record.startTime)
+                    <= AppConfig.shared.transportDepartureMaximumBackfillDuration {
+                    continue
+                }
+                repairedStart = automaticTransportStart(
+                    record, proposedStart: record.startTime, trustedStart: record.startTime
+                )
             }
             guard repairedStart > record.startTime, repairedStart < record.endTime else { continue }
 

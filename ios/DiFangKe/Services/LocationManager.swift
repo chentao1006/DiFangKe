@@ -1023,6 +1023,17 @@ final class FootprintProcessor {
     func finalizeCurrentStay(queue: inout [CLLocation]) -> CandidateFootprint? {
         return detectStayPoint(in: queue)
     }
+
+    /// A confirmed low-power stay may receive no departure fix for many
+    /// minutes. Persist the observed stay before the location stream goes
+    /// quiet; never count the unobserved interval as stationary evidence.
+    func confirmedStationaryCandidate(in points: [CLLocation], near anchor: CLLocation) -> CandidateFootprint? {
+        let clustered = points.filter {
+            $0.horizontalAccuracy > 0 && $0.horizontalAccuracy < AppConfig.shared.maxGPSAccuracyFilter
+                && $0.distance(from: anchor) < AppConfig.shared.stayDistanceThreshold
+        }.sorted { $0.timestamp < $1.timestamp }
+        return detectStayPoint(in: clustered)
+    }
 }
 
 #if !WIDGET_EXTENSION
@@ -1417,8 +1428,23 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// metres; they are backups, not a substitute for detecting departure.
     private func applyAutomaticStationaryDepartureWatchSettings() {
         applyPowerSavingLocationSettings()
+        // Hundred-metre accuracy lets iOS defer the first departure fix until
+        // the user is already several blocks away. Keep this cheaper than
+        // moving-mode Best, but precise enough to see the first street.
+        locationManager.desiredAccuracy = AppConfig.shared.automaticStationaryWatchAccuracy
+        locationManager.distanceFilter = AppConfig.shared.automaticStationaryWatchDistanceFilter
         locationManager.activityType = .fitness
         locationManager.pausesLocationUpdatesAutomatically = false
+    }
+
+    static func hasPromptAutomaticDepartureEvidence(_ fix: CLLocation, from anchor: CLLocation) -> Bool {
+        fix.horizontalAccuracy > 0
+            && fix.horizontalAccuracy <= AppConfig.shared.lowPowerDepartureAccuracy
+            && fix.speed >= AppConfig.shared.lowPowerDepartureSpeed
+            && fix.distance(from: anchor) > max(
+                AppConfig.shared.lowPowerDepartureDistanceFloor,
+                fix.horizontalAccuracy * AppConfig.shared.lowPowerDepartureAccuracyRatio
+            )
     }
 
     /// A confirmed long stay uses low-cost standard updates to detect the first
@@ -1431,6 +1457,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         lastStationaryProbeTime = Date()
         applyAutomaticStationaryDepartureWatchSettings()
         locationManager.startUpdatingLocation()
+        if let anchor = stationaryLowPowerAnchor,
+           let candidate = footprintProcessor.confirmedStationaryCandidate(
+                in: stationaryLocationWindow, near: anchor
+           ) {
+            let ongoingStop = potentialStopStartLocation
+            handleNewCandidateFootprint(candidate)
+            // Saving a finished snapshot must not turn an ongoing stay into
+            // a new stay starting at its last observed point.
+            potentialStopStartLocation = ongoingStop
+            savePotentialStop()
+        }
         print("[LocationManager] 💤 Confirmed long stay; low-power departure watch active.")
     }
 
@@ -2450,7 +2487,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // low-power standard session is the only prompt departure signal. Use
         // speed plus accuracy-relative displacement so indoor jitter cannot
         // promote a single noisy fix to a ten-minute high-accuracy session.
-        let hasLowPowerGPSDepartureEvidence = isUsingAutomaticStationaryLowPower
+        let hasPromptLowPowerDepartureEvidence = isUsingAutomaticStationaryLowPower
+            && isFreshLocation
+            && (stationaryLowPowerAnchor ?? potentialStopStartLocation).map {
+                Self.hasPromptAutomaticDepartureEvidence(location, from: $0)
+            } == true
+        let hasLowPowerGPSDepartureEvidence = hasPromptLowPowerDepartureEvidence
+            || (isUsingAutomaticStationaryLowPower
             && isFreshLocation
             && location.horizontalAccuracy >= 0
             && location.horizontalAccuracy < AppConfig.shared.departureAccuracyThreshold
@@ -2458,7 +2501,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             && distanceFromStop > max(
                 AppConfig.shared.lowPowerStrictDwellDistance,
                 location.horizontalAccuracy * AppConfig.shared.departureDriftResistantRatio
-            )
+            ))
         let isMovingByGPS = isFreshLocation
             && location.speed >= 0
             && location.speed > AppConfig.shared.stationaryDwellSpeed
@@ -2595,6 +2638,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                   isUsingAutomaticStationaryLowPower,
                   !isMovingBySensor,
                   !hasLowPowerGPSDepartureEvidence,
+                  location.speed < AppConfig.shared.stationaryDwellSpeed,
                   let anchor = stationaryLowPowerAnchor,
                   let saved = lastSavedRawLocation,
                   Calendar.current.isDate(saved.timestamp, inSameDayAs: location.timestamp),
@@ -2620,7 +2664,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let shouldSaveRawLocation = !isRedundantConfirmedStationaryFix
             && !isRedundantStationaryFix && (lastRawLocationSaveTimestamp == .distantPast
             || rawTimestampDelta >= rawLocationMinimumSaveInterval
-            || isDelayedBatchSample)
+            || isDelayedBatchSample
+            || hasPromptLowPowerDepartureEvidence)
         if shouldSaveRawLocation {
             // 保持最新时间戳作为前向节流的水位线，避免一个迟到样本倒退水位后，
             // 让后续实时回调全部绕过五秒节流。

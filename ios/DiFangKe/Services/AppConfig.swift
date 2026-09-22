@@ -252,6 +252,12 @@ class AppConfig {
         double(forKey: "TRANSPORT_GAP_BREAK_THRESHOLD")
     }
 
+    var dormantStayMaxGapDuration: Double { double(forKey: "DORMANT_STAY_MAX_GAP_DURATION") }
+    var dormantStayMinObservedDuration: Double { double(forKey: "DORMANT_STAY_MIN_OBSERVED_DURATION") }
+    var dormantStayClusterRadius: Double { double(forKey: "DORMANT_STAY_CLUSTER_RADIUS") }
+    var dormantStayMaxAccuracy: Double { double(forKey: "DORMANT_STAY_MAX_ACCURACY") }
+    var dormantStayMaxOutliers: Int { int(forKey: "DORMANT_STAY_MAX_OUTLIERS") }
+
     var transportDepartureSpeedSampleDuration: Double {
         double(forKey: "TRANSPORT_DEPARTURE_SPEED_SAMPLE_DURATION")
     }
@@ -262,6 +268,14 @@ class AppConfig {
 
     var transportDepartureMaximumBackfillDuration: Double {
         double(forKey: "TRANSPORT_DEPARTURE_MAXIMUM_BACKFILL_DURATION")
+    }
+
+    var transportDepartureBackfillFraction: Double {
+        double(forKey: "TRANSPORT_DEPARTURE_BACKFILL_FRACTION")
+    }
+
+    var transportUnobservedMinSpeed: Double {
+        double(forKey: "TRANSPORT_UNOBSERVED_MIN_SPEED")
     }
 
     var driftRatioThreshold: Double {
@@ -369,6 +383,13 @@ class AppConfig {
     var lowPowerClusterFraction: Double {
         double(forKey: "LOW_POWER_CLUSTER_FRACTION")
     }
+
+    var automaticStationaryWatchAccuracy: Double { double(forKey: "AUTOMATIC_STATIONARY_WATCH_ACCURACY") }
+    var automaticStationaryWatchDistanceFilter: Double { double(forKey: "AUTOMATIC_STATIONARY_WATCH_DISTANCE_FILTER") }
+    var lowPowerDepartureSpeed: Double { double(forKey: "LOW_POWER_DEPARTURE_SPEED") }
+    var lowPowerDepartureAccuracy: Double { double(forKey: "LOW_POWER_DEPARTURE_ACCURACY") }
+    var lowPowerDepartureDistanceFloor: Double { double(forKey: "LOW_POWER_DEPARTURE_DISTANCE_FLOOR") }
+    var lowPowerDepartureAccuracyRatio: Double { double(forKey: "LOW_POWER_DEPARTURE_ACCURACY_RATIO") }
 
     var stationaryLocationSampleInterval: Double {
         double(forKey: "STATIONARY_LOCATION_SAMPLE_INTERVAL")

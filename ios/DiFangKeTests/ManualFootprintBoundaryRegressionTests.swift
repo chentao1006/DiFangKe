@@ -6,6 +6,96 @@ import XCTest
 
 @MainActor
 final class ManualFootprintBoundaryRegressionTests: XCTestCase {
+    func testAutomaticDepartureWatchBoostsOnFirstAccurateMovingFix() {
+        let now = Date()
+        let anchor = CLLocation(latitude: 31.2304, longitude: 121.4737)
+        func fix(latitude: Double, speed: CLLocationSpeed) -> CLLocation {
+            CLLocation(coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: 121.4737),
+                       altitude: 0, horizontalAccuracy: 15, verticalAccuracy: 15,
+                       course: -1, speed: speed, timestamp: now)
+        }
+
+        XCTAssertTrue(LocationManager.hasPromptAutomaticDepartureEvidence(
+            fix(latitude: 31.23075, speed: 3), from: anchor
+        ))
+        XCTAssertFalse(LocationManager.hasPromptAutomaticDepartureEvidence(
+            fix(latitude: 31.23048, speed: 3), from: anchor
+        ))
+        XCTAssertFalse(LocationManager.hasPromptAutomaticDepartureEvidence(
+            fix(latitude: 31.23075, speed: 0.2), from: anchor
+        ))
+    }
+
+    func testAutomaticStartDoesNotKeepOldHeartbeatOrMergedStart() throws {
+        let oldStayEnd = Date(timeIntervalSince1970: 1_726_660_000)
+        let firstFix = oldStayEnd.addingTimeInterval(900)
+        let moving = [
+            CodableCoordinate(lat: 31.2350, lon: 121.4800, timestamp: firstFix),
+            CodableCoordinate(lat: 31.2355, lon: 121.4810, timestamp: firstFix.addingTimeInterval(15)),
+            CodableCoordinate(lat: 31.2360, lon: 121.4820, timestamp: firstFix.addingTimeInterval(30))
+        ]
+        let anchor = CodableCoordinate(lat: 31.2304, lon: 121.4737,
+                                       timestamp: oldStayEnd, isSyntheticPadding: true)
+        func record(_ points: [CodableCoordinate]) throws -> TransportRecord {
+            TransportRecord(day: Calendar.current.startOfDay(for: oldStayEnd),
+                            startTime: oldStayEnd, endTime: firstFix.addingTimeInterval(30),
+                            typeRaw: TransportType.car.rawValue, distance: 1_000,
+                            averageSpeed: 1, pointsData: try JSONEncoder().encode(points))
+        }
+
+        let withStay = try record([anchor] + moving)
+        let inferred = PersistentTimelineBuilder.automaticTransportStart(
+            withStay, proposedStart: oldStayEnd, trustedStart: oldStayEnd
+        )
+        XCTAssertGreaterThan(inferred, firstFix.addingTimeInterval(-121))
+        XCTAssertLessThanOrEqual(inferred, firstFix)
+
+        let withoutStay = try record(moving)
+        XCTAssertEqual(PersistentTimelineBuilder.automaticTransportStart(
+            withoutStay, proposedStart: oldStayEnd, trustedStart: oldStayEnd
+        ), firstFix)
+    }
+
+    func testSchoolStopBetweenTripsSurvivesFifteenMinuteLocationGap() throws {
+        let base = Date(timeIntervalSince1970: 1_790_082_000)
+        func point(_ seconds: TimeInterval, _ latitude: Double, _ longitude: Double) -> CLLocation {
+            CLLocation(coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                       altitude: 0, horizontalAccuracy: 15, verticalAccuracy: 15,
+                       timestamp: base.addingTimeInterval(seconds))
+        }
+        let points = [
+            point(0, 25.09985, 102.73705),
+            point(60, 25.0970, 102.7300),
+            point(120, 25.09596, 102.72070),
+            point(150, 25.09594, 102.72069),
+            point(180, 25.09592, 102.72068),
+            point(240, 25.09591, 102.72068),
+            point(1_152, 25.09773, 102.72616),
+            point(1_212, 25.09975, 102.73702)
+        ]
+        let stop = try XCTUnwrap(PersistentTimelineBuilder.dormantGapStay(in: points))
+        XCTAssertEqual(stop.arrivalIndex, 2)
+        XCTAssertEqual(stop.resumeIndex, 6)
+        XCTAssertEqual(stop.start, points[2].timestamp)
+        XCTAssertEqual(stop.end, points[5].timestamp.addingTimeInterval(300))
+    }
+
+    func testConfirmedLowPowerStayIsReadyBeforeDepartureFix() throws {
+        let start = Date(timeIntervalSince1970: 1_726_660_000)
+        let coordinate = CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
+        let points = (0...6).map { index in
+            CLLocation(coordinate: coordinate, altitude: 0, horizontalAccuracy: 12,
+                       verticalAccuracy: 12, timestamp: start.addingTimeInterval(Double(index * 60)))
+        }
+
+        let candidate = try XCTUnwrap(FootprintProcessor.shared.confirmedStationaryCandidate(
+            in: points, near: points[0]
+        ))
+        XCTAssertEqual(candidate.startTime, start)
+        XCTAssertEqual(candidate.endTime, points.last?.timestamp)
+        XCTAssertEqual(candidate.rawLocations.count, points.count)
+    }
+
     func testAutomaticTransportKeepsPreviousStayAsStartAcrossDormantGap() {
         let departure = Date(timeIntervalSince1970: 1_726_660_000)
         let stay = CodableCoordinate(

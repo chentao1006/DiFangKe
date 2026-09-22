@@ -64,7 +64,7 @@
     <key>LIVE_STAY_MERGE_DISTANCE_THRESHOLD</key>
     <real>100</real>
     <key>LIVE_STAY_MIN_DURATION_THRESHOLD</key>
-    <real>360</real>
+    <real>300</real>
     
     <!-- 速度门槛：低于此值（km/h）判定为静止 -->
     <key>SPEED_THRESHOLD_STATIONARY</key>
@@ -80,7 +80,18 @@
 
     <!-- 交通段强制打断的时间缺口（秒） -->
     <key>TRANSPORT_GAP_BREAK_THRESHOLD</key>
-    <real>1800</real>
+    <real>600</real>
+    <!-- 短停留后 GPS 断档的谨慎恢复门槛 -->
+    <key>DORMANT_STAY_MAX_GAP_DURATION</key>
+    <real>3600</real>
+    <key>DORMANT_STAY_MIN_OBSERVED_DURATION</key>
+    <real>90</real>
+    <key>DORMANT_STAY_CLUSTER_RADIUS</key>
+    <real>50</real>
+    <key>DORMANT_STAY_MAX_ACCURACY</key>
+    <real>100</real>
+    <key>DORMANT_STAY_MAX_OUTLIERS</key>
+    <integer>2</integer>
 
     <!-- 低功耗唤醒后回推真实出发时间：局部均速采样窗口（秒）、
          最低有效速度（米/秒）、最大允许回推时长（秒） -->
@@ -89,7 +100,13 @@
     <key>TRANSPORT_DEPARTURE_MINIMUM_SPEED</key>
     <real>0.5</real>
     <key>TRANSPORT_DEPARTURE_MAXIMUM_BACKFILL_DURATION</key>
-    <real>300</real>
+    <real>120</real>
+    <!-- 断档期间的直线距离不是实测路线，仅回推理论行驶时间的一半 -->
+    <key>TRANSPORT_DEPARTURE_BACKFILL_FRACTION</key>
+    <real>0.5</real>
+    <!-- 两个足迹间完全没有轨迹点时，避免把整个停留后空档算作交通 -->
+    <key>TRANSPORT_UNOBSERVED_MIN_SPEED</key>
+    <real>5</real>
 
     <!-- 交通探测段最低时长（秒） -->
     <key>TRANSPORT_DETECTION_SEGMENT_DURATION</key>
@@ -314,6 +331,20 @@
     <real>60</real>
     <key>LOW_POWER_CLUSTER_FRACTION</key>
     <real>0.8</real>
+    <!-- 自动停留期间仍保持的离开监测：比手动省电模式更及时，低于移动中的最高精度 -->
+    <key>AUTOMATIC_STATIONARY_WATCH_ACCURACY</key>
+    <real>25</real>
+    <key>AUTOMATIC_STATIONARY_WATCH_DISTANCE_FILTER</key>
+    <real>5</real>
+    <!-- 单个准确且有速度的离开点即可唤醒高精度，但须超出定位误差范围 -->
+    <key>LOW_POWER_DEPARTURE_SPEED</key>
+    <real>2.5</real>
+    <key>LOW_POWER_DEPARTURE_ACCURACY</key>
+    <real>60</real>
+    <key>LOW_POWER_DEPARTURE_DISTANCE_FLOOR</key>
+    <real>20</real>
+    <key>LOW_POWER_DEPARTURE_ACCURACY_RATIO</key>
+    <real>1.5</real>
     <!-- 自动静止省电期间单次定位采样间隔（秒）：15 分钟 -->
     <key>STATIONARY_LOCATION_SAMPLE_INTERVAL</key>
     <real>900</real>
