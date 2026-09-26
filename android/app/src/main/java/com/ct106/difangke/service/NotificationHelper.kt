@@ -13,12 +13,14 @@ object NotificationHelper {
 
     const val CHANNEL_TRACKING = "channel_tracking"
     const val CHANNEL_DAILY_SUMMARY = "channel_daily_summary"
-    const val CHANNEL_HIGHLIGHT = "channel_highlight"
+    const val CHANNEL_PAST_MEMORIES = "channel_highlight"
+    const val CHANNEL_NEW_PLACE = "channel_new_place_footprint"
     const val CHANNEL_FUTURE_TRIP = "channel_future_trip"
 
     const val TRACKING_NOTIFICATION_ID = 1001
     const val DAILY_SUMMARY_NOTIFICATION_ID = 1002
-    private const val HIGHLIGHT_NOTIFICATION_ID_BASE = 2000
+    private const val PAST_MEMORIES_NOTIFICATION_ID_BASE = 2000
+    private const val NEW_PLACE_NOTIFICATION_ID_BASE = 3000
     private const val FUTURE_TRIP_NOTIFICATION_ID_BASE = 4000
 
     fun buildTrackingNotification(context: Context, status: String = "正在记录位置"): Notification {
@@ -62,17 +64,16 @@ object NotificationHelper {
         nm.notify(DAILY_SUMMARY_NOTIFICATION_ID, notification)
     }
 
-    fun sendHighlightNotification(context: Context, title: String, body: String, notifId: Int, timestamp: Long? = null, footprintId: String? = null) {
+    fun sendPastMemoriesNotification(context: Context, title: String, body: String, notifId: Int, timestamp: Long? = null) {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             if (timestamp != null) putExtra("date", timestamp)
-            if (footprintId != null) putExtra("footprintID", footprintId)
         }
         val pi = PendingIntent.getActivity(
             context, notifId, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val notification = NotificationCompat.Builder(context, CHANNEL_HIGHLIGHT)
+        val notification = NotificationCompat.Builder(context, CHANNEL_PAST_MEMORIES)
             .setSmallIcon(android.R.drawable.ic_menu_gallery)
             .setContentTitle("✨ $title")
             .setContentText(body)
@@ -82,7 +83,32 @@ object NotificationHelper {
             .build()
 
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(HIGHLIGHT_NOTIFICATION_ID_BASE + notifId, notification)
+        nm.notify(PAST_MEMORIES_NOTIFICATION_ID_BASE + notifId, notification)
+    }
+
+    fun sendNewPlaceNotification(context: Context, placeName: String, footprintId: String) {
+        val requestCode = footprintId.hashCode()
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("footprintID", footprintId)
+        }
+        val pi = PendingIntent.getActivity(
+            context, requestCode, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val body = "你第一次在「$placeName」留下足迹。点此选择这次的活动类型。"
+        val notification = NotificationCompat.Builder(context, CHANNEL_NEW_PLACE)
+            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+            .setContentTitle("新地点足迹")
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setAutoCancel(true)
+            .setContentIntent(pi)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.notify(NEW_PLACE_NOTIFICATION_ID_BASE + kotlin.math.abs(requestCode % 1000), notification)
     }
 
     fun sendFutureTripReminder(context: Context, tripID: String, title: String, body: String) {

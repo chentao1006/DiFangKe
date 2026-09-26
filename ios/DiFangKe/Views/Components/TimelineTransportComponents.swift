@@ -17,8 +17,6 @@ struct TransportModalView: View {
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @State private var position: MapCameraPosition = .automatic
     @State private var localManualType: TransportType? = nil
-    @State private var selectedMarker: LocationType? = nil
-    @State private var showingMarkerDialog: LocationType? = nil
     
     @Environment(LocationManager.self) private var locationManager
     @State private var showingSearchSheet: LocationType? = nil
@@ -40,14 +38,6 @@ struct TransportModalView: View {
         var id: Int { self == .start ? 0 : 1 }
     }
     
-    private var currentStartLocation: String {
-        localStartOverride ?? displayedTransport.startLocation
-    }
-    
-    private var currentEndLocation: String {
-        localEndOverride ?? displayedTransport.endLocation
-    }
-
     private var currentStartTime: Date { localStartTime ?? displayedTransport.startTime }
     private var currentEndTime: Date { localEndTime ?? displayedTransport.endTime }
 
@@ -78,24 +68,6 @@ struct TransportModalView: View {
         localManualType ?? displayedTransport.currentType
     }
     
-    private var isStartImportantPlace: Bool {
-        allPlaces.contains { place in
-            guard place.isUserDefined else { return false }
-            let addr = currentStartLocation.trimmingCharacters(in: .whitespacesAndNewlines)
-            return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == addr || 
-                   (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == addr)
-        }
-    }
-    
-    private var isEndImportantPlace: Bool {
-        allPlaces.contains { place in
-            guard place.isUserDefined else { return false }
-            let addr = currentEndLocation.trimmingCharacters(in: .whitespacesAndNewlines)
-            return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == addr || 
-                   (place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == addr)
-        }
-    }
-
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {

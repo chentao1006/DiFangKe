@@ -72,30 +72,6 @@ private struct StarOutlineShape: Shape {
     }
 }
 
-private func deduplicatedTimelineIcons(_ icons: [DaySummary.TimelineIcon]) -> [DaySummary.TimelineIcon] {
-    var ordered: [DaySummary.TimelineIcon] = []
-    var positions: [TimelineIconKey: Int] = [:]
-
-    for item in icons {
-        let key = TimelineIconKey(icon: item.icon, isTransport: item.isTransport)
-        if let index = positions[key] {
-            if item.isHighlight && !ordered[index].isHighlight {
-                ordered[index] = DaySummary.TimelineIcon(
-                    icon: ordered[index].icon,
-                    colorHex: ordered[index].colorHex,
-                    isTransport: ordered[index].isTransport,
-                    isHighlight: true
-                )
-            }
-        } else {
-            positions[key] = ordered.count
-            ordered.append(item)
-        }
-    }
-
-    return Array(ordered.prefix(10))
-}
-
 private func timelineIconStyle(for item: DaySummary.TimelineIcon, colorScheme: ColorScheme) -> SummaryIconStyle {
     let fallback = item.isTransport ? Color(hex: "#8E8E93") ?? .dfkAccent : Color.dfkAccent
     let background = (Color(hex: item.colorHex) ?? fallback).opacity(0.9)
@@ -119,6 +95,9 @@ private struct HistoryFootprintIndexEntry: Equatable {
     let startTime: Date
     let endTime: Date
     let status: String
+    let countryCode: String?
+    let countryName: String?
+    let cityName: String?
 }
 
 private struct HistoryTransportIndexEntry: Equatable {
@@ -188,7 +167,6 @@ struct HistoryListView: View {
     @State private var showingDate: IdentifiableDate? = nil
     @State private var showingPhotoImportRange = false
     @State private var showingRawPointsDate: IdentifiableDate? = nil
-    @State private var selectedRange: (Date, Date)? = nil
     @State private var isScanning = false
     @State private var isImporting = false
     @State private var scannedResults: [Footprint] = []
@@ -219,13 +197,15 @@ struct HistoryListView: View {
     @State private var tabActivationTask: Task<Void, Never>?
     
     var onDateSelected: ((Date) -> Void)? = nil
+    var onFootprintPresentationChanged: ((Footprint?) -> Void)? = nil
     var onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil
 
-    init(initialDate: Date = Date(), showImportOnAppear: Bool = false, onDateSelected: ((Date) -> Void)? = nil, onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil) {
+    init(initialDate: Date = Date(), showImportOnAppear: Bool = false, onDateSelected: ((Date) -> Void)? = nil, onFootprintPresentationChanged: ((Footprint?) -> Void)? = nil, onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil) {
         let normalizedDate = Calendar.current.startOfDay(for: initialDate)
         self.initialDate = normalizedDate
         self.showImportOnAppear = showImportOnAppear
         self.onDateSelected = onDateSelected
+        self.onFootprintPresentationChanged = onFootprintPresentationChanged
         self.onStatisticsVisibilityChanged = onStatisticsVisibilityChanged
         _selectedDate = State(initialValue: normalizedDate)
     }
@@ -392,8 +372,11 @@ struct HistoryListView: View {
             // alive. That avoids initial history-page work while preserving the
             // results and scroll state for every subsequent tab switch.
             if hasOpenedFavorites {
-                HistoryFavoritesView(onUpdate: rebuildIndex)
-                    .environment(locationManager)
+                HistoryFavoritesView(
+                    onFootprintSelected: { footprint in
+                        onFootprintPresentationChanged?(footprint)
+                    }
+                )
                     .opacity(viewMode == .favorites ? 1 : 0)
                     .allowsHitTesting(viewMode == .favorites)
                     .accessibilityHidden(viewMode != .favorites)
@@ -501,7 +484,15 @@ struct HistoryListView: View {
     private var calendarIndexSource: HistoryCalendarIndexSource {
         HistoryCalendarIndexSource(
             footprints: allFootprints.map {
-                HistoryFootprintIndexEntry(id: $0.footprintID, startTime: $0.startTime, endTime: $0.endTime, status: $0.statusValue)
+                HistoryFootprintIndexEntry(
+                    id: $0.footprintID,
+                    startTime: $0.startTime,
+                    endTime: $0.endTime,
+                    status: $0.statusValue,
+                    countryCode: $0.countryCode,
+                    countryName: $0.countryName,
+                    cityName: $0.cityName
+                )
             },
             transports: allTransportRecords.map {
                 HistoryTransportIndexEntry(id: $0.recordID, startTime: $0.startTime, endTime: $0.endTime, status: $0.statusRaw)
@@ -808,13 +799,17 @@ struct HistoryMonthView: View {
     }
     
     var body: some View {
+        let previousFootprintDates = previousFootprintDatesByDate()
         ScrollViewReader { proxy in
             ZStack {
                 ScrollView {
                     LazyVStack(spacing: 32, pinnedViews: [.sectionHeaders]) {
                         ForEach(months, id: \.self) { month in
                             Section(header: monthHeader(for: month)) {
-                                monthGrid(for: month)
+                                monthGrid(
+                                    for: month,
+                                    previousFootprintDates: previousFootprintDates
+                                )
                             }
                             .id("month-" + month.dayID)
                         }
@@ -926,9 +921,18 @@ struct HistoryMonthView: View {
         return Array(symbols[firstIndex..<symbols.count] + symbols[0..<firstIndex])
     }
     
-    private func monthGrid(for month: Date) -> some View {
+    private func monthGrid(for month: Date, previousFootprintDates: [Date: Date]) -> some View {
         let days = daysInMonth(for: month)
         let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 7)
+        let locationLabelsByDate = Dictionary(uniqueKeysWithValues: days.map { date in
+            (
+                date,
+                locationChangeLabels(
+                    for: date,
+                    previousFootprintDate: previousFootprintDates[date]
+                )
+            )
+        })
         return VStack(spacing: 8) {
             HStack(spacing: 0) {
                 ForEach(weekdaySymbols, id: \.self) { day in
@@ -939,7 +943,21 @@ struct HistoryMonthView: View {
             LazyVGrid(columns: columns, spacing: 10) {
                 let leadingSpaces = calculateLeadingSpaces(for: month)
                 ForEach(0..<leadingSpaces, id: \.self) { _ in Color.clear.frame(height: 40) }
-                ForEach(days, id: \.self) { date in
+                ForEach(Array(days.enumerated()), id: \.element) { index, date in
+                    let locationLabels = locationLabelsByDate[date] ?? []
+                    let isRightmostColumn = (leadingSpaces + index) % 7 == 6
+                    let nextDate = Calendar.current.date(byAdding: .day, value: 1, to: date)
+                    let nextLocationLabels = nextDate.map { nextDate in
+                        locationLabelsByDate[nextDate] ?? locationChangeLabels(
+                            for: nextDate,
+                            previousFootprintDate: previousFootprintDates[nextDate]
+                        )
+                    } ?? []
+                    let nextDateForcesLocationLabel = nextDate.map { nextDate in
+                        Calendar.current.component(.day, from: nextDate) == 1
+                    } ?? false
+                    let hasNextLocationLabel = !nextLocationLabels.isEmpty || nextDateForcesLocationLabel
+                    let allowsLocationLabelOverflow = !isRightmostColumn && !hasNextLocationLabel
                     MonthDayCell(
                         date: date,
                         targetDate: targetDate,
@@ -947,9 +965,12 @@ struct HistoryMonthView: View {
                         transports: transportsByDay[date] ?? [],
                         futureTrips: futureTripsByDay[date] ?? [],
                         activityTypes: allActivityTypes,
+                        locationChangeLabels: locationLabels,
+                        allowsLocationLabelOverflow: allowsLocationLabelOverflow,
                         onTap: { onDayTap(date) }
                     )
                         .id("day-" + date.dayID)
+                        .zIndex(locationLabels.isEmpty ? 0 : 1)
                         .onLongPressGesture(minimumDuration: 0.45) {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             rawPointsDialogDate = IdentifiableDate(date: date)
@@ -958,6 +979,71 @@ struct HistoryMonthView: View {
             }
             .padding(.horizontal)
         }
+    }
+
+    private func locationChangeLabels(for date: Date, previousFootprintDate: Date?) -> [String] {
+        let currentLocations = orderedLocations(in: footprintsByDay[date] ?? [])
+        guard !currentLocations.isEmpty else { return [] }
+
+        let calendar = Calendar.current
+        let shouldAlwaysShowLocation = calendar.component(.day, from: date) == 1
+        if shouldAlwaysShowLocation {
+            let cityLabels = uniqueLabels(currentLocations.compactMap(\.cityLabel))
+            return cityLabels.isEmpty
+                ? uniqueLabels(currentLocations.map(\.countryLabel))
+                : cityLabels
+        }
+
+        var previousLocation = previousFootprintDate.flatMap { previousDate in
+            orderedLocations(in: footprintsByDay[previousDate] ?? []).last
+        }
+        var labels: [String] = []
+
+        for location in currentLocations {
+            if let previousLocation {
+                if location.countryKey != previousLocation.countryKey {
+                    labels.append(location.countryLabel)
+                } else if location.cityKey != previousLocation.cityKey,
+                          let cityLabel = location.cityLabel {
+                    labels.append(cityLabel)
+                }
+            } else {
+                labels.append(location.countryLabel)
+            }
+            previousLocation = location
+        }
+
+        return uniqueLabels(labels)
+    }
+
+    private func previousFootprintDatesByDate() -> [Date: Date] {
+        let footprintDates = footprintsByDay
+            .compactMap { date, footprints in footprints.isEmpty ? nil : date }
+            .sorted()
+        guard footprintDates.count > 1 else { return [:] }
+
+        var result: [Date: Date] = [:]
+        for index in 1..<footprintDates.count {
+            result[footprintDates[index]] = footprintDates[index - 1]
+        }
+        return result
+    }
+
+    private func orderedLocations(in footprints: [Footprint]) -> [HistoryCalendarLocation] {
+        let locations = footprints
+            .sorted { $0.startTime < $1.startTime }
+            .compactMap(HistoryCalendarLocation.init(footprint:))
+
+        return locations.reduce(into: []) { result, location in
+            if result.last != location {
+                result.append(location)
+            }
+        }
+    }
+
+    private func uniqueLabels(_ labels: [String]) -> [String] {
+        var seen = Set<String>()
+        return labels.filter { seen.insert($0).inserted }
     }
     
     private func calculateLeadingSpaces(for month: Date) -> Int {
@@ -975,6 +1061,40 @@ struct HistoryMonthView: View {
     }
 }
 
+private struct HistoryCalendarLocation: Hashable {
+    let countryKey: String
+    let countryLabel: String
+    let cityKey: String?
+    let cityLabel: String?
+
+    init?(footprint: Footprint) {
+        let countryCode = footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let countryName = footprint.countryName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cityName = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let localizedCountry = countryCode.flatMap {
+            Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
+        }
+        guard let countryLabel = [countryName, localizedCountry]
+            .compactMap({ $0 })
+            .first(where: { !$0.isEmpty }) else { return nil }
+
+        let normalizedCountry = countryLabel.applyingTransform(
+            StringTransform("Traditional-Simplified"),
+            reverse: false
+        ) ?? countryLabel
+        let normalizedCity = cityName.flatMap { value -> String? in
+            guard !value.isEmpty else { return nil }
+            return value.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? value
+        }
+        let normalizedCountryKey = countryCode.flatMap { $0.isEmpty ? nil : $0 } ?? normalizedCountry
+
+        self.countryKey = normalizedCountryKey
+        self.countryLabel = normalizedCountry
+        self.cityKey = normalizedCity.map { "\(normalizedCountryKey)|\($0)" }
+        self.cityLabel = normalizedCity
+    }
+}
+
 struct MonthDayCell: View {
     let date: Date
     let targetDate: Date
@@ -982,6 +1102,8 @@ struct MonthDayCell: View {
     let transports: [TransportRecord]
     let futureTrips: [FutureTrip]
     let activityTypes: [ActivityType]
+    let locationChangeLabels: [String]
+    let allowsLocationLabelOverflow: Bool
     let onTap: () -> Void
     private var timelineSegments: [MonthDayTimelineSegment] {
         let footprintSegments = footprints.map { footprint in
@@ -1016,21 +1138,49 @@ struct MonthDayCell: View {
         // 重置），用户永远没法翻回那天调出"重新生成"菜单。
         let isSelectable = hasData || Calendar.current.startOfDay(for: date) <= Calendar.current.startOfDay(for: Date())
 
-        ZStack {
-            if hasData {
-                MonthDayTimelineRing(
-                    date: date,
-                    segments: timelineSegments,
-                    plannedTrips: futureTrips
-                )
-                .frame(width: 34, height: 34)
+        VStack(spacing: 4) {
+            ZStack {
+                if hasData {
+                    MonthDayTimelineRing(
+                        date: date,
+                        segments: timelineSegments,
+                        plannedTrips: futureTrips
+                    )
+                    .frame(width: 34, height: 34)
+                }
+                Text("\(Calendar.current.component(.day, from: date))")
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundColor(hasData ? .primary : .secondary.opacity(0.4))
             }
-            Text("\(Calendar.current.component(.day, from: date))")
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundColor(hasData ? .primary : .secondary.opacity(0.4))
+            .frame(width: 34, height: 34)
+
+            if !locationChangeLabels.isEmpty {
+                GeometryReader { geometry in
+                    let leadingInset = max(0, (geometry.size.width - 34) / 2)
+                    if allowsLocationLabelOverflow {
+                        locationLabelRow(fontSize: 12, lineLimit: 1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .offset(x: leadingInset)
+                    } else {
+                        locationLabelRow(
+                            fontSize: usesCompactTwoLineLocationLabel ? 10 : 12,
+                            lineLimit: usesCompactTwoLineLocationLabel ? 2 : 1,
+                            lineSpacing: usesCompactTwoLineLocationLabel ? -4 : 0
+                        )
+                            .frame(
+                                width: max(0, geometry.size.width - leadingInset),
+                                alignment: .leading
+                            )
+                            .clipped()
+                            .offset(x: leadingInset)
+                    }
+                }
+                .frame(height: 17)
+            }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 50)
+        .padding(.top, 6)
+        .frame(height: 61, alignment: .top)
         .background(
             ZStack {
                 if isToday { RoundedRectangle(cornerRadius: 12).fill(Color.dfkAccent.opacity(0.06)) }
@@ -1038,6 +1188,27 @@ struct MonthDayCell: View {
             }
         )
         .onTapGesture { if isSelectable { onTap() } }
+    }
+
+    private var usesCompactTwoLineLocationLabel: Bool {
+        !allowsLocationLabelOverflow
+            && locationChangeLabels.joined(separator: " ").count > 3
+    }
+
+    private func locationLabelRow(
+        fontSize: CGFloat,
+        lineLimit: Int,
+        lineSpacing: CGFloat = 0
+    ) -> some View {
+        Text(locationChangeLabels.joined(separator: " "))
+        .font(.system(size: fontSize, weight: .bold))
+        .foregroundStyle(.primary.opacity(0.82))
+        .lineLimit(lineLimit)
+        .lineSpacing(lineSpacing)
+        .truncationMode(.tail)
+        .multilineTextAlignment(.leading)
+        .minimumScaleFactor(0.85)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -1559,11 +1730,12 @@ private struct PhotoImportResultRow: View {
 }
 
 struct HistoryFavoritesView: View {
-    @Environment(LocationManager.self) private var locationManager
     @Query(filter: #Predicate<Footprint> { $0.isHighlight == true && $0.statusValue != "ignored" }, sort: \Footprint.startTime, order: .reverse) private var favoriteFootprints: [Footprint]
     @Query(sort: \Place.name) private var allPlaces: [Place]
-    @State private var selectedFootprint: Footprint?
-    let onUpdate: () -> Void
+    /// The host presents the detail sheet from the root of the History sheet.
+    /// Presented from here, deep inside History's content, dragging the detail
+    /// between detents rebuilt it on every drag (new identity each time).
+    let onFootprintSelected: (Footprint) -> Void
     
     private var groupedFootprints: [(Date, [Footprint])] {
         let grouped = Dictionary(grouping: favoriteFootprints) { fp in
@@ -1579,7 +1751,9 @@ struct HistoryFavoritesView: View {
                     Section(header: favoriteHeader(for: date)) {
                         VStack(spacing: 12) {
                             ForEach(footprints) { fp in
-                                FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false) { f, _ in selectedFootprint = f }
+                                FootprintCardView(footprint: fp, allPlaces: allPlaces, showTimeline: false) { footprint, _ in
+                                    onFootprintSelected(footprint)
+                                }
                             }
                         }
                         .padding(.horizontal)
@@ -1590,13 +1764,8 @@ struct HistoryFavoritesView: View {
             }
         }
         .background(Color.dfkBackground)
-        .sheet(item: $selectedFootprint) { fp in 
-            FootprintModalView(footprint: fp, autoFocus: false)
-                .environment(locationManager)
-                .onDisappear { onUpdate() } 
-        }
     }
-    
+
     private func favoriteHeader(for date: Date) -> some View {
         HStack {
             Text(date.formatted(.dateTime.year().month().day()))

@@ -88,14 +88,6 @@ struct ActivityTypeSettingsView: View {
         }
     }
     
-    private func deleteActivities(offsets: IndexSet) {
-        for index in offsets {
-            modelContext.delete(activities[index])
-        }
-        try? modelContext.save()
-        CloudSettingsManager.shared.triggerDataSyncPulse()
-    }
-    
     private func moveActivities(from source: IndexSet, to destination: Int) {
         var revisedItems = activities
         revisedItems.move(fromOffsets: source, toOffset: destination)

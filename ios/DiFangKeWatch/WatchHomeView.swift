@@ -108,19 +108,19 @@ private struct CurrentPlaceView: View {
     @EnvironmentObject private var store: WatchStore
     @State private var showingActivityPicker = false
 
-    private var currentTransport: (name: String, icon: String)? {
+    private var currentTransportIcon: String? {
         switch store.snapshot.currentTransportType {
-        case "slow": return ("步行", "figure.walk")
-        case "running": return ("跑步", "figure.run")
-        case "bicycle": return ("骑行", "bicycle")
-        case "ebike": return ("骑电动车", "moped.fill")
-        case "motorcycle": return ("骑摩托车", "motorcycle.fill")
-        case "bus": return ("乘公交", "bus.fill")
-        case "car": return ("驾车", "car.fill")
-        case "subway": return ("乘地铁", "tram.fill")
-        case "train": return ("乘火车", "train.side.front.car")
-        case "airplane": return ("飞行", "airplane")
-        case "ship": return ("乘船", "ferry.fill")
+        case "slow": return "figure.walk"
+        case "running": return "figure.run"
+        case "bicycle": return "bicycle"
+        case "ebike": return "moped.fill"
+        case "motorcycle": return "motorcycle.fill"
+        case "bus": return "bus.fill"
+        case "car": return "car.fill"
+        case "subway": return "tram.fill"
+        case "train": return "train.side.front.car"
+        case "airplane": return "airplane"
+        case "ship": return "ferry.fill"
         default: return nil
         }
     }
@@ -128,8 +128,8 @@ private struct CurrentPlaceView: View {
     var body: some View {
         let snapshot = store.snapshot
         VStack(spacing: 8) {
-            if let currentTransport {
-                Image(systemName: currentTransport.icon)
+            if let currentTransportIcon {
+                Image(systemName: currentTransportIcon)
                     .foregroundStyle(Color.accentColor)
             } else if store.hasReceivedSnapshot {
                 Image(systemName: "location.fill")
@@ -141,11 +141,11 @@ private struct CurrentPlaceView: View {
                     .frame(width: 32, height: 32)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            Text(currentTransport.map { "正在\($0.name)" } ?? snapshot.placeName)
+            Text(currentTransportIcon == nil ? snapshot.placeName : "正在移动")
                 .font(.title3.bold())
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
-            if currentTransport != nil {
+            if currentTransportIcon != nil {
                 if let startedAt = snapshot.currentTransportStartedAt {
                     Text("已移动 \(startedAt, style: .relative)")
                         .font(.caption)
@@ -163,7 +163,7 @@ private struct CurrentPlaceView: View {
             } else if let address = snapshot.address, !address.isEmpty {
                 Text(address).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
-            if store.hasReceivedSnapshot && currentTransport == nil {
+            if store.hasReceivedSnapshot && currentTransportIcon == nil {
                 Button {
                     showingActivityPicker = true
                 } label: {
@@ -177,7 +177,7 @@ private struct CurrentPlaceView: View {
             ActivityPickerView()
         }
         .onChange(of: store.requestedActivityPickerFootprintID) { _, footprintID in
-            guard currentTransport == nil, footprintID == snapshot.currentFootprintID else { return }
+            guard currentTransportIcon == nil, footprintID == snapshot.currentFootprintID else { return }
             showingActivityPicker = true
         }
         .onChange(of: snapshot.currentTransportType) { _, transportType in

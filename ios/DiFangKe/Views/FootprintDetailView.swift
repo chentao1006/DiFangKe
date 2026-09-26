@@ -16,12 +16,14 @@ struct FootprintModalView: View {
     @Bindable var footprint: Footprint
     var allPlaces: [Place] = []
     var onDismiss: ((Bool) -> Void)? = nil
+    /// When set, the host closes the sheet itself (e.g. to start animating its
+    /// own layout before the dismissal), instead of this view calling dismiss().
+    var onRequestClose: (() -> Void)? = nil
     
     @Query private var savedPlaces: [Place]
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
     
     @State private var hasChanged = false
-    @State private var sheetDetent: PresentationDetent = .medium
     @State private var showAI = false
     @FocusState private var addressFocused: Bool
     var autoFocus: Bool = false
@@ -46,7 +48,7 @@ struct FootprintModalView: View {
     var isInline: Bool = false
     @Binding private var presentationDetent: PresentationDetent
     
-    init(footprint: Footprint, allPlaces: [Place] = [], autoFocus: Bool = false, isDraft: Bool = false, isInline: Bool = false, presentationDetent: Binding<PresentationDetent> = .constant(.large), onDismiss: ((Bool) -> Void)? = nil) {
+    init(footprint: Footprint, allPlaces: [Place] = [], autoFocus: Bool = false, isDraft: Bool = false, isInline: Bool = false, presentationDetent: Binding<PresentationDetent> = .constant(.large), onDismiss: ((Bool) -> Void)? = nil, onRequestClose: (() -> Void)? = nil) {
         self._footprint = Bindable(footprint)
         self.allPlaces = allPlaces
         self.autoFocus = autoFocus
@@ -54,14 +56,21 @@ struct FootprintModalView: View {
         self.isInline = isInline
         self._presentationDetent = presentationDetent
         self.onDismiss = onDismiss
+        self.onRequestClose = onRequestClose
+    }
+
+    private func close() {
+        if let onRequestClose {
+            onRequestClose()
+        } else if !isInline {
+            dismiss()
+        }
     }
     
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
-    @State private var isGeneratingAI = false
     @State private var showingAINotEnabledAlert = false
     @State private var showingAIErrorAlert = false
     @State private var aiErrorMessage = ""
-    @State private var isAIPerformingUpdate = false
 
     private var isMinimized: Bool {
         isInline && presentationDetent == .height(88)
@@ -148,7 +157,7 @@ struct FootprintModalView: View {
                     Button { 
                         if !isDraft { try? modelContext.save() }
                         onDismiss?(hasChanged)
-                        if !isInline { dismiss() }
+                        close()
                     } label: {
                         Image(systemName: "xmark").dfkToolbarDismissIcon()
                     }
@@ -290,7 +299,12 @@ struct FootprintModalView: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large], selection: $sheetDetent)
+        // No `selection:` binding: a bound detent only updates when a drag
+        // ends, so any view update mid-drag (map flight, timeline jump,
+        // location) re-applied the stale `.medium` and snapped the sheet back.
+        // UIKit alone owns the detent while the user drags.
+        .presentationDetents([.medium, .large])
+        .presentationBackgroundInteraction(.enabled)
     }
 }
 
@@ -317,7 +331,10 @@ private struct FootprintReasonEditor: View {
             IMESafeTextView(textState: textState, onFocusChange: { isFocused in
                 if isFocused { onBeginEditing() }
             })
-                .frame(minHeight: 52, maxHeight: 120)
+                .frame(
+                    minHeight: UIFont.preferredFont(forTextStyle: .body).lineHeight,
+                    maxHeight: 120
+                )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
@@ -520,6 +537,14 @@ extension FootprintModalView {
             }
             .buttonStyle(.plain)
 
+            if let geographicSubtitle {
+                Text(geographicSubtitle)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity)
+            }
+
             SuggestionsMenu(locationManager: locationManager, coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude), forOngoing: false, footprint: footprint, isDraft: isDraft) {
                 showingSearchSheet = true
             } onSelectionApplied: {
@@ -587,6 +612,16 @@ extension FootprintModalView {
         matchedPlaceByAddress?.name ?? footprint.address ?? "未知地点"
     }
 
+    private var geographicSubtitle: String? {
+        let country = footprint.countryName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts: [String] = [country, city].compactMap { value in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "·")
+    }
+
     private var placeValueFont: Font {
         let text = isUpdatingAddress ? "正在重新获取地址..." : displayPlaceText
         let count = text.count
@@ -619,104 +654,6 @@ extension FootprintModalView {
         footprint.getActivityType(from: allActivities)?.color ?? .secondary
     }
 
-    @ViewBuilder
-    private func detailMenuRow(
-        title: String?,
-        value: String,
-        valueColor: Color,
-        valueFont: Font = .system(.title3, design: .rounded).bold(),
-        textColor: Color? = nil,
-        textLineLimit: Int = 2,
-        textMinimumScaleFactor: CGFloat = 1,
-        iconFont: Font = .system(size: 13, weight: .semibold),
-        leadingIcon: String? = nil
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let title, !title.isEmpty {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.secondary)
-            }
-
-            HStack(alignment: .center, spacing: 12) {
-                HStack(alignment: .center, spacing: 6) {
-                    if let leadingIcon {
-                        Image(systemName: leadingIcon)
-                            .font(iconFont)
-                            .foregroundColor(valueColor)
-                    }
-
-                    Text(value)
-                        .font(valueFont)
-                        .foregroundColor(textColor ?? valueColor)
-                        .lineLimit(textLineLimit)
-                        .minimumScaleFactor(textMinimumScaleFactor)
-                        .multilineTextAlignment(.leading)
-                }
-
-                Spacer(minLength: 8)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.05)))
-        .contentShape(Rectangle())
-    }
-    
-    private var activitySuggestionsRow: some View {
-        let suggestions = getSuggestedActivities()
-        return HStack(spacing: 0) {
-            Text("可能的活动")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary.opacity(0.6))
-                .padding(.leading, 12)
-                .padding(.trailing, 2)
-            
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(suggestions) { activity in
-                        Button {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                                ensureFootprintManaged()
-                                setActivitySelection(activity.id.uuidString)
-                                hasChanged = true
-                                if !isDraft { try? modelContext.save() }
-                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: activity.icon)
-                                    .font(.system(size: 13))
-                                Text(activity.name)
-                                    .font(.system(size: 12, weight: .medium))
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(
-                                Capsule()
-                                    .fill(activity.color.opacity(0.08))
-                                    .overlay(Capsule().stroke(activity.color.opacity(0.15), lineWidth: 0.5))
-                            )
-                            .foregroundColor(activity.color)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.vertical, 8)
-                .padding(.trailing, 12)
-            }
-        }
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.secondary.opacity(0.04))
-        )
-        .transition(.asymmetric(
-            insertion: .move(edge: .top).combined(with: .opacity),
-            removal: .opacity.combined(with: .scale(scale: 0.95))
-        ))
-    }
-    
     private func getSuggestedActivities(includeFallback: Bool = true) -> [ActivityType] {
         let liteActivities = allActivities.map { $0.convertToLite() }
         let litePlaces = savedPlaces.map { $0.convertToLite() }
@@ -759,50 +696,6 @@ extension FootprintModalView {
         footprint.status = .manual
         hasChanged = true
         if !isDraft { try? modelContext.save() }
-    }
-    
-    private var timeSection: some View {
-        Button {
-            showingTimeAdjustment = true
-        } label: {
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "calendar")
-                            .font(.system(size: 12))
-                            .foregroundColor(Color.secondary)
-                        Text(footprint.date.formatted(.dateTime.year().month().day().weekday()))
-                            .font(.system(size: 14, design: .rounded))
-                            .foregroundColor(Color.secondary)
-                    }
-                    HStack(spacing: 6) {
-                        Image(systemName: "clock")
-                            .font(.system(size: 12))
-                            .foregroundColor(Color.secondary)
-                        Text(timeRangeString)
-                            .font(.system(size: 14, design: .monospaced))
-                            .foregroundColor(Color.secondary)
-                    }
-                    HStack(spacing: 6) {
-                        Image(systemName: "hourglass")
-                            .font(.system(size: 12))
-                            .foregroundColor(Color.secondary)
-                        Text("停留 \(durationString)")
-                            .font(.system(size: 14, design: .rounded))
-                            .foregroundColor(Color.secondary)
-                    }
-                }
-                Spacer(minLength: 8)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.04)))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("调整足迹时间")
-        .padding(.top, 4)
     }
     
     private var matchedPlace: Place? {
@@ -1057,7 +950,7 @@ extension FootprintModalView {
         }
         try? modelContext.save()
         onDismiss?(hasChanged)
-        dismiss() 
+        close()
     }
 }
 

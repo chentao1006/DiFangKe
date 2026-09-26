@@ -76,14 +76,24 @@ class DiFangKeApp : Application() {
             }
         )
 
-        // 精彩足迹高亮提醒频道
+        // 往年今日沿用旧频道 ID，保留用户已有的系统通知设置。
         notificationManager.createNotificationChannel(
             NotificationChannel(
-                NotificationHelper.CHANNEL_HIGHLIGHT,
-                "精彩足迹提醒",
+                NotificationHelper.CHANNEL_PAST_MEMORIES,
+                "往年今日提醒",
                 NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
-                description = "当发现高价值足迹时提醒您"
+                description = "重温多年前的今天曾到访的地方"
+            }
+        )
+
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                NotificationHelper.CHANNEL_NEW_PLACE,
+                "新地点足迹提醒",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "在新地点生成足迹时提醒您选择活动类型"
             }
         )
 

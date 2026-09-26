@@ -119,11 +119,12 @@ struct SettingsView: View {
                         }
                     }
                 }
-                
-                Toggle("开启 iCloud 同步", isOn: $isICloudSyncEnabled)
-                if isICloudSyncEnabled {
+
+                if isTrackingEnabled && isICloudSyncEnabled {
                     Toggle("以当前设备记录为准", isOn: useCurrentDeviceForRawRecordingBinding)
                 }
+
+                Toggle("开启 iCloud 同步", isOn: $isICloudSyncEnabled)
                 Toggle("自动关联照片到足迹", isOn: $isAutoPhotoLinkEnabled)
             }
             
@@ -217,7 +218,7 @@ struct SettingsView: View {
                         .onChange(of: notificationMinute) { _, _ in updateNotifications() }
                 }
                 
-                Toggle("精彩足迹提醒", isOn: $isHighlightNotificationEnabled)
+                Toggle("新地点足迹提醒", isOn: $isHighlightNotificationEnabled)
                     .onChange(of: isHighlightNotificationEnabled) { _, newValue in
                         if newValue {
                             NotificationManager.shared.requestAuthorization { granted in

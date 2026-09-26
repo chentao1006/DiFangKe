@@ -5,7 +5,6 @@ import MapKit
 struct RawPointsListView: View {
     let date: Date
     @Environment(\.dismiss) private var dismiss
-    @Environment(LocationManager.self) private var locationManager
 
     @State private var entries: [RawPointEntry] = []
     @State private var previousDistances: [Int: CLLocationDistance] = [:]
@@ -777,7 +776,6 @@ private struct RawPointsMapView: UIViewRepresentable {
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         private static let selectedReuseIdentifier = "RawPointsSelectedAnnotation"
-        private static let driftReuseIdentifier = "RawPointsDriftAnnotation"
 
         var parent: RawPointsMapView
         weak var mapView: MKMapView?

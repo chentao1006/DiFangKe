@@ -137,6 +137,21 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         WCSession.default.activate()
     }
 
+    /// Opening the Watch app makes the phone reachable, so use that opportunity
+    /// to ask for a freshly generated snapshot instead of merely accepting the
+    /// last application context cached on the Watch.
+    func requestLatestSnapshot() {
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        guard session.activationState == .activated else {
+            session.activate()
+            return
+        }
+        apply(session.receivedApplicationContext)
+        guard session.isReachable else { return }
+        session.sendMessage(["requestSnapshot": true], replyHandler: nil, errorHandler: nil)
+    }
+
     var currentActivity: WatchActivityOption? {
         snapshot.activities.first { $0.id == snapshot.currentActivityID }
     }
@@ -159,6 +174,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         apply(session.receivedApplicationContext)
+        requestLatestSnapshot()
     }
 
 #if os(iOS)

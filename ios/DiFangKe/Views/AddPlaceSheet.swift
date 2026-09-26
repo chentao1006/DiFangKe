@@ -12,7 +12,6 @@ struct AddPlaceSheet: View {
     @Environment(LocationManager.self) private var locationManager
     @StateObject private var vm = PlacePickerViewModel()
 
-    @Query private var allPlaces: [Place]
     @State private var placeName = ""
     @State private var radius: Float = 80
     @State private var selectedCoord: CLLocationCoordinate2D?
@@ -22,7 +21,6 @@ struct AddPlaceSheet: View {
     @State private var centerTrigger = UUID()
     @State private var radiusTrigger = UUID()
     @State private var shouldSnapToUser = false
-    @State private var showingCategoryManager = false
     @State private var isIgnored = false
     
     init(initialCoordinate: CLLocationCoordinate2D? = nil, initialName: String? = nil, onSave: @escaping (Place) -> Void) {
@@ -32,10 +30,6 @@ struct AddPlaceSheet: View {
     }
 
     private let importantTypes = ["家", "公司", "学校"]
-
-    private var presetHeader: some View {
-        Text("快速预设")
-    }
 
     var body: some View {
         NavigationStack {

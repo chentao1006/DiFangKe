@@ -1149,13 +1149,6 @@ struct DFKShareCardView: View {
         onPayloadUpdate(updated)
     }
 
-    private func updateStat(_ id: UUID, mutate: (inout DFKShareStatEntry) -> Void) {
-        var updated = payload
-        guard let index = updated.stats.firstIndex(where: { $0.id == id }) else { return }
-        mutate(&updated.stats[index])
-        onPayloadUpdate(updated)
-    }
-
     var body: some View {
         let canvasSize = Self.pixelSize(for: payload)
         let cardWidth = s(canvasSize.width)
@@ -2333,19 +2326,6 @@ enum DFKShareCardFactory {
         return formatter.string(from: date)
     }
 
-    private static func topCityName(footprints: [Footprint], places: [Place]) -> String? {
-        var counts: [String: Int] = [:]
-        for footprint in footprints {
-            let address = footprint.placeID
-                .flatMap { id in places.first(where: { $0.placeID == id })?.address }
-                ?? footprint.address
-                ?? ""
-            guard let city = cityName(from: address) else { continue }
-            counts[city, default: 0] += 1
-        }
-        return counts.sorted { $0.value > $1.value }.first?.key
-    }
-
     private static func cityName(from address: String) -> String? {
         let normalized = address.replacingOccurrences(of: "中国", with: "")
         if let provinceRange = normalized.range(of: "省") {
@@ -2364,27 +2344,6 @@ enum DFKShareCardFactory {
         return nil
     }
 
-    private static func topActivityName(footprints: [Footprint], activities: [ActivityType]) -> String? {
-        var counts: [String: Int] = [:]
-        for footprint in footprints {
-            guard let name = footprint.getActivityType(from: activities)?.name else { continue }
-            counts[name, default: 0] += 1
-        }
-        return counts.sorted { $0.value > $1.value }.first?.key
-    }
-
-    private static func currentRecordingStreak(footprints: [Footprint]) -> Int {
-        let days = Set(footprints.map { Calendar.current.startOfDay(for: $0.startTime) })
-        guard !days.isEmpty else { return 0 }
-        var cursor = Calendar.current.startOfDay(for: Date())
-        var count = 0
-        while days.contains(cursor) {
-            count += 1
-            guard let previous = Calendar.current.date(byAdding: .day, value: -1, to: cursor) else { break }
-            cursor = previous
-        }
-        return count
-    }
 }
 
 struct DFKShareMedia {

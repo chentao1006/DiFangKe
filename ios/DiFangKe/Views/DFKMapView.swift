@@ -306,7 +306,6 @@ struct DFKMapView: View {
     @State private var lastSnapshotSize: CGSize = .zero
     @State private var lastSnapshotCacheKey: String? = nil
 
-    @State private var isRequestingWidgetSnapshot = false
     @State private var selectedAggregatedFootprint: AggregatedFootprint?
     @State private var interactiveMapReady = false
     @State private var interactiveActivationTask: Task<Void, Never>?
@@ -490,6 +489,9 @@ struct DFKMapView: View {
         return orderedKeys.compactMap { key in
             guard let bucket = buckets[key] else { return nil }
             let divisor = max(bucket.totalWeight, 1)
+            let representative = selectedFootprintID.flatMap { selectedID in
+                bucket.footprints.first { $0.footprintID == selectedID }
+            } ?? bucket.representative
             return AggregatedFootprint(
                 id: key,
                 coordinate: CLLocationCoordinate2D(
@@ -497,7 +499,7 @@ struct DFKMapView: View {
                     longitude: bucket.weightedLongitude / divisor
                 ),
                 totalDuration: bucket.totalDuration,
-                representative: bucket.representative,
+                representative: representative,
                 footprints: bucket.footprints.sorted { $0.startTime < $1.startTime }
             )
         }
@@ -995,17 +997,6 @@ struct DFKMapView: View {
     }
 
 
-
-    @MapContentBuilder
-    private func aggregatedFootprintAnnotations() -> some MapContent {
-        ForEach(aggregatedFootprints) { aggregated in
-            Annotation("", coordinate: aggregated.coordinate, anchor: .bottom) {
-                aggregatedAnnotationContent(for: aggregated)
-                    .zIndex(10)
-            }
-            .tag(aggregated.id)
-        }
-    }
 
     @MapContentBuilder
     private func photoAnnotations() -> some MapContent {

@@ -14,7 +14,6 @@ struct DataManagerView: View {
     @Query(sort: \FutureTrip.arrivalDate) private var allFutureTrips: [FutureTrip]
     
     @State private var showDeleteAlert = false
-    @State private var showingExportFileExporter = false
     @State private var showingImportFilePicker = false
     @State private var exportURL: URL?
     @State private var showingShareSheet = false

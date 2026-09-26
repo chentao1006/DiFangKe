@@ -175,12 +175,20 @@ private struct WatchComplicationView: View {
         case .accessoryInline:
             HStack(spacing: 3) {
                 Image(systemName: icon)
+                    .foregroundStyle(color)
                 Text(title)
                 Text("·")
                 durationLabel
             }
         case .accessoryCorner:
-            durationLabel.widgetLabel { Label(title, systemImage: icon) }
+            durationLabel.widgetLabel {
+                Label {
+                    Text(title)
+                } icon: {
+                    Image(systemName: icon)
+                        .foregroundStyle(color)
+                }
+            }
         default:
             VStack(alignment: .leading) {
                 Label(title, systemImage: icon).foregroundStyle(color)
@@ -367,6 +375,7 @@ struct DiFangKeWatchComplication: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: ComplicationProvider()) { entry in
             WatchComplicationView(entry: entry)
+                .privacySensitive()
                 .widgetURL(URL(string: "difangke://watch/current"))
         }
         .configurationDisplayName("地方客此刻")

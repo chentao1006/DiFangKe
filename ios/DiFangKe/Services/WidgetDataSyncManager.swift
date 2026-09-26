@@ -143,6 +143,17 @@ final class WidgetDataSyncManager {
     
     /// 仅同步今日数据 (用于位置更新等高频场景)
     func syncTodayOnly() async {
+        // Widgets are not visible while the app is in the foreground, but each
+        // sync renders six MapKit snapshots that compete with the live map for
+        // the GPU ("Failed to acquire drawable") and add memory pressure. The
+        // scene's background transition runs syncTodayOnly again, so skipping
+        // here only postpones the refresh to the moment it can be seen.
+        // `.inactive` covers launch (before the first activation) and
+        // transitions; only a real background state renders snapshots.
+        if UIApplication.shared.applicationState != .background {
+            return
+        }
+
         if isTodaySyncInFlight {
             hasPendingTodaySync = true
             return
@@ -1021,19 +1032,6 @@ final class WidgetDataSyncManager {
         guard let containerURL = manager.containerURL(forSecurityApplicationGroupIdentifier: groupID) else { return nil }
         let fileName = "widget_snapshot_\(sizeName)_\(themeName)_\(offset)_\(Self.snapshotFileVersion).jpg"
         return containerURL.appendingPathComponent(fileName)
-    }
-
-    private func formatDuration(_ duration: TimeInterval) -> (number: String, unit: String) {
-        let totalMinutes = Int(duration / 60)
-        if totalMinutes < 60 {
-            return ("\(max(1, totalMinutes))", "分钟")
-        }
-        let hours = Double(totalMinutes) / 60.0
-        if hours >= 10.0 {
-            return ("\(Int(round(hours)))", "小时")
-        }
-        let formatted = String(format: "%g", (hours * 10).rounded() / 10)
-        return (formatted, "小时")
     }
 
     private func sharedDefaults() -> UserDefaults? {

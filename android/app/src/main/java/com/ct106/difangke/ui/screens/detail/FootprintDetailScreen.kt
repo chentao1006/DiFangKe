@@ -390,6 +390,21 @@ fun FootprintDetailScreen(
                         ) {
                             val mPlace = matchedPlace
                             val locationText = addressText.ifEmpty { mPlace?.name ?: "未知位置" }
+
+                            val geographicSubtitle = listOfNotNull(
+                                footprint?.countryName?.trim()?.takeIf { it.isNotEmpty() },
+                                footprint?.cityName?.trim()?.takeIf { it.isNotEmpty() }
+                            ).joinToString("·")
+
+                            if (geographicSubtitle.isNotEmpty()) {
+                                Text(
+                                    text = geographicSubtitle,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                             
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(

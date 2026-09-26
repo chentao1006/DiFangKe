@@ -667,7 +667,7 @@ class LocationTrackingService : Service() {
                                                         speed = current.speed
                                                 )
 
-                                        upsertOngoingFootprint(
+                                        val didCreateFootprint = upsertOngoingFootprint(
                                                 centerLat,
                                                 centerLon,
                                                 current,
@@ -675,7 +675,7 @@ class LocationTrackingService : Service() {
                                         )
 
                                         val stayStart = ongoingStayStart!!.timestamp.time
-                                        if (lastNotifiedStayStart != stayStart) {
+                                        if (didCreateFootprint && lastNotifiedStayStart != stayStart) {
                                                 checkAndSendNewPlaceNotification(
                                                         centerLat,
                                                         centerLon,
@@ -803,10 +803,10 @@ class LocationTrackingService : Service() {
                 centerLon: Double,
                 current: RawLocationStore.RawPoint,
                 address: String?
-        ) {
-                val start = ongoingStayStart ?: return
+        ): Boolean {
+                val start = ongoingStayStart ?: return false
                 val durationSec = (current.timestamp.time - start.timestamp.time) / 1000.0
-                if (durationSec < AppConfig.STAY_DURATION_THRESHOLD) return
+                if (durationSec < AppConfig.STAY_DURATION_THRESHOLD) return false
 
                 val rawPoints =
                         rawStore.loadRecentLocations(AppConfig.LOCATION_LOOKBACK_MAX_HOURS)
@@ -835,7 +835,7 @@ class LocationTrackingService : Service() {
                 val places = db.placeDao().getAll()
                 if (PlaceMatcher.ignoredPlaceForCoordinate(centerLat, centerLon, places, processor) != null) {
                         ongoingFootprintID = null
-                        return
+                        return false
                 }
                 val matchedPlace = ongoingPlaceOverrideID?.let { overrideID ->
                         places.firstOrNull { it.placeID == overrideID && !it.isIgnored }
@@ -874,7 +874,7 @@ class LocationTrackingService : Service() {
                                         cityName = existing.cityName ?: geocode?.cityName
                                 )
                         db.footprintDao().update(updated)
-                        return
+                        return false
                 }
 
                 val entity =
@@ -913,6 +913,7 @@ class LocationTrackingService : Service() {
 
                 db.footprintDao().insert(entity)
                 ongoingFootprintID = entity.footprintID
+                return true
         }
 
         private suspend fun findExistingOngoingFootprint(
@@ -970,54 +971,24 @@ class LocationTrackingService : Service() {
                         val matchedPlace =
                                 PlaceMatcher.bestPlaceForCoordinate(lat, lon, places, processor)
 
-                        var lastVisit: FootprintEntity? = null
-                        var isNewPlace = false
-
-                        if (matchedPlace != null) {
-                                lastVisit =
+                        val lastVisit =
+                                if (matchedPlace != null) {
                                         db.footprintDao()
                                                 .getLastVisitToPlace(
                                                         matchedPlace.placeID,
                                                         startTimeDate
                                                 )
-                                if (lastVisit == null) isNewPlace = true
-                        } else {
-                                val hash = FootprintEntity.generateLocationHash(lat, lon)
-                                lastVisit =
+                                } else {
+                                        val hash = FootprintEntity.generateLocationHash(lat, lon)
                                         db.footprintDao().getLastVisitToHash(hash, startTimeDate)
-                                if (lastVisit == null) isNewPlace = true
-                        }
-
-                        var isLongTimeNoSee = false
-                        if (lastVisit != null) {
-                                val diffDays =
-                                        (startTime - lastVisit.startTime.time) /
-                                                (1000 * 60 * 60 * 24)
-                                if (diffDays >= 30) {
-                                        isLongTimeNoSee = true
                                 }
-                        }
 
-                        if (isNewPlace || isLongTimeNoSee) {
-                                val title = if (isNewPlace) "发现新地方" else "久违了"
+                        if (lastVisit == null && footprintID != null) {
                                 val placeName = matchedPlace?.name ?: address ?: "这个位置"
-                                val body =
-                                        if (isNewPlace) {
-                                                "你第一次在「$placeName」留下足迹，开启一段新回忆吧。"
-                                        } else {
-                                                val diffDays =
-                                                        (startTime - lastVisit!!.startTime.time) /
-                                                                (1000 * 60 * 60 * 24)
-                                                "你已经有 $diffDays 天没来「$placeName」了，欢迎回来。"
-                                        }
-
-                                NotificationHelper.sendHighlightNotification(
+                                NotificationHelper.sendNewPlaceNotification(
                                         this@LocationTrackingService,
-                                        title,
-                                        body,
-                                        startTime.hashCode(),
-                                        timestamp = startTime,
-                                        footprintId = footprintID
+                                        placeName,
+                                        footprintID
                                 )
                         }
                 }

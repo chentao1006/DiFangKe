@@ -591,24 +591,6 @@ enum DataDeduplicationService {
         return score
     }
 
-    private static func footprintCloneKey(_ footprint: Footprint) -> String {
-        let date = Int(Calendar.current.startOfDay(for: footprint.date).timeIntervalSince1970.rounded())
-        let start = Int(footprint.startTime.timeIntervalSince1970.rounded())
-        let end = Int(footprint.endTime.timeIntervalSince1970.rounded())
-        let latitude = Int((footprint.latitude * 100_000).rounded())
-        let longitude = Int((footprint.longitude * 100_000).rounded())
-        let place = footprint.placeID?.uuidString ?? ""
-        return "fp|\(date)|\(start)|\(end)|\(latitude)|\(longitude)|\(place)|\(footprint.locationHash)"
-    }
-
-    private static func transportCloneKey(_ transport: TransportRecord) -> String {
-        let day = Int(Calendar.current.startOfDay(for: transport.day).timeIntervalSince1970.rounded())
-        let start = Int(transport.startTime.timeIntervalSince1970.rounded())
-        let end = Int(transport.endTime.timeIntervalSince1970.rounded())
-        let distance = Int(transport.distance.rounded())
-        return "tp|\(day)|\(start)|\(end)|\(distance)|\(transport.startLocation)|\(transport.endLocation)|\(transport.typeRaw)|\(transport.manualTypeRaw ?? "")|\(transport.pointsData.count)"
-    }
-
     private static func combinedOptionalMax<T: Comparable>(_ first: T?, _ second: T?) -> T? {
         switch (first, second) {
         case let (.some(first), .some(second)):

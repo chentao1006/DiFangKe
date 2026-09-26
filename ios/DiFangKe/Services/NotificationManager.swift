@@ -190,13 +190,7 @@ class NotificationManager {
         defaults.set(Date(), forKey: dailySummaryOverviewDateKey)
     }
 
-    func sendHighlightNotification(title: String, body: String, footprintID: UUID? = nil, date: Date) {
-        // Keep this default in sync with SettingsView's @AppStorage default.  `bool(forKey:)`
-        // returns false for a missing key, which previously made existing users whose toggle
-        // had never been changed appear to have disabled highlight notifications.
-        let isEnabled = UserDefaults.standard.object(forKey: "isHighlightNotificationEnabled") as? Bool ?? true
-        guard isEnabled else { return }
-        
+    func sendPastMemoriesNotification(title: String, body: String, footprintID: UUID? = nil, date: Date) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -214,14 +208,14 @@ class NotificationManager {
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
-                print("Failed to send highlight notification: \(error)")
+                print("Failed to send past-memories notification: \(error)")
             }
         }
     }
 
-    /// The notification is mirrored to the paired Watch. Its action opens the Watch app's
-    /// complete activity picker, so custom activity types are never truncated.
-    func sendNewFootprintActivityNotification(title: String, body: String, footprintID: UUID) {
+    /// The notification opens the saved footprint detail, where the complete activity picker
+    /// is available. The persisted preference key is retained to preserve existing choices.
+    func sendNewFootprintActivityNotification(title: String, body: String, footprintID: UUID, date: Date) {
         let isEnabled = UserDefaults.standard.object(forKey: "isHighlightNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }
 
@@ -230,7 +224,11 @@ class NotificationManager {
         content.body = body + " 点此选择这次的活动类型。"
         content.sound = .default
         content.categoryIdentifier = newFootprintActivityCategoryID
-        content.userInfo = ["type": "new_footprint_activity", "footprintID": footprintID.uuidString]
+        content.userInfo = [
+            "type": "new_footprint_activity",
+            "footprintID": footprintID.uuidString,
+            "date": date.timeIntervalSince1970
+        ]
         let request = UNNotificationRequest(identifier: "newFootprintActivity.\(footprintID.uuidString)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             if let error { print("Failed to send new-footprint activity notification: \(error)") }

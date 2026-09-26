@@ -12,7 +12,6 @@ struct PlacesManagerView: View {
         allPlacesList.filter { $0.isUserDefined }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
-    @Query private var footprints: [Footprint]
     var startInAddMode: Bool = false
     
     @State private var showingAddPlace = false

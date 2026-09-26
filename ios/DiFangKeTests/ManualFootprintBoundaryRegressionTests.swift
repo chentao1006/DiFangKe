@@ -6,6 +6,85 @@ import XCTest
 
 @MainActor
 final class ManualFootprintBoundaryRegressionTests: XCTestCase {
+    func testStableStayBoundariesRecoverClippedShortTransportWithoutAcceptingDrift() throws {
+        let base = Date(timeIntervalSince1970: 1_790_207_077)
+        func point(
+            _ seconds: TimeInterval,
+            _ latitude: Double,
+            _ longitude: Double,
+            synthetic: Bool = false,
+            stableBoundary: Bool = false
+        ) -> CodableCoordinate {
+            CodableCoordinate(
+                lat: latitude,
+                lon: longitude,
+                timestamp: base.addingTimeInterval(seconds),
+                isSyntheticPadding: synthetic,
+                isStableStayBoundary: stableBoundary
+            )
+        }
+        func record(_ points: [CodableCoordinate]) throws -> TransportRecord {
+            TransportRecord(
+                day: Calendar.current.startOfDay(for: base),
+                startTime: base.addingTimeInterval(6),
+                endTime: base.addingTimeInterval(48),
+                typeRaw: TransportType.ebike.rawValue,
+                distance: 377,
+                averageSpeed: 377 / 42,
+                pointsData: try JSONEncoder().encode(points)
+            )
+        }
+
+        let clippedRealTrip = try record([
+            point(0, 25.10008000, 102.73331000, synthetic: true, stableBoundary: true),
+            point(6, 25.10024005, 102.73439256),
+            point(18, 25.10021892, 102.73517815),
+            point(30, 25.09988864, 102.73561169),
+            point(42, 25.09982451, 102.73612879),
+            point(54, 25.09984500, 102.73704500, synthetic: true, stableBoundary: true),
+        ])
+        XCTAssertTrue(PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan(clippedRealTrip))
+
+        let stationaryDrift = try record([
+            point(0, 25.10008000, 102.73331000, synthetic: true, stableBoundary: true),
+            point(6, 25.10009000, 102.73332000),
+            point(18, 25.10007000, 102.73330000),
+            point(30, 25.10010000, 102.73333000),
+            point(42, 25.10008000, 102.73331000),
+            point(54, 25.09984500, 102.73704500, synthetic: true, stableBoundary: true),
+        ])
+        XCTAssertFalse(PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan(stationaryDrift))
+    }
+
+    func testAutomaticSyncReopensTransportThatEndedAtMidRoutePause() {
+        let end = Date(timeIntervalSince1970: 1_790_116_740)
+        func point(_ seconds: TimeInterval, _ latitude: Double, _ longitude: Double) -> CLLocation {
+            CLLocation(coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                       altitude: 0, horizontalAccuracy: 10, verticalAccuracy: 10,
+                       timestamp: end.addingTimeInterval(seconds))
+        }
+        let stillMoving = [
+            point(5, 25.0960, 102.7310),
+            point(60, 25.0970, 102.7320),
+            point(120, 25.0980, 102.7340),
+            point(220, 25.0997, 102.7370)
+        ]
+        XCTAssertTrue(PersistentTimelineBuilder.hasTransportSizedMovementAfterPrematureEnd(
+            recordEnd: end, footprintStart: end.addingTimeInterval(240),
+            footprintEnd: end.addingTimeInterval(1_200), rawPoints: stillMoving
+        ))
+
+        let stationary = [
+            point(5, 25.09970, 102.73700),
+            point(120, 25.09973, 102.73702),
+            point(220, 25.09969, 102.73701)
+        ]
+        XCTAssertFalse(PersistentTimelineBuilder.hasTransportSizedMovementAfterPrematureEnd(
+            recordEnd: end, footprintStart: end,
+            footprintEnd: end.addingTimeInterval(1_200), rawPoints: stationary
+        ))
+    }
+
     func testAutomaticDepartureWatchBoostsOnFirstAccurateMovingFix() {
         let now = Date()
         let anchor = CLLocation(latitude: 31.2304, longitude: 121.4737)

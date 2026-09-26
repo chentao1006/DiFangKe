@@ -35,29 +35,6 @@ struct FutureTripTimelineRow: View {
         }
     }
     
-    private var countdownText: String {
-        let now = Date()
-        let arrivalDate = trip.effectiveArrivalDate(now: now)
-        if arrivalDate > now {
-            let components = Calendar.current.dateComponents([.day, .hour, .minute], from: now, to: arrivalDate)
-            let d = components.day ?? 0
-            let h = components.hour ?? 0
-            let m = components.minute ?? 0
-            
-            if d > 0 {
-                return "\(d)天"
-            } else if h > 0 {
-                return "\(h)小时"
-            } else if m > 0 {
-                return "\(m)分钟"
-            } else {
-                return "即将到时"
-            }
-        } else {
-            return "已到时间"
-        }
-    }
-
     private var countdownColor: Color {
         if trip.isCompleted {
             return .green
@@ -233,15 +210,6 @@ struct FutureTripDetailView: View {
         isInline && presentationDetent == .height(88) && !isSideBySide
     }
 
-    private var selectedActivityName: String {
-        if let activityTypeValue = trip.activityTypeValue,
-           let id = UUID(uuidString: activityTypeValue),
-           let activity = allActivities.first(where: { $0.id == id }) {
-            return activity.name
-        }
-        return "无"
-    }
-    
     private var selectedActivityIcon: String {
         if let activityTypeValue = trip.activityTypeValue,
            let id = UUID(uuidString: activityTypeValue),
@@ -275,25 +243,6 @@ struct FutureTripDetailView: View {
     private var shouldOfferCompletion: Bool {
         if trip.isOrdered { return false }
         return trip.shouldOfferCompletion(currentDistance: distanceInMeters)
-    }
-
-    private var fullCountdownText: String {
-        let now = Date()
-        let arrivalDate = trip.effectiveArrivalDate(now: now)
-        if arrivalDate < now {
-            return "已到时间"
-        }
-        
-        let diff = Calendar.current.dateComponents([.day, .hour, .minute], from: now, to: arrivalDate)
-        if let d = diff.day, d > 0 { return "\(d)天" }
-        if let h = diff.hour, h > 0 { return "\(h)小时" }
-        
-        if trip.hasArrivalTime {
-            if let m = diff.minute, m > 0 { return "\(m)分" }
-            return "1分内"
-        } else {
-            return "<1小时"
-        }
     }
 
     private func updateActivity(_ newValue: String?) {
@@ -679,51 +628,6 @@ struct FutureTripDetailView: View {
             .frame(maxWidth: .infinity)
     }
 
-    @ViewBuilder
-    private func detailMenuRow(
-        title: String?,
-        value: String,
-        valueColor: Color,
-        valueFont: Font = .system(.title3, design: .rounded).bold(),
-        textColor: Color? = nil,
-        textLineLimit: Int = 2,
-        textMinimumScaleFactor: CGFloat = 1,
-        iconFont: Font = .system(size: 13, weight: .semibold),
-        leadingIcon: String? = nil
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let title, !title.isEmpty {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.secondary)
-            }
-
-            HStack(alignment: .center, spacing: 12) {
-                HStack(alignment: .center, spacing: 6) {
-                    if let leadingIcon {
-                        Image(systemName: leadingIcon)
-                            .font(iconFont)
-                            .foregroundColor(valueColor)
-                    }
-
-                    Text(value)
-                        .font(valueFont)
-                        .foregroundColor(textColor ?? valueColor)
-                        .lineLimit(textLineLimit)
-                        .minimumScaleFactor(textMinimumScaleFactor)
-                        .multilineTextAlignment(.leading)
-                }
-
-                Spacer(minLength: 8)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.05)))
-        .contentShape(Rectangle())
-    }
-    
     private var delayButton: some View {
         Menu {
             ForEach(delayOptions, id: \.1) { option in

@@ -587,6 +587,10 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     func sessionDidDeactivate(_ session: WCSession) { session.activate() }
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        if message["requestSnapshot"] as? Bool == true {
+            DispatchQueue.main.async { self.syncSnapshot() }
+            return
+        }
         guard let footprintID = message["footprintID"] as? String else { return }
         let activityID = message["activityID"] as? String
         DispatchQueue.main.async { self.applyActivityChange(footprintID: footprintID, activityID: activityID) }

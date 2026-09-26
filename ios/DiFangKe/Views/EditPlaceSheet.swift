@@ -10,10 +10,8 @@ struct EditPlaceSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
-    @Environment(LocationManager.self) private var locationManager
     @StateObject private var vm = PlacePickerViewModel()
 
-    @Query private var allPlaces: [Place]
     @State private var placeName = ""
     @State private var radius: Float = 100
     @State private var selectedCoord: CLLocationCoordinate2D?
@@ -24,13 +22,8 @@ struct EditPlaceSheet: View {
     @State private var radiusTrigger = UUID()
     @State private var shouldSnapToUser = false
     @State private var showDeleteConfirm = false
-    @State private var showingCategoryManager = false
 
     private let importantTypes = ["家", "公司", "学校"]
-
-    private var presetHeader: some View {
-        Text("快速预设")
-    }
 
     init(place: Place, onSave: @escaping () -> Void, onDelete: @escaping () -> Void) {
         self.place = place

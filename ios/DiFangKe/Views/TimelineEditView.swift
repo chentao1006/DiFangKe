@@ -603,12 +603,6 @@ struct TimelineEditView: View {
         redoStack = []
     }
     
-    private func performUndoableEdit(_ edit: () -> Void) {
-        let snapshot = makeEditorSnapshot()
-        edit()
-        recordUndoSnapshot(snapshot)
-    }
-    
     private func undoLastEdit() {
         guard let snapshot = undoStack.popLast() else { return }
         redoStack.append(makeEditorSnapshot())
@@ -1264,23 +1258,6 @@ struct TimelineEditView: View {
 
     private func timeRangeString(start: Date, end: Date) -> String {
         return "\(timeFormatter.string(from: start)) - \(timeFormatter.string(from: end))"
-    }
-    
-    @ViewBuilder
-    private func compactIconView(for item: TimelineItem) -> some View {
-        switch item {
-        case .footprint(let fp):
-            let activity = fp.getActivityType(from: allActivities)
-            Image(systemName: activity?.icon ?? "questionmark.circle.dashed")
-                .font(.system(size: 14))
-                .foregroundColor(activity?.color ?? Color.secondary)
-                .frame(width: 22, height: 22)
-        case .transport(let tp):
-            Image(systemName: tp.currentType.sfSymbol)
-                .font(.system(size: 14))
-                .foregroundColor(Color.dfkAccent)
-                .frame(width: 22, height: 22)
-        }
     }
     
     @ViewBuilder

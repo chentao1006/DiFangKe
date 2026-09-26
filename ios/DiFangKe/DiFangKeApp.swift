@@ -149,20 +149,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let userInfo = response.notification.request.content.userInfo
 
-        if userInfo["type"] as? String == "new_footprint_activity",
-           let footprintID = userInfo["footprintID"] as? String {
-            Task { @MainActor in
-                if response.actionIdentifier == "dfk.chooseActivity" {
-                    WatchSyncManager.shared.requestActivityPicker(for: footprintID)
-                } else if response.actionIdentifier.hasPrefix("dfk.activity.") {
-                    let activityID = String(response.actionIdentifier.dropFirst("dfk.activity.".count))
-                    WatchSyncManager.shared.applyActivityChange(footprintID: footprintID, activityID: activityID)
-                }
-            }
-        }
-        
         if let type = userInfo["type"] as? String {
-            if type == "highlight_footprint",
+            if (type == "highlight_footprint" || type == "new_footprint_activity"),
                let timestamp = userInfo["date"] as? Double {
                 
                 let date = Date(timeIntervalSince1970: timestamp)

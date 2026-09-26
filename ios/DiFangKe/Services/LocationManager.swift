@@ -887,8 +887,6 @@ struct CandidateFootprint {
 final class FootprintProcessor {
     static let shared = FootprintProcessor()
     
-    // 1.2 去噪参数
-    private let minAccuracy: CLLocationAccuracy = 100.0   // 精度过滤
     private var minTimeInterval: TimeInterval { AppConfig.shared.footprintMinSampleInterval }       // 时间间隔过滤
     private var driftDistanceThreshold: CLLocationDistance { AppConfig.shared.stayDistanceThreshold }
     private var driftSpeedThreshold: CLLocationSpeed { AppConfig.shared.driftSpeedThreshold } // m/s，异常飘移速度
@@ -1200,7 +1198,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     // 服务引用
     private let footprintProcessor = FootprintProcessor.shared
-    private let openAIService = OpenAIService.shared
     private let geocoder = CLGeocoder()
     private var lastGeocodedLocation: CLLocation?
     /// 原始轨迹是后续重建足迹的源数据；定位回调可能在静止时按秒到达，
@@ -2903,7 +2900,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let title = "往年今日 · \(yearsAgo)年前"
         let body = "在 \(fpYear) 年的今天，你去了「\(placeName)」。点此重温那段时光。"
         
-        NotificationManager.shared.sendHighlightNotification(
+        NotificationManager.shared.sendPastMemoriesNotification(
             title: title,
             body: body,
             footprintID: nil, // 点开通知只要跳到那一天即可,不用打开足迹详情
@@ -3132,11 +3129,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         guard let context = modelContext else { return }
         let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
         let startTime = footprint.startTime
-        
-        // 判定规则：
-        // 1. 新地方：历史上从未在该地点（或周边 200m）有过足迹
-        // 2. 很久没来：上一次来是 30 天以前
-        
+
+        // 新地点：历史上从未在该地点（或周边 200m）生成过足迹。
         // 由于 SwiftData Predicate 不支持计算属性 (latitude/longitude)，我们在此使用内存过滤
         // 对于几千条记录，性能是可以接受的
         let descriptor = FetchDescriptor<Footprint>()
@@ -3154,63 +3148,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // 否则按距离匹配 (200m 范围内视为同一地点)
             let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
             return location.distance(from: fpLoc) < 200
-        }.sorted { $0.startTime > $1.startTime }
-        
-        var isNewPlace = false
-        var isLongTimeNoSee = false
-        var lastVisitDate: Date? = nil
-        if let last = history.first {
-            lastVisitDate = last.startTime
-            let days = Calendar.current.dateComponents([.day], from: lastVisitDate!, to: startTime).day ?? 0
-            if days >= 180 {
-                isLongTimeNoSee = true
-            }
-        } else {
-            isNewPlace = true
-        }
-        
-        // First visits need a more meaningful stay; returning after a long absence can be
-        // surfaced sooner.  Both thresholds are evaluated on the saved footprint so a tap
-        // can always open its detail page.
-        if isNewPlace, footprint.duration < 60 * 60 {
-            return
-        }
-        if isLongTimeNoSee, footprint.duration < 10 * 60 {
-            return
         }
 
-        if isNewPlace || isLongTimeNoSee {
-            let placeName = place?.name ?? currentAddress
-            let title = isNewPlace ? "发现新地方" : "久违了"
-            let body: String
-            if isNewPlace {
-                body = "你第一次在「\(placeName)」留下足迹，开启一段新回忆吧。"
-            } else {
-                let days = Calendar.current.dateComponents([.day], from: lastVisitDate!, to: startTime).day ?? 0
-                let absenceDuration = formatLongAbsenceDuration(days: days)
-                body = "你已经有 \(absenceDuration) 没来「\(placeName)」了，欢迎回来。"
-            }
-            
-            if isNewPlace {
-                NotificationManager.shared.sendNewFootprintActivityNotification(
-                    title: title, body: body, footprintID: footprint.footprintID
-                )
-            } else {
-                NotificationManager.shared.sendHighlightNotification(
-                    title: title, body: body, footprintID: footprint.footprintID, date: footprint.startTime
-                )
-            }
-        }
-    }
+        guard history.isEmpty else { return }
 
-    private func formatLongAbsenceDuration(days: Int) -> String {
-        guard days >= 365 else {
-            return "\(days) 天"
-        }
-
-        let years = days / 365
-        let remainingDays = days % 365
-        return remainingDays >= 30 ? "\(years) 年多" : "\(years) 年"
+        let placeName = place?.name ?? footprint.address ?? currentAddress
+        NotificationManager.shared.sendNewFootprintActivityNotification(
+            title: "新地点足迹",
+            body: "你第一次在「\(placeName)」留下足迹。",
+            footprintID: footprint.footprintID,
+            date: footprint.startTime
+        )
     }
 
     private func saveOngoingTitle() {
@@ -4689,8 +4637,26 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     // --- 附近地点建议逻辑 ---
     
+    // 每次建议查询会并发发出 8~9 个 MKLocalSearch，Apple 限制每 60 秒 50 次。
+    // 按坐标（约 11 米精度）缓存结果，避免重复打开菜单时再次触发整批请求。
+    @ObservationIgnored private var nearbySuggestionCache: [String: (date: Date, results: [LocationSuggestion])] = [:]
+    private let nearbySuggestionCacheLifetime: TimeInterval = 600
+
     /// 获取当前坐标附近的建议地点（包含已保存地点和 POI）
     func fetchNearbySuggestions(at coordinate: CLLocationCoordinate2D) async -> [LocationSuggestion] {
+        let key = String(format: "%.4f,%.4f", coordinate.latitude, coordinate.longitude)
+        if let cached = nearbySuggestionCache[key],
+           Date().timeIntervalSince(cached.date) < nearbySuggestionCacheLifetime {
+            return cached.results
+        }
+        let results = await loadNearbySuggestions(at: coordinate)
+        if !results.isEmpty {
+            nearbySuggestionCache[key] = (Date(), results)
+        }
+        return results
+    }
+
+    private func loadNearbySuggestions(at coordinate: CLLocationCoordinate2D) async -> [LocationSuggestion] {
         let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
         var allFound: [LocationSuggestion] = []
         

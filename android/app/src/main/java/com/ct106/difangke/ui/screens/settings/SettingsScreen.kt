@@ -210,8 +210,8 @@ fun SettingsScreen(
             }
             item {
                 SettingsToggleItem(
-                    title = "精彩足迹提醒",
-                    subtitle = "发现值得纪念的瞬间时给予提醒",
+                    title = "新地点足迹提醒",
+                    subtitle = "在新地点生成足迹时提醒选择活动类型",
                     checked = isHighlightNotificationEnabled,
                     onCheckedChange = { isEnabled ->
                         if (isEnabled) {

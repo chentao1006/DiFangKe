@@ -644,7 +644,6 @@ struct FootprintCardView: View {
     @State private var showingMergeConfirm = false
     @State private var showingAddImportantPlace = false
     @State private var showingSplitFootprint = false
-    @State private var confirmedAnimating: Bool = false
     @State private var pendingMergeCandidate: AdjacentFootprintMergeCandidate?
     @State private var isResolvingUnknownPlace = false
     @State private var isPlaceTitleBreathing = false
@@ -1217,15 +1216,6 @@ struct FootprintCardView: View {
         if calendar.isDateInToday(start) || calendar.isDateInToday(end) {
             locationManager.triggerNotificationSummaryRefresh()
         }
-    }
-    
-    private func confirmFootprint() {
-        withAnimation(.spring(response: 0.3)) {
-            footprint.status = .confirmed
-            confirmedAnimating = true
-            try? modelContext.save()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { confirmedAnimating = false }
     }
     
     private func ignoreFootprint() {

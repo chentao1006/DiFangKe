@@ -108,7 +108,8 @@ struct SuggestionsMenu<Label: View>: View {
     @ViewBuilder var label: () -> Label
     
     @State private var suggestions: [LocationSuggestion] = []
-    @State private var isLoading = false
+    // Starts true: loading begins only once the menu opens.
+    @State private var isLoading = true
 
     private var coordinateKey: String {
         guard let coordinate else { return "none" }
@@ -124,7 +125,29 @@ struct SuggestionsMenu<Label: View>: View {
             }
             
             Divider()
-            
+
+            suggestionItems
+                // Menu content only exists while the menu is open. Loading
+                // here (not on the Menu itself) keeps every timeline row that
+                // merely shows this button from firing a batch of MapKit
+                // searches, which exceeded Apple's 50-per-minute limit.
+                .task(id: coordinateKey) {
+                    suggestions = []
+                    guard let coordinate else { isLoading = false; return }
+                    isLoading = true
+                    let results = await locationManager.fetchNearbySuggestions(at: coordinate)
+                    guard !Task.isCancelled else { return }
+                    suggestions = results
+                    isLoading = false
+                }
+        } label: {
+            label()
+        }
+    }
+
+    @ViewBuilder
+    private var suggestionItems: some View {
+        Group {
             if isLoading {
                 Text("正在寻找附近地点...")
             } else if suggestions.isEmpty {
@@ -145,17 +168,6 @@ struct SuggestionsMenu<Label: View>: View {
                     }
                 }
             }
-        } label: {
-            label()
-        }
-        .task(id: coordinateKey) {
-            suggestions = []
-            guard let coordinate else { isLoading = false; return }
-            isLoading = true
-            let results = await locationManager.fetchNearbySuggestions(at: coordinate)
-            guard !Task.isCancelled else { return }
-            suggestions = results
-            isLoading = false
         }
     }
 }

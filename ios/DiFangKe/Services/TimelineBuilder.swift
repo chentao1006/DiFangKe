@@ -1351,12 +1351,20 @@ struct CodableCoordinate: Codable {
     let lon: Double
     let timestamp: Date?
     var isSyntheticPadding: Bool?
+    var isStableStayBoundary: Bool?
 
-    init(lat: Double, lon: Double, timestamp: Date? = nil, isSyntheticPadding: Bool? = nil) {
+    init(
+        lat: Double,
+        lon: Double,
+        timestamp: Date? = nil,
+        isSyntheticPadding: Bool? = nil,
+        isStableStayBoundary: Bool? = nil
+    ) {
         self.lat = lat
         self.lon = lon
         self.timestamp = timestamp
         self.isSyntheticPadding = isSyntheticPadding
+        self.isStableStayBoundary = isStableStayBoundary
     }
 }
 
@@ -1729,6 +1737,21 @@ class PersistentTimelineBuilder {
             return (valid, drift)
         }.value
 
+        // A moving-day sync can persist a provisional transport before the
+        // journey has actually finished. Once a following automatic stay is
+        // available, a sub-threshold gap is normally invisible to gap filling.
+        // Reopen only records whose supposedly uncovered/stationary interval
+        // contains a real transport-sized displacement. Manual boundaries and
+        // edited stays remain authoritative.
+        if reopenPrematureAutomaticTransportEnds(
+            transports: allTps, footprints: allFps,
+            rawPoints: allRawPoints, context: context
+        ) {
+            try? context.save()
+            allFps = (try? context.fetch(fpDesc)) ?? []
+            allTps = (try? context.fetch(tpDesc)) ?? []
+        }
+
         // An earlier sync may already have saved the entire outbound trip,
         // school stop and return as one automatic transport. Rebuild only
         // those unedited records that contain a confirmed short stop before
@@ -1970,70 +1993,6 @@ class PersistentTimelineBuilder {
         return true
     }
 
-
-    @MainActor
-    private static func fillGapAfterLastItem(for date: Date, lastEndTime: Date, in context: ModelContext) async {
-        let calendar = Calendar.current
-        let startOfDay = calendar.startOfDay(for: date)
-        let now = Date()
-        let endOfTargetDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
-        
-        // 缝隙嗅探器的截止点：除了受限于当前时间，还要受限于本设备当前的“实时停留”起始点。
-        // 如果正在停留，缝隙填充不应跨越到停留时间段内，否则会造成双重视图。
-#if !WIDGET_EXTENSION
-        let ongoingStart = calendar.isDateInToday(date) ? LocationManager.shared.potentialStopStartLocation?.timestamp : nil
-#else
-        let ongoingStart: Date? = nil
-#endif
-        
-        var syncLimit = min(now, endOfTargetDay)
-        if let os = ongoingStart {
-            syncLimit = min(syncLimit, os)
-        }
-        
-        let gap = syncLimit.timeIntervalSince(lastEndTime)
-        
-        // 核心兜底：如果是全天空白（从 0:00 开始且没有任何原始轨迹），坚决不自动生成覆盖全天的假足迹
-        if lastEndTime == startOfDay && gap > 23 * 3600 { return }
-
-        if gap >= AppConfig.shared.gapFillingThreshold { // 使用配置的缺口阈值
-            let transportDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                $0.statusRaw != "ignored" && $0.endTime > lastEndTime && $0.startTime < syncLimit
-            })
-            let hasTransportOverlap = ((try? context.fetch(transportDesc))?.isEmpty == false)
-            if hasTransportOverlap { return }
-
-            // 尝试寻找该日期的上一个足迹，如果没有，寻找该日期之前的绝对最后一条记录
-            var fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-                $0.startTime < lastEndTime
-            }, sortBy: [SortDescriptor(\.endTime, order: .reverse)])
-            fpDesc.fetchLimit = 1
-            
-            let previousFp = (try? context.fetch(fpDesc))?.first
-            
-            let bridgeFp = Footprint(
-                date: startOfDay,
-                startTime: lastEndTime,
-                endTime: syncLimit,
-                footprintLocations: previousFp != nil ? [CLLocationCoordinate2D(latitude: previousFp!.latitude, longitude: previousFp!.longitude)] : [],
-                locationHash: "stationary_fill",
-                duration: gap,
-                status: .confirmed
-            )
-            bridgeFp.address = previousFp?.address
-            bridgeFp.placeID = previousFp?.placeID
-            if let placeID = bridgeFp.placeID {
-                bridgeFp.activityTypeValue = frequentActivityTypeValue(
-                    for: placeID, at: bridgeFp.startTime, context: context,
-                    window: AppConfig.shared.habitTimeWindow, threshold: AppConfig.shared.habitFrequencyThreshold
-                )
-            }
-            let available = Footprint.automaticStayIntervals(start: bridgeFp.startTime, end: bridgeFp.endTime, context: context)
-            guard available.count == 1, available.first?.start == bridgeFp.startTime,
-                  available.first?.end == bridgeFp.endTime else { return }
-            context.insert(bridgeFp)
-        }
-    }
 
     @MainActor
     private static func mergeConsecutiveTransports(for date: Date, in context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle, preferredTransport: TransportType? = nil) async {
@@ -2365,7 +2324,7 @@ class PersistentTimelineBuilder {
             let gapEnd = next.start
             let duration = gapEnd.timeIntervalSince(gapStart)
             
-            if duration > 120 { // More than 2 minutes gap
+            if duration > 0 {
                 if overlapsDeletedTransportOverride(start: gapStart, end: gapEnd, deletedRanges: deletedTransportRanges) {
                     continue
                 }
@@ -2398,13 +2357,28 @@ class PersistentTimelineBuilder {
                     let observedTransportPoints = observation.points
                     guard !observedTransportPoints.isEmpty else { continue }
                     var routePoints = observedTransportPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) }
-                    let startCoord = CodableCoordinate(lat: current.endLoc.latitude, lon: current.endLoc.longitude, timestamp: current.end, isSyntheticPadding: true)
+                    let startCoord = CodableCoordinate(
+                        lat: current.endLoc.latitude,
+                        lon: current.endLoc.longitude,
+                        timestamp: current.end,
+                        isSyntheticPadding: true,
+                        isStableStayBoundary: !current.includesTransport
+                    )
                     if !current.includesTransport {
                         routePoints = TimelineBuilder.anchoringAutomaticTransportStart(routePoints, at: startCoord)
+                        if routePoints.first?.isStableStayBoundary != true {
+                            routePoints.insert(startCoord, at: 0)
+                        }
                     } else if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.first, footprint: startCoord) {
                         routePoints.insert(startCoord, at: 0)
                     }
-                    let endCoord = CodableCoordinate(lat: next.startLoc.latitude, lon: next.startLoc.longitude, timestamp: next.start, isSyntheticPadding: true)
+                    let endCoord = CodableCoordinate(
+                        lat: next.startLoc.latitude,
+                        lon: next.startLoc.longitude,
+                        timestamp: next.start,
+                        isSyntheticPadding: true,
+                        isStableStayBoundary: !next.includesTransport
+                    )
                     if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: routePoints.last, footprint: endCoord) {
                         routePoints.append(endCoord)
                     }
@@ -2418,8 +2392,20 @@ class PersistentTimelineBuilder {
                     actualEndTime = observedTransportPoints.last!.timestamp
                 } else {
                     pathDist = straightDist
-                    pts = [CodableCoordinate(lat: current.endLoc.latitude, lon: current.endLoc.longitude, timestamp: current.end, isSyntheticPadding: true),
-                           CodableCoordinate(lat: next.startLoc.latitude, lon: next.startLoc.longitude, timestamp: next.start, isSyntheticPadding: true)]
+                    pts = [CodableCoordinate(
+                               lat: current.endLoc.latitude,
+                               lon: current.endLoc.longitude,
+                               timestamp: current.end,
+                               isSyntheticPadding: true,
+                               isStableStayBoundary: !current.includesTransport
+                           ),
+                           CodableCoordinate(
+                               lat: next.startLoc.latitude,
+                               lon: next.startLoc.longitude,
+                               timestamp: next.start,
+                               isSyntheticPadding: true,
+                               isStableStayBoundary: !next.includesTransport
+                           )]
                     // With no observed route, the whole footprint-to-footprint
                     // gap is not evidence of travel. Bias the uncertain start
                     // toward arrival using a conservative minimum travel pace.
@@ -2445,7 +2431,13 @@ class PersistentTimelineBuilder {
                     guard routeDuration > 0 else { continue }
                     // 缝隙桥接出的短促交通同样要过最短时长门槛，避免上一段交通的尾部轨迹
                     // 被重复识别成一段新的交通（长距离例外：飞机/高铁允许极短行程）
-                    guard isLongDistance || routeDuration >= AppConfig.shared.transportMinDurationThreshold else { continue }
+                    let hasStableBoundaryEvidence = hasStableBoundaryShortTripEvidence(
+                        pts,
+                        duration: routeDuration
+                    )
+                    guard isLongDistance
+                            || routeDuration >= AppConfig.shared.transportMinDurationThreshold
+                            || hasStableBoundaryEvidence else { continue }
                     let ptsData = (try? JSONEncoder().encode(pts)) ?? Data()
                     let speed = pathDist / routeDuration
                     let currentLocName = current.endName
@@ -2591,14 +2583,29 @@ class PersistentTimelineBuilder {
             }
             
             if let prevFp = alignedPreviousFootprint {
-                let fpCoord = CodableCoordinate(lat: prevFp.latitude, lon: prevFp.longitude, timestamp: prevFp.endTime, isSyntheticPadding: true)
+                let fpCoord = CodableCoordinate(
+                    lat: prevFp.latitude,
+                    lon: prevFp.longitude,
+                    timestamp: prevFp.endTime,
+                    isSyntheticPadding: true,
+                    isStableStayBoundary: true
+                )
                 decodedPoints = TimelineBuilder.anchoringAutomaticTransportStart(decodedPoints, at: fpCoord)
+                if decodedPoints.first?.isStableStayBoundary != true {
+                    decodedPoints.insert(fpCoord, at: 0)
+                }
             }
             
             if let nextFp = alignedNextFootprint {
-                let fpCoord = CodableCoordinate(lat: nextFp.latitude, lon: nextFp.longitude, timestamp: nextFp.startTime, isSyntheticPadding: true)
+                let fpCoord = CodableCoordinate(
+                    lat: nextFp.latitude,
+                    lon: nextFp.longitude,
+                    timestamp: nextFp.startTime,
+                    isSyntheticPadding: true,
+                    isStableStayBoundary: true
+                )
                 if TimelineBuilder.shouldAttachTransportEndpoint(pathEndpoint: decodedPoints.last, footprint: fpCoord) &&
-                    (decodedPoints.last?.lat != fpCoord.lat || decodedPoints.last?.lon != fpCoord.lon) {
+                    decodedPoints.last?.isStableStayBoundary != true {
                     decodedPoints.append(fpCoord)
                 }
             }
@@ -2637,6 +2644,75 @@ class PersistentTimelineBuilder {
         }
         
         return route
+    }
+
+    static func hasTransportSizedMovementAfterPrematureEnd(
+        recordEnd: Date, footprintStart: Date, footprintEnd: Date,
+        rawPoints: [CLLocation]
+    ) -> Bool {
+        let windowEnd: Date
+        if footprintStart > recordEnd {
+            // The first automatic trip ended before the later stay began.
+            windowEnd = footprintStart
+        } else {
+            // The provisional stay itself began too early. Only inspect the
+            // first five minutes: movement after a valid five-minute stay is
+            // a new trip and must not invalidate that stay.
+            windowEnd = min(footprintEnd,
+                            footprintStart.addingTimeInterval(AppConfig.shared.stayDurationThreshold))
+        }
+        guard windowEnd > recordEnd else { return false }
+        let evidence = rawPoints.filter {
+            $0.timestamp > recordEnd && $0.timestamp <= windowEnd
+                && $0.horizontalAccuracy > 0
+                && $0.horizontalAccuracy <= AppConfig.shared.habitAnalysisAccuracyThreshold
+        }
+        guard evidence.count >= 2 else { return false }
+        return TimelineBuilder.calculateMaxDiameter(evidence.map(\.coordinate))
+            >= AppConfig.shared.transportMinDistanceThreshold
+    }
+
+    @MainActor
+    private static func reopenPrematureAutomaticTransportEnds(
+        transports: [TransportRecord], footprints: [Footprint],
+        rawPoints: [CLLocation], context: ModelContext
+    ) -> Bool {
+        var changed = false
+        var removedTransportIDs = Set<UUID>()
+        var removedFootprintIDs = Set<UUID>()
+        let sortedFootprints = footprints.sorted { $0.startTime < $1.startTime }
+
+        for record in transports where record.manualTypeRaw == nil && record.statusRaw != "ignored" {
+            guard !removedTransportIDs.contains(record.recordID),
+                  let next = sortedFootprints.first(where: {
+                      !removedFootprintIDs.contains($0.footprintID)
+                          && $0.status != .ignored
+                          && $0.endTime > record.endTime
+                          && $0.startTime <= record.endTime.addingTimeInterval(AppConfig.shared.gapFillingThreshold)
+                  }),
+                  next.status != .manual,
+                  !next.isAddressEditedByHand,
+                  next.isHighlight != true,
+                  next.photoAssetIDs.isEmpty,
+                  (next.reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !next.allowsAutomaticDurationExtension,
+                  hasTransportSizedMovementAfterPrematureEnd(
+                    recordEnd: record.endTime, footprintStart: next.startTime,
+                    footprintEnd: next.endTime, rawPoints: rawPoints
+                  ) else { continue }
+
+            context.delete(record)
+            removedTransportIDs.insert(record.recordID)
+            // If the automatic stay overlaps the old transport end, it claimed
+            // moving samples as stationary. Remove it too; the same sync will
+            // reconstruct both items from the complete raw trajectory.
+            if next.startTime <= record.endTime.addingTimeInterval(1) {
+                context.delete(next)
+                removedFootprintIDs.insert(next.footprintID)
+            }
+            changed = true
+        }
+        return changed
     }
 
     private static func getSimplifiedLocationName(for footprint: Footprint, allPlaces: [Place]) -> String {
@@ -3230,6 +3306,7 @@ class PersistentTimelineBuilder {
                 // 寻找下一个能构成停留的起始点 k
                 var k = j
                 var transportPoints: [CLLocation] = [points[i]]
+                var nextStableCluster: [CLLocation] = []
                 
                 while k < points.count {
                     // 预判从 k 开始是否有停留
@@ -3244,6 +3321,7 @@ class PersistentTimelineBuilder {
                     
                     if subCluster.last!.timestamp.timeIntervalSince(subCluster.first!.timestamp) >= AppConfig.shared.stayDurationThreshold {
                         // 发现下一个停留点簇了！k 是停留的开始，那么从 i 到 k 就是交通
+                        nextStableCluster = subCluster
                         break
                     } else {
                         // k 依然是在移动或者短暂停留，将其归入交通
@@ -3265,9 +3343,41 @@ class PersistentTimelineBuilder {
                     let coords = transportPoints.map { $0.coordinate }
                     let codableCoords = transportPoints.map { CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp) }
                     let diameter = TimelineBuilder.calculateMaxDiameter(coords)
-                    
-                    // 最低位移是自动交通的硬门槛，不能由较长停留时间替代。
-                    guard diameter >= AppConfig.shared.transportMinDistanceThreshold else {
+
+                    // A short trip loses up to one stay radius at each end when
+                    // the two stable clusters consume its departure/arrival
+                    // samples. Validate that clipped middle together with the
+                    // two stable stay centers instead of lowering the global
+                    // anti-drift span threshold.
+                    var spanEvidence = codableCoords
+                    if let last = lastFp {
+                        spanEvidence.insert(CodableCoordinate(
+                            lat: last.latitude,
+                            lon: last.longitude,
+                            timestamp: last.endTime,
+                            isSyntheticPadding: true,
+                            isStableStayBoundary: true
+                        ), at: 0)
+                    }
+                    if !nextStableCluster.isEmpty {
+                        let center = FootprintProcessor.shared.calculateCenter(nextStableCluster)
+                        spanEvidence.append(CodableCoordinate(
+                            lat: center.latitude,
+                            lon: center.longitude,
+                            timestamp: nextStableCluster.first?.timestamp,
+                            isSyntheticPadding: true,
+                            isStableStayBoundary: true
+                        ))
+                    }
+                    let hasStableBoundaryEvidence = hasStableBoundaryShortTripEvidence(
+                        spanEvidence,
+                        duration: tEnd.timeIntervalSince(tStart)
+                    )
+
+                    // 最低位移仍是自动交通的硬门槛；只有两端稳定停留和中间连续
+                    // 移动点共同成立时，才允许被停留半径裁短的真实短途通过。
+                    guard diameter >= AppConfig.shared.transportMinDistanceThreshold
+                            || hasStableBoundaryEvidence else {
                         i = k
                         continue
                     }
@@ -3289,30 +3399,17 @@ class PersistentTimelineBuilder {
                     // Calculate distance including footprint connections if available
                     var augmentedPoints = transportPoints
                     var hasSyntheticStartPadding = false
+                    var hasSyntheticEndPadding = false
                     if let last = lastFp {
-                        let endpoint = CodableCoordinate(
-                            lat: augmentedPoints.first!.coordinate.latitude,
-                            lon: augmentedPoints.first!.coordinate.longitude,
-                            timestamp: augmentedPoints.first!.timestamp
+                        let footprintLocation = CLLocation(
+                            coordinate: CLLocationCoordinate2D(latitude: last.latitude, longitude: last.longitude),
+                            altitude: 0,
+                            horizontalAccuracy: 0,
+                            verticalAccuracy: 0,
+                            timestamp: last.endTime
                         )
-                        let footprintCoord = CodableCoordinate(
-                            lat: last.latitude,
-                            lon: last.longitude,
-                            timestamp: last.endTime,
-                            isSyntheticPadding: true
-                        )
-                        let anchoredStart = TimelineBuilder.anchoringAutomaticTransportStart([endpoint], at: footprintCoord)
-                        if anchoredStart.count > 1 {
-                            let footprintLocation = CLLocation(
-                                coordinate: CLLocationCoordinate2D(latitude: last.latitude, longitude: last.longitude),
-                                altitude: 0,
-                                horizontalAccuracy: 0,
-                                verticalAccuracy: 0,
-                                timestamp: last.endTime
-                            )
-                            augmentedPoints.insert(footprintLocation, at: 0)
-                            hasSyntheticStartPadding = true
-                        }
+                        augmentedPoints.insert(footprintLocation, at: 0)
+                        hasSyntheticStartPadding = true
                         if startName == "起点" {
                             startName = last.address ?? "起点"
                         }
@@ -3321,20 +3418,36 @@ class PersistentTimelineBuilder {
                         // Include the first point of the next cluster to complete the path
                         augmentedPoints.append(points[k])
                     }
+                    if !nextStableCluster.isEmpty {
+                        let center = FootprintProcessor.shared.calculateCenter(nextStableCluster)
+                        augmentedPoints.append(CLLocation(
+                            coordinate: center,
+                            altitude: 0,
+                            horizontalAccuracy: 0,
+                            verticalAccuracy: 0,
+                            timestamp: nextStableCluster.first?.timestamp ?? tEnd
+                        ))
+                        hasSyntheticEndPadding = true
+                    }
 
                     let pathDist = TimelineBuilder.calculateDistance(augmentedPoints)
                     let avgSpeed = tEnd.timeIntervalSince(tStart) > 0 ? pathDist / tEnd.timeIntervalSince(tStart) : 0
-                    
-                    let augmentedPtsData = (try? JSONEncoder().encode(
-                        augmentedPoints.enumerated().map { index, point in
-                            CodableCoordinate(
-                                lat: point.coordinate.latitude,
-                                lon: point.coordinate.longitude,
-                                timestamp: point.timestamp,
-                                isSyntheticPadding: index == 0 && hasSyntheticStartPadding
-                            )
-                        }
-                    )) ?? ptsData
+
+                    var encodedAugmentedPoints = augmentedPoints.enumerated().map { index, point in
+                        let isSyntheticStart = index == 0 && hasSyntheticStartPadding
+                        let isSyntheticEnd = index == augmentedPoints.count - 1 && hasSyntheticEndPadding
+                        return CodableCoordinate(
+                            lat: point.coordinate.latitude,
+                            lon: point.coordinate.longitude,
+                            timestamp: point.timestamp,
+                            isSyntheticPadding: isSyntheticStart || isSyntheticEnd,
+                            isStableStayBoundary: isSyntheticStart || isSyntheticEnd
+                        )
+                    }
+                    if encodedAugmentedPoints.isEmpty {
+                        encodedAugmentedPoints = codableCoords
+                    }
+                    let augmentedPtsData = (try? JSONEncoder().encode(encodedAugmentedPoints)) ?? ptsData
 
                     // --- 异步获取健康和传感器数据 ---
                     #if !WIDGET_EXTENSION
@@ -3356,7 +3469,7 @@ class PersistentTimelineBuilder {
                         duration: tEnd.timeIntervalSince(tStart),
                         distanceMeters: pathDist,
                         pointCount: augmentedPoints.count,
-                        observedPointCount: augmentedPoints.count - (hasSyntheticStartPadding ? 1 : 0),
+                        observedPointCount: encodedAugmentedPoints.filter { $0.isSyntheticPadding != true }.count,
                         preferredAutomotive: preferredAuto,
                         preferredCycling: preferredCycling,
                         preferredTransport: preferredTransport
@@ -3560,9 +3673,63 @@ class PersistentTimelineBuilder {
         }
     }
 
+    /// A short real trip can have its first/last stay-radius portions absorbed
+    /// by two stable footprints. Accept that clipped middle only when multiple
+    /// timestamped observations continuously progress from the first stable
+    /// stay toward the second; a jump or a loop cannot use this exception.
+    static func hasStableBoundaryShortTripEvidence(
+        _ points: [CodableCoordinate],
+        duration: TimeInterval
+    ) -> Bool {
+        let config = AppConfig.shared
+        guard duration > 0,
+              duration < config.transportMinDurationThreshold else { return false }
+
+        let valid = points.filter {
+            CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon))
+        }
+        let boundaries = valid.filter { $0.isStableStayBoundary == true }
+            .sorted { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
+        guard let startBoundary = boundaries.first,
+              let endBoundary = boundaries.last,
+              boundaries.count >= 2 else { return false }
+
+        let start = CLLocation(latitude: startBoundary.lat, longitude: startBoundary.lon)
+        let end = CLLocation(latitude: endBoundary.lat, longitude: endBoundary.lon)
+        guard start.distance(from: end) >= config.transportMinDistanceThreshold else { return false }
+
+        let observed = valid.filter { $0.isSyntheticPadding != true && $0.timestamp != nil }
+            .sorted { $0.timestamp! < $1.timestamp! }
+        guard observed.count >= 3,
+              let first = observed.first,
+              let last = observed.last else { return false }
+
+        // A short-gap exception still requires a continuous sampled route.
+        // The departure-speed window is already the configured period over
+        // which local movement samples are considered related.
+        for index in 1..<observed.count {
+            let gap = observed[index].timestamp!.timeIntervalSince(observed[index - 1].timestamp!)
+            guard gap > 0, gap <= config.transportDepartureSpeedSampleDuration else { return false }
+        }
+
+        let firstLocation = CLLocation(latitude: first.lat, longitude: first.lon)
+        let lastLocation = CLLocation(latitude: last.lat, longitude: last.lon)
+        let minimumVisibleMiddle = max(
+            25,
+            config.transportMinDistanceThreshold - 2 * config.stayDistanceThreshold
+        )
+        guard firstLocation.distance(from: lastLocation) >= minimumVisibleMiddle,
+              firstLocation.distance(from: start) < firstLocation.distance(from: end),
+              lastLocation.distance(from: end) < lastLocation.distance(from: start) else {
+            return false
+        }
+        return true
+    }
+
     /// Accumulated path length is not displacement: jitter and small loops
     /// must not bypass the configured minimum movement span. Synthetic map
-    /// connectors do not establish movement when real observations exist.
+    /// connectors establish span only through the narrow stable-stay exception
+    /// above; otherwise real observations must cross the configured threshold.
     static func hasMinimumAutomaticTransportSpan(_ record: TransportRecord) -> Bool {
         // An automatic record with no measurable route is not a trip.  This
         // also catches legacy/partially-created records whose type was inferred
@@ -3580,7 +3747,13 @@ class PersistentTimelineBuilder {
         let evidence = observed.isEmpty ? valid : observed
         guard evidence.count >= 2 else { return false }
         let coordinates = evidence.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-        return TimelineBuilder.calculateMaxDiameter(coordinates) >= AppConfig.shared.transportMinDistanceThreshold
+        if TimelineBuilder.calculateMaxDiameter(coordinates) >= AppConfig.shared.transportMinDistanceThreshold {
+            return true
+        }
+        return hasStableBoundaryShortTripEvidence(
+            valid,
+            duration: record.endTime.timeIntervalSince(record.startTime)
+        )
     }
 
     /// Both automatic builders can propose the same route during one sync.
