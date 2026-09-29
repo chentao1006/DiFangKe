@@ -83,6 +83,221 @@ final class WidgetDataSyncManager {
         }
         return await operation()
     }
+
+    func writeCurrentActivityMapSnapshots(
+        sessionID: String,
+        revision: Int,
+        kind: CurrentTrackingActivityKind,
+        coordinate: CLLocationCoordinate2D,
+        routeCoordinates: [CLLocationCoordinate2D],
+        colorHex: String?
+    ) async -> Bool {
+        guard CLLocationCoordinate2DIsValid(coordinate),
+              let containerURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: groupID
+              ) else { return false }
+
+        return await withExclusiveMapSnapshotWork {
+            var writtenStyleCount = 0
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                guard let image = await self.makeCurrentActivityMapSnapshot(
+                    kind: kind,
+                    coordinate: coordinate,
+                    routeCoordinates: routeCoordinates,
+                    colorHex: colorHex,
+                    style: style
+                ), let data = image.pngData() else { continue }
+
+                let suffix = style == .dark ? "dark" : "light"
+                let fileURL = containerURL.appendingPathComponent(
+                    "current_activity_\(sessionID)_\(revision)_\(suffix).png"
+                )
+                do {
+                    try data.write(to: fileURL, options: .atomic)
+                    writtenStyleCount += 1
+                } catch {
+                    print("[CurrentLiveActivity] map write failed (\(suffix)): \(error)")
+                }
+            }
+
+            guard writtenStyleCount == 2 else {
+                print("[CurrentLiveActivity] map snapshot incomplete: \(writtenStyleCount)/2 styles")
+                return false
+            }
+
+            let prefix = "current_activity_\(sessionID)_"
+            let retainedRevisions = [revision, max(0, revision - 1)].map(String.init)
+            if let files = try? FileManager.default.contentsOfDirectory(
+                at: containerURL,
+                includingPropertiesForKeys: nil
+            ) {
+                for file in files where file.lastPathComponent.hasPrefix(prefix) {
+                    let remainder = file.lastPathComponent.dropFirst(prefix.count)
+                    guard !remainder.hasPrefix("photo_") else { continue }
+                    guard !retainedRevisions.contains(where: { remainder.hasPrefix("\($0)_") }) else { continue }
+                    try? FileManager.default.removeItem(at: file)
+                }
+            }
+            return true
+        }
+    }
+
+    /// Copies a few small Photos-library images into the App Group because the
+    /// Live Activity extension cannot fetch PHAssets directly from the host app.
+    func writeCurrentActivityPhotoThumbnails(
+        sessionID: String,
+        revision: Int,
+        assetIDs: [String]
+    ) async -> Int {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: groupID
+        ) else { return 0 }
+
+        let selectedIDs = Array(assetIDs.suffix(3).reversed())
+        var images: [UIImage] = []
+        for assetID in selectedIDs {
+            if let image = await loadWidgetSnapshotAssetImage(
+                assetID: assetID,
+                targetSize: CGSize(width: 120, height: 120)
+            ) {
+                images.append(image)
+            }
+        }
+
+        for (index, image) in images.enumerated() {
+            guard let data = image.jpegData(compressionQuality: 0.82) else { continue }
+            let fileURL = containerURL.appendingPathComponent(
+                "current_activity_\(sessionID)_photo_\(revision)_\(index).jpg"
+            )
+            try? data.write(to: fileURL, options: .atomic)
+        }
+
+        let prefix = "current_activity_\(sessionID)_photo_"
+        if let files = try? FileManager.default.contentsOfDirectory(
+            at: containerURL,
+            includingPropertiesForKeys: nil
+        ) {
+            for file in files where file.lastPathComponent.hasPrefix(prefix) {
+                let remainder = file.lastPathComponent.dropFirst(prefix.count)
+                guard !remainder.hasPrefix("\(revision)_") else { continue }
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+        return images.count
+    }
+
+    private func makeCurrentActivityMapSnapshot(
+        kind: CurrentTrackingActivityKind,
+        coordinate: CLLocationCoordinate2D,
+        routeCoordinates: [CLLocationCoordinate2D],
+        colorHex: String?,
+        style: UIUserInterfaceStyle
+    ) async -> UIImage? {
+        let validRoute = routeCoordinates.filter(CLLocationCoordinate2DIsValid)
+        let coordinates = validRoute.isEmpty ? [coordinate] : validRoute + [coordinate]
+        let minLat = coordinates.map(\.latitude).min() ?? coordinate.latitude
+        let maxLat = coordinates.map(\.latitude).max() ?? coordinate.latitude
+        let minLon = coordinates.map(\.longitude).min() ?? coordinate.longitude
+        let maxLon = coordinates.map(\.longitude).max() ?? coordinate.longitude
+        let minimumSpan = kind == .footprint ? 0.02 : 0.01
+        let region = MKCoordinateRegion(
+            // The Live Activity is about the user's current position. Keep its
+            // blue location dot at the visual center instead of centering the
+            // accumulated transport route behind it.
+            center: coordinate,
+            span: MKCoordinateSpan(
+                latitudeDelta: max(minimumSpan, (maxLat - minLat) * 1.8),
+                longitudeDelta: max(minimumSpan, (maxLon - minLon) * 1.8)
+            )
+        )
+        let options = MKMapSnapshotter.Options()
+        options.region = region
+        options.size = CGSize(width: 400, height: 200)
+        options.scale = 2.0
+        options.showsBuildings = true
+        options.traitCollection = UITraitCollection(userInterfaceStyle: style)
+        var snapshot: MKMapSnapshotter.Snapshot?
+        for attempt in 0..<3 {
+            do {
+                let candidate = try await MKMapSnapshotter(options: options).start()
+                if Self.hasVisibleMapDetail(candidate.image) {
+                    snapshot = candidate
+                    break
+                }
+                print("[CurrentLiveActivity] map snapshot contained no visible map detail (attempt \(attempt + 1))")
+            } catch {
+                print("[CurrentLiveActivity] map snapshot failed (attempt \(attempt + 1)): \(error)")
+            }
+            if attempt < 2 {
+                try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 500_000_000)
+            }
+        }
+        guard let snapshot else { return nil }
+
+        let renderer = UIGraphicsImageRenderer(size: snapshot.image.size)
+        return renderer.image { context in
+            snapshot.image.draw(at: .zero)
+            let cg = context.cgContext
+            let accent = UIColor(hex: colorHex ?? "#00B6C1") ?? .systemTeal
+
+            if kind == .transport, validRoute.count >= 2 {
+                let points = validRoute.map(snapshot.point(for:))
+                cg.beginPath()
+                cg.move(to: points[0])
+                points.dropFirst().forEach { cg.addLine(to: $0) }
+                cg.setLineCap(.round)
+                cg.setLineJoin(.round)
+                cg.setLineWidth(6)
+                cg.setStrokeColor(accent.withAlphaComponent(0.9).cgColor)
+                cg.strokePath()
+            }
+
+            // The snapshot is later center-cropped to several Live Activity
+            // aspect ratios. Draw the current-location marker at the exact
+            // image center so it remains visually centered in every family.
+            let point = CGPoint(
+                x: snapshot.image.size.width / 2,
+                y: snapshot.image.size.height / 2
+            )
+            let outerRect = CGRect(x: point.x - 9, y: point.y - 9, width: 18, height: 18)
+            let innerRect = CGRect(x: point.x - 6, y: point.y - 6, width: 12, height: 12)
+            cg.setFillColor(UIColor.white.withAlphaComponent(0.95).cgColor)
+            cg.fillEllipse(in: outerRect)
+            cg.setFillColor(UIColor.systemBlue.cgColor)
+            cg.fillEllipse(in: innerRect)
+
+        }
+    }
+
+    /// A background snapshot request can occasionally succeed before map tiles
+    /// arrive and return a uniform gray placeholder. Never publish that image.
+    private static func hasVisibleMapDetail(_ image: UIImage) -> Bool {
+        guard let cgImage = image.cgImage else { return false }
+        let width = 16
+        let height = 8
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return false }
+        context.interpolationQuality = .low
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var minimum = [UInt8](repeating: 255, count: 3)
+        var maximum = [UInt8](repeating: 0, count: 3)
+        for pixel in stride(from: 0, to: pixels.count, by: 4) {
+            for channel in 0..<3 {
+                minimum[channel] = min(minimum[channel], pixels[pixel + channel])
+                maximum[channel] = max(maximum[channel], pixels[pixel + channel])
+            }
+        }
+        return zip(minimum, maximum).contains { Int($0.1) - Int($0.0) >= 10 }
+    }
     
     /// 更新数据库容器
     func updateContainer(_ newContainer: ModelContainer) {

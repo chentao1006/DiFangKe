@@ -91,13 +91,13 @@ struct TransportModalView: View {
 
                             // Start Marker (Physical Look & Title)
                             if let start = validTransportPoints.first {
-                                Marker("", coordinate: start)
+                                Marker("", systemImage: "play.fill", coordinate: start)
                                     .tint(.green)
                             }
                             
                             // End Marker (Physical Look & Title)
                             if let end = validTransportPoints.last {
-                                Marker("", coordinate: end)
+                                Marker("", systemImage: "stop.fill", coordinate: end)
                                     .tint(.blue)
                             }
                             

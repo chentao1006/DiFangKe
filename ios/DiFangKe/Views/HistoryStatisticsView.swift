@@ -760,7 +760,7 @@ struct HistoryStatisticsView: View {
                             Spacer()
                             
                             VStack(alignment: .trailing, spacing: 4) {
-                                Text("\(Int(item.duration / 3600))小时")
+                                Text(formatRankDuration(item.duration))
                                     .font(.system(size: 15, weight: .semibold))
                                     .foregroundColor(.dfkAccent)
                                 
@@ -1133,6 +1133,15 @@ struct HistoryStatisticsView: View {
         let totalMinutes = Int(duration / 60)
         guard totalMinutes >= 60 else {
             return "\(totalMinutes)分钟"
+        }
+
+        let totalHours = totalMinutes / 60
+        if totalHours >= 24 {
+            let days = totalHours / 24
+            if duration > 3 * 24 * 60 * 60 {
+                return "\(days)天"
+            }
+            return "\(days)天\(totalHours % 24)小时"
         }
 
         let hours = Double(totalMinutes) / 60

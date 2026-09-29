@@ -560,10 +560,72 @@ private struct ContinuousTimelineView: View {
 
         if url.host == "timeline" {
             openTimelineDeepLink(url)
+        } else if url.host == "current" {
+            handleCurrentActivityDeepLink(url)
         } else if url.host == "trip", url.path == "/action" {
             handleTripAction(url: url)
         } else if url.host == "trip", url.path == "/detail" {
             openTripDetailDeepLink(url)
+        }
+    }
+
+    private func handleCurrentActivityDeepLink(_ url: URL) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let idString = components.queryItems?.first(where: { $0.name == "id" })?.value else { return }
+
+        let kind = components.queryItems?.first(where: { $0.name == "kind" })?.value
+        if url.path == "/detail",
+           kind == CurrentTrackingActivityKind.transport.rawValue,
+           let timelineURL = URL(string: "difangke://timeline?offset=0") {
+            openTimelineDeepLink(timelineURL)
+            return
+        }
+
+        if url.path == "/detail",
+           kind == CurrentTrackingActivityKind.footprint.rawValue,
+           idString.hasPrefix("ongoing-") {
+            targetScrollDate = Date()
+            todayScrollRequest += 1
+            return
+        }
+
+        guard let id = UUID(uuidString: idString) else { return }
+
+        if url.path == "/action",
+           components.queryItems?.first(where: { $0.name == "type" })?.value == "arrive" {
+            let recentThreshold = Date().addingTimeInterval(-5 * 60)
+            let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                $0.recordID == id && $0.statusRaw == "active" && $0.endTime >= recentThreshold
+            })
+            guard (try? modelContext.fetch(descriptor).first) != nil else { return }
+            Task { await locationManager.confirmArrival() }
+            return
+        }
+
+        guard url.path == "/detail" else { return }
+        if kind == CurrentTrackingActivityKind.footprint.rawValue {
+            let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
+            if let footprint = try? modelContext.fetch(descriptor).first {
+                selectedFootprint = footprint
+            }
+        } else if kind == CurrentTrackingActivityKind.transport.rawValue {
+            let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == id })
+            guard let record = try? modelContext.fetch(descriptor).first else { return }
+            let stored = (try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData)) ?? []
+            let points = stored.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+            selectedTransport = Transport(
+                id: record.recordID,
+                startTime: record.startTime,
+                endTime: record.endTime,
+                startLocation: record.startLocation,
+                endLocation: record.endLocation,
+                type: TransportType(rawValue: record.typeRaw) ?? .slow,
+                distance: record.distance,
+                averageSpeed: record.averageSpeed,
+                points: points,
+                manualType: record.manualTypeRaw.flatMap(TransportType.init(rawValue:)),
+                stepCount: record.stepCount
+            )
         }
     }
 
@@ -5711,6 +5773,14 @@ private struct CurrentStayTimelineCard: View {
                 Text(detailText(for: startTimestamp, now: now))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                if isCurrentlyMoving {
+                    Button("已到达") {
+                        Task { await locationManager.confirmArrival() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .tint(.dfkAccent)
+                }
             }
             .padding(.top, 20)
             .padding(.bottom, 20)
@@ -5735,6 +5805,12 @@ private struct CurrentStayTimelineCard: View {
 
     private var canSelectOngoingPlace: Bool {
         locationManager.potentialStopStartLocation != nil
+    }
+
+    private var isCurrentlyMoving: Bool {
+        locationManager.isTracking
+            && locationManager.uiIsMoving
+            && locationManager.potentialStopStartLocation == nil
     }
 
     private var ongoingSelectionCoordinate: CLLocationCoordinate2D? {

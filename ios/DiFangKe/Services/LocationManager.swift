@@ -18,7 +18,7 @@ struct LocationSuggestion: Identifiable, Equatable {
     var isExistingPlace: Bool = false
     var placeID: UUID?
     var category: String?
-    
+
     static func == (lhs: LocationSuggestion, rhs: LocationSuggestion) -> Bool {
         lhs.id == rhs.id
     }
@@ -1017,7 +1017,7 @@ final class FootprintProcessor {
         
         return distance < mergeDistanceThreshold
     }
-    
+
     func finalizeCurrentStay(queue: inout [CLLocation]) -> CandidateFootprint? {
         return detectStayPoint(in: queue)
     }
@@ -1163,10 +1163,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     func checkLiveActivity() {
-        guard let location = lastLocation, let context = modelContext else { return }
+        guard let context = modelContext else { return }
+        guard let location = lastLocation ?? potentialStopStartLocation else {
+            print("[CurrentLiveActivity] waiting for restored or fresh location")
+            return
+        }
 #if canImport(ActivityKit)
         if #available(iOS 16.1, *) {
-            TripLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: context)
+            CurrentLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: context)
         }
 #endif
     }
@@ -1459,7 +1463,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 in: stationaryLocationWindow, near: anchor
            ) {
             let ongoingStop = potentialStopStartLocation
-            handleNewCandidateFootprint(candidate)
+            let continuousCandidate = ongoingStop.flatMap { stop -> CandidateFootprint? in
+                guard stop.distance(from: anchor) < AppConfig.shared.stayDistanceThreshold else { return nil }
+                return CandidateFootprint(
+                    startTime: min(stop.timestamp, candidate.startTime),
+                    endTime: candidate.endTime,
+                    centerCoordinate: candidate.centerCoordinate,
+                    duration: candidate.endTime.timeIntervalSince(min(stop.timestamp, candidate.startTime)),
+                    rawLocations: candidate.rawLocations
+                )
+            } ?? candidate
+            handleNewCandidateFootprint(continuousCandidate)
             // Saving a finished snapshot must not turn an ongoing stay into
             // a new stay starting at its last observed point.
             potentialStopStartLocation = ongoingStop
@@ -1718,7 +1732,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     @MainActor
-    func triggerTimelineSift() async {
+    func triggerTimelineSift(requiresFreshRun: Bool = false) async {
         guard let context = modelContext else { return }
         // `syncDay` also rejects duplicate work, but callers used to continue
         // after that rejection and each post another data-change notification,
@@ -1727,6 +1741,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         if let timelineSiftTask {
             print("[TimelineAuto] join automatic sync already in progress")
             await timelineSiftTask.value
+            if requiresFreshRun {
+                // The joined pass may have read its raw-point snapshot before an
+                // explicit arrival boundary was persisted. Wait for its owner to
+                // release the shared task, then guarantee one post-arrival pass.
+                while self.timelineSiftTask != nil {
+                    await Task.yield()
+                }
+                await triggerTimelineSift()
+            }
             return
         }
 
@@ -1742,6 +1765,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // syncDay may have just persisted transport records. Refresh after the
             // write so the notification does not retain its earlier 0m snapshot.
             triggerNotificationSummaryRefresh()
+#if canImport(ActivityKit)
+            if #available(iOS 16.1, *), let location = lastLocation {
+                CurrentLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: context)
+            }
+#endif
         }
         timelineSiftTask = task
         await task.value
@@ -1796,6 +1824,61 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         let duration = now.timeIntervalSince(start)
         return duration.formattedStayDuration
+    }
+
+    /// Explicitly closes the live trip at the latest known coordinate and starts
+    /// a new provisional stay. Both iPhone and Watch route through this method so
+    /// the transport is generated once from the same persisted raw-point stream.
+    @MainActor
+    @discardableResult
+    func confirmArrival() async -> Bool {
+        guard isTracking,
+              potentialStopStartLocation == nil,
+              let observed = lastLocation else { return false }
+
+        let now = Date()
+        let arrival = CLLocation(
+            coordinate: observed.coordinate,
+            altitude: observed.altitude,
+            horizontalAccuracy: observed.horizontalAccuracy,
+            verticalAccuracy: observed.verticalAccuracy,
+            course: observed.course,
+            speed: 0,
+            timestamp: now
+        )
+
+        // Change the visible state immediately. The persisted boundary below is
+        // what makes timeline reconstruction close the trip at this exact time.
+        lastLocation = arrival
+        lastUpdateTime = now
+        accuracy = arrival.horizontalAccuracy
+        uiIsMoving = false
+        lastMovingEvidenceTime = .distantPast
+        potentialStopStartLocation = arrival
+        clearOngoingPlaceOverride()
+        ongoingTitle = nil
+        saveOngoingTitle()
+        savePotentialStop()
+
+        lastRawLocationSaveTimestamp = max(lastRawLocationSaveTimestamp, now)
+        lastSavedRawLocation = arrival
+        trackingPoints.append(arrival)
+        allTodayPoints.append(arrival)
+
+        await withCheckedContinuation { continuation in
+            RawLocationStore.shared.saveLocation(arrival) {
+                continuation.resume()
+            }
+        }
+
+        await triggerTimelineSift(requiresFreshRun: true)
+        WatchSyncManager.shared.syncSnapshot()
+#if canImport(ActivityKit)
+        if #available(iOS 16.1, *) {
+            CurrentLiveActivityManager.shared.updateLiveActivity(location: arrival, modelContext: modelContext)
+        }
+#endif
+        return true
     }
 
     var matchedPlace: Place? {
@@ -1940,6 +2023,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // reflected without reapplying accuracy or restarting monitors.
             locationManager.allowsBackgroundLocationUpdates = isAlwaysAuthorized
             sampleStationaryLocationIfNeeded()
+            checkLiveActivity()
             return
         }
 
@@ -1954,6 +2038,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationManager.startMonitoringVisits()
         lastStartTrackingAt = now
         isTracking = true
+        checkLiveActivity()
 
         // CLLocationManager 的参数不会跨进程可靠保留；每次恢复记录都重新应用用户选择，
         // 防止应用重启或系统唤醒后先以初始化时的高精度运行。
@@ -1991,6 +2076,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         UserDefaults.standard.removeObject(forKey: "pending_lng")
         UserDefaults.standard.removeObject(forKey: "pending_time")
         clearOngoingPlaceOverride()
+#if canImport(ActivityKit)
+        if #available(iOS 16.1, *) {
+            CurrentLiveActivityManager.shared.stop()
+        }
+#endif
     }
 
     /// 合并数据库中已有的碎片足迹（必须在主线程执行）
@@ -2457,14 +2547,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             lastUpdateTime = Date()
         }
 
-#if canImport(ActivityKit)
-        if isLatestInBatch {
-            if #available(iOS 16.1, *) {
-                TripLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: self.modelContext)
-            }
-        }
-#endif
-
         // Indoor fixes often report a plausible speed even while jumping around a
         // building.  Do not let that noise continuously reset the stationary
         // dwell timer when Core Motion explicitly says the phone is stationary.
@@ -2773,6 +2855,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         if isLatestInBatch {
             // --- 10 AM 往年今日检查 ---
             checkDailyPastMemories()
+#if canImport(ActivityKit)
+            if #available(iOS 16.1, *) {
+                CurrentLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: modelContext)
+            }
+#endif
         }
     }
 
@@ -3364,7 +3451,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             duration: boundedEnd.timeIntervalSince(boundedStart),
             rawLocations: effectiveRawLocations
         )
-        
+
         // All accepted candidates, including an already-owned replay, must
         // advance ingestion and publish updates through the same completion path.
         defer { finishCandidateFootprint(candidate, isHistorical: isHistorical, context: context) }
@@ -3675,7 +3762,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     if newMergedIDs != workingIDs {
                         workingIDs = newMergedIDs
                         hasChanged = true
-                        
+
                         // 为新发现的 ID 补充元数据
                         let autoMappings = await PhotoService.shared.getCloudIdentifiers(for: newFoundIDs)
                         for (localID, cloudID) in autoMappings {
@@ -4134,6 +4221,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             
             // 数据加载完成后，后台扫描并补全缺失的活动类型
             self.autoFillMissingActivityTypes(for: today)
+            self.checkLiveActivity()
         }
     }
 
@@ -4320,104 +4408,104 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
             
-                    // 4. 回到主线程执行持久化
-                    if !gapsToInsert.isEmpty {
-                        let itemsToInsert = gapsToInsert
-                        await MainActor.run {
-                            guard let context = self.modelContext else { return }
-                            var insertedFootprints: [Footprint] = []
-                            let transportDescriptor = FetchDescriptor<TransportRecord>(
-                                predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < endOfDay && $0.endTime >= startOfDay },
-                                sortBy: [SortDescriptor(\.startTime)]
-                            )
-                            let transportRanges = ((try? context.fetch(transportDescriptor)) ?? []).map { ($0.startTime, $0.endTime) }
-                            for gap in itemsToInsert {
-                                let overlapsTransport = transportRanges.contains { range in
-                                    let overlapStart = max(range.0, gap.start)
-                                    let overlapEnd = min(range.1, gap.end)
-                                    return overlapEnd.timeIntervalSince(overlapStart) > 60
-                                }
-                                if overlapsTransport { continue }
-
-                                if Footprint.extendActivityEditedStay(start: gap.start, end: gap.end, coordinate: gap.center, context: context) {
-                                    continue
-                                }
-                                let available = Footprint.automaticStayIntervals(start: gap.start, end: gap.end, context: context)
-                                guard available.count == 1, available.first?.start == gap.start,
-                                      available.first?.end == gap.end else { continue }
-
-                                let matchedPlace = self.matchedPlaceFor(coordinate: gap.center)
-                                let candidate = CandidateFootprint(
-                                    startTime: gap.start,
-                                    endTime: gap.end,
-                                    centerCoordinate: gap.center,
-                                    duration: gap.duration,
-                                    rawLocations: []
-                                )
-                                let gapEnd = gap.end
-
-                                var previousDescriptor = FetchDescriptor<Footprint>(
-                                    predicate: #Predicate {
-                                        $0.statusValue != "ignored" && $0.endTime > startOfDay && $0.endTime <= gapEnd
-                                    },
-                                    sortBy: [SortDescriptor(\.endTime, order: .reverse)]
-                                )
-                                previousDescriptor.fetchLimit = 1
-
-                                if let lastFp = (try? context.fetch(previousDescriptor))?.first,
-                                   !transportRanges.contains(where: { range in
-                                       range.1 > lastFp.endTime && range.0 < gap.start
-                                   }),
-                                   self.shouldMergeExistingFootprint(lastFp, with: candidate, matchedPlace: matchedPlace) {
-                                    lastFp.endTime = max(lastFp.endTime, gap.end)
-
-                                    var mergedLocations = lastFp.footprintLocations
-                                    mergedLocations.append(contentsOf: gap.points)
-                                    lastFp.footprintLocations = mergedLocations
-
-                                    if lastFp.placeID == nil, let matchedPlace {
-                                        lastFp.placeID = matchedPlace.placeID
-                                    }
-                                    if !lastFp.isAddressEditedByHand, let matchedPlace {
-                                        lastFp.address = matchedPlace.name
-                                    }
-
-                                    insertedFootprints.append(lastFp)
-                                    continue
-                                }
-
-                                let newFp = Footprint(
-                                    date: Calendar.current.startOfDay(for: gap.start),
-                                    startTime: gap.start,
-                                    endTime: gap.end,
-                                    footprintLocations: gap.points,
-                                    locationHash: "GAP_STAY",
-                                    duration: gap.duration
-                                )
-                                context.insert(newFp)
-                                
-                                if let mPlace = matchedPlace {
-                                    let pid = mPlace.placeID
-                                    newFp.placeID = pid
-                                    newFp.address = mPlace.name
-                                    
-                                    // --- 自动关联历史习惯 ---
-                                    newFp.activityTypeValue = self.findFrequentActivityType(for: pid, at: gap.start, context: context)
-                                }
-                                insertedFootprints.append(newFp)
-                            }
-                            // 后刷入数据库以获得正式 ID
-                            try? context.save()
-                            
-                            // 再触发分析
-                            for fp in insertedFootprints {
-                                self.analyzeFootprint(fp, context: context)
-                            }
-                            
-                            // 提醒小组件更新历史回填数据
-                            Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
+            // 4. 回到主线程执行持久化
+            if !gapsToInsert.isEmpty {
+                let itemsToInsert = gapsToInsert
+                await MainActor.run {
+                    guard let context = self.modelContext else { return }
+                    var insertedFootprints: [Footprint] = []
+                    let transportDescriptor = FetchDescriptor<TransportRecord>(
+                        predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < endOfDay && $0.endTime >= startOfDay },
+                        sortBy: [SortDescriptor(\.startTime)]
+                    )
+                    let transportRanges = ((try? context.fetch(transportDescriptor)) ?? []).map { ($0.startTime, $0.endTime) }
+                    for gap in itemsToInsert {
+                        let overlapsTransport = transportRanges.contains { range in
+                            let overlapStart = max(range.0, gap.start)
+                            let overlapEnd = min(range.1, gap.end)
+                            return overlapEnd.timeIntervalSince(overlapStart) > 60
                         }
+                        if overlapsTransport { continue }
+
+                        if Footprint.extendActivityEditedStay(start: gap.start, end: gap.end, coordinate: gap.center, context: context) {
+                            continue
+                        }
+                        let available = Footprint.automaticStayIntervals(start: gap.start, end: gap.end, context: context)
+                        guard available.count == 1, available.first?.start == gap.start,
+                              available.first?.end == gap.end else { continue }
+
+                        let matchedPlace = self.matchedPlaceFor(coordinate: gap.center)
+                        let candidate = CandidateFootprint(
+                            startTime: gap.start,
+                            endTime: gap.end,
+                            centerCoordinate: gap.center,
+                            duration: gap.duration,
+                            rawLocations: []
+                        )
+                        let gapEnd = gap.end
+
+                        var previousDescriptor = FetchDescriptor<Footprint>(
+                            predicate: #Predicate {
+                                $0.statusValue != "ignored" && $0.endTime > startOfDay && $0.endTime <= gapEnd
+                            },
+                            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+                        )
+                        previousDescriptor.fetchLimit = 1
+
+                        if let lastFp = (try? context.fetch(previousDescriptor))?.first,
+                           !transportRanges.contains(where: { range in
+                               range.1 > lastFp.endTime && range.0 < gap.start
+                           }),
+                           self.shouldMergeExistingFootprint(lastFp, with: candidate, matchedPlace: matchedPlace) {
+                            lastFp.endTime = max(lastFp.endTime, gap.end)
+
+                            var mergedLocations = lastFp.footprintLocations
+                            mergedLocations.append(contentsOf: gap.points)
+                            lastFp.footprintLocations = mergedLocations
+
+                            if lastFp.placeID == nil, let matchedPlace {
+                                lastFp.placeID = matchedPlace.placeID
+                            }
+                            if !lastFp.isAddressEditedByHand, let matchedPlace {
+                                lastFp.address = matchedPlace.name
+                            }
+
+                            insertedFootprints.append(lastFp)
+                            continue
+                        }
+
+                        let newFp = Footprint(
+                            date: Calendar.current.startOfDay(for: gap.start),
+                            startTime: gap.start,
+                            endTime: gap.end,
+                            footprintLocations: gap.points,
+                            locationHash: "GAP_STAY",
+                            duration: gap.duration
+                        )
+                        context.insert(newFp)
+
+                        if let mPlace = matchedPlace {
+                            let pid = mPlace.placeID
+                            newFp.placeID = pid
+                            newFp.address = mPlace.name
+                            
+                            // --- 自动关联历史习惯 ---
+                            newFp.activityTypeValue = self.findFrequentActivityType(for: pid, at: gap.start, context: context)
+                        }
+                        insertedFootprints.append(newFp)
                     }
+                    // 后刷入数据库以获得正式 ID
+                    try? context.save()
+
+                    // 再触发分析
+                    for fp in insertedFootprints {
+                        self.analyzeFootprint(fp, context: context)
+                    }
+
+                    // 提醒小组件更新历史回填数据
+                    Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
+                }
+            }
         }
     }
     
@@ -5163,6 +5251,319 @@ extension TimeInterval {
 #if canImport(ActivityKit)
 import ActivityKit
 import SwiftData
+
+@available(iOS 16.1, *)
+@MainActor
+final class CurrentLiveActivityManager {
+    static let shared = CurrentLiveActivityManager()
+
+    private var currentActivity: Activity<CurrentTrackingActivityAttributes>?
+    private var lastState: CurrentTrackingActivityAttributes.ContentState?
+    private var lastMapLocation: CLLocation?
+    private var lastMapUpdate = Date.distantPast
+    private var mapRevision = 0
+    private var lastPhotoSignature: String?
+    private var photoRevision = 0
+    private var unresolvedEndTask: Task<Void, Never>?
+    private var isReconciling = false
+    private var pendingUpdate: (location: CLLocation, modelContext: ModelContext?)?
+    private var lifecycleRevision = 0
+
+    private init() {}
+
+    private var isEnabled: Bool {
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: "isCurrentLiveActivityEnabled") == nil
+            || defaults.bool(forKey: "isCurrentLiveActivityEnabled")
+    }
+
+    func updateLiveActivity(location: CLLocation, modelContext: ModelContext?) {
+        Task { @MainActor in
+            await enqueueUpdate(location: location, modelContext: modelContext)
+        }
+    }
+
+    func stop() {
+        Task { @MainActor in
+            lifecycleRevision += 1
+            pendingUpdate = nil
+            await endAll()
+        }
+    }
+
+    private func enqueueUpdate(location: CLLocation, modelContext: ModelContext?) async {
+        pendingUpdate = (location, modelContext)
+        guard !isReconciling else { return }
+
+        isReconciling = true
+        defer { isReconciling = false }
+        while let update = pendingUpdate {
+            pendingUpdate = nil
+            let revision = lifecycleRevision
+            await reconcile(
+                location: update.location,
+                modelContext: update.modelContext,
+                lifecycleRevision: revision
+            )
+        }
+    }
+
+    private func reconcile(
+        location: CLLocation,
+        modelContext: ModelContext?,
+        lifecycleRevision expectedLifecycleRevision: Int
+    ) async {
+        guard isEnabled,
+              ActivityAuthorizationInfo().areActivitiesEnabled,
+              LocationManager.shared.isTracking,
+              let context = modelContext else {
+            await endAll()
+            return
+        }
+        guard let resolved = resolveState(location: location, context: context) else {
+            scheduleEndAfterRecognitionGrace(location: location, modelContext: context)
+            return
+        }
+        unresolvedEndTask?.cancel()
+        unresolvedEndTask = nil
+
+        let activeActivities = Activity<CurrentTrackingActivityAttributes>.activities
+        let existingActivity = currentActivity ?? activeActivities.first
+        for duplicate in activeActivities where duplicate.id != existingActivity?.id {
+            await duplicate.end(nil, dismissalPolicy: .immediate)
+        }
+        let sessionID = existingActivity?.attributes.sessionID ?? UUID().uuidString
+        var state = resolved.state
+
+        let movedEnough = lastMapLocation.map { location.distance(from: $0) >= 100 } ?? true
+        let needsMap = existingActivity == nil
+            || lastState?.recordID != state.recordID
+            || Date().timeIntervalSince(lastMapUpdate) >= 60
+            || movedEnough
+        if needsMap {
+            mapRevision += 1
+            state.mapRevision = mapRevision
+            let didWriteMap = await WidgetDataSyncManager.shared.writeCurrentActivityMapSnapshots(
+                sessionID: sessionID,
+                revision: mapRevision,
+                kind: state.kind,
+                coordinate: location.coordinate,
+                routeCoordinates: resolved.route,
+                colorHex: state.colorHex
+            )
+            if didWriteMap {
+                lastMapLocation = location
+                lastMapUpdate = Date()
+            } else {
+                // Keep the previous revision when available. With no previous map,
+                // the next location update retries immediately instead of waiting 60 seconds.
+                state.mapRevision = lastState?.mapRevision ?? 0
+            }
+        } else {
+            state.mapRevision = lastState?.mapRevision ?? mapRevision
+        }
+
+        let photoSignature = ([state.kind.rawValue, state.recordID] + resolved.photoAssetIDs)
+            .joined(separator: "|")
+        if photoSignature != lastPhotoSignature {
+            photoRevision += 1
+            state.photoRevision = photoRevision
+            state.photoCount = resolved.photoAssetIDs.count
+            state.photoThumbnailCount = await WidgetDataSyncManager.shared.writeCurrentActivityPhotoThumbnails(
+                sessionID: sessionID,
+                revision: photoRevision,
+                assetIDs: resolved.photoAssetIDs
+            )
+            lastPhotoSignature = photoSignature
+        } else {
+            state.photoRevision = lastState?.photoRevision ?? photoRevision
+            state.photoCount = lastState?.photoCount ?? resolved.photoAssetIDs.count
+            state.photoThumbnailCount = lastState?.photoThumbnailCount ?? 0
+        }
+
+        let content = ActivityContent(
+            state: state,
+            staleDate: Date().addingTimeInterval(15 * 60)
+        )
+        guard expectedLifecycleRevision == lifecycleRevision,
+              isEnabled,
+              LocationManager.shared.isTracking else { return }
+        if let activity = existingActivity {
+            currentActivity = activity
+            if state != lastState {
+                await activity.update(content)
+            }
+        } else {
+            do {
+                currentActivity = try Activity.request(
+                    attributes: CurrentTrackingActivityAttributes(sessionID: sessionID),
+                    content: content,
+                    pushType: nil
+                )
+            } catch {
+                print("[CurrentLiveActivity] request failed: \(error)")
+            }
+        }
+        lastState = state
+
+        // Clean up any plan-based activity left behind by an older build.
+        for legacy in Activity<TripActivityAttributes>.activities {
+            await legacy.end(nil, dismissalPolicy: .immediate)
+        }
+    }
+
+    private func resolveState(
+        location: CLLocation,
+        context: ModelContext
+    ) -> (
+        state: CurrentTrackingActivityAttributes.ContentState,
+        route: [CLLocationCoordinate2D],
+        photoAssetIDs: [String]
+    )? {
+        let manager = LocationManager.shared
+        let now = Date()
+
+        if manager.potentialStopStartLocation == nil, manager.uiIsMoving {
+            let recentThreshold = now.addingTimeInterval(-5 * 60)
+            var descriptor = FetchDescriptor<TransportRecord>(
+                predicate: #Predicate {
+                    $0.statusRaw == "active" && $0.startTime <= now && $0.endTime >= recentThreshold
+                },
+                sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+            )
+            descriptor.fetchLimit = 1
+            guard let transport = try? context.fetch(descriptor).first else { return nil }
+            let type = TransportType(rawValue: transport.manualTypeRaw ?? transport.typeRaw) ?? .slow
+            let route = ((try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData)) ?? [])
+                .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+            let placeName = normalizedPlaceName(manager.currentAddress, fallback: "当前位置")
+            return (
+                CurrentTrackingActivityAttributes.ContentState(
+                    kind: .transport,
+                    recordID: transport.recordID.uuidString,
+                    startedAt: transport.startTime,
+                    title: type.localizedName,
+                    icon: type.sfSymbol,
+                    colorHex: nil,
+                    placeName: placeName,
+                    address: nil,
+                    startLocation: transport.startLocation,
+                    distance: transport.distance > 0 ? transport.distance : nil,
+                    averageSpeed: transport.averageSpeed > 0 ? transport.averageSpeed : nil,
+                    latitude: location.coordinate.latitude,
+                    longitude: location.coordinate.longitude,
+                    mapRevision: mapRevision,
+                    prefersDarkMap: currentInterfacePrefersDarkMap
+                ),
+                route,
+                []
+            )
+        }
+
+        guard let stayAnchor = manager.potentialStopStartLocation else { return nil }
+        let stayStart = stayAnchor.timestamp
+        var descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate {
+                $0.statusValue != "ignored" && $0.endTime >= stayStart && $0.startTime <= now
+            },
+            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+        )
+        descriptor.fetchLimit = 8
+        let activePlaceID = manager.matchedPlace?.placeID
+        let footprint = (try? context.fetch(descriptor))?.first { candidate in
+            if let activePlaceID, candidate.placeID == activePlaceID { return true }
+            let candidateLocation = CLLocation(
+                latitude: candidate.latitude,
+                longitude: candidate.longitude
+            )
+            return candidateLocation.distance(from: stayAnchor) < AppConfig.shared.stayDistanceThreshold
+        }
+        let activities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+        let activity = footprint?.getActivityType(from: activities)
+        let matchedPlaceName = manager.matchedPlace.flatMap { $0.isIgnored ? nil : $0.name }
+        let ongoingName = normalizedPlaceName(manager.ongoingTitle, fallback: "")
+        let footprintName = normalizedPlaceName(footprint?.address, fallback: "")
+        let placeName = matchedPlaceName
+            ?? (ongoingName.isEmpty ? nil : ongoingName)
+            ?? (footprintName.isEmpty ? nil : footprintName)
+            ?? normalizedPlaceName(manager.currentAddress, fallback: "正在停留")
+        let currentAddress = normalizedPlaceName(manager.currentAddress, fallback: "")
+        let address = currentAddress.isEmpty || currentAddress == placeName ? nil : currentAddress
+        return (
+            CurrentTrackingActivityAttributes.ContentState(
+                kind: .footprint,
+                recordID: footprint?.footprintID.uuidString
+                    ?? "ongoing-\(Int(stayStart.timeIntervalSince1970))",
+                startedAt: stayStart,
+                title: activity?.name ?? "停留",
+                icon: activity?.icon ?? "mappin.and.ellipse",
+                colorHex: activity?.colorHex,
+                placeName: placeName,
+                address: address,
+                startLocation: nil,
+                distance: nil,
+                averageSpeed: nil,
+                latitude: location.coordinate.latitude,
+                longitude: location.coordinate.longitude,
+                mapRevision: mapRevision,
+                prefersDarkMap: currentInterfacePrefersDarkMap
+            ),
+            [],
+            footprint?.photoAssetIDs ?? []
+        )
+    }
+
+    private func normalizedPlaceName(_ value: String?, fallback: String) -> String {
+        let text = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if text.isEmpty || text == "正在解析位置..." || text == "未知位置" {
+            return fallback
+        }
+        return text
+    }
+
+    private var currentInterfacePrefersDarkMap: Bool {
+#if WIDGET_EXTENSION
+        return false
+#else
+        let sceneStyle = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)?
+            .traitCollection.userInterfaceStyle
+        let style = sceneStyle ?? UITraitCollection.current.userInterfaceStyle
+        return style == .dark
+#endif
+    }
+
+    private func scheduleEndAfterRecognitionGrace(location: CLLocation, modelContext: ModelContext) {
+        guard currentActivity != nil || !Activity<CurrentTrackingActivityAttributes>.activities.isEmpty,
+              unresolvedEndTask == nil else { return }
+        unresolvedEndTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.unresolvedEndTask = nil
+            guard self.resolveState(location: location, context: modelContext) == nil else {
+                await self.enqueueUpdate(location: location, modelContext: modelContext)
+                return
+            }
+            await self.endAll()
+        }
+    }
+
+    private func endAll() async {
+        unresolvedEndTask?.cancel()
+        unresolvedEndTask = nil
+        let activities = Activity<CurrentTrackingActivityAttributes>.activities
+        currentActivity = nil
+        lastState = nil
+        lastMapLocation = nil
+        lastMapUpdate = .distantPast
+        lastPhotoSignature = nil
+        for activity in activities {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
+    }
+}
 
 @available(iOS 16.1, *)
 class TripLiveActivityManager {

@@ -347,7 +347,13 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             predicate: #Predicate { $0.statusRaw == "active" && $0.startTime <= now && $0.endTime >= recentTransportEndThreshold },
             sortBy: [SortDescriptor(\.endTime, order: .reverse)]
         ))) ?? []
-        let currentTransport = transports.first
+        // A recently persisted transport may still end within the five-minute
+        // lookup window after the user has explicitly arrived. Live stay state
+        // is authoritative for whether Watch should continue showing "moving".
+        let liveStayStart = LocationManager.shared.potentialStopStartLocation?.timestamp
+        let currentTransport = LocationManager.shared.isTracking && liveStayStart == nil
+            ? transports.first
+            : nil
         let todayTransports = (try? context.fetch(FetchDescriptor<TransportRecord>(
             predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < todayEnd && $0.endTime >= todayStart },
             sortBy: [SortDescriptor(\.startTime)]
@@ -520,13 +526,26 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         let futureTrips: [WatchTripSnapshot] = []
         let nextTrip: WatchTripSnapshot? = nil
 
+        let liveFootprint = liveStayStart.flatMap { start in
+            footprints.first { $0.startTime <= start && $0.endTime >= start }
+        }
+        let livePlaceName: String? = {
+            guard liveStayStart != nil else { return nil }
+            if let place = LocationManager.shared.matchedPlace, !place.isIgnored { return place.name }
+            if let title = LocationManager.shared.ongoingTitle,
+               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
+            let address = LocationManager.shared.currentAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !address.isEmpty && address != "正在解析位置..." && address != "未知位置" { return address }
+            return "正在停留"
+        }()
+
         return WatchSnapshot(
-            currentFootprintID: latest?.footprintID.uuidString,
-            placeName: latest?.address?.isEmpty == false ? latest!.address! : "正在定位",
-            address: latest?.reason,
-            startedAt: latest?.startTime,
+            currentFootprintID: (liveStayStart == nil ? latest : liveFootprint)?.footprintID.uuidString,
+            placeName: livePlaceName ?? (latest?.address?.isEmpty == false ? latest!.address! : "正在定位"),
+            address: (liveStayStart == nil ? latest : liveFootprint)?.reason,
+            startedAt: liveStayStart ?? latest?.startTime,
             isTracking: LocationManager.shared.isTracking,
-            currentActivityID: latest?.activityTypeValue,
+            currentActivityID: (liveStayStart == nil ? latest : liveFootprint)?.activityTypeValue,
             currentTransportType: currentTransport.map { $0.manualTypeRaw ?? $0.typeRaw },
             currentTransportStartedAt: currentTransport?.startTime,
             todayFootprintCount: footprints.count,
@@ -591,9 +610,31 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             DispatchQueue.main.async { self.syncSnapshot() }
             return
         }
+        if message["confirmArrival"] as? Bool == true {
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    await LocationManager.shared.confirmArrival()
+                }
+            }
+            return
+        }
         guard let footprintID = message["footprintID"] as? String else { return }
         let activityID = message["activityID"] as? String
         DispatchQueue.main.async { self.applyActivityChange(footprintID: footprintID, activityID: activityID) }
+    }
+
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
+        if message["confirmArrival"] as? Bool == true {
+            DispatchQueue.main.async {
+                Task { @MainActor in
+                    let succeeded = await LocationManager.shared.confirmArrival()
+                    replyHandler(["success": succeeded])
+                }
+            }
+            return
+        }
+        self.session(session, didReceiveMessage: message)
+        replyHandler(["accepted": true])
     }
 
     func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {

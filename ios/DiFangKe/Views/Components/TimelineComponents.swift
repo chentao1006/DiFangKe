@@ -493,14 +493,22 @@ struct RecordingStatusCard: View {
                             .buttonStyle(.plain)
                         } else {
                             SwiftUI.TimelineView(.periodic(from: .now, by: 60)) { _ in
-                                if shouldShowCurrentSpeed {
-                                    Text(currentSpeedText)
-                                        .font(.system(size: 14))
-                                        .foregroundColor(.secondary)
-                                } else if let durationStr = locationManager.stayDuration {
-                                    Text("已停留 \(durationStr)")
-                                        .font(.system(size: 14))
-                                        .foregroundColor(.secondary)
+                                VStack(alignment: .leading, spacing: 8) {
+                                    if shouldShowCurrentSpeed {
+                                        Text(currentSpeedText)
+                                            .font(.system(size: 14))
+                                            .foregroundColor(.secondary)
+                                        Button("已到达") {
+                                            Task { await locationManager.confirmArrival() }
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                        .controlSize(.small)
+                                        .tint(.dfkAccent)
+                                    } else if let durationStr = locationManager.stayDuration {
+                                        Text("已停留 \(durationStr)")
+                                            .font(.system(size: 14))
+                                            .foregroundColor(.secondary)
+                                    }
                                 }
                             }
                         }
@@ -647,6 +655,9 @@ struct FootprintCardView: View {
     @State private var pendingMergeCandidate: AdjacentFootprintMergeCandidate?
     @State private var isResolvingUnknownPlace = false
     @State private var isPlaceTitleBreathing = false
+    @State private var showingActivityPicker = false
+    @State private var activityPickerItems: [StableActivityPickerItem] = []
+    @State private var suggestedActivityPickerItems: [StableActivityPickerItem] = []
     
     var body: some View {
         if footprint.status == .ignored {
@@ -910,35 +921,9 @@ struct FootprintCardView: View {
                 Spacer().frame(height: 8)
             }
             
-            Menu {
-                Button {
-                    applyActivityType(nil)
-                } label: {
-                    Label("无", systemImage: "circle.slash")
-                }
-                
-                let genuineSuggestions = getSuggestedActivities(includeFallback: false)
-                if !genuineSuggestions.isEmpty {
-                    Section("推荐活动") {
-                        ForEach(genuineSuggestions) { type in
-                            Button {
-                                applyActivityType(type)
-                            } label: {
-                                Label(type.name, systemImage: type.icon)
-                            }
-                        }
-                    }
-                }
-                
-                Section("所有活动") {
-                    ForEach(allActivities) { type in
-                        Button {
-                            applyActivityType(type)
-                        } label: {
-                            Label(type.name, systemImage: type.icon)
-                        }
-                    }
-                }
+            Button {
+                prepareActivityPicker()
+                showingActivityPicker = true
             } label: {
                 ZStack {
                     Circle()
@@ -962,6 +947,13 @@ struct FootprintCardView: View {
                 }
             }
             .buttonStyle(.plain)
+            .popover(isPresented: $showingActivityPicker) {
+                StableActivityPickerPopover(
+                    suggestedItems: suggestedActivityPickerItems,
+                    allItems: activityPickerItems,
+                    onSelect: applyActivityType
+                )
+            }
             
             if showTimeline {
                 Rectangle().fill(Color.secondary.opacity(0.15))
@@ -1167,6 +1159,22 @@ struct FootprintCardView: View {
         case let (nil, right?): return right
         case (nil, nil): return nil
         }
+    }
+
+    private func prepareActivityPicker() {
+        activityPickerItems = allActivities.map {
+            StableActivityPickerItem(id: $0.id, name: $0.name, icon: $0.icon)
+        }
+        suggestedActivityPickerItems = getSuggestedActivities(includeFallback: false).map {
+            StableActivityPickerItem(id: $0.id, name: $0.name, icon: $0.icon)
+        }
+    }
+
+    private func applyActivityType(_ id: UUID?) {
+        let activity = id.flatMap { selectedID in
+            allActivities.first(where: { $0.id == selectedID })
+        }
+        applyActivityType(activity)
     }
 
     private func applyActivityType(_ activity: ActivityType?) {

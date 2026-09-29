@@ -147,23 +147,28 @@ private struct CurrentPlaceView: View {
                 .lineLimit(2)
             if currentTransportIcon != nil {
                 if let startedAt = snapshot.currentTransportStartedAt {
-                    Text("已移动 \(startedAt, style: .relative)")
+                    Text("已 \(startedAt, style: .relative)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Button("已到达") {
+                    store.confirmArrival()
+                }
+                .disabled(store.isConfirmingArrival)
+                .tint(.accentColor)
             } else if !store.hasReceivedSnapshot {
                 Text(snapshot.address ?? "")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else if let startedAt = snapshot.startedAt {
-                Text("已停留 \(startedAt, style: .relative)")
+                Text("已 \(startedAt, style: .relative)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if let address = snapshot.address, !address.isEmpty {
                 Text(address).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
-            if store.hasReceivedSnapshot && currentTransportIcon == nil {
+            if store.hasReceivedSnapshot && currentTransportIcon == nil && snapshot.currentFootprintID != nil {
                 Button {
                     showingActivityPicker = true
                 } label: {

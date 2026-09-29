@@ -78,6 +78,7 @@ private struct ComplicationProvider: TimelineProvider {
 
 private struct WatchComplicationView: View {
     @Environment(\.widgetFamily) private var family
+    @Environment(\.redactionReasons) private var redactionReasons
     let entry: ComplicationEntry
 
     private var activity: ComplicationActivity? {
@@ -138,62 +139,99 @@ private struct WatchComplicationView: View {
 
     @ViewBuilder
     var body: some View {
+        if redactionReasons.contains(.privacy) {
+            privacyPlaceholder
+        } else {
+            switch family {
+            case .accessoryCircular:
+                ZStack {
+                    dayTimelineRing
+                    VStack(spacing: 0) {
+                        Image(systemName: icon)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(color)
+                        durationLabel
+                            .font(.system(size: 8, weight: .medium, design: .rounded))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    }
+                }
+                .padding(1)
+                .widgetLabel(title)
+            case .accessoryRectangular:
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Image(systemName: icon).font(.title2).foregroundStyle(color).frame(width: 24)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(title).font(.headline).lineLimit(1)
+                            HStack(spacing: 2) { Text("已持续"); durationLabel }
+                                .font(.caption2)
+                            Text(todaySummary).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    DayTimelineBar(
+                        items: entry.snapshot?.todayTimeline ?? [],
+                        currentFootprintID: entry.snapshot?.currentFootprintID,
+                        date: entry.date
+                    )
+                    .frame(height: 6)
+                }
+            case .accessoryInline:
+                HStack(spacing: 3) {
+                    Image(systemName: icon)
+                        .foregroundStyle(color)
+                    Text(title)
+                    Text("·")
+                    durationLabel
+                }
+            case .accessoryCorner:
+                durationLabel.widgetLabel {
+                    Label {
+                        Text(title)
+                    } icon: {
+                        Image(systemName: icon)
+                            .foregroundStyle(color)
+                    }
+                }
+            default:
+                VStack(alignment: .leading) {
+                    Label(title, systemImage: icon).foregroundStyle(color)
+                    Text(duration).font(.headline.monospacedDigit())
+                }
+            }
+        }
+    }
+
+    /// watchOS may keep accessory artwork visible while privacy-redacting text.
+    /// Render a data-free view ourselves so the current place/activity, duration,
+    /// and day timeline cannot leak through the locked watch face.
+    @ViewBuilder
+    private var privacyPlaceholder: some View {
         switch family {
         case .accessoryCircular:
             ZStack {
-                dayTimelineRing
-                VStack(spacing: 0) {
-                    Image(systemName: icon)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(color)
-                    durationLabel
-                        .font(.system(size: 8, weight: .medium, design: .rounded))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                }
+                Circle()
+                    .stroke(.secondary.opacity(0.45), lineWidth: 3.8)
+                Image(systemName: "location.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
-            .padding(1)
-            .widgetLabel(title)
+            .padding(2)
+            .widgetLabel("地方客")
         case .accessoryRectangular:
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Image(systemName: icon).font(.title2).foregroundStyle(color).frame(width: 24)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(title).font(.headline).lineLimit(1)
-                        HStack(spacing: 2) { Text("已持续"); durationLabel }
-                            .font(.caption2)
-                        Text(todaySummary).font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-                DayTimelineBar(
-                    items: entry.snapshot?.todayTimeline ?? [],
-                    currentFootprintID: entry.snapshot?.currentFootprintID,
-                    date: entry.date
-                )
-                .frame(height: 6)
-            }
+            Label("地方客", systemImage: "location.fill")
+                .font(.headline)
+                .foregroundStyle(.secondary)
         case .accessoryInline:
-            HStack(spacing: 3) {
-                Image(systemName: icon)
-                    .foregroundStyle(color)
-                Text(title)
-                Text("·")
-                durationLabel
-            }
+            Label("地方客", systemImage: "location.fill")
+                .foregroundStyle(.secondary)
         case .accessoryCorner:
-            durationLabel.widgetLabel {
-                Label {
-                    Text(title)
-                } icon: {
-                    Image(systemName: icon)
-                        .foregroundStyle(color)
-                }
-            }
+            Image(systemName: "location.fill")
+                .foregroundStyle(.secondary)
+                .widgetLabel("地方客")
         default:
-            VStack(alignment: .leading) {
-                Label(title, systemImage: icon).foregroundStyle(color)
-                Text(duration).font(.headline.monospacedDigit())
-            }
+            Label("地方客", systemImage: "location.fill")
+                .foregroundStyle(.secondary)
         }
     }
 

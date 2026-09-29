@@ -1,7 +1,6 @@
 import SwiftUI
 import MapKit
 import CoreLocation
-import UIKit
 
 // MARK: - IME-safe text editing
 
@@ -32,65 +31,106 @@ struct IMESafeMultilineTextField: View {
     }
 }
 
-/// A UIKit-backed editor for fields where retaining marked text is critical.
-/// `UITextView` owns an active Pinyin/Zhuyin composition until the candidate is
-/// committed; SwiftUI state is deliberately updated only after that point.
-struct IMESafeTextView: UIViewRepresentable {
-    @ObservedObject var textState: IMETextState
-    var onFocusChange: ((Bool) -> Void)? = nil
+extension View {
+    func dfkMultilineInputStyle() -> some View {
+        textFieldStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(uiColor: .secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(textState: textState, onFocusChange: onFocusChange)
+// MARK: - Stable activity selection
+
+/// A value snapshot keeps an open picker independent from SwiftData, location,
+/// map, and photo updates occurring behind it. Rebuilding a native `Menu`
+/// during those updates resets its scroll position to the top.
+struct StableActivityPickerItem: Identifiable, Equatable {
+    let id: UUID
+    let name: String
+    let icon: String
+}
+
+struct StableActivityPickerPopover: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let suggestedItems: [StableActivityPickerItem]
+    let allItems: [StableActivityPickerItem]
+    let onSelect: (UUID?) -> Void
+    var onAdd: (() -> Void)? = nil
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                pickerButton(title: "无", icon: "circle.slash") {
+                    onSelect(nil)
+                    dismiss()
+                }
+
+                if !suggestedItems.isEmpty {
+                    sectionDivider
+                    sectionTitle("推荐活动")
+                    ForEach(suggestedItems) { item in
+                        pickerButton(title: item.name, icon: item.icon) {
+                            onSelect(item.id)
+                            dismiss()
+                        }
+                    }
+                }
+
+                sectionDivider
+                sectionTitle("所有活动")
+                ForEach(allItems) { item in
+                    pickerButton(title: item.name, icon: item.icon) {
+                        onSelect(item.id)
+                        dismiss()
+                    }
+                }
+
+                if let onAdd {
+                    sectionDivider
+                    pickerButton(title: "添加活动类型", icon: "plus") {
+                        dismiss()
+                        onAdd()
+                    }
+                }
+            }
+            .padding(.vertical, 8)
+        }
+        .frame(width: 300, height: min(480, pickerHeight))
+        .presentationCompactAdaptation(.popover)
     }
 
-    func makeUIView(context: Context) -> UITextView {
-        let textView = UITextView()
-        textView.backgroundColor = .clear
-        textView.font = .preferredFont(forTextStyle: .body)
-        textView.textColor = .label
-        textView.delegate = context.coordinator
-        textView.isScrollEnabled = true
-        textView.textContainerInset = .zero
-        textView.textContainer.lineFragmentPadding = 0
-        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        textView.text = textState.text
-        return textView
+    private var pickerHeight: CGFloat {
+        let rowCount = 1 + suggestedItems.count + allItems.count + (onAdd == nil ? 0 : 1)
+        let sectionCount = (suggestedItems.isEmpty ? 1 : 2) + (onAdd == nil ? 0 : 1)
+        return CGFloat(rowCount * 48 + sectionCount * 34 + 16)
     }
 
-    func updateUIView(_ textView: UITextView, context: Context) {
-        // Never assign text while the keyboard has marked (uncommitted) text.
-        // Doing so is what commits the first Pinyin letter prematurely.
-        guard textView.markedTextRange == nil, textView.text != textState.text else { return }
-        textView.text = textState.text
+    private var sectionDivider: some View {
+        Divider().padding(.vertical, 4)
     }
 
-    final class Coordinator: NSObject, UITextViewDelegate {
-        private let textState: IMETextState
-        private let onFocusChange: ((Bool) -> Void)?
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+    }
 
-        init(textState: IMETextState, onFocusChange: ((Bool) -> Void)?) {
-            self.textState = textState
-            self.onFocusChange = onFocusChange
+    private func pickerButton(title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.body)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                .padding(.horizontal, 16)
+                .contentShape(Rectangle())
         }
-
-        func textViewDidBeginEditing(_ textView: UITextView) {
-            onFocusChange?(true)
-        }
-
-        func textViewDidChange(_ textView: UITextView) {
-            guard textView.markedTextRange == nil else { return }
-            commit(textView)
-        }
-
-        func textViewDidEndEditing(_ textView: UITextView) {
-            commit(textView)
-            onFocusChange?(false)
-        }
-
-        private func commit(_ textView: UITextView) {
-            guard textState.text != textView.text else { return }
-            textState.text = textView.text
-        }
+        .buttonStyle(.plain)
     }
 }
 

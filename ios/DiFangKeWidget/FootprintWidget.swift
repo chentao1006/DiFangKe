@@ -646,4 +646,554 @@ struct TripMapImageView: View {
         }
     }
 }
+
+@available(iOS 16.1, *)
+struct CurrentTrackingLiveActivityWidget: Widget {
+    var body: some WidgetConfiguration {
+        ActivityConfiguration(for: CurrentTrackingActivityAttributes.self) { context in
+            CurrentTrackingLockScreenContent(context: context)
+                .activityBackgroundTint(.clear)
+                .activitySystemActionForegroundColor(.white)
+        } dynamicIsland: { context in
+            DynamicIsland {
+                DynamicIslandExpandedRegion(.leading) {
+                    HStack(spacing: 6) {
+                        Image(systemName: context.state.icon)
+                            .foregroundStyle(currentActivityColor(context.state.colorHex))
+                        Text(context.state.title)
+                            .font(.subheadline.bold())
+                            .lineLimit(1)
+                    }
+                    .padding(.leading, 4)
+                }
+                DynamicIslandExpandedRegion(.trailing) {
+                    CurrentActivityDuration(startedAt: context.state.startedAt, compact: false)
+                        .font(.subheadline.bold())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .padding(.trailing, 4)
+                }
+                DynamicIslandExpandedRegion(.bottom) {
+                    CurrentTrackingIslandBottomContent(context: context)
+                }
+            } compactLeading: {
+                Image(systemName: context.state.icon)
+                    .foregroundStyle(currentActivityColor(context.state.colorHex))
+            } compactTrailing: {
+                CurrentActivityDuration(startedAt: context.state.startedAt, compact: true)
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+            } minimal: {
+                Image(systemName: context.state.icon)
+                    .foregroundStyle(currentActivityColor(context.state.colorHex))
+            }
+            .keylineTint(currentActivityColor(context.state.colorHex))
+            .widgetURL(currentActivityDetailURL(for: context.state))
+        }
+    }
+}
+
+@available(iOS 16.1, *)
+private struct CurrentTrackingLockScreenContent: View {
+    let context: ActivityViewContext<CurrentTrackingActivityAttributes>
+
+    private var state: CurrentTrackingActivityAttributes.ContentState { context.state }
+    private var accent: Color { currentActivityColor(state.colorHex) }
+    private var usesDarkMap: Bool { state.prefersDarkMap ?? false }
+    private var primaryForeground: Color { usesDarkMap ? .white : .black }
+    private var secondaryForeground: Color { primaryForeground.opacity(0.72) }
+    private let contentHeight: CGFloat = 120
+
+    var body: some View {
+        ZStack {
+            GeometryReader { proxy in
+                CurrentActivityMapImage(
+                    sessionID: context.attributes.sessionID,
+                    revision: state.mapRevision,
+                    prefersDarkMap: state.prefersDarkMap ?? false
+                )
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
+                .clipped()
+                .overlay(
+                    LinearGradient(
+                        colors: usesDarkMap
+                            ? [.black.opacity(0.18), .clear, .black.opacity(0.28)]
+                            : [.white.opacity(0.36), .clear, .white.opacity(0.46)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+            }
+
+            VStack(spacing: state.kind == .transport ? 5 : 8) {
+                HStack(spacing: 7) {
+                    Image(systemName: state.icon)
+                        .foregroundStyle(accent)
+                        .font(.headline)
+                    Text(state.title)
+                        .font(.subheadline.bold())
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    CurrentActivityDuration(startedAt: state.startedAt, compact: false)
+                        .font(.subheadline.bold())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+
+                if state.kind == .transport {
+                    CurrentTransportProgress(
+                        start: state.startLocation ?? "起点",
+                        current: state.placeName,
+                        accent: accent,
+                        onDarkMap: usesDarkMap,
+                        compact: true
+                    )
+
+                    HStack(alignment: .firstTextBaseline) {
+                        CurrentMetric(
+                            title: "里程",
+                            value: formatCurrentDistance(state.distance),
+                            onDarkMap: usesDarkMap
+                        )
+                        Spacer()
+                        CurrentMetric(
+                            title: "均速",
+                            value: formatCurrentSpeed(state.averageSpeed),
+                            onDarkMap: usesDarkMap
+                        )
+                        Spacer(minLength: 12)
+                        Link(destination: currentActivityArrivalURL(for: state)) {
+                            Text("已到达")
+                                .font(.subheadline.bold())
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 7)
+                                .background(accent, in: Capsule())
+                                .foregroundStyle(.white)
+                        }
+                    }
+                } else {
+                    HStack(alignment: .center, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(state.placeName)
+                                .font(.title3.bold())
+                                .lineLimit(1)
+                            if let address = state.address, !address.isEmpty {
+                                Text(address)
+                                    .font(.caption)
+                                    .foregroundStyle(secondaryForeground)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer(minLength: 8)
+                        if state.photoThumbnailCount > 0 {
+                            CurrentActivityPhotoStack(
+                                sessionID: context.attributes.sessionID,
+                                revision: state.photoRevision,
+                                thumbnailCount: state.photoThumbnailCount,
+                                totalCount: state.photoCount
+                            )
+                        }
+                    }
+                }
+            }
+            .foregroundStyle(primaryForeground)
+            .padding(.horizontal, 16)
+            .padding(.vertical, state.kind == .transport ? 6 : 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, minHeight: contentHeight, maxHeight: contentHeight, alignment: .top)
+        .clipped()
+        .widgetURL(currentActivityDetailURL(for: state))
+    }
+}
+
+@available(iOS 16.1, *)
+private struct CurrentTrackingIslandBottomContent: View {
+    let context: ActivityViewContext<CurrentTrackingActivityAttributes>
+
+    private var state: CurrentTrackingActivityAttributes.ContentState { context.state }
+    private var accent: Color { currentActivityColor(state.colorHex) }
+    private var mapHeight: CGFloat { state.kind == .transport ? 108 : 94 }
+
+    var body: some View {
+        Group {
+            if state.kind == .transport {
+                VStack(spacing: 8) {
+                    CurrentTransportProgress(
+                        start: state.startLocation ?? "起点",
+                        current: state.placeName,
+                        accent: accent,
+                        onDarkMap: true
+                    )
+
+                    HStack(alignment: .firstTextBaseline) {
+                        CurrentMetric(
+                            title: "里程",
+                            value: formatCurrentDistance(state.distance),
+                            onDarkMap: true
+                        )
+                        Spacer()
+                        CurrentMetric(
+                            title: "均速",
+                            value: formatCurrentSpeed(state.averageSpeed),
+                            onDarkMap: true
+                        )
+                        Spacer(minLength: 10)
+                        Link(destination: currentActivityArrivalURL(for: state)) {
+                            Text("已到达")
+                                .font(.subheadline.bold())
+                                .padding(.horizontal, 13)
+                                .padding(.vertical, 6)
+                                .background(accent, in: Capsule())
+                                .foregroundStyle(.white)
+                        }
+                    }
+                }
+            } else {
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(state.placeName)
+                            .font(.title3.bold())
+                            .lineLimit(1)
+                        if let address = state.address, !address.isEmpty {
+                            Text(address)
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.78))
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if state.photoThumbnailCount > 0 {
+                        CurrentActivityPhotoStack(
+                            sessionID: context.attributes.sessionID,
+                            revision: state.photoRevision,
+                            thumbnailCount: state.photoThumbnailCount,
+                            totalCount: state.photoCount
+                        )
+                    }
+                }
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 8)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, minHeight: mapHeight, alignment: .top)
+        .background {
+            CurrentActivityMapImage(
+                sessionID: context.attributes.sessionID,
+                revision: state.mapRevision,
+                prefersDarkMap: true
+            )
+            .overlay(
+                LinearGradient(
+                    colors: [.black.opacity(0.16), .clear, .black.opacity(0.28)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+        .clipped()
+        .clipShape(
+            UnevenRoundedRectangle(
+                topLeadingRadius: 14,
+                bottomLeadingRadius: 22,
+                bottomTrailingRadius: 22,
+                topTrailingRadius: 14,
+                style: .continuous
+            )
+        )
+        .widgetURL(currentActivityDetailURL(for: state))
+    }
+}
+
+private struct CurrentActivityPhotoStack: View {
+    let sessionID: String
+    let revision: Int
+    let thumbnailCount: Int
+    let totalCount: Int
+
+    private var visibleCount: Int { min(3, thumbnailCount) }
+    private var stackWidth: CGFloat { 34 + CGFloat(max(0, visibleCount - 1)) * 21 }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ZStack(alignment: .leading) {
+                ForEach(0..<visibleCount, id: \.self) { index in
+                    if let image = currentActivityPhotoImage(
+                        sessionID: sessionID,
+                        revision: revision,
+                        index: index
+                    ) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 34, height: 34)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .stroke(.white.opacity(0.9), lineWidth: 1.5)
+                            )
+                            .shadow(color: .black.opacity(0.28), radius: 2, y: 1)
+                            .rotationEffect(.degrees(Double(index - 1) * 3.5))
+                            .offset(x: CGFloat(index) * 21)
+                            .zIndex(Double(index))
+                    }
+                }
+            }
+            .frame(width: stackWidth, height: 36, alignment: .leading)
+
+            if totalCount > visibleCount {
+                Text("+\(totalCount - visibleCount)")
+                    .font(.caption2.bold())
+                    .monospacedDigit()
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(.black.opacity(0.48), in: Capsule())
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(totalCount) 张照片")
+    }
+}
+
+@available(iOS 16.1, *)
+private struct CurrentTransportProgress: View {
+    let start: String
+    let current: String
+    let accent: Color
+    let onDarkMap: Bool
+    var compact = false
+
+    private var foreground: Color { onDarkMap ? .white : .black }
+
+    var body: some View {
+        VStack(spacing: compact ? 2 : 4) {
+            GeometryReader { proxy in
+                let leadingX: CGFloat = 7
+                let currentX = max(leadingX + 28, proxy.size.width * 0.58)
+                let trailingX = proxy.size.width - 7
+                ZStack(alignment: .leading) {
+                    Path { path in
+                        path.move(to: CGPoint(x: leadingX, y: 8))
+                        path.addLine(to: CGPoint(x: trailingX, y: 8))
+                    }
+                    .stroke(foreground.opacity(0.34), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    Path { path in
+                        path.move(to: CGPoint(x: leadingX, y: 8))
+                        path.addLine(to: CGPoint(x: currentX, y: 8))
+                    }
+                    .stroke(accent, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    Circle().fill(accent).frame(width: 12, height: 12).position(x: leadingX, y: 8)
+                    Circle().fill(accent).overlay(Circle().stroke(foreground, lineWidth: 2))
+                        .frame(width: 16, height: 16).position(x: currentX, y: 8)
+                    Circle().fill(foreground.opacity(0.18)).overlay(Circle().stroke(foreground.opacity(0.75), lineWidth: 2))
+                        .frame(width: 12, height: 12).position(x: trailingX, y: 8)
+                }
+            }
+            .frame(height: 16)
+
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(start).lineLimit(1)
+                    if !compact {
+                        Text("起点").foregroundStyle(foreground.opacity(0.65))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(spacing: 1) {
+                    Text(current).lineLimit(1)
+                    if !compact {
+                        Text("当前").foregroundStyle(foreground.opacity(0.65))
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                Color.clear.frame(maxWidth: .infinity, minHeight: 1)
+            }
+            .font(.caption)
+            .foregroundStyle(foreground)
+        }
+    }
+}
+
+private struct CurrentMetric: View {
+    let title: String
+    let value: String
+    let onDarkMap: Bool
+
+    private var foreground: Color { onDarkMap ? .white : .black }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title).font(.caption2).foregroundStyle(foreground.opacity(0.68))
+            Text(value).font(.subheadline.bold()).monospacedDigit()
+        }
+        .foregroundStyle(foreground)
+    }
+}
+
+private struct CurrentActivityDuration: View {
+    let startedAt: Date
+    let compact: Bool
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
+            Text(compact
+                 ? currentActivityCompactDurationText(elapsed)
+                 : currentActivityDurationText(elapsed))
+        }
+    }
+}
+
+/// Matches the duration shown inside the Watch circular complication.
+private func currentActivityCompactDurationText(_ elapsed: Int) -> String {
+    let minutes = max(0, elapsed / 60)
+    if minutes < 60 {
+        return "\(max(1, minutes))分钟"
+    }
+
+    let hours = Double(minutes) / 60
+    if hours >= 10 {
+        return "\(Int(hours.rounded()))小时"
+    }
+    return "\(String(format: "%g", (hours * 10).rounded() / 10))小时"
+}
+
+private func currentActivityDurationText(_ elapsed: Int) -> String {
+    let totalMinutes = elapsed / 60
+    if totalMinutes >= 1_440 {
+        let days = totalMinutes / 1_440
+        let hours = (totalMinutes % 1_440) / 60
+        return hours > 0 ? "\(days) 天 \(hours) 小时" : "\(days) 天"
+    }
+    if totalMinutes >= 60 {
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        return minutes > 0 ? "\(hours) 小时 \(minutes) 分钟" : "\(hours) 小时"
+    }
+    return "\(max(1, totalMinutes)) 分钟"
+}
+
+private struct CurrentActivityMapImage: View {
+    let sessionID: String
+    let revision: Int
+    let prefersDarkMap: Bool
+
+    var body: some View {
+        if let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.com.ct106.difangke"
+        ) {
+            let preferredSuffixes = prefersDarkMap
+                ? ["dark", "light"]
+                : ["light", "dark"]
+            if let url = preferredSuffixes.lazy.compactMap({ suffix in
+                currentActivityMapURL(
+                    container: container,
+                    sessionID: sessionID,
+                    revision: revision,
+                    suffix: suffix
+                )
+            }).first,
+               let data = try? Data(contentsOf: url), let image = UIImage(data: data) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Color.clear
+            }
+        } else {
+            Color.clear
+        }
+    }
+}
+
+private func currentActivityMapURL(
+    container: URL,
+    sessionID: String,
+    revision: Int,
+    suffix: String
+) -> URL? {
+    let exactURL = container.appendingPathComponent(
+        "current_activity_\(sessionID)_\(revision)_\(suffix).png"
+    )
+    if FileManager.default.fileExists(atPath: exactURL.path) {
+        return exactURL
+    }
+
+    // A process restart can briefly restore an Activity state before the host
+    // restores its in-memory revision. Reuse the newest snapshot for this same
+    // Activity session instead of showing an empty background.
+    let prefix = "current_activity_\(sessionID)_"
+    let ending = "_\(suffix).png"
+    return (try? FileManager.default.contentsOfDirectory(
+        at: container,
+        includingPropertiesForKeys: [.contentModificationDateKey]
+    ))?
+    .filter {
+        $0.lastPathComponent.hasPrefix(prefix)
+            && $0.lastPathComponent.hasSuffix(ending)
+            && !$0.lastPathComponent.contains("_photo_")
+    }
+    .max {
+        let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        return left < right
+    }
+}
+
+private func currentActivityPhotoImage(
+    sessionID: String,
+    revision: Int,
+    index: Int
+) -> UIImage? {
+    guard let container = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: "group.com.ct106.difangke"
+    ) else { return nil }
+    let url = container.appendingPathComponent(
+        "current_activity_\(sessionID)_photo_\(revision)_\(index).jpg"
+    )
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    return UIImage(data: data)
+}
+
+private func currentActivityColor(_ hex: String?) -> Color {
+    guard var value = hex?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+        return .teal
+    }
+    value = value.replacingOccurrences(of: "#", with: "")
+    guard let number = UInt64(value, radix: 16), value.count == 6 else { return .teal }
+    return Color(
+        red: Double((number >> 16) & 0xff) / 255,
+        green: Double((number >> 8) & 0xff) / 255,
+        blue: Double(number & 0xff) / 255
+    )
+}
+
+private func formatCurrentDistance(_ distance: Double?) -> String {
+    guard let distance, distance > 0 else { return "—" }
+    return distance < 1_000
+        ? String(format: "%.0f 米", distance)
+        : String(format: "%.1f 公里", distance / 1_000)
+}
+
+private func formatCurrentSpeed(_ speed: Double?) -> String {
+    guard let speed, speed > 0 else { return "—" }
+    return String(format: "%.0f km/h", speed * 3.6)
+}
+
+private func currentActivityDetailURL(
+    for state: CurrentTrackingActivityAttributes.ContentState
+) -> URL {
+    if state.kind == .transport {
+        return URL(string: "difangke://timeline?offset=0")!
+    }
+    return URL(string: "difangke://current/detail?kind=\(state.kind.rawValue)&id=\(state.recordID)")!
+}
+
+private func currentActivityArrivalURL(
+    for state: CurrentTrackingActivityAttributes.ContentState
+) -> URL {
+    URL(string: "difangke://current/action?type=arrive&id=\(state.recordID)")!
+}
 #endif

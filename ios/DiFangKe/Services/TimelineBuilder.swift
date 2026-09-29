@@ -2899,7 +2899,7 @@ class PersistentTimelineBuilder {
             // 手动分割会把两段都标记为 manual。它们定义了用户明确指定的
             // 时间线边界，自动同步/冷启动重建绝不能再把它们合回去。
             // `.confirmed` 是自动识别足迹的正常状态，不能把它当作手动边界。
-            guard current.status != .manual,
+            guard (current.status != .manual || current.allowsAutomaticDurationExtension),
                   next.status != .manual else {
                 i += 1
                 continue
@@ -2914,7 +2914,9 @@ class PersistentTimelineBuilder {
             let isSameLogicalPlace = (current.placeID != nil && current.placeID == next.placeID)
             // 如果两个足迹距离小于阈值，且间隔小于配置的合并时长，则视作同一地点
             let mergeThreshold = isSameLogicalPlace ? max(threshold, AppConfig.shared.samePlaceMergeBonusThreshold) : threshold
-            let mergeGapLimit = isSameLogicalPlace ? 3600.0 : AppConfig.shared.stayMergeGapThreshold
+            let mergeGapLimit = isSameLogicalPlace
+                ? endOfDay.timeIntervalSince(startOfDay)
+                : AppConfig.shared.stayMergeGapThreshold
 
             // 硬规则：只要两个足迹之间存在有效交通记录，就绝不能合并。
             let cEnd = current.endTime

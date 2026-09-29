@@ -6,6 +6,7 @@ struct SettingsView: View {
     @Environment(\.requestReview) private var requestReview
     @Environment(LocationManager.self) private var locationManager
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
+    @AppStorage("isCurrentLiveActivityEnabled") private var isCurrentLiveActivityEnabled = true
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder)]) private var allActivities: [ActivityType]
     @AppStorage("isICloudSyncEnabled") private var isICloudSyncEnabled = false
@@ -80,6 +81,11 @@ struct SettingsView: View {
                             locationManager.startTracking()
                         } else {
                             locationManager.stopTracking()
+#if canImport(ActivityKit)
+                            if #available(iOS 16.1, *) {
+                                CurrentLiveActivityManager.shared.stop()
+                            }
+#endif
                         }
                     }
 
@@ -120,12 +126,27 @@ struct SettingsView: View {
                     }
                 }
 
+                Toggle("开启 iCloud 同步", isOn: $isICloudSyncEnabled)
                 if isTrackingEnabled && isICloudSyncEnabled {
                     Toggle("以当前设备记录为准", isOn: useCurrentDeviceForRawRecordingBinding)
                 }
-
-                Toggle("开启 iCloud 同步", isOn: $isICloudSyncEnabled)
                 Toggle("自动关联照片到足迹", isOn: $isAutoPhotoLinkEnabled)
+
+                Toggle("实时活动", isOn: $isCurrentLiveActivityEnabled)
+                    .onChange(of: isCurrentLiveActivityEnabled) { _, isEnabled in
+#if canImport(ActivityKit)
+                        if #available(iOS 16.1, *) {
+                            if isEnabled {
+                                locationManager.checkLiveActivity()
+                            } else {
+                                CurrentLiveActivityManager.shared.stop()
+                            }
+                        }
+#endif
+                    }
+                Text("在锁屏和灵动岛显示当前足迹与交通")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             
             .task(id: rawRecordingSourceDeviceID) {

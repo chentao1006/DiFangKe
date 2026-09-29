@@ -32,6 +32,7 @@ struct FootprintModalView: View {
     @State private var showPhotoPicker = false
     @State private var showCamera = false
     @State private var selectedPhotoID: String? = nil
+    @State private var orderedPhotoAssetIDs: [String] = []
     @State private var showAddPlaceModal = false
     @State private var isUpdatingAddress = false
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
@@ -40,6 +41,9 @@ struct FootprintModalView: View {
     @State private var showingPhotoDeleteAlert = false
     @State private var photoToDelete: String? = nil
     @State private var showingSearchSheet = false
+    @State private var showingActivityPicker = false
+    @State private var activityPickerItems: [StableActivityPickerItem] = []
+    @State private var suggestedActivityPickerItems: [StableActivityPickerItem] = []
     @State private var showingActivityTypeEditor = false
     @State private var showingTimeAdjustment = false
     @State private var sharePayload: DFKShareCardPayload?
@@ -74,6 +78,54 @@ struct FootprintModalView: View {
 
     private var isMinimized: Bool {
         isInline && presentationDetent == .height(88)
+    }
+
+    private var photoOrderTaskKey: String {
+        "\(photoService.authorizationStatus.rawValue)|\(footprint.photoAssetIDs.joined(separator: "|"))"
+    }
+
+    private var displayedPhotoAssetIDs: [String] {
+        let currentIDs = footprint.photoAssetIDs
+        guard orderedPhotoAssetIDs.count == currentIDs.count,
+              Set(orderedPhotoAssetIDs) == Set(currentIDs) else {
+            return currentIDs
+        }
+        return orderedPhotoAssetIDs
+    }
+
+    private func refreshPhotoAssetOrder() {
+        let assetIDs = footprint.photoAssetIDs
+        guard !assetIDs.isEmpty else {
+            orderedPhotoAssetIDs = []
+            return
+        }
+
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else {
+            orderedPhotoAssetIDs = assetIDs
+            return
+        }
+
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: assetIDs, options: nil)
+        var creationDates: [String: Date] = [:]
+        assets.enumerateObjects { asset, _, _ in
+            creationDates[asset.localIdentifier] = asset.creationDate
+        }
+
+        orderedPhotoAssetIDs = assetIDs.enumerated().sorted { lhs, rhs in
+            let lhsDate = creationDates[lhs.element]
+            let rhsDate = creationDates[rhs.element]
+            switch (lhsDate, rhsDate) {
+            case let (left?, right?) where left != right:
+                return left > right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return lhs.offset < rhs.offset
+            }
+        }.map(\.element)
     }
 
     private func ensureFootprintManaged() {
@@ -212,6 +264,9 @@ struct FootprintModalView: View {
                     hasSeenPhotoPermissionGuide = true
                 }
             }
+            .task(id: photoOrderTaskKey) {
+                refreshPhotoAssetOrder()
+            }
             .sheet(isPresented: $showCamera) {
                 CameraPickerView { image in
                     guard let image = image else { return }
@@ -262,8 +317,8 @@ struct FootprintModalView: View {
                                     onSelectionApplied: markFootprintChanged)
             }
             .fullScreenCover(item: Binding(get: { selectedPhotoID.map { IdentifiableString(value: $0) } }, set: { selectedPhotoID = $0?.value })) { item in
-                let index = footprint.photoAssetIDs.firstIndex(of: item.value) ?? 0
-                PhotoFullscreenView(assetIDs: footprint.photoAssetIDs, currentIndex: index)
+                let index = displayedPhotoAssetIDs.firstIndex(of: item.value) ?? 0
+                PhotoFullscreenView(assetIDs: displayedPhotoAssetIDs, currentIndex: index)
             }
             .sheet(isPresented: $showAddPlaceModal) {
                 AddToFavoriteModal(footprint: footprint)
@@ -310,6 +365,7 @@ struct FootprintModalView: View {
 
 private struct FootprintReasonEditor: View {
     @StateObject private var textState: IMETextState
+    @FocusState private var isFocused: Bool
     let onCommit: (String) -> Void
     let onBeginEditing: () -> Void
 
@@ -320,31 +376,17 @@ private struct FootprintReasonEditor: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            if textState.text.isEmpty {
-                Text("输入备注...")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .allowsHitTesting(false)
+        TextField("输入备注...", text: $textState.text, axis: .vertical)
+            .font(.body)
+            .lineLimit(1...6)
+            .focused($isFocused)
+            .dfkMultilineInputStyle()
+            .onChange(of: isFocused) { _, focused in
+                if focused { onBeginEditing() }
             }
-
-            IMESafeTextView(textState: textState, onFocusChange: { isFocused in
-                if isFocused { onBeginEditing() }
-            })
-                .frame(
-                    minHeight: UIFont.preferredFont(forTextStyle: .body).lineHeight,
-                    maxHeight: 120
-                )
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.secondary.opacity(0.05))
-        )
-        .onDisappear {
-            onCommit(textState.text)
-        }
+            .onDisappear {
+                onCommit(textState.text)
+            }
     }
 }
 
@@ -381,7 +423,7 @@ extension FootprintModalView {
         let payloadID = loadingPayload.id
 
         DFKShareImageLoader.loadShareMedia(
-            assetIDs: footprint.photoAssetIDs,
+            assetIDs: displayedPhotoAssetIDs,
             coordinates: footprint.coordinates,
             footprints: [footprint],
             activities: allActivities,
@@ -490,43 +532,9 @@ extension FootprintModalView {
     
     private var addressSection: some View {
         VStack(alignment: .center, spacing: 10) {
-            Menu {
-                Button {
-                    clearActivityType()
-                } label: {
-                    Label("无", systemImage: "circle.slash")
-                }
-                
-                let genuineSuggestions = getSuggestedActivities(includeFallback: false)
-                if !genuineSuggestions.isEmpty {
-                    Section("推荐活动") {
-                        ForEach(genuineSuggestions) { type in
-                            Button {
-                                applyActivityType(type)
-                            } label: {
-                                Label(type.name, systemImage: type.icon)
-                            }
-                        }
-                    }
-                }
-                
-                Section("所有活动") {
-                    ForEach(allActivities) { type in
-                        Button {
-                            applyActivityType(type)
-                        } label: {
-                            Label(type.name, systemImage: type.icon)
-                        }
-                    }
-                }
-
-                Divider()
-
-                Button {
-                    showingActivityTypeEditor = true
-                } label: {
-                    Label("添加活动类型", systemImage: "plus")
-                }
+            Button {
+                prepareActivityPicker()
+                showingActivityPicker = true
             } label: {
                 ZStack(alignment: .bottomTrailing) {
                     Image(systemName: selectedActivityIcon)
@@ -536,6 +544,18 @@ extension FootprintModalView {
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.plain)
+            .popover(isPresented: $showingActivityPicker) {
+                StableActivityPickerPopover(
+                    suggestedItems: suggestedActivityPickerItems,
+                    allItems: activityPickerItems,
+                    onSelect: applyActivityType,
+                    onAdd: {
+                        DispatchQueue.main.async {
+                            showingActivityTypeEditor = true
+                        }
+                    }
+                )
+            }
 
             if let geographicSubtitle {
                 Text(geographicSubtitle)
@@ -662,6 +682,24 @@ extension FootprintModalView {
         return suggestions.compactMap { lite in
             allActivities.first { $0.id == lite.id }
         }
+    }
+
+    private func prepareActivityPicker() {
+        activityPickerItems = allActivities.map {
+            StableActivityPickerItem(id: $0.id, name: $0.name, icon: $0.icon)
+        }
+        suggestedActivityPickerItems = getSuggestedActivities(includeFallback: false).map {
+            StableActivityPickerItem(id: $0.id, name: $0.name, icon: $0.icon)
+        }
+    }
+
+    private func applyActivityType(_ id: UUID?) {
+        guard let id else {
+            clearActivityType()
+            return
+        }
+        guard let type = allActivities.first(where: { $0.id == id }) else { return }
+        applyActivityType(type)
     }
 
     private func setActivitySelection(_ value: String?) {
@@ -921,7 +959,7 @@ extension FootprintModalView {
             } else {
                 let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
                 LazyVGrid(columns: columns, spacing: 8) {
-                    ForEach(footprint.photoAssetIDs, id: \.self) { assetID in
+                    ForEach(displayedPhotoAssetIDs, id: \.self) { assetID in
                         AssetThumbnailView(assetID: assetID, showsTime: true)
                             .aspectRatio(1, contentMode: .fit)
                             .clipShape(RoundedRectangle(cornerRadius: 10))

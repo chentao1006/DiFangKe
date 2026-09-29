@@ -6,8 +6,8 @@ struct DiFangKeWidgetBundle: WidgetBundle {
     var body: some Widget {
         DFKFootprintWidget()
 #if canImport(ActivityKit)
-        if #available(iOS 18.0, *) {
-            TripLiveActivityWidget()
+        if #available(iOS 16.1, *) {
+            CurrentTrackingLiveActivityWidget()
         }
 #endif
     }

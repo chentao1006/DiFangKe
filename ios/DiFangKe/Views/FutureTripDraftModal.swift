@@ -270,15 +270,9 @@ struct FutureTripDraftModal: View {
 
     private var notesSection: some View {
         Section("备注") {
-            ZStack(alignment: .topLeading) {
-                if notesState.text.isEmpty {
-                    Text("添加备注...")
-                        .foregroundStyle(.tertiary)
-                        .allowsHitTesting(false)
-                }
-                IMESafeTextView(textState: notesState)
-                    .frame(minHeight: 44, maxHeight: 132)
-            }
+            TextField("添加备注...", text: $notesState.text, axis: .vertical)
+                .lineLimit(1...6)
+                .dfkMultilineInputStyle()
         }
     }
 

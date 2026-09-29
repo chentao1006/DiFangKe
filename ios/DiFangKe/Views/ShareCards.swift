@@ -12,7 +12,10 @@ private struct DFKAutoSelectingTextView: UIViewRepresentable {
         let textView = UITextView()
         textView.font = .preferredFont(forTextStyle: .body)
         textView.delegate = context.coordinator
-        textView.backgroundColor = .clear
+        textView.backgroundColor = .secondarySystemBackground
+        textView.layer.cornerRadius = 12
+        textView.layer.cornerCurve = .continuous
+        textView.clipsToBounds = true
         textView.textContainerInset = UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0)
         textView.textContainer.lineFragmentPadding = 0
         textView.isScrollEnabled = true
@@ -121,6 +124,7 @@ struct DFKShareCardPayload: Identifiable {
     var title: String
     var subtitle: String
     var rangeText: String
+    var locationText: String? = nil
     var heroImage: UIImage?
     var heroImages: [UIImage] = []
     var backgroundMapImage: UIImage?
@@ -360,8 +364,6 @@ struct DFKShareCardPreviewView: View {
                         )
                             .padding(.horizontal, 12)
                             .frame(height: 92)
-                            .background(Color(uiColor: .secondarySystemBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                         HStack {
                             Spacer()
@@ -1036,9 +1038,10 @@ struct DFKShareCardView: View {
     static func pixelSize(for payload: DFKShareCardPayload) -> CGSize {
         let width: CGFloat = 1080
         let hasPhoto = payload.heroImages.first != nil || payload.heroImage != nil
+        let locationExtraHeight: CGFloat = payload.locationText == nil ? 0 : 64
         if case .stats = payload.kind {
             let rows = max(2, payload.placeRankings.count + payload.activityRankings.count)
-            return CGSize(width: width, height: max(2_060, 1_160 + CGFloat(rows) * 130))
+            return CGSize(width: width, height: max(2_060, 1_160 + CGFloat(rows) * 130) + locationExtraHeight)
         }
         if case .plan = payload.kind {
             let includedPlans = payload.plans.filter(\.isIncluded)
@@ -1056,7 +1059,7 @@ struct DFKShareCardView: View {
             )
         }
         guard case .timeline = payload.kind else {
-            return CGSize(width: width, height: hasPhoto ? 1970 : 1440)
+            return CGSize(width: width, height: (hasPhoto ? 1970 : 1440) + locationExtraHeight)
         }
 
         // One consistent card width; estimate from the text that is actually
@@ -1074,7 +1077,7 @@ struct DFKShareCardView: View {
         let photoSectionHeight: CGFloat = hasPhoto ? 370 : 0
         let titleLineCount = max(1, Int(ceil(CGFloat(payload.title.count) / 10)))
         let titleExtraHeight = CGFloat(titleLineCount - 1) * 180
-        let height = max(CGFloat(1080), 900 + photoSectionHeight + titleExtraHeight + entryHeight + CGFloat(dayDividerCount) * 76)
+        let height = max(CGFloat(1080), 900 + photoSectionHeight + titleExtraHeight + entryHeight + CGFloat(dayDividerCount) * 76) + locationExtraHeight
         return CGSize(width: width, height: height)
     }
 
@@ -1228,6 +1231,15 @@ struct DFKShareCardView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let locationText = payload.locationText {
+                Text(locationText)
+                    .font(.system(size: fs(34), weight: .medium))
+                    .foregroundStyle(theme.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.62)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             editableText(payload.title, update: { newText in
                 var updated = payload
@@ -1944,6 +1956,7 @@ enum DFKShareCardFactory {
             title: place,
             subtitle: "这一刻，被认真留了下来",
             rangeText: dateText(footprint.startTime),
+            locationText: locationText(for: [footprint]),
             heroImage: images.first,
             heroImages: images,
             backgroundMapImage: mapImage,
@@ -1978,6 +1991,7 @@ enum DFKShareCardFactory {
             title: title,
             subtitle: "我这一段时间去了哪里",
             rangeText: rangeText,
+            locationText: locationText(for: sortedFootprints),
             heroImage: images.first,
             heroImages: images,
             backgroundMapImage: mapImage,
@@ -2043,6 +2057,7 @@ enum DFKShareCardFactory {
             title: "我的生活总结",
             subtitle: "每一次停留，都成为了生活的一部分",
             rangeText: rangeText,
+            locationText: locationText(for: footprints),
             backgroundMapImage: nil,
             coordinates: footprints.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) },
             stats: [
@@ -2054,6 +2069,43 @@ enum DFKShareCardFactory {
             activityRankings: activityRankingEntries(footprints: footprints, activities: activities),
             summary: nil
         )
+    }
+
+    private static func locationText(for footprints: [Footprint]) -> String? {
+        struct CountryCities {
+            let country: String
+            var cities: [String]
+        }
+
+        var locations: [CountryCities] = []
+        for footprint in footprints.sorted(by: { $0.startTime < $1.startTime }) {
+            let countryCode = footprint.countryCode?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .uppercased()
+            let storedCountry = footprint.countryName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let localizedCountry = countryCode.flatMap {
+                Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
+            }
+            guard let country = [storedCountry, localizedCountry]
+                .compactMap({ $0 })
+                .first(where: { !$0.isEmpty }),
+                  let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !city.isEmpty else { continue }
+
+            if let index = locations.firstIndex(where: { $0.country == country }) {
+                if !locations[index].cities.contains(city) {
+                    locations[index].cities.append(city)
+                }
+            } else {
+                locations.append(CountryCities(country: country, cities: [city]))
+            }
+        }
+
+        guard !locations.isEmpty else { return nil }
+        return locations
+            .map { "\($0.country)·\($0.cities.joined(separator: "、"))" }
+            .joined(separator: " / ")
     }
 
     private static func placeRankingEntries(footprints: [Footprint], places: [Place]) -> [DFKShareRankingEntry] {

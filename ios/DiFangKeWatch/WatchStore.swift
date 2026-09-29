@@ -125,6 +125,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     static let backgroundRefreshInterval: TimeInterval = 15 * 60
     @Published private(set) var snapshot = WatchSnapshot.placeholder
     @Published private(set) var requestedActivityPickerFootprintID: String?
+    @Published private(set) var isConfirmingArrival = false
 
     override init() {
         super.init()
@@ -170,6 +171,50 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
             session.transferUserInfo(payload)
         }
         snapshot = WatchSnapshot(currentFootprintID: snapshot.currentFootprintID, placeName: snapshot.placeName, address: snapshot.address, startedAt: snapshot.startedAt, isTracking: snapshot.isTracking, currentActivityID: activity?.id, currentTransportType: snapshot.currentTransportType, currentTransportStartedAt: snapshot.currentTransportStartedAt, todayFootprintCount: snapshot.todayFootprintCount, todayDistance: snapshot.todayDistance, nextTrip: snapshot.nextTrip, activities: snapshot.activities, todayTimeline: snapshot.todayTimeline, recentDays: snapshot.recentDays, statistics: snapshot.statistics, futureTrips: snapshot.futureTrips)
+    }
+
+    func confirmArrival() {
+        guard snapshot.currentTransportType != nil, !isConfirmingArrival else { return }
+        isConfirmingArrival = true
+
+        // Reflect the user's explicit state change immediately. The phone remains
+        // the sole writer and will replace this optimistic state after rebuilding
+        // the current transport from its persisted raw locations.
+        snapshot = WatchSnapshot(
+            currentFootprintID: nil,
+            placeName: "正在停留",
+            address: nil,
+            startedAt: Date(),
+            isTracking: snapshot.isTracking,
+            currentActivityID: nil,
+            currentTransportType: nil,
+            currentTransportStartedAt: nil,
+            todayFootprintCount: snapshot.todayFootprintCount,
+            todayDistance: snapshot.todayDistance,
+            nextTrip: snapshot.nextTrip,
+            activities: snapshot.activities,
+            todayTimeline: snapshot.todayTimeline,
+            recentDays: snapshot.recentDays,
+            statistics: snapshot.statistics,
+            futureTrips: snapshot.futureTrips
+        )
+
+        let session = WCSession.default
+        let payload: [String: Any] = ["confirmArrival": true]
+        if session.isReachable {
+            session.sendMessage(payload) { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.isConfirmingArrival = false
+                    self?.requestLatestSnapshot()
+                }
+            } errorHandler: { [weak self] _ in
+                session.transferUserInfo(payload)
+                DispatchQueue.main.async { self?.isConfirmingArrival = false }
+            }
+        } else {
+            session.transferUserInfo(payload)
+            isConfirmingArrival = false
+        }
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
