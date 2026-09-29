@@ -27,6 +27,29 @@ final class WidgetDataSyncManager {
         let latestPhotoAssetID: String?
     }
 
+    private struct CurrentActivityMapOverlays {
+        let footprints: [CurrentActivityFootprintOverlay]
+        let transports: [CurrentActivityTransportOverlay]
+        let activitiesByID: [String: CurrentActivityMarkerStyle]
+        let activitiesByName: [String: CurrentActivityMarkerStyle]
+    }
+
+    private struct CurrentActivityFootprintOverlay {
+        let coordinate: CLLocationCoordinate2D
+        let activityKey: String?
+    }
+
+    private struct CurrentActivityTransportOverlay {
+        let coordinates: [CLLocationCoordinate2D]
+        let segments: [WidgetTransportLineSegment]
+        let typeRaw: String
+    }
+
+    private struct CurrentActivityMarkerStyle {
+        let colorHex: String
+        let icon: String
+    }
+
     private final class WidgetImageContinuation {
         private let lock = NSLock()
         private var didResume = false
@@ -89,13 +112,15 @@ final class WidgetDataSyncManager {
         revision: Int,
         kind: CurrentTrackingActivityKind,
         coordinate: CLLocationCoordinate2D,
-        routeCoordinates: [CLLocationCoordinate2D],
-        colorHex: String?
+        routeCoordinates: [CLLocationCoordinate2D]
     ) async -> Bool {
         guard CLLocationCoordinate2DIsValid(coordinate),
               let containerURL = FileManager.default.containerURL(
                 forSecurityApplicationGroupIdentifier: groupID
               ) else { return false }
+
+        ensureContainer()
+        let todayOverlays = loadCurrentActivityTodayOverlays()
 
         return await withExclusiveMapSnapshotWork {
             var writtenStyleCount = 0
@@ -104,8 +129,8 @@ final class WidgetDataSyncManager {
                     kind: kind,
                     coordinate: coordinate,
                     routeCoordinates: routeCoordinates,
-                    colorHex: colorHex,
-                    style: style
+                    style: style,
+                    todayOverlays: todayOverlays
                 ), let data = image.pngData() else { continue }
 
                 let suffix = style == .dark ? "dark" : "light"
@@ -140,6 +165,71 @@ final class WidgetDataSyncManager {
             }
             return true
         }
+    }
+
+    private func loadCurrentActivityTodayOverlays() -> CurrentActivityMapOverlays {
+        guard let context = container?.mainContext else {
+            return CurrentActivityMapOverlays(
+                footprints: [],
+                transports: [],
+                activitiesByID: [:],
+                activitiesByName: [:]
+            )
+        }
+
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: Date())
+        let endOfToday = calendar.date(byAdding: .day, value: 1, to: startOfToday)
+            ?? startOfToday.addingTimeInterval(86_400)
+        let footprintDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.startTime < endOfToday && $0.endTime >= startOfToday && $0.statusValue != "ignored"
+        })
+        let transportDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime < endOfToday && $0.endTime >= startOfToday && $0.statusRaw != "ignored"
+        })
+
+        let footprints = (try? context.fetch(footprintDescriptor)) ?? []
+        let transports = (try? context.fetch(transportDescriptor)) ?? []
+        let activities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+        let footprintOverlays = aggregatedFootprints(from: footprints).map {
+            CurrentActivityFootprintOverlay(
+                coordinate: $0.coordinate,
+                activityKey: $0.representative.activityTypeValue
+            )
+        }
+        let transportOverlays = transports.compactMap { transport -> CurrentActivityTransportOverlay? in
+            guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
+                  !decoded.isEmpty else { return nil }
+            let coordinates = decoded
+                .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                .filter { $0.latitude.isFinite && $0.longitude.isFinite && CLLocationCoordinate2DIsValid($0) }
+            guard !coordinates.isEmpty else { return nil }
+            let typeRaw = transport.manualTypeRaw ?? transport.typeRaw
+            return CurrentActivityTransportOverlay(
+                coordinates: coordinates,
+                segments: widgetTransportLineSegments(from: decoded),
+                typeRaw: typeRaw
+            )
+        }
+        let stylesByID = Dictionary(
+            activities.map {
+                ($0.id.uuidString, CurrentActivityMarkerStyle(colorHex: $0.colorHex, icon: $0.icon))
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let stylesByName = Dictionary(
+            activities.map {
+                ($0.name, CurrentActivityMarkerStyle(colorHex: $0.colorHex, icon: $0.icon))
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        return CurrentActivityMapOverlays(
+            footprints: footprintOverlays,
+            transports: transportOverlays,
+            activitiesByID: stylesByID,
+            activitiesByName: stylesByName
+        )
     }
 
     /// Copies a few small Photos-library images into the App Group because the
@@ -190,8 +280,8 @@ final class WidgetDataSyncManager {
         kind: CurrentTrackingActivityKind,
         coordinate: CLLocationCoordinate2D,
         routeCoordinates: [CLLocationCoordinate2D],
-        colorHex: String?,
-        style: UIUserInterfaceStyle
+        style: UIUserInterfaceStyle,
+        todayOverlays: CurrentActivityMapOverlays
     ) async -> UIImage? {
         let validRoute = routeCoordinates.filter(CLLocationCoordinate2DIsValid)
         let coordinates = validRoute.isEmpty ? [coordinate] : validRoute + [coordinate]
@@ -238,7 +328,15 @@ final class WidgetDataSyncManager {
         return renderer.image { context in
             snapshot.image.draw(at: .zero)
             let cg = context.cgContext
-            let accent = UIColor(hex: colorHex ?? "#00B6C1") ?? .systemTeal
+            let routeColor = UIColor(named: "AccentColor") ?? .systemTeal
+
+            drawCurrentActivityTodayOverlays(
+                todayOverlays,
+                on: snapshot,
+                in: cg,
+                style: style,
+                routeColor: routeColor
+            )
 
             if kind == .transport, validRoute.count >= 2 {
                 let points = validRoute.map(snapshot.point(for:))
@@ -248,7 +346,7 @@ final class WidgetDataSyncManager {
                 cg.setLineCap(.round)
                 cg.setLineJoin(.round)
                 cg.setLineWidth(6)
-                cg.setStrokeColor(accent.withAlphaComponent(0.9).cgColor)
+                cg.setStrokeColor(routeColor.withAlphaComponent(0.9).cgColor)
                 cg.strokePath()
             }
 
@@ -266,6 +364,137 @@ final class WidgetDataSyncManager {
             cg.setFillColor(UIColor.systemBlue.cgColor)
             cg.fillEllipse(in: innerRect)
 
+        }
+    }
+
+    private func drawCurrentActivityTodayOverlays(
+        _ overlays: CurrentActivityMapOverlays,
+        on snapshot: MKMapSnapshotter.Snapshot,
+        in cg: CGContext,
+        style: UIUserInterfaceStyle,
+        routeColor: UIColor
+    ) {
+        cg.setLineCap(.round)
+        cg.setLineJoin(.round)
+        let markerOutlineColor = Self.mapMarkerOutlineColor(for: style)
+
+        for transport in overlays.transports {
+            for segment in transport.segments {
+                let points = segment.coordinates.map(snapshot.point(for:))
+                guard points.count >= 2 else { continue }
+
+                cg.beginPath()
+                cg.move(to: points[0])
+                points.dropFirst().forEach { cg.addLine(to: $0) }
+                cg.setStrokeColor(routeColor.withAlphaComponent(segment.isDashed ? 0.42 : 0.68).cgColor)
+                cg.setLineWidth(segment.isDashed ? 1.5 : 3)
+                cg.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
+                cg.strokePath()
+            }
+            cg.setLineDash(phase: 0, lengths: [])
+
+            if transport.coordinates.count >= 2,
+               let midpoint = transport.coordinates.widgetMidpoint {
+                let point = snapshot.point(for: midpoint)
+                let markerRect = CGRect(x: point.x - 7, y: point.y - 7, width: 14, height: 14)
+                let markerPath = UIBezierPath(ovalIn: markerRect)
+                markerOutlineColor.setFill()
+                markerPath.fill()
+                routeColor.setStroke()
+                markerPath.lineWidth = 1.2
+                markerPath.stroke()
+
+                let type = TransportType(rawValue: transport.typeRaw) ?? .slow
+                if let icon = UIImage(systemName: type.sfSymbol) {
+                    icon.withTintColor(routeColor, renderingMode: .alwaysTemplate).drawAspectFit(
+                        in: CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
+                    )
+                }
+            }
+        }
+
+        for footprint in overlays.footprints.sorted(by: { $0.coordinate.latitude > $1.coordinate.latitude }) {
+            let point = snapshot.point(for: footprint.coordinate)
+            let radius: CGFloat = 8
+            let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
+            let activity = footprint.activityKey.flatMap {
+                overlays.activitiesByID[$0] ?? overlays.activitiesByName[$0]
+            }
+            let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
+            let tipRadius: CGFloat = 1.4
+            let bottomY = point.y - tipRadius
+
+            let pinPath = CGMutablePath()
+            pinPath.addArc(
+                center: center,
+                radius: radius,
+                startAngle: 140 * .pi / 180,
+                endAngle: 40 * .pi / 180,
+                clockwise: false
+            )
+            pinPath.addLine(to: CGPoint(x: center.x + tipRadius, y: bottomY))
+            pinPath.addArc(
+                center: CGPoint(x: center.x, y: bottomY),
+                radius: tipRadius,
+                startAngle: 0,
+                endAngle: .pi,
+                clockwise: false
+            )
+            pinPath.closeSubpath()
+
+            cg.saveGState()
+            cg.setShadow(
+                offset: CGSize(width: 0, height: 1.5),
+                blur: 1.5,
+                color: UIColor.black.withAlphaComponent(0.15).cgColor
+            )
+            cg.setFillColor(markerOutlineColor.cgColor)
+            cg.addPath(pinPath)
+            cg.fillPath()
+            cg.restoreGState()
+
+            let innerRadius = radius - tipRadius
+            let innerPath = UIBezierPath(
+                arcCenter: center,
+                radius: innerRadius,
+                startAngle: 0,
+                endAngle: 2 * .pi,
+                clockwise: true
+            )
+            cg.saveGState()
+            innerPath.addClip()
+            let colors = style == .dark
+                ? [activityColor.cgColor, activityColor.withAlphaComponent(0.7).cgColor] as CFArray
+                : [activityColor.withAlphaComponent(0.7).cgColor, activityColor.cgColor] as CFArray
+            if let gradient = CGGradient(
+                colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                colors: colors,
+                locations: [0, 1]
+            ) {
+                cg.drawLinearGradient(
+                    gradient,
+                    start: CGPoint(x: center.x, y: center.y - innerRadius),
+                    end: CGPoint(x: center.x, y: center.y + innerRadius),
+                    options: []
+                )
+            } else {
+                activityColor.setFill()
+                innerPath.fill()
+            }
+            cg.restoreGState()
+
+            let iconName = activity?.icon ?? FootprintIconDefaults.map
+            if let icon = UIImage(systemName: iconName) {
+                let iconSize: CGFloat = 10
+                icon.withTintColor(.white, renderingMode: .alwaysTemplate).drawAspectFit(
+                    in: CGRect(
+                        x: center.x - iconSize / 2,
+                        y: center.y - iconSize / 2,
+                        width: iconSize,
+                        height: iconSize
+                    )
+                )
+            }
         }
     }
 

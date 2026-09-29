@@ -896,10 +896,10 @@ private struct CurrentTrackingIslandBottomContent: View {
         .clipped()
         .clipShape(
             UnevenRoundedRectangle(
-                topLeadingRadius: 14,
+                topLeadingRadius: 22,
                 bottomLeadingRadius: 22,
                 bottomTrailingRadius: 22,
-                topTrailingRadius: 14,
+                topTrailingRadius: 22,
                 style: .continuous
             )
         )

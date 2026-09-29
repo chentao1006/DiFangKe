@@ -5348,8 +5348,7 @@ final class CurrentLiveActivityManager {
                 revision: mapRevision,
                 kind: state.kind,
                 coordinate: location.coordinate,
-                routeCoordinates: resolved.route,
-                colorHex: state.colorHex
+                routeCoordinates: resolved.route
             )
             if didWriteMap {
                 lastMapLocation = location
