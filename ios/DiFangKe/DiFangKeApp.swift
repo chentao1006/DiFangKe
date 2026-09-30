@@ -123,6 +123,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                     LocationManager.shared.startTracking()
                 }
                 LocationManager.shared.sampleStationaryLocationIfNeeded()
+                LocationManager.shared.checkLiveActivity(forceContentUpdate: true)
                 
                 // 已在追踪中的标准定位会话不需要每次 BG refresh 再次启动。
                 // 重复 startUpdatingLocation 会把静止状态拉回活跃定位，造成
@@ -318,6 +319,10 @@ struct DiFangKeApp: App {
                                 UIApplication.shared.endBackgroundTask(bgTask)
                                 bgTask = .invalid
                             }
+
+                            // Submit the current ActivityKit state immediately
+                            // while this background execution window is open.
+                            locationManager.checkLiveActivity(forceContentUpdate: true)
                             
                             await WidgetDataSyncManager.shared.syncTodayOnly()
                             // BGAppRefreshTask already forces a full history resync periodically; don't duplicate it here.

@@ -1162,7 +1162,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
     
-    func checkLiveActivity() {
+    func checkLiveActivity(forceContentUpdate: Bool = false) {
         guard let context = modelContext else { return }
         guard let location = lastLocation ?? potentialStopStartLocation else {
             print("[CurrentLiveActivity] waiting for restored or fresh location")
@@ -1170,7 +1170,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
 #if canImport(ActivityKit)
         if #available(iOS 16.1, *) {
-            CurrentLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: context)
+            CurrentLiveActivityManager.shared.updateLiveActivity(
+                location: location,
+                modelContext: context,
+                forceContentUpdate: forceContentUpdate
+            )
         }
 #endif
     }
@@ -1219,6 +1223,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     private var refreshTimer: AnyCancellable?
     private var locationWatchdogTimer: AnyCancellable?
+    private var liveActivityRefreshTimer: AnyCancellable?
+    private var lastScheduledLiveActivityRefresh = Date.distantPast
     private var lastStationaryProbeTime: Date = .distantPast
     private var lastStartTrackingAt: Date = .distantPast
     private var isRequestingAlwaysAuthorization = false
@@ -1308,6 +1314,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             if !uiIsMoving {
                 uiIsMoving = true
                 print("[LocationManager] UI moving=true (\(source))")
+                // The Live Activity reflects the immediate motion state. Do
+                // not wait for the persisted stay boundary to be closed after
+                // enough GPS displacement has accumulated.
+                checkLiveActivity(forceContentUpdate: true)
             }
             return
         }
@@ -1317,6 +1327,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         if uiIsMoving, now.timeIntervalSince(lastMovingEvidenceTime) > holdSeconds {
             uiIsMoving = false
             print("[LocationManager] UI moving=false (\(source))")
+            checkLiveActivity(forceContentUpdate: true)
             Task {
                 await triggerTimelineSift()
             }
@@ -1597,6 +1608,19 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             .autoconnect()
             .sink { [weak self] _ in
                 self?.runLocationWatchdog()
+            }
+
+        // Location callbacks refresh immediately while moving. This is the
+        // independent safety net: once per minute while moving and at least
+        // once per 5 minutes while staying, whenever the process is runnable.
+        liveActivityRefreshTimer = Timer.publish(every: 60, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] now in
+                guard let self, self.isTracking else { return }
+                let interval: TimeInterval = self.uiIsMoving ? 60 : 5 * 60
+                guard now.timeIntervalSince(self.lastScheduledLiveActivityRefresh) >= interval else { return }
+                self.lastScheduledLiveActivityRefresh = now
+                self.checkLiveActivity(forceContentUpdate: true)
             }
         
         // Initial check on launch
@@ -5256,6 +5280,12 @@ import SwiftData
 @MainActor
 final class CurrentLiveActivityManager {
     static let shared = CurrentLiveActivityManager()
+    private static let layoutSessionPrefix = "current-layout-v3-"
+
+    private struct TodaySummary {
+        var placeKeys: Set<String>
+        let distance: Double
+    }
 
     private var currentActivity: Activity<CurrentTrackingActivityAttributes>?
     private var lastState: CurrentTrackingActivityAttributes.ContentState?
@@ -5264,10 +5294,11 @@ final class CurrentLiveActivityManager {
     private var mapRevision = 0
     private var lastPhotoSignature: String?
     private var photoRevision = 0
-    private var unresolvedEndTask: Task<Void, Never>?
     private var isReconciling = false
-    private var pendingUpdate: (location: CLLocation, modelContext: ModelContext?)?
+    private var pendingUpdate: (location: CLLocation, modelContext: ModelContext?, forceContentUpdate: Bool)?
     private var lifecycleRevision = 0
+    private var provisionalTransportStartedAt: Date?
+    private var provisionalTransportStartLocation: String?
 
     private init() {}
 
@@ -5277,9 +5308,17 @@ final class CurrentLiveActivityManager {
             || defaults.bool(forKey: "isCurrentLiveActivityEnabled")
     }
 
-    func updateLiveActivity(location: CLLocation, modelContext: ModelContext?) {
+    func updateLiveActivity(
+        location: CLLocation,
+        modelContext: ModelContext?,
+        forceContentUpdate: Bool = false
+    ) {
         Task { @MainActor in
-            await enqueueUpdate(location: location, modelContext: modelContext)
+            await enqueueUpdate(
+                location: location,
+                modelContext: modelContext,
+                forceContentUpdate: forceContentUpdate
+            )
         }
     }
 
@@ -5291,8 +5330,20 @@ final class CurrentLiveActivityManager {
         }
     }
 
-    private func enqueueUpdate(location: CLLocation, modelContext: ModelContext?) async {
-        pendingUpdate = (location, modelContext)
+    private func enqueueUpdate(
+        location: CLLocation,
+        modelContext: ModelContext?,
+        forceContentUpdate: Bool
+    ) async {
+        if let pendingUpdate {
+            self.pendingUpdate = (
+                location,
+                modelContext,
+                pendingUpdate.forceContentUpdate || forceContentUpdate
+            )
+        } else {
+            pendingUpdate = (location, modelContext, forceContentUpdate)
+        }
         guard !isReconciling else { return }
 
         isReconciling = true
@@ -5303,6 +5354,7 @@ final class CurrentLiveActivityManager {
             await reconcile(
                 location: update.location,
                 modelContext: update.modelContext,
+                forceContentUpdate: update.forceContentUpdate,
                 lifecycleRevision: revision
             )
         }
@@ -5311,6 +5363,7 @@ final class CurrentLiveActivityManager {
     private func reconcile(
         location: CLLocation,
         modelContext: ModelContext?,
+        forceContentUpdate: Bool,
         lifecycleRevision expectedLifecycleRevision: Int
     ) async {
         guard isEnabled,
@@ -5321,23 +5374,79 @@ final class CurrentLiveActivityManager {
             return
         }
         guard let resolved = resolveState(location: location, context: context) else {
-            scheduleEndAfterRecognitionGrace(location: location, modelContext: context)
+            // Recognition briefly has no persisted model while a departure is
+            // being rebuilt. Keep the current activity alive; an explicit stop,
+            // disabled setting, or the next resolved state owns termination.
+            print("[CurrentLiveActivity] waiting for recognized current state")
             return
         }
-        unresolvedEndTask?.cancel()
-        unresolvedEndTask = nil
 
         let activeActivities = Activity<CurrentTrackingActivityAttributes>.activities
-        let existingActivity = currentActivity ?? activeActivities.first
+        // ActivityKit is the source of truth. A retained Activity instance can
+        // already be ended/dismissed by the system; reusing it makes updates
+        // silently target an object that is no longer visible.
+        var existingActivity = activeActivities.first
+        currentActivity = existingActivity
+        if let activity = existingActivity,
+           !activity.attributes.sessionID.hasPrefix(Self.layoutSessionPrefix) {
+            await activity.end(nil, dismissalPolicy: .immediate)
+            currentActivity = nil
+            existingActivity = nil
+            lastState = nil
+            lastMapLocation = nil
+            lastMapUpdate = .distantPast
+            lastPhotoSignature = nil
+            mapRevision = 0
+            photoRevision = 0
+        }
         for duplicate in activeActivities where duplicate.id != existingActivity?.id {
             await duplicate.end(nil, dismissalPolicy: .immediate)
         }
-        let sessionID = existingActivity?.attributes.sessionID ?? UUID().uuidString
+        let sessionID = existingActivity?.attributes.sessionID
+            ?? Self.layoutSessionPrefix + UUID().uuidString
+        let hadExistingActivity = existingActivity != nil
+        // After a background relaunch this manager has no in-memory cache, but
+        // ActivityKit still owns the last published content. Preserve its asset
+        // revisions instead of briefly replacing the visible map with revision 0.
+        let previousState = lastState ?? existingActivity?.content.state
         var state = resolved.state
 
+        // Publish the new coordinates/text/metrics before doing any MapKit or
+        // Photos work. Snapshot generation can outlive the short background
+        // execution window; previously that meant the ActivityKit update was
+        // never reached even though a fresh location had already arrived.
+        state.mapRevision = previousState?.mapRevision ?? mapRevision
+        state.photoRevision = previousState?.photoRevision ?? photoRevision
+        state.photoCount = previousState?.photoCount ?? resolved.photoAssetIDs.count
+        state.photoThumbnailCount = previousState?.photoThumbnailCount ?? 0
+        guard expectedLifecycleRevision == lifecycleRevision,
+              isEnabled,
+              LocationManager.shared.isTracking else { return }
+        let immediateContent = ActivityContent(state: state, staleDate: nil)
+        if let activity = existingActivity {
+            currentActivity = activity
+            if forceContentUpdate || state != previousState {
+                await activity.update(immediateContent)
+            }
+        } else {
+            do {
+                let activity = try Activity.request(
+                    attributes: CurrentTrackingActivityAttributes(sessionID: sessionID),
+                    content: immediateContent,
+                    pushType: nil
+                )
+                currentActivity = activity
+                existingActivity = activity
+            } catch {
+                print("[CurrentLiveActivity] request failed: \(error)")
+                return
+            }
+        }
+        lastState = state
+
         let movedEnough = lastMapLocation.map { location.distance(from: $0) >= 100 } ?? true
-        let needsMap = existingActivity == nil
-            || lastState?.recordID != state.recordID
+        let needsMap = !hadExistingActivity
+            || previousState?.recordID != state.recordID
             || Date().timeIntervalSince(lastMapUpdate) >= 60
             || movedEnough
         if needsMap {
@@ -5356,10 +5465,10 @@ final class CurrentLiveActivityManager {
             } else {
                 // Keep the previous revision when available. With no previous map,
                 // the next location update retries immediately instead of waiting 60 seconds.
-                state.mapRevision = lastState?.mapRevision ?? 0
+                state.mapRevision = previousState?.mapRevision ?? 0
             }
         } else {
-            state.mapRevision = lastState?.mapRevision ?? mapRevision
+            state.mapRevision = previousState?.mapRevision ?? mapRevision
         }
 
         let photoSignature = ([state.kind.rawValue, state.recordID] + resolved.photoAssetIDs)
@@ -5375,33 +5484,17 @@ final class CurrentLiveActivityManager {
             )
             lastPhotoSignature = photoSignature
         } else {
-            state.photoRevision = lastState?.photoRevision ?? photoRevision
-            state.photoCount = lastState?.photoCount ?? resolved.photoAssetIDs.count
-            state.photoThumbnailCount = lastState?.photoThumbnailCount ?? 0
+            state.photoRevision = previousState?.photoRevision ?? photoRevision
+            state.photoCount = previousState?.photoCount ?? resolved.photoAssetIDs.count
+            state.photoThumbnailCount = previousState?.photoThumbnailCount ?? 0
         }
 
-        let content = ActivityContent(
-            state: state,
-            staleDate: Date().addingTimeInterval(15 * 60)
-        )
         guard expectedLifecycleRevision == lifecycleRevision,
               isEnabled,
               LocationManager.shared.isTracking else { return }
-        if let activity = existingActivity {
+        if let activity = existingActivity, state != lastState {
             currentActivity = activity
-            if state != lastState {
-                await activity.update(content)
-            }
-        } else {
-            do {
-                currentActivity = try Activity.request(
-                    attributes: CurrentTrackingActivityAttributes(sessionID: sessionID),
-                    content: content,
-                    pushType: nil
-                )
-            } catch {
-                print("[CurrentLiveActivity] request failed: \(error)")
-            }
+            await activity.update(ActivityContent(state: state, staleDate: nil))
         }
         lastState = state
 
@@ -5421,8 +5514,11 @@ final class CurrentLiveActivityManager {
     )? {
         let manager = LocationManager.shared
         let now = Date()
+        var todaySummary = todaySummary(context: context, now: now)
 
-        if manager.potentialStopStartLocation == nil, manager.uiIsMoving {
+        // A confirmed motion state owns the visible Live Activity immediately.
+        // Persisted footprint/transport boundaries can settle independently.
+        if manager.uiIsMoving {
             let recentThreshold = now.addingTimeInterval(-5 * 60)
             var descriptor = FetchDescriptor<TransportRecord>(
                 predicate: #Predicate {
@@ -5431,7 +5527,19 @@ final class CurrentLiveActivityManager {
                 sortBy: [SortDescriptor(\.endTime, order: .reverse)]
             )
             descriptor.fetchLimit = 1
-            guard let transport = try? context.fetch(descriptor).first else { return nil }
+            let transport = try? context.fetch(descriptor).first
+            if transport == nil {
+                return provisionalTransportState(
+                    location: location,
+                    manager: manager,
+                    todaySummary: todaySummary
+                )
+            }
+            guard let transport else { return nil }
+            provisionalTransportStartedAt = transport.startTime
+            if provisionalTransportStartLocation == nil {
+                provisionalTransportStartLocation = transport.startLocation
+            }
             let type = TransportType(rawValue: transport.manualTypeRaw ?? transport.typeRaw) ?? .slow
             let route = ((try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData)) ?? [])
                 .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
@@ -5452,7 +5560,9 @@ final class CurrentLiveActivityManager {
                     latitude: location.coordinate.latitude,
                     longitude: location.coordinate.longitude,
                     mapRevision: mapRevision,
-                    prefersDarkMap: currentInterfacePrefersDarkMap
+                    prefersDarkMap: currentInterfacePrefersDarkMap,
+                    todayPlaceCount: todaySummary.placeKeys.count,
+                    todayDistance: todaySummary.distance
                 ),
                 route,
                 []
@@ -5460,6 +5570,8 @@ final class CurrentLiveActivityManager {
         }
 
         guard let stayAnchor = manager.potentialStopStartLocation else { return nil }
+        provisionalTransportStartedAt = nil
+        provisionalTransportStartLocation = nil
         let stayStart = stayAnchor.timestamp
         var descriptor = FetchDescriptor<Footprint>(
             predicate: #Predicate {
@@ -5488,6 +5600,15 @@ final class CurrentLiveActivityManager {
             ?? normalizedPlaceName(manager.currentAddress, fallback: "正在停留")
         let currentAddress = normalizedPlaceName(manager.currentAddress, fallback: "")
         let address = currentAddress.isEmpty || currentAddress == placeName ? nil : currentAddress
+        if footprint == nil {
+            todaySummary.placeKeys.insert(
+                placeSummaryKey(
+                    name: placeName,
+                    placeID: activePlaceID,
+                    coordinate: stayAnchor.coordinate
+                )
+            )
+        }
         return (
             CurrentTrackingActivityAttributes.ContentState(
                 kind: .footprint,
@@ -5505,11 +5626,134 @@ final class CurrentLiveActivityManager {
                 latitude: location.coordinate.latitude,
                 longitude: location.coordinate.longitude,
                 mapRevision: mapRevision,
-                prefersDarkMap: currentInterfacePrefersDarkMap
+                prefersDarkMap: currentInterfacePrefersDarkMap,
+                todayPlaceCount: todaySummary.placeKeys.count,
+                todayDistance: todaySummary.distance
             ),
             [],
             footprint?.photoAssetIDs ?? []
         )
+    }
+
+    private func provisionalTransportState(
+        location: CLLocation,
+        manager: LocationManager,
+        todaySummary: TodaySummary
+    ) -> (
+        state: CurrentTrackingActivityAttributes.ContentState,
+        route: [CLLocationCoordinate2D],
+        photoAssetIDs: [String]
+    ) {
+        let now = Date()
+        let freshLocationStart = abs(location.timestamp.timeIntervalSince(now)) < 60
+            ? location.timestamp
+            : now
+        let startedAt = provisionalTransportStartedAt ?? freshLocationStart
+        if provisionalTransportStartedAt == nil {
+            provisionalTransportStartedAt = startedAt
+            provisionalTransportStartLocation = lastState?.kind == .footprint
+                ? lastState?.placeName
+                : normalizedPlaceName(manager.currentAddress, fallback: "出发地")
+        }
+
+        var routePoints = manager.allTodayPoints.filter {
+            $0.timestamp >= startedAt && $0.timestamp <= now &&
+            CLLocationCoordinate2DIsValid($0.coordinate)
+        }
+        if routePoints.last.map({ location.timestamp > $0.timestamp }) ?? true {
+            routePoints.append(location)
+        }
+        if routePoints.isEmpty {
+            routePoints = [location]
+        }
+
+        let distance = TimelineBuilder.calculateDistance(routePoints)
+        let duration = max(1, location.timestamp.timeIntervalSince(startedAt))
+        let averageSpeed = distance / duration
+        let type: TransportType
+        switch HealthManager.shared.currentMotionType {
+        case .walking: type = .slow
+        case .running: type = .running
+        case .cycling: type = .bicycle
+        case .automotive:
+            type = location.speed >= 28 ? .train : .car
+        default:
+            if averageSpeed >= 28 {
+                type = .train
+            } else if averageSpeed >= 9 {
+                type = .car
+            } else if averageSpeed >= 2.2 {
+                type = .bicycle
+            } else {
+                type = .slow
+            }
+        }
+
+        return (
+            CurrentTrackingActivityAttributes.ContentState(
+                kind: .transport,
+                recordID: "provisional-\(Int(startedAt.timeIntervalSince1970))",
+                startedAt: startedAt,
+                title: type.localizedName,
+                icon: type.sfSymbol,
+                colorHex: nil,
+                placeName: normalizedPlaceName(manager.currentAddress, fallback: "移动中"),
+                address: nil,
+                startLocation: provisionalTransportStartLocation,
+                distance: distance > 0 ? distance : nil,
+                averageSpeed: averageSpeed > 0 ? averageSpeed : nil,
+                latitude: location.coordinate.latitude,
+                longitude: location.coordinate.longitude,
+                mapRevision: mapRevision,
+                prefersDarkMap: currentInterfacePrefersDarkMap,
+                todayPlaceCount: todaySummary.placeKeys.count,
+                todayDistance: todaySummary.distance + distance
+            ),
+            routePoints.map(\.coordinate),
+            []
+        )
+    }
+
+    private func todaySummary(context: ModelContext, now: Date) -> TodaySummary {
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: now)
+        let endOfToday = calendar.date(byAdding: .day, value: 1, to: startOfToday)
+            ?? startOfToday.addingTimeInterval(86_400)
+        let footprintDescriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.startTime < endOfToday && $0.endTime >= startOfToday && $0.statusValue != "ignored"
+        })
+        let transportDescriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime < endOfToday && $0.endTime > startOfToday && $0.statusRaw == "active"
+        })
+        let footprints = (try? context.fetch(footprintDescriptor)) ?? []
+        let transports = ((try? context.fetch(transportDescriptor)) ?? []).filter {
+            $0.manualTypeRaw != nil || PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan($0)
+        }
+        let placeKeys = Set(footprints.map {
+            placeSummaryKey(
+                name: $0.address,
+                placeID: $0.placeID,
+                coordinate: CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+            )
+        })
+        return TodaySummary(
+            placeKeys: placeKeys,
+            distance: transports.reduce(0) { $0 + max(0, $1.distance) }
+        )
+    }
+
+    private func placeSummaryKey(
+        name: String?,
+        placeID: UUID?,
+        coordinate: CLLocationCoordinate2D
+    ) -> String {
+        let normalizedName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !normalizedName.isEmpty,
+           !["正在解析位置...", "未知位置", "地点记录", "此处"].contains(normalizedName) {
+            return "name:\(normalizedName.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))"
+        }
+        if let placeID { return "place:\(placeID.uuidString)" }
+        return "coordinate:\(Int((coordinate.latitude * 1000).rounded())),\(Int((coordinate.longitude * 1000).rounded()))"
     }
 
     private func normalizedPlaceName(_ value: String?, fallback: String) -> String {
@@ -5534,30 +5778,15 @@ final class CurrentLiveActivityManager {
 #endif
     }
 
-    private func scheduleEndAfterRecognitionGrace(location: CLLocation, modelContext: ModelContext) {
-        guard currentActivity != nil || !Activity<CurrentTrackingActivityAttributes>.activities.isEmpty,
-              unresolvedEndTask == nil else { return }
-        unresolvedEndTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 30_000_000_000)
-            guard let self, !Task.isCancelled else { return }
-            self.unresolvedEndTask = nil
-            guard self.resolveState(location: location, context: modelContext) == nil else {
-                await self.enqueueUpdate(location: location, modelContext: modelContext)
-                return
-            }
-            await self.endAll()
-        }
-    }
-
     private func endAll() async {
-        unresolvedEndTask?.cancel()
-        unresolvedEndTask = nil
         let activities = Activity<CurrentTrackingActivityAttributes>.activities
         currentActivity = nil
         lastState = nil
         lastMapLocation = nil
         lastMapUpdate = .distantPast
         lastPhotoSignature = nil
+        provisionalTransportStartedAt = nil
+        provisionalTransportStartLocation = nil
         for activity in activities {
             await activity.end(nil, dismissalPolicy: .immediate)
         }

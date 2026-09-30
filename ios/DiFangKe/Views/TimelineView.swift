@@ -575,17 +575,10 @@ private struct ContinuousTimelineView: View {
 
         let kind = components.queryItems?.first(where: { $0.name == "kind" })?.value
         if url.path == "/detail",
-           kind == CurrentTrackingActivityKind.transport.rawValue,
+           kind == CurrentTrackingActivityKind.transport.rawValue
+            || kind == CurrentTrackingActivityKind.footprint.rawValue,
            let timelineURL = URL(string: "difangke://timeline?offset=0") {
             openTimelineDeepLink(timelineURL)
-            return
-        }
-
-        if url.path == "/detail",
-           kind == CurrentTrackingActivityKind.footprint.rawValue,
-           idString.hasPrefix("ongoing-") {
-            targetScrollDate = Date()
-            todayScrollRequest += 1
             return
         }
 
@@ -602,31 +595,6 @@ private struct ContinuousTimelineView: View {
             return
         }
 
-        guard url.path == "/detail" else { return }
-        if kind == CurrentTrackingActivityKind.footprint.rawValue {
-            let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
-            if let footprint = try? modelContext.fetch(descriptor).first {
-                selectedFootprint = footprint
-            }
-        } else if kind == CurrentTrackingActivityKind.transport.rawValue {
-            let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == id })
-            guard let record = try? modelContext.fetch(descriptor).first else { return }
-            let stored = (try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData)) ?? []
-            let points = stored.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-            selectedTransport = Transport(
-                id: record.recordID,
-                startTime: record.startTime,
-                endTime: record.endTime,
-                startLocation: record.startLocation,
-                endLocation: record.endLocation,
-                type: TransportType(rawValue: record.typeRaw) ?? .slow,
-                distance: record.distance,
-                averageSpeed: record.averageSpeed,
-                points: points,
-                manualType: record.manualTypeRaw.flatMap(TransportType.init(rawValue:)),
-                stepCount: record.stepCount
-            )
-        }
     }
 
     private func handleTimelineAppear() {
@@ -5777,9 +5745,7 @@ private struct CurrentStayTimelineCard: View {
                     Button("已到达") {
                         Task { await locationManager.confirmArrival() }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .tint(.dfkAccent)
+                    .arrivalButtonStyle()
                 }
             }
             .padding(.top, 20)
@@ -5885,6 +5851,15 @@ private struct CurrentTimelineBreathingMarker: View {
 }
 
 private extension View {
+    @ViewBuilder
+    func arrivalButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.bordered)
+        }
+    }
+
     @ViewBuilder
     func returnToTodayButtonStyle() -> some View {
         if #available(iOS 26.0, *) {

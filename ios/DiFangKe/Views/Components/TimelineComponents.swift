@@ -501,9 +501,7 @@ struct RecordingStatusCard: View {
                                         Button("已到达") {
                                             Task { await locationManager.confirmArrival() }
                                         }
-                                        .buttonStyle(.borderedProminent)
-                                        .controlSize(.small)
-                                        .tint(.dfkAccent)
+                                        .arrivalButtonStyle()
                                     } else if let durationStr = locationManager.stayDuration {
                                         Text("已停留 \(durationStr)")
                                             .font(.system(size: 14))
@@ -1464,6 +1462,18 @@ extension View {
         }
     }
 }
+
+private extension View {
+    @ViewBuilder
+    func arrivalButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.bordered)
+        }
+    }
+}
+
 // MARK: - Animations
 struct BreathingOpacityModifier: ViewModifier {
     let isActive: Bool

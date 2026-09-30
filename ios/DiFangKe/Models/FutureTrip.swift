@@ -230,6 +230,8 @@ public struct CurrentTrackingActivityAttributes: ActivityAttributes {
         public var photoRevision: Int
         public var photoCount: Int
         public var photoThumbnailCount: Int
+        public var todayPlaceCount: Int?
+        public var todayDistance: Double?
 
         public init(
             kind: CurrentTrackingActivityKind,
@@ -249,7 +251,9 @@ public struct CurrentTrackingActivityAttributes: ActivityAttributes {
             prefersDarkMap: Bool? = nil,
             photoRevision: Int = 0,
             photoCount: Int = 0,
-            photoThumbnailCount: Int = 0
+            photoThumbnailCount: Int = 0,
+            todayPlaceCount: Int? = nil,
+            todayDistance: Double? = nil
         ) {
             self.kind = kind
             self.recordID = recordID
@@ -269,6 +273,8 @@ public struct CurrentTrackingActivityAttributes: ActivityAttributes {
             self.photoRevision = photoRevision
             self.photoCount = photoCount
             self.photoThumbnailCount = photoThumbnailCount
+            self.todayPlaceCount = todayPlaceCount
+            self.todayDistance = todayDistance
         }
     }
 

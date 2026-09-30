@@ -743,7 +743,6 @@ private struct CurrentTrackingLockScreenContent: View {
                 if state.kind == .transport {
                     CurrentTransportProgress(
                         start: state.startLocation ?? "起点",
-                        current: state.placeName,
                         accent: accent,
                         onDarkMap: usesDarkMap,
                         compact: true
@@ -761,38 +760,36 @@ private struct CurrentTrackingLockScreenContent: View {
                             value: formatCurrentSpeed(state.averageSpeed),
                             onDarkMap: usesDarkMap
                         )
-                        Spacer(minLength: 12)
-                        Link(destination: currentActivityArrivalURL(for: state)) {
-                            Text("已到达")
-                                .font(.subheadline.bold())
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 7)
-                                .background(accent, in: Capsule())
-                                .foregroundStyle(.white)
-                        }
                     }
                 } else {
-                    HStack(alignment: .center, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(state.placeName)
-                                .font(.title3.bold())
-                                .lineLimit(1)
-                            if let address = state.address, !address.isEmpty {
-                                Text(address)
-                                    .font(.caption)
-                                    .foregroundStyle(secondaryForeground)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .center, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(state.placeName)
+                                    .font(.title3.bold())
                                     .lineLimit(1)
+                                if let address = state.address, !address.isEmpty {
+                                    Text(address)
+                                        .font(.caption)
+                                        .foregroundStyle(secondaryForeground)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Spacer(minLength: 8)
+                            if state.photoThumbnailCount > 0 {
+                                CurrentActivityPhotoStack(
+                                    sessionID: context.attributes.sessionID,
+                                    revision: state.photoRevision,
+                                    thumbnailCount: state.photoThumbnailCount,
+                                    totalCount: state.photoCount
+                                )
                             }
                         }
-                        Spacer(minLength: 8)
-                        if state.photoThumbnailCount > 0 {
-                            CurrentActivityPhotoStack(
-                                sessionID: context.attributes.sessionID,
-                                revision: state.photoRevision,
-                                thumbnailCount: state.photoThumbnailCount,
-                                totalCount: state.photoCount
-                            )
-                        }
+                        CurrentFootprintTodaySummary(
+                            placeCount: state.todayPlaceCount,
+                            distance: state.todayDistance,
+                            foreground: secondaryForeground
+                        )
                     }
                 }
             }
@@ -816,16 +813,63 @@ private struct CurrentTrackingIslandBottomContent: View {
     private var mapHeight: CGFloat { state.kind == .transport ? 108 : 94 }
 
     var body: some View {
-        Group {
-            if state.kind == .transport {
-                VStack(spacing: 8) {
+        VStack(spacing: 6) {
+            CurrentActivityMapImage(
+                sessionID: context.attributes.sessionID,
+                revision: state.mapRevision,
+                prefersDarkMap: true
+            )
+            .frame(maxWidth: .infinity, minHeight: mapHeight, maxHeight: mapHeight)
+            .clipped()
+            .overlay(
+                LinearGradient(
+                    colors: [.black.opacity(0.16), .clear, .black.opacity(0.28)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .overlay(alignment: .topLeading) {
+                if state.kind == .footprint {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(state.placeName)
+                            .font(.title3.bold())
+                            .lineLimit(1)
+                        if let address = state.address, !address.isEmpty {
+                            Text(address)
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.78))
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.leading, 8)
+                    .padding(.top, 6)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if state.kind == .footprint, state.photoThumbnailCount > 0 {
+                    CurrentActivityPhotoStack(
+                        sessionID: context.attributes.sessionID,
+                        revision: state.photoRevision,
+                        thumbnailCount: state.photoThumbnailCount,
+                        totalCount: state.photoCount
+                    )
+                    .padding(.trailing, 8)
+                    .padding(.top, 6)
+                }
+            }
+            .overlay(alignment: .top) {
+                if state.kind == .transport {
                     CurrentTransportProgress(
                         start: state.startLocation ?? "起点",
-                        current: state.placeName,
                         accent: accent,
                         onDarkMap: true
                     )
-
+                    .padding(.horizontal, 8)
+                    .padding(.top, 20)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if state.kind == .transport {
                     HStack(alignment: .firstTextBaseline) {
                         CurrentMetric(
                             title: "里程",
@@ -838,72 +882,47 @@ private struct CurrentTrackingIslandBottomContent: View {
                             value: formatCurrentSpeed(state.averageSpeed),
                             onDarkMap: true
                         )
-                        Spacer(minLength: 10)
-                        Link(destination: currentActivityArrivalURL(for: state)) {
-                            Text("已到达")
-                                .font(.subheadline.bold())
-                                .padding(.horizontal, 13)
-                                .padding(.vertical, 6)
-                                .background(accent, in: Capsule())
-                                .foregroundStyle(.white)
-                        }
                     }
-                }
-            } else {
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(state.placeName)
-                            .font(.title3.bold())
-                            .lineLimit(1)
-                        if let address = state.address, !address.isEmpty {
-                            Text(address)
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.78))
-                                .lineLimit(1)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    if state.photoThumbnailCount > 0 {
-                        CurrentActivityPhotoStack(
-                            sessionID: context.attributes.sessionID,
-                            revision: state.photoRevision,
-                            thumbnailCount: state.photoThumbnailCount,
-                            totalCount: state.photoCount
-                        )
-                    }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 6)
+                } else {
+                    CurrentFootprintTodaySummary(
+                        placeCount: state.todayPlaceCount,
+                        distance: state.todayDistance,
+                        foreground: .white.opacity(0.78)
+                    )
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 6)
                 }
             }
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 8)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
-        .frame(maxWidth: .infinity, minHeight: mapHeight, alignment: .top)
-        .background {
-            CurrentActivityMapImage(
-                sessionID: context.attributes.sessionID,
-                revision: state.mapRevision,
-                prefersDarkMap: true
-            )
-            .overlay(
-                LinearGradient(
-                    colors: [.black.opacity(0.16), .clear, .black.opacity(0.28)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-        }
-        .clipped()
-        .clipShape(
-            UnevenRoundedRectangle(
-                topLeadingRadius: 22,
-                bottomLeadingRadius: 22,
-                bottomTrailingRadius: 22,
-                topTrailingRadius: 22,
-                style: .continuous
-            )
-        )
+        .padding(.horizontal, 0)
+        .padding(.top, 0)
+        .padding(.bottom, 0)
+        .frame(maxWidth: .infinity, alignment: .top)
         .widgetURL(currentActivityDetailURL(for: state))
+    }
+}
+
+private struct CurrentFootprintTodaySummary: View {
+    let placeCount: Int?
+    let distance: Double?
+    let foreground: Color
+
+    var body: some View {
+        if let placeCount, let distance {
+            HStack(spacing: 8) {
+                Text("今日停留 \(placeCount) 个地点")
+                Spacer(minLength: 8)
+                Text("今日里程 \(formatCurrentTodayDistance(distance))")
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(foreground)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+        }
     }
 }
 
@@ -960,7 +979,6 @@ private struct CurrentActivityPhotoStack: View {
 @available(iOS 16.1, *)
 private struct CurrentTransportProgress: View {
     let start: String
-    let current: String
     let accent: Color
     let onDarkMap: Bool
     var compact = false
@@ -971,7 +989,7 @@ private struct CurrentTransportProgress: View {
         VStack(spacing: compact ? 2 : 4) {
             GeometryReader { proxy in
                 let leadingX: CGFloat = 7
-                let currentX = max(leadingX + 28, proxy.size.width * 0.58)
+                let currentX = proxy.size.width / 2
                 let trailingX = proxy.size.width - 7
                 ZStack(alignment: .leading) {
                     Path { path in
@@ -996,18 +1014,9 @@ private struct CurrentTransportProgress: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(start).lineLimit(1)
-                    if !compact {
-                        Text("起点").foregroundStyle(foreground.opacity(0.65))
-                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                VStack(spacing: 1) {
-                    Text(current).lineLimit(1)
-                    if !compact {
-                        Text("当前").foregroundStyle(foreground.opacity(0.65))
-                    }
-                }
-                .frame(maxWidth: .infinity)
+                Color.clear.frame(maxWidth: .infinity, minHeight: 1)
                 Color.clear.frame(maxWidth: .infinity, minHeight: 1)
             }
             .font(.caption)
@@ -1037,12 +1046,18 @@ private struct CurrentActivityDuration: View {
     let compact: Bool
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 60)) { context in
+        TimelineView(.periodic(from: nextMinuteBoundary, by: 60)) { context in
             let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
             Text(compact
                  ? currentActivityCompactDurationText(elapsed)
                  : currentActivityDurationText(elapsed))
         }
+    }
+
+    private var nextMinuteBoundary: Date {
+        let elapsed = max(0, Date().timeIntervalSince(startedAt))
+        let completedMinutes = floor(elapsed / 60)
+        return startedAt.addingTimeInterval((completedMinutes + 1) * 60)
     }
 }
 
@@ -1177,23 +1192,21 @@ private func formatCurrentDistance(_ distance: Double?) -> String {
         : String(format: "%.1f 公里", distance / 1_000)
 }
 
+private func formatCurrentTodayDistance(_ distance: Double) -> String {
+    let value = max(0, distance)
+    return value < 1_000
+        ? String(format: "%.0f 米", value)
+        : String(format: "%.1f 公里", value / 1_000)
+}
+
 private func formatCurrentSpeed(_ speed: Double?) -> String {
     guard let speed, speed > 0 else { return "—" }
     return String(format: "%.0f km/h", speed * 3.6)
 }
 
 private func currentActivityDetailURL(
-    for state: CurrentTrackingActivityAttributes.ContentState
+    for _: CurrentTrackingActivityAttributes.ContentState
 ) -> URL {
-    if state.kind == .transport {
-        return URL(string: "difangke://timeline?offset=0")!
-    }
-    return URL(string: "difangke://current/detail?kind=\(state.kind.rawValue)&id=\(state.recordID)")!
-}
-
-private func currentActivityArrivalURL(
-    for state: CurrentTrackingActivityAttributes.ContentState
-) -> URL {
-    URL(string: "difangke://current/action?type=arrive&id=\(state.recordID)")!
+    URL(string: "difangke://timeline?offset=0")!
 }
 #endif
