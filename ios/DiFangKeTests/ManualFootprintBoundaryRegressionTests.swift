@@ -6,6 +6,128 @@ import XCTest
 
 @MainActor
 final class ManualFootprintBoundaryRegressionTests: XCTestCase {
+    func testNormalSparseRoundTripIsNotMarkedAsDrift() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let samples: [(TimeInterval, Double, Double)] = [
+            (0, 34.57522, 112.21969),
+            (5 * 60, 34.54901, 112.22595),
+            (7 * 60, 34.54910, 112.22780),
+            (12 * 60, 34.55749, 112.22307),
+            (25 * 60, 34.57522, 112.21969),
+        ]
+        let points = samples.map { offset, latitude, longitude in
+            CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                altitude: 0,
+                horizontalAccuracy: 40,
+                verticalAccuracy: 0,
+                course: 0,
+                speed: -1,
+                timestamp: start.addingTimeInterval(offset)
+            )
+        }
+
+        XCTAssertFalse(RawLocationStore.markDriftPoints(points).contains(where: \.isDriftPoint))
+    }
+
+    func testRapidMultiPointReboundRemainsMarkedAsDrift() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let samples: [(TimeInterval, Double, Double)] = [
+            (0, 34.57522, 112.21969),
+            (10, 34.54901, 112.22595),
+            (20, 34.54910, 112.22780),
+            (30, 34.57522, 112.21969),
+        ]
+        let points = samples.map { offset, latitude, longitude in
+            CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                altitude: 0,
+                horizontalAccuracy: 40,
+                verticalAccuracy: 0,
+                course: 0,
+                speed: -1,
+                timestamp: start.addingTimeInterval(offset)
+            )
+        }
+
+        XCTAssertEqual(
+            RawLocationStore.markDriftPoints(points).map(\.isDriftPoint),
+            [false, true, true, false]
+        )
+    }
+
+    func testTransportSplitPreservesStoredOuterEndpointsAndSharesOnlyNewCutPoint() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let split = start.addingTimeInterval(5 * 60)
+        let end = start.addingTimeInterval(10 * 60)
+        let points = [
+            CodableCoordinate(lat: 31.00, lon: 121.00, timestamp: start.addingTimeInterval(-30), isSyntheticPadding: true),
+            CodableCoordinate(lat: 31.04, lon: 121.04, timestamp: start.addingTimeInterval(4 * 60)),
+            CodableCoordinate(lat: 31.08, lon: 121.08, timestamp: start.addingTimeInterval(8 * 60)),
+            CodableCoordinate(lat: 31.10, lon: 121.10, timestamp: end.addingTimeInterval(30), isStableStayBoundary: true)
+        ]
+
+        let routes = TransportSplitRouteBuilder.segments(
+            points: points,
+            startTime: start,
+            splitTime: split,
+            endTime: end
+        )
+
+        XCTAssertEqual(routes.first.first?.lat, points.first?.lat)
+        XCTAssertEqual(routes.first.first?.lon, points.first?.lon)
+        XCTAssertEqual(routes.first.first?.timestamp, points.first?.timestamp)
+        XCTAssertEqual(routes.first.first?.isSyntheticPadding, points.first?.isSyntheticPadding)
+        XCTAssertEqual(routes.second.last?.lat, points.last?.lat)
+        XCTAssertEqual(routes.second.last?.lon, points.last?.lon)
+        XCTAssertEqual(routes.second.last?.timestamp, points.last?.timestamp)
+        XCTAssertEqual(routes.second.last?.isStableStayBoundary, points.last?.isStableStayBoundary)
+        XCTAssertEqual(routes.first.last?.lat, routes.second.first?.lat)
+        XCTAssertEqual(routes.first.last?.lon, routes.second.first?.lon)
+        XCTAssertEqual(routes.first.last?.timestamp, split)
+        XCTAssertEqual(routes.second.first?.timestamp, split)
+        XCTAssertEqual(routes.first.last?.isSyntheticPadding, true)
+    }
+
+    func testSparseEightKilometerUrbanTripPrefersRailOverRoadHistory() {
+        let duration: TimeInterval = 27 * 60
+        let distance = 8_600.0
+        let speed = distance / duration
+
+        for roadPreference in [TransportType.ebike, .bus] {
+            let inferred = TransportType.from(
+                speed: speed,
+                motionType: .automotive,
+                duration: duration,
+                distanceMeters: distance,
+                pointCount: 6,
+                observedPointCount: 4,
+                preferredAutomotive: roadPreference == .bus ? .bus : .car,
+                preferredCycling: .ebike,
+                preferredTransport: roadPreference
+            )
+            XCTAssertEqual(inferred, .subway)
+        }
+    }
+
+    func testFiveObservedPointsDoNotTriggerSparseUrbanRailRule() {
+        let duration: TimeInterval = 27 * 60
+        let distance = 8_600.0
+
+        XCTAssertEqual(
+            TransportType.from(
+                speed: distance / duration,
+                duration: duration,
+                distanceMeters: distance,
+                pointCount: 7,
+                observedPointCount: 5,
+                preferredCycling: .ebike,
+                preferredTransport: .ebike
+            ),
+            .ebike
+        )
+    }
+
     func testStableStayBoundariesRecoverClippedShortTransportWithoutAcceptingDrift() throws {
         let base = Date(timeIntervalSince1970: 1_790_207_077)
         func point(

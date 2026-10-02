@@ -53,6 +53,13 @@ struct StableActivityPickerItem: Identifiable, Equatable {
     let icon: String
 }
 
+/// Present the snapshot itself so a popover cannot capture pre-tap empty arrays.
+struct ActivityPickerPresentation: Identifiable {
+    let id = UUID()
+    let suggestedItems: [StableActivityPickerItem]
+    let allItems: [StableActivityPickerItem]
+}
+
 struct StableActivityPickerPopover: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -63,7 +70,7 @@ struct StableActivityPickerPopover: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
                 pickerButton(title: "无", icon: "circle.slash") {
                     onSelect(nil)
                     dismiss()
@@ -72,20 +79,30 @@ struct StableActivityPickerPopover: View {
                 if !suggestedItems.isEmpty {
                     sectionDivider
                     sectionTitle("推荐活动")
-                    ForEach(suggestedItems) { item in
-                        pickerButton(title: item.name, icon: item.icon) {
-                            onSelect(item.id)
-                            dismiss()
+                    // Keep repeated activity IDs in separate section view trees.
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(suggestedItems) { item in
+                            pickerButton(title: item.name, icon: item.icon) {
+                                onSelect(item.id)
+                                dismiss()
+                            }
                         }
                     }
                 }
 
-                sectionDivider
-                sectionTitle("所有活动")
-                ForEach(allItems) { item in
-                    pickerButton(title: item.name, icon: item.icon) {
-                        onSelect(item.id)
-                        dismiss()
+                if allItems.isEmpty {
+                    sectionDivider
+                    emptyState
+                } else {
+                    sectionDivider
+                    sectionTitle("所有活动")
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(allItems) { item in
+                            pickerButton(title: item.name, icon: item.icon) {
+                                onSelect(item.id)
+                                dismiss()
+                            }
+                        }
                     }
                 }
 
@@ -119,6 +136,14 @@ struct StableActivityPickerPopover: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 16)
             .padding(.vertical, 6)
+    }
+
+    private var emptyState: some View {
+        Label("暂无活动类型", systemImage: "exclamationmark.circle")
+            .font(.body)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+            .padding(.horizontal, 16)
     }
 
     private func pickerButton(title: String, icon: String, action: @escaping () -> Void) -> some View {

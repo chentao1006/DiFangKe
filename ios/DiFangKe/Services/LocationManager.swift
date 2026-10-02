@@ -835,11 +835,18 @@ final class RawLocationStore {
             let time = max(current.timestamp.timeIntervalSince(prev.timestamp), 0.1)
             let speed = dist / time
             
-            if speed > 60 || (dist > 800 && speed > 20) || dist > 2000 {
+            // Distance alone is not evidence of drift after a sparse location
+            // interval. A real drive can be several kilometres from the last
+            // stationary heartbeat and later return to the same place. Only
+            // search for a rebound when the entry jump itself is abnormally
+            // fast, then require the return to happen within a short window.
+            if speed > 60 || (dist > 800 && speed > 20) {
                 var foundReturn = false
                 let searchLimit = min(i + 15, points.count)
                 for j in (i + 1)..<searchLimit {
                     let next = points[j]
+                    let excursionDuration = next.timestamp.timeIntervalSince(current.timestamp)
+                    if excursionDuration > 5 * 60 { break }
                     let tPrevToNext = max(next.timestamp.timeIntervalSince(prev.timestamp), 0.1)
                     let dPrevToNext = next.distance(from: prev)
                     let avgSpeed = dPrevToNext / tPrevToNext
@@ -1063,6 +1070,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// UI 层“是否在移动”的稳定判断（带滞回），用于“今日正在记录”卡片标题等。
     /// 目标：避免走路时因为 speed 抖动/传感器短暂 stationay 而快速切回“正在停留”。
     var uiIsMoving: Bool = false
+    /// 首页“正在移动”和实时活动交通态共用的唯一状态。
+    var isCurrentlyMoving: Bool {
+        isTracking && uiIsMoving && potentialStopStartLocation == nil
+    }
     private var lastMovingEvidenceTime: Date = .distantPast
     
     var trackingPoints: [CLLocation] = [] // 用于足迹识别的内存滑动窗口
@@ -1327,6 +1338,17 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         if uiIsMoving, now.timeIntervalSince(lastMovingEvidenceTime) > holdSeconds {
             uiIsMoving = false
             print("[LocationManager] UI moving=false (\(source))")
+            // The app now presents a stay, so establish that same current state
+            // before asking the Live Activity to resolve it. Previously the
+            // resolver saw no stay anchor and deliberately kept the old
+            // transport activity alive until another GPS callback arrived.
+            if potentialStopStartLocation == nil, let lastLocation {
+                potentialStopStartLocation = lastLocation
+                clearOngoingPlaceOverride()
+                ongoingTitle = nil
+                saveOngoingTitle()
+                savePotentialStop()
+            }
             checkLiveActivity(forceContentUpdate: true)
             Task {
                 await triggerTimelineSift()
@@ -1337,6 +1359,16 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var cancellables = Set<AnyCancellable>()
     
     private func setupSubscribers() {
+        NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                // Every footprint creation path converges on this notification.
+                // Keep the current Live Activity synchronized even when the
+                // footprint was produced by a background timeline rebuild.
+                self?.checkLiveActivity(forceContentUpdate: true)
+            }
+            .store(in: &cancellables)
+
         NotificationCenter.default.publisher(for: NSNotification.Name("RawLocationDataDeleted"))
             .receive(on: RunLoop.main)
             .sink { [weak self] notification in
@@ -1610,9 +1642,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 self?.runLocationWatchdog()
             }
 
-        // Location callbacks refresh immediately while moving. This is the
-        // independent safety net: once per minute while moving and at least
-        // once per 5 minutes while staying, whenever the process is runnable.
+        // Location callbacks refresh immediately while moving. This timer is a
+        // best-effort content refresh while the process is runnable; background
+        // location callbacks advance ContentState's duration bucket separately.
         liveActivityRefreshTimer = Timer.publish(every: 60, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] now in
@@ -1884,6 +1916,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         saveOngoingTitle()
         savePotentialStop()
 
+        // Keep the Live Activity in lockstep with the current timeline row.
+        // Do this before rebuilding persisted timeline records, which may take
+        // long enough to leave the old transport activity visibly stuck.
+        checkLiveActivity(forceContentUpdate: true)
+
         lastRawLocationSaveTimestamp = max(lastRawLocationSaveTimestamp, now)
         lastSavedRawLocation = arrival
         trackingPoints.append(arrival)
@@ -1897,11 +1934,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         await triggerTimelineSift(requiresFreshRun: true)
         WatchSyncManager.shared.syncSnapshot()
-#if canImport(ActivityKit)
-        if #available(iOS 16.1, *) {
-            CurrentLiveActivityManager.shared.updateLiveActivity(location: arrival, modelContext: modelContext)
-        }
-#endif
         return true
     }
 
@@ -2825,12 +2857,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // B: 如果没有匹配地点，且位移超过 150m，且精度尚可，判定为离开（放宽到 150m 减少因室内飘移导致的停留时刻重置）
                 let isSamePlace = (startPlace != nil && startPlace?.placeID == currentPlace?.placeID)
                 if hasConfirmedDeparture(from: startLoc, to: location, isSamePlace: isSamePlace, isMovingBySensor: isMovingBySensor) {
-                    // 已经离开当前地点，设为空以表示正在移动中
-                    potentialStopStartLocation = nil
-                    clearOngoingPlaceOverride()
-                    savePotentialStop()
-                    ongoingTitle = nil
-                    saveOngoingTitle()
+                    transitionToMovingAfterConfirmedDeparture(source: "location")
                 }
             } else {
                 // 目前没有记录停留起点（正在移动中）
@@ -2913,6 +2940,21 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
 
         return true
+    }
+
+    /// Close the current stay through one path so the app row and Live Activity
+    /// enter moving state together, including during a background location wake.
+    private func transitionToMovingAfterConfirmedDeparture(source: String) {
+        guard potentialStopStartLocation != nil else { return }
+        potentialStopStartLocation = nil
+        clearOngoingPlaceOverride()
+        savePotentialStop()
+        ongoingTitle = nil
+        saveOngoingTitle()
+        updateUIMovementState(isMovingEvidence: true, source: "departure:\(source)")
+        // uiIsMoving may already be true, so its change handler is not guaranteed
+        // to fire here. The cleared stay anchor changes the shared state itself.
+        checkLiveActivity(forceContentUpdate: true)
     }
     
     private func checkDailyPastMemories() {
@@ -3215,6 +3257,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
         if region.identifier == "StationaryWakeupRegion" {
             print("🚧 Exited stationary region! Waking up GPS immediately...")
+            transitionToMovingAfterConfirmedDeparture(source: "region-exit")
             // 统一通过 forceHighAccuracyBoost 处理，确保出门保护期和传感器重启一并执行
             HealthManager.shared.stopActivityTracking()
             HealthManager.shared.startActivityTracking()
@@ -5281,6 +5324,7 @@ import SwiftData
 final class CurrentLiveActivityManager {
     static let shared = CurrentLiveActivityManager()
     private static let layoutSessionPrefix = "current-layout-v3-"
+    private static let lastKnownKindKey = "currentLiveActivityLastKnownKind"
 
     private struct TodaySummary {
         var placeKeys: Set<String>
@@ -5313,12 +5357,23 @@ final class CurrentLiveActivityManager {
         modelContext: ModelContext?,
         forceContentUpdate: Bool = false
     ) {
+        // A location/region callback can wake the app only briefly. Keep that
+        // window alive until ActivityKit has received the state transition.
+        let backgroundTask = UIApplication.shared.applicationState == .active
+            ? UIBackgroundTaskIdentifier.invalid
+            : UIApplication.shared.beginBackgroundTask(
+                withName: "CurrentLiveActivityUpdate",
+                expirationHandler: nil
+            )
         Task { @MainActor in
             await enqueueUpdate(
                 location: location,
                 modelContext: modelContext,
                 forceContentUpdate: forceContentUpdate
             )
+            if backgroundTask != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTask)
+            }
         }
     }
 
@@ -5368,9 +5423,17 @@ final class CurrentLiveActivityManager {
     ) async {
         guard isEnabled,
               ActivityAuthorizationInfo().areActivitiesEnabled,
-              LocationManager.shared.isTracking,
-              let context = modelContext else {
+              LocationManager.shared.isTracking else {
             await endAll()
+            return
+        }
+        // A location event can relaunch the app in the background before
+        // SwiftData has finished opening. That is not an instruction to end a
+        // valid Live Activity: once ended, ActivityKit won't let this ordinary
+        // background wake recreate it. Keep it alive and retry when the app root
+        // binds the context.
+        guard let context = modelContext else {
+            print("[CurrentLiveActivity] waiting for model context; preserving active activity")
             return
         }
         guard let resolved = resolveState(location: location, context: context) else {
@@ -5410,6 +5473,33 @@ final class CurrentLiveActivityManager {
         // revisions instead of briefly replacing the visible map with revision 0.
         let previousState = lastState ?? existingActivity?.content.state
         var state = resolved.state
+        // Stationary coordinates, place text, and metrics can remain byte-for-byte
+        // identical for hours. Make the state advance every five minutes so a
+        // background Core Location callback cannot be discarded by the equality
+        // guard below. Moving content already changes continuously, but a one-
+        // minute bucket also provides a deterministic fallback there.
+        let durationRefreshInterval: TimeInterval = state.kind == .transport ? 60 : 5 * 60
+        state.durationUpdateBucket = Int(Date().timeIntervalSince1970 / durationRefreshInterval)
+
+        // An ordinary background location wake can update an existing Live
+        // Activity but can't create a replacement. When the tracking state has
+        // genuinely changed and the activity is gone, ask the user to reopen
+        // the app instead of repeatedly making a request ActivityKit will deny.
+        if existingActivity == nil, UIApplication.shared.applicationState != .active {
+            let defaults = UserDefaults.standard
+            let previousKind = defaults.string(forKey: Self.lastKnownKindKey)
+            let kindChanged = previousKind.map { $0 != state.kind.rawValue }
+                ?? (state.kind == .transport)
+            if kindChanged {
+                NotificationManager.shared.sendLiveActivityRecoveryNotification(
+                    isMoving: state.kind == .transport
+                )
+            }
+            defaults.set(state.kind.rawValue, forKey: Self.lastKnownKindKey)
+            lastState = state
+            print("[CurrentLiveActivity] no active activity in background; recovery notification handled")
+            return
+        }
 
         // Publish the new coordinates/text/metrics before doing any MapKit or
         // Photos work. Snapshot generation can outlive the short background
@@ -5442,6 +5532,7 @@ final class CurrentLiveActivityManager {
                 return
             }
         }
+        UserDefaults.standard.set(state.kind.rawValue, forKey: Self.lastKnownKindKey)
         lastState = state
 
         let movedEnough = lastMapLocation.map { location.distance(from: $0) >= 100 } ?? true
@@ -5516,9 +5607,9 @@ final class CurrentLiveActivityManager {
         let now = Date()
         var todaySummary = todaySummary(context: context, now: now)
 
-        // A confirmed motion state owns the visible Live Activity immediately.
-        // Persisted footprint/transport boundaries can settle independently.
-        if manager.uiIsMoving {
+        // Use exactly the same state that makes the current timeline row show
+        // “正在移动”. Do not independently infer transport for Live Activity.
+        if manager.isCurrentlyMoving {
             let recentThreshold = now.addingTimeInterval(-5 * 60)
             var descriptor = FetchDescriptor<TransportRecord>(
                 predicate: #Predicate {
@@ -5616,7 +5707,7 @@ final class CurrentLiveActivityManager {
                     ?? "ongoing-\(Int(stayStart.timeIntervalSince1970))",
                 startedAt: stayStart,
                 title: activity?.name ?? "停留",
-                icon: activity?.icon ?? "mappin.and.ellipse",
+                icon: activity?.icon ?? "questionmark",
                 colorHex: activity?.colorHex,
                 placeName: placeName,
                 address: address,

@@ -41,9 +41,7 @@ struct FootprintModalView: View {
     @State private var showingPhotoDeleteAlert = false
     @State private var photoToDelete: String? = nil
     @State private var showingSearchSheet = false
-    @State private var showingActivityPicker = false
-    @State private var activityPickerItems: [StableActivityPickerItem] = []
-    @State private var suggestedActivityPickerItems: [StableActivityPickerItem] = []
+    @State private var activityPickerPresentation: ActivityPickerPresentation?
     @State private var showingActivityTypeEditor = false
     @State private var showingTimeAdjustment = false
     @State private var sharePayload: DFKShareCardPayload?
@@ -534,7 +532,6 @@ extension FootprintModalView {
         VStack(alignment: .center, spacing: 10) {
             Button {
                 prepareActivityPicker()
-                showingActivityPicker = true
             } label: {
                 ZStack(alignment: .bottomTrailing) {
                     Image(systemName: selectedActivityIcon)
@@ -544,10 +541,10 @@ extension FootprintModalView {
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.plain)
-            .popover(isPresented: $showingActivityPicker) {
+            .popover(item: $activityPickerPresentation) { presentation in
                 StableActivityPickerPopover(
-                    suggestedItems: suggestedActivityPickerItems,
-                    allItems: activityPickerItems,
+                    suggestedItems: presentation.suggestedItems,
+                    allItems: presentation.allItems,
                     onSelect: applyActivityType,
                     onAdd: {
                         DispatchQueue.main.async {
@@ -685,12 +682,13 @@ extension FootprintModalView {
     }
 
     private func prepareActivityPicker() {
-        activityPickerItems = allActivities.map {
+        let allItems = allActivities.map {
             StableActivityPickerItem(id: $0.id, name: $0.name, icon: $0.icon)
         }
-        suggestedActivityPickerItems = getSuggestedActivities(includeFallback: false).map {
+        let suggestedItems = getSuggestedActivities(includeFallback: false).map {
             StableActivityPickerItem(id: $0.id, name: $0.name, icon: $0.icon)
         }
+        activityPickerPresentation = ActivityPickerPresentation(suggestedItems: suggestedItems, allItems: allItems)
     }
 
     private func applyActivityType(_ id: UUID?) {

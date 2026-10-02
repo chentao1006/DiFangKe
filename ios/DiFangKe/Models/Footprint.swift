@@ -81,7 +81,8 @@ final class Footprint {
     }
     
     func getActivityType(from allActivities: [ActivityType]) -> ActivityType? {
-        guard let val = activityTypeValue else { return nil }
+        guard let val = activityTypeValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !val.isEmpty else { return nil }
         return allActivities.first { $0.id.uuidString == val || $0.name == val }
     }
     
@@ -222,7 +223,8 @@ final class Footprint {
         // Changing an activity does not establish a manually fixed end time.
         // Existing manual splits/time edits remain fixed, including legacy data.
         if status != .manual { allowsAutomaticDurationExtension = true }
-        activityTypeValue = value
+        let trimmedValue = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        activityTypeValue = trimmedValue?.isEmpty == true ? nil : trimmedValue
         status = .manual
     }
 

@@ -456,11 +456,6 @@ struct TransportSplitView: View {
         )
     }
 
-    private var splitRatio: Double {
-        boundedSplitTime.timeIntervalSince(transport.startTime) /
-            max(1, transport.endTime.timeIntervalSince(transport.startTime))
-    }
-
     private var splitTimeRange: ClosedRange<TimeInterval> {
         let lowerBound = transport.startTime.addingTimeInterval(minimumDuration).timeIntervalSince1970
         let upperBound = transport.endTime.addingTimeInterval(-minimumDuration).timeIntervalSince1970
@@ -468,11 +463,20 @@ struct TransportSplitView: View {
     }
 
     private var firstRoute: [CodableCoordinate] {
-        routeSegment(from: transport.startTime, to: boundedSplitTime, startRatio: 0, endRatio: splitRatio)
+        splitRoutes.first
     }
 
     private var secondRoute: [CodableCoordinate] {
-        routeSegment(from: boundedSplitTime, to: transport.endTime, startRatio: splitRatio, endRatio: 1)
+        splitRoutes.second
+    }
+
+    private var splitRoutes: (first: [CodableCoordinate], second: [CodableCoordinate]) {
+        TransportSplitRouteBuilder.segments(
+            points: routePoints,
+            startTime: transport.startTime,
+            splitTime: boundedSplitTime,
+            endTime: transport.endTime
+        )
     }
 
     private var previewCoordinates: [CLLocationCoordinate2D] {
@@ -575,7 +579,11 @@ struct TransportSplitView: View {
             }
         }
         .onAppear {
-            splitTime = transport.startTime.addingTimeInterval(transport.endTime.timeIntervalSince(transport.startTime) / 2)
+            splitTime = roundedToMinute(
+                transport.startTime.addingTimeInterval(
+                    transport.endTime.timeIntervalSince(transport.startTime) / 2
+                )
+            )
             loadRoute()
         }
     }
@@ -592,54 +600,17 @@ struct TransportSplitView: View {
         routePoints = decoded
     }
 
-    private func routeSegment(from start: Date, to end: Date, startRatio: Double, endRatio: Double) -> [CodableCoordinate] {
-        guard !routePoints.isEmpty else { return [] }
-        let inRange = routePoints.filter { point in
-            guard let timestamp = point.timestamp else { return false }
-            return timestamp > start && timestamp < end
-        }
-        let startPoint = point(at: start, fallbackRatio: startRatio)
-        let endPoint = point(at: end, fallbackRatio: endRatio)
-        return ([startPoint] + inRange + [endPoint]).reduce(into: []) { result, point in
-            if result.last?.lat != point.lat || result.last?.lon != point.lon {
-                result.append(point)
-            }
-        }
-    }
-
-    private func point(at date: Date, fallbackRatio: Double) -> CodableCoordinate {
-        let timedPoints = routePoints.compactMap { point -> CodableCoordinate? in
-            point.timestamp == nil ? nil : point
-        }
-        if let previous = timedPoints.last(where: { ($0.timestamp ?? date) <= date }),
-           let next = timedPoints.first(where: { ($0.timestamp ?? date) >= date }),
-           let previousTime = previous.timestamp,
-           let nextTime = next.timestamp,
-           nextTime > previousTime {
-            let ratio = min(1, max(0, date.timeIntervalSince(previousTime) / nextTime.timeIntervalSince(previousTime)))
-            return CodableCoordinate(
-                lat: previous.lat + (next.lat - previous.lat) * ratio,
-                lon: previous.lon + (next.lon - previous.lon) * ratio,
-                timestamp: date
-            )
-        }
-        if let nearest = routePoints.min(by: {
-            abs(($0.timestamp ?? transport.startTime).timeIntervalSince(date)) < abs(($1.timestamp ?? transport.endTime).timeIntervalSince(date))
-        }) {
-            return CodableCoordinate(lat: nearest.lat, lon: nearest.lon, timestamp: date, isSyntheticPadding: nearest.isSyntheticPadding)
-        }
-        let index = min(max(0, Int((Double(routePoints.count - 1) * fallbackRatio).rounded())), routePoints.count - 1)
-        let fallback = routePoints[index]
-        return CodableCoordinate(lat: fallback.lat, lon: fallback.lon, timestamp: date, isSyntheticPadding: fallback.isSyntheticPadding)
-    }
-
     private func saveSplit() {
         guard canSplit, let record = findRecord() else { return }
-        let split = roundedToMinute(boundedSplitTime)
+        // Persist exactly the same cut shown in the preview. Re-running route
+        // interpolation here used to move the endpoints at save time.
+        let split = boundedSplitTime
         let oldEnd = record.endTime
+        let oldEndLocation = record.endLocation
         let ratio = split.timeIntervalSince(record.startTime) / max(1, record.endTime.timeIntervalSince(record.startTime))
-        let firstPoints = routeSegment(from: record.startTime, to: split, startRatio: 0, endRatio: ratio)
-        let secondPoints = routeSegment(from: split, to: record.endTime, startRatio: ratio, endRatio: 1)
+        let routes = splitRoutes
+        let firstPoints = routes.first
+        let secondPoints = routes.second
         let explicitlySelectedType = record.manualTypeRaw
 
         record.endTime = split
@@ -657,7 +628,7 @@ struct TransportSplitView: View {
             startTime: split,
             endTime: oldEnd,
             startLocation: "中途",
-            endLocation: transport.endLocation,
+            endLocation: oldEndLocation,
             typeRaw: record.typeRaw,
             distance: TimelineBuilder.calculatePathDistance(secondPoints),
             averageSpeed: 0,

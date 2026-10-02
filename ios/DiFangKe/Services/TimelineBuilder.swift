@@ -1368,6 +1368,69 @@ struct CodableCoordinate: Codable {
     }
 }
 
+/// Splits an existing stored route without re-selecting either outer endpoint.
+/// The only coordinate this helper may create is the shared cut point between
+/// the two resulting routes.
+enum TransportSplitRouteBuilder {
+    static func segments(
+        points: [CodableCoordinate],
+        startTime: Date,
+        splitTime: Date,
+        endTime: Date
+    ) -> (first: [CodableCoordinate], second: [CodableCoordinate]) {
+        guard !points.isEmpty else { return ([], []) }
+        guard points.count > 1 else { return (points, points) }
+
+        let duration = max(1, endTime.timeIntervalSince(startTime))
+        let splitRatio = min(1, max(0, splitTime.timeIntervalSince(startTime) / duration))
+        if let exactIndex = points.firstIndex(where: { $0.timestamp == splitTime }) {
+            return (
+                Array(points[...exactIndex]),
+                Array(points[exactIndex...])
+            )
+        }
+
+        let previousIndex = points.indices.last(where: {
+            guard let timestamp = points[$0].timestamp else { return false }
+            return timestamp < splitTime
+        })
+        let nextIndex = points.indices.first(where: {
+            guard let timestamp = points[$0].timestamp else { return false }
+            return timestamp > splitTime
+        })
+        if let previousIndex, let nextIndex,
+           previousIndex < nextIndex,
+           let previousTime = points[previousIndex].timestamp,
+           let nextTime = points[nextIndex].timestamp {
+            let span = nextTime.timeIntervalSince(previousTime)
+            let ratio = span > 0 ? splitTime.timeIntervalSince(previousTime) / span : 0
+            let cut = CodableCoordinate(
+                lat: points[previousIndex].lat + (points[nextIndex].lat - points[previousIndex].lat) * ratio,
+                lon: points[previousIndex].lon + (points[nextIndex].lon - points[previousIndex].lon) * ratio,
+                timestamp: splitTime,
+                isSyntheticPadding: true
+            )
+            let insertionIndex = min(
+                nextIndex,
+                max(previousIndex + 1, previousIndex + Int((Double(nextIndex - previousIndex) * ratio).rounded()))
+            )
+            return (
+                Array(points[..<insertionIndex]) + [cut],
+                [cut] + Array(points[insertionIndex...])
+            )
+        }
+
+        let cutIndex = min(
+            max(0, Int((Double(points.count - 1) * splitRatio).rounded())),
+            points.count - 1
+        )
+        return (
+            Array(points[...cutIndex]),
+            Array(points[cutIndex...])
+        )
+    }
+}
+
 class PersistentTimelineBuilder {
     @MainActor
     private static var syncingDates: Set<Date> = []
@@ -1562,7 +1625,7 @@ class PersistentTimelineBuilder {
                   let points = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
                   points.count >= 2 else { continue }
             let observedCount = points.filter { $0.isSyntheticPadding != true }.count
-            guard observedCount <= 2 else { continue }
+            guard observedCount <= 4 else { continue }
             let duration = transport.endTime.timeIntervalSince(transport.startTime)
             guard duration > 0 else { continue }
             let inferred = TransportType.from(

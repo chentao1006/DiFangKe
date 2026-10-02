@@ -235,6 +235,36 @@ class NotificationManager {
         }
     }
 
+    /// ActivityKit can't create a replacement Live Activity during an ordinary
+    /// background location wake. Notify only when a confirmed tracking-state
+    /// transition needs the user to reopen the app and restore it.
+    func sendLiveActivityRecoveryNotification(isMoving: Bool) {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "isCurrentLiveActivityEnabled") == nil
+                || defaults.bool(forKey: "isCurrentLiveActivityEnabled") else {
+            return
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = isMoving ? "检测到正在移动" : "检测到正在停留"
+        content.body = isMoving
+            ? "点击查看当前行程。"
+            : "点击查看当前足迹。"
+        content.sound = .default
+        content.userInfo = ["type": "resume_current_live_activity"]
+
+        let request = UNNotificationRequest(
+            identifier: "currentLiveActivityRecovery",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                print("Failed to send Live Activity recovery notification: \(error)")
+            }
+        }
+    }
+
     func scheduleFutureTripNotification(for tripID: UUID, placeName: String, arrivalDate: Date, hasArrivalTime: Bool) {
         let isEnabled = UserDefaults.standard.object(forKey: "isFutureTripNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }

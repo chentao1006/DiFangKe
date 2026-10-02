@@ -762,34 +762,24 @@ private struct CurrentTrackingLockScreenContent: View {
                         )
                     }
                 } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(alignment: .center, spacing: 12) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(state.placeName)
-                                    .font(.title3.bold())
-                                    .lineLimit(1)
-                                if let address = state.address, !address.isEmpty {
-                                    Text(address)
-                                        .font(.caption)
-                                        .foregroundStyle(secondaryForeground)
-                                        .lineLimit(1)
-                                }
-                            }
-                            Spacer(minLength: 8)
-                            if state.photoThumbnailCount > 0 {
-                                CurrentActivityPhotoStack(
-                                    sessionID: context.attributes.sessionID,
-                                    revision: state.photoRevision,
-                                    thumbnailCount: state.photoThumbnailCount,
-                                    totalCount: state.photoCount
-                                )
-                            }
+                    HStack(alignment: .center, spacing: 12) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "mappin.and.ellipse")
+                                .font(.headline)
+                                .foregroundStyle(secondaryForeground)
+                            Text(state.placeName)
+                                .font(.title3.bold())
+                                .lineLimit(1)
                         }
-                        CurrentFootprintTodaySummary(
-                            placeCount: state.todayPlaceCount,
-                            distance: state.todayDistance,
-                            foreground: secondaryForeground
-                        )
+                        Spacer(minLength: 8)
+                        if state.photoThumbnailCount > 0 {
+                            CurrentActivityPhotoStack(
+                                sessionID: context.attributes.sessionID,
+                                revision: state.photoRevision,
+                                thumbnailCount: state.photoThumbnailCount,
+                                totalCount: state.photoCount
+                            )
+                        }
                     }
                 }
             }
@@ -797,6 +787,17 @@ private struct CurrentTrackingLockScreenContent: View {
             .padding(.horizontal, 16)
             .padding(.vertical, state.kind == .transport ? 6 : 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .overlay(alignment: .bottom) {
+            if state.kind == .footprint {
+                CurrentFootprintTodaySummary(
+                    placeCount: state.todayPlaceCount,
+                    distance: state.todayDistance,
+                    foreground: secondaryForeground
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
         }
         .frame(maxWidth: .infinity, minHeight: contentHeight, maxHeight: contentHeight, alignment: .top)
         .clipped()
@@ -830,16 +831,13 @@ private struct CurrentTrackingIslandBottomContent: View {
             )
             .overlay(alignment: .topLeading) {
                 if state.kind == .footprint {
-                    VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "mappin.and.ellipse")
+                            .font(.headline)
+                            .foregroundStyle(.white.opacity(0.78))
                         Text(state.placeName)
                             .font(.title3.bold())
                             .lineLimit(1)
-                        if let address = state.address, !address.isEmpty {
-                            Text(address)
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.78))
-                                .lineLimit(1)
-                        }
                     }
                     .padding(.leading, 8)
                     .padding(.top, 6)
@@ -865,7 +863,7 @@ private struct CurrentTrackingIslandBottomContent: View {
                         onDarkMap: true
                     )
                     .padding(.horizontal, 8)
-                    .padding(.top, 20)
+                    .padding(.top, 18)
                 }
             }
             .overlay(alignment: .bottom) {
@@ -916,7 +914,7 @@ private struct CurrentFootprintTodaySummary: View {
             HStack(spacing: 8) {
                 Text("今日停留 \(placeCount) 个地点")
                 Spacer(minLength: 8)
-                Text("今日里程 \(formatCurrentTodayDistance(distance))")
+                Text("里程 \(formatCurrentTodayDistance(distance))")
             }
             .font(.caption2.weight(.semibold))
             .foregroundStyle(foreground)

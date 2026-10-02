@@ -265,6 +265,10 @@ struct DiFangKeApp: App {
                         // automatic timeline recovery never starts in that path.
                         print("[TimelineAuto] binding model context from app root")
                         locationManager.modelContext = container.mainContext
+                        // A location wake can arrive before SwiftData finishes
+                        // opening. Once the context exists, publish the state that
+                        // the background departure callback already established.
+                        locationManager.checkLiveActivity(forceContentUpdate: true)
                     }
                     .modelContainer(container)
                 } else {

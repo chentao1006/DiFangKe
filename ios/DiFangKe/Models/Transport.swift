@@ -296,11 +296,14 @@ enum TransportType: String, CaseIterable, Codable {
         pointCount: Int
     ) -> TransportType? {
         // 只按真实定位点衡量轨迹稀疏程度；合成的足迹端点不是采样证据。
-        // 点数不再改变距离门槛，避免同一条路线仅因补点而改变类型。
+        // 城市轨交在地下常只留下进站前、出站后和极少量中间点。此前上限
+        // 只有 2 个真实点，3～4 个点的同一条稀疏路线反而会跌入低速兜底，
+        // 被近期习惯误判成电动车或公交。距离、时长和速度窗口仍共同约束，
+        // 避免把普通短途稀疏移动一律提升为轨交。
         let isSparseUrbanRailTrip =
             distanceMeters >= 5_000 && distanceMeters <= 30_000 &&
             duration >= 8 * 60 && duration <= 90 * 60 &&
-            pointCount >= 0 && pointCount <= 2 &&
+            pointCount >= 0 && pointCount <= 4 &&
             kmh >= 12 && kmh < 45
         if isSparseUrbanRailTrip {
             return .subway

@@ -2528,8 +2528,13 @@ private struct ContinuousTimelineSheet: View {
                                         isLoading: isLoadingMoreEarlier,
                                         action: requestLoadEarlierDates
                                     )
-                                    .opacity(hasCompletedInitialTimelinePositioning ? 1 : 0)
-                                    .allowsHitTesting(hasCompletedInitialTimelinePositioning)
+                                    // A notification deep link can complete its
+                                    // calendar positioning through a different
+                                    // path than the normal launch-to-today flow.
+                                    // The button must follow data readiness, not
+                                    // that optional positioning flag.
+                                    .opacity(initialTimelineLoadCompleted ? 1 : 0)
+                                    .allowsHitTesting(initialTimelineLoadCompleted)
                                 } else if initialTimelineLoadCompleted {
                                     TimelineLoadMoreButton(
                                         title: "从照片导入足迹",
@@ -2539,8 +2544,8 @@ private struct ContinuousTimelineSheet: View {
                                             isShowingHistory = true
                                         }
                                     )
-                                    .opacity(hasCompletedInitialTimelinePositioning ? 1 : 0)
-                                    .allowsHitTesting(hasCompletedInitialTimelinePositioning)
+                                    .opacity(initialTimelineLoadCompleted ? 1 : 0)
+                                    .allowsHitTesting(initialTimelineLoadCompleted)
                                 }
 
                                 ForEach(Array(dates.enumerated()), id: \.element) { index, date in
@@ -3568,6 +3573,7 @@ private struct ContinuousTimelineSheet: View {
                         item: item,
                         nextStartTime: items.indices.contains(index + 1) ? items[index + 1].startTime : nil,
                         activityTypes: activityTypes,
+                        allPlaces: allPlaces,
                         showsContinuation: true,
                         usesMinimumBottomSpacing: shouldUseMinimumSpacingBeforeCurrentStay(item, at: index, in: items, date: date),
                         canMergeItem: canMergeAdjacentTimelineItem(item, at: index, in: items),
@@ -5211,6 +5217,7 @@ private struct ContinuousTimelineRow: View {
     let item: TimelineItem
     let nextStartTime: Date?
     let activityTypes: [ActivityType]
+    let allPlaces: [Place]
     let showsContinuation: Bool
     let usesMinimumBottomSpacing: Bool
     let canMergeItem: Bool
@@ -5222,6 +5229,7 @@ private struct ContinuousTimelineRow: View {
     let onDelete: () -> Void
     @State private var isResolvingUnknownPlace = false
     @State private var isPlaceTitleBreathing = false
+    @State private var activityPickerPresentation: ActivityPickerPresentation?
 
     var body: some View {
         HStack(alignment: .top, spacing: ContinuousTimelineLayout.markerSpacing) {
@@ -5234,26 +5242,22 @@ private struct ContinuousTimelineRow: View {
                 .padding(.top, 4)
 
             VStack(spacing: 0) {
-                Menu {
-                    if case .footprint(let footprint) = item {
-                        Button {
-                            footprint.updateActivityType(to: nil, in: modelContext)
-                            try? modelContext.save()
-                        } label: {
-                            Label("无", systemImage: "circle.slash")
-                        }
-                        
-                        Divider()
-                        
-                        ForEach(activityTypes) { type in
-                            Button {
-                                footprint.updateActivityType(to: type.id.uuidString, in: modelContext)
-                                try? modelContext.save()
-                            } label: {
-                                Label(type.name, systemImage: type.icon)
-                            }
-                        }
-                    } else if case .transport(let transport) = item {
+                if case .footprint = item {
+                    Button {
+                        prepareActivityPicker()
+                    } label: {
+                        timelineMarker
+                    }
+                    .buttonStyle(.plain)
+                    .popover(item: $activityPickerPresentation) { presentation in
+                        StableActivityPickerPopover(
+                            suggestedItems: presentation.suggestedItems,
+                            allItems: presentation.allItems,
+                            onSelect: applyActivityType
+                        )
+                    }
+                } else if case .transport(let transport) = item {
+                    Menu {
                         ForEach(TransportType.allCases, id: \.self) { type in
                             Button {
                                 let tid = transport.id
@@ -5266,40 +5270,11 @@ private struct ContinuousTimelineRow: View {
                                 Label(type.localizedName, systemImage: type.icon)
                             }
                         }
+                    } label: {
+                        timelineMarker
                     }
-                } label: {
-                    if case .footprint = item {
-                        ZStack {
-                            Circle()
-                                .fill(Color(uiColor: .systemBackground))
-                                .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
-                                .frame(width: markerSize, height: markerSize)
-
-                            Circle()
-                                .fill(
-                                    LinearGradient(
-                                        gradient: Gradient(colors: [tint.lighter(by: 0.25), tint]),
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
-                                )
-                                .frame(width: markerSize - 5, height: markerSize - 5)
-
-                            Image(systemName: icon)
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.white)
-                        }
-                    } else {
-                        Image(systemName: icon)
-                            .font(markerIconFont)
-                            .foregroundStyle(markerForeground)
-                            .frame(width: markerSize, height: markerSize)
-                            .background(markerBackground, in: Circle())
-                            .overlay(Circle().strokeBorder(markerStroke, lineWidth: markerStrokeWidth))
-                            .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
-                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
                 Rectangle()
                     .fill(ContinuousTimelineLayout.lineColor)
                     .frame(width: 2)
@@ -5453,6 +5428,63 @@ private struct ContinuousTimelineRow: View {
                 Label("删除", systemImage: "trash")
             }
         }
+    }
+
+    @ViewBuilder
+    private var timelineMarker: some View {
+        if case .footprint = item {
+            ZStack {
+                Circle()
+                    .fill(Color(uiColor: .systemBackground))
+                    .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
+                    .frame(width: markerSize, height: markerSize)
+
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            gradient: Gradient(colors: [tint.lighter(by: 0.25), tint]),
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: markerSize - 5, height: markerSize - 5)
+
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+        } else {
+            Image(systemName: icon)
+                .font(markerIconFont)
+                .foregroundStyle(markerForeground)
+                .frame(width: markerSize, height: markerSize)
+                .background(markerBackground, in: Circle())
+                .overlay(Circle().strokeBorder(markerStroke, lineWidth: markerStrokeWidth))
+                .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
+        }
+    }
+
+    private func prepareActivityPicker() {
+        guard case .footprint(let footprint) = item else { return }
+        let allItems = activityTypes.map {
+            StableActivityPickerItem(id: $0.id, name: $0.name, icon: $0.icon)
+        }
+        let suggestions = ActivityType.getSuggestedActivities(
+            for: footprint,
+            allActivities: activityTypes.map { $0.convertToLite() },
+            allPlaces: allPlaces.map { $0.convertToLite() },
+            includeFallback: false
+        )
+        let suggestedItems = suggestions.compactMap { suggestion in
+            allItems.first { $0.id == suggestion.id }
+        }
+        activityPickerPresentation = ActivityPickerPresentation(suggestedItems: suggestedItems, allItems: allItems)
+    }
+
+    private func applyActivityType(_ id: UUID?) {
+        guard case .footprint(let footprint) = item else { return }
+        footprint.updateActivityType(to: id?.uuidString, in: modelContext)
+        try? modelContext.save()
     }
 
     private var icon: String {
@@ -5774,9 +5806,7 @@ private struct CurrentStayTimelineCard: View {
     }
 
     private var isCurrentlyMoving: Bool {
-        locationManager.isTracking
-            && locationManager.uiIsMoving
-            && locationManager.potentialStopStartLocation == nil
+        locationManager.isCurrentlyMoving
     }
 
     private var ongoingSelectionCoordinate: CLLocationCoordinate2D? {
@@ -5784,8 +5814,7 @@ private struct CurrentStayTimelineCard: View {
     }
 
     private var resolvedTitle: String {
-        let isCurrentlyStaying = locationManager.potentialStopStartLocation != nil
-        if locationManager.uiIsMoving && !isCurrentlyStaying {
+        if locationManager.isCurrentlyMoving {
             if let location = locationManager.lastLocation, location.speed > 0 {
                 let speedKmh = location.speed * 3.6
                 if speedKmh > 90 { return "正在高速移动" }

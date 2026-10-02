@@ -325,11 +325,9 @@ struct RecordingStatusCard: View {
             return "定位记录已关闭"
         }
         
-        let isCurrentlyStaying = locationManager.potentialStopStartLocation != nil
-        
         // 优先使用 LocationManager 的稳定移动判断（带滞回），避免走路时标题频繁切换“停留”
         // 但如果未打破停留半径（isCurrentlyStaying == true），则绝不切换到移动状态
-        if locationManager.uiIsMoving && !isCurrentlyStaying {
+        if locationManager.isCurrentlyMoving {
             if let location = locationManager.lastLocation, location.speed > 0 {
                 let speedKmh = location.speed * 3.6
                 if speedKmh > 90 {
@@ -390,7 +388,7 @@ struct RecordingStatusCard: View {
     }
 
     private var shouldShowCurrentSpeed: Bool {
-        locationManager.uiIsMoving && locationManager.potentialStopStartLocation == nil
+        locationManager.isCurrentlyMoving
     }
 
     private var canSelectOngoingPlace: Bool {
@@ -653,9 +651,7 @@ struct FootprintCardView: View {
     @State private var pendingMergeCandidate: AdjacentFootprintMergeCandidate?
     @State private var isResolvingUnknownPlace = false
     @State private var isPlaceTitleBreathing = false
-    @State private var showingActivityPicker = false
-    @State private var activityPickerItems: [StableActivityPickerItem] = []
-    @State private var suggestedActivityPickerItems: [StableActivityPickerItem] = []
+    @State private var activityPickerPresentation: ActivityPickerPresentation?
     
     var body: some View {
         if footprint.status == .ignored {
@@ -921,7 +917,6 @@ struct FootprintCardView: View {
             
             Button {
                 prepareActivityPicker()
-                showingActivityPicker = true
             } label: {
                 ZStack {
                     Circle()
@@ -945,10 +940,10 @@ struct FootprintCardView: View {
                 }
             }
             .buttonStyle(.plain)
-            .popover(isPresented: $showingActivityPicker) {
+            .popover(item: $activityPickerPresentation) { presentation in
                 StableActivityPickerPopover(
-                    suggestedItems: suggestedActivityPickerItems,
-                    allItems: activityPickerItems,
+                    suggestedItems: presentation.suggestedItems,
+                    allItems: presentation.allItems,
                     onSelect: applyActivityType
                 )
             }
@@ -1160,12 +1155,13 @@ struct FootprintCardView: View {
     }
 
     private func prepareActivityPicker() {
-        activityPickerItems = allActivities.map {
+        let allItems = allActivities.map {
             StableActivityPickerItem(id: $0.id, name: $0.name, icon: $0.icon)
         }
-        suggestedActivityPickerItems = getSuggestedActivities(includeFallback: false).map {
+        let suggestedItems = getSuggestedActivities(includeFallback: false).map {
             StableActivityPickerItem(id: $0.id, name: $0.name, icon: $0.icon)
         }
+        activityPickerPresentation = ActivityPickerPresentation(suggestedItems: suggestedItems, allItems: allItems)
     }
 
     private func applyActivityType(_ id: UUID?) {

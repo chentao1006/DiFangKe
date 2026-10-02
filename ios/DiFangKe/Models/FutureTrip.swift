@@ -232,6 +232,9 @@ public struct CurrentTrackingActivityAttributes: ActivityAttributes {
         public var photoThumbnailCount: Int
         public var todayPlaceCount: Int?
         public var todayDistance: Double?
+        /// Changes at a controlled cadence so an otherwise identical stationary
+        /// state is still submitted to ActivityKit for duration re-rendering.
+        public var durationUpdateBucket: Int?
 
         public init(
             kind: CurrentTrackingActivityKind,
@@ -253,7 +256,8 @@ public struct CurrentTrackingActivityAttributes: ActivityAttributes {
             photoCount: Int = 0,
             photoThumbnailCount: Int = 0,
             todayPlaceCount: Int? = nil,
-            todayDistance: Double? = nil
+            todayDistance: Double? = nil,
+            durationUpdateBucket: Int? = nil
         ) {
             self.kind = kind
             self.recordID = recordID
@@ -275,6 +279,7 @@ public struct CurrentTrackingActivityAttributes: ActivityAttributes {
             self.photoThumbnailCount = photoThumbnailCount
             self.todayPlaceCount = todayPlaceCount
             self.todayDistance = todayDistance
+            self.durationUpdateBucket = durationUpdateBucket
         }
     }
 
