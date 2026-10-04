@@ -219,13 +219,17 @@ final class Footprint {
         self.photoAssetIDs = photoAssetIDs
     }
     
-    func setManualActivityType(_ value: String?) {
-        // Changing an activity does not establish a manually fixed end time.
-        // Existing manual splits/time edits remain fixed, including legacy data.
+    func markManualMetadataEdit() {
+        // Metadata edits preserve automatic duration growth; time edits and
+        // splits already marked manual retain their explicit boundary.
         if status != .manual { allowsAutomaticDurationExtension = true }
+        status = .manual
+    }
+
+    func setManualActivityType(_ value: String?) {
+        markManualMetadataEdit()
         let trimmedValue = value?.trimmingCharacters(in: .whitespacesAndNewlines)
         activityTypeValue = trimmedValue?.isEmpty == true ? nil : trimmedValue
-        status = .manual
     }
 
     /// Extend only a continuous, observed stay. Never cross a transport or a
@@ -245,11 +249,11 @@ final class Footprint {
             } == true
         let earliestPreviousEnd = activeCurrentStay
             ? Calendar.current.startOfDay(for: start)
-            : start.addingTimeInterval(-60)
+            : start.addingTimeInterval(-5 * 60)
         #else
         // No LocationManager in the widget extension, so there is never an active current stay to extend from today's start.
         let activeCurrentStay = false
-        let earliestPreviousEnd = start.addingTimeInterval(-60)
+        let earliestPreviousEnd = start.addingTimeInterval(-5 * 60)
         #endif
         let descriptor: FetchDescriptor<Footprint>
         if activeCurrentStay {
@@ -269,8 +273,10 @@ final class Footprint {
               CLLocation(latitude: existing.latitude, longitude: existing.longitude)
                 .distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)) < AppConfig.shared.stayDistanceThreshold else { return false }
         #if !WIDGET_EXTENSION
-        if activeCurrentStay, let anchor,
-           anchor.timestamp > existing.endTime { return false }
+        if activeCurrentStay, let anchor, anchor.timestamp > existing.endTime {
+            guard existing.allowsAutomaticDurationExtension,
+                  anchor.timestamp.timeIntervalSince(existing.endTime) <= 5 * 60 else { return false }
+        }
         #endif
         let extensionStart = existing.endTime
         let ownID = existing.footprintID

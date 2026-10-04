@@ -13,6 +13,7 @@ struct AddPlaceSheet: View {
     @StateObject private var vm = PlacePickerViewModel()
 
     @State private var placeName = ""
+    @State private var hasExplicitName = false
     @State private var radius: Float = 80
     @State private var selectedCoord: CLLocationCoordinate2D?
     @State private var searchText = ""
@@ -27,6 +28,9 @@ struct AddPlaceSheet: View {
         self.initialCoordinate = initialCoordinate
         self.initialName = initialName
         self.onSave = onSave
+        _selectedCoord = State(initialValue: initialCoordinate)
+        _placeName = State(initialValue: initialName ?? "")
+        _hasExplicitName = State(initialValue: initialName?.isEmpty == false)
     }
 
     private let importantTypes = ["家", "公司", "学校"]
@@ -37,7 +41,7 @@ struct AddPlaceSheet: View {
                 Section {
                     // Interactive Map Section (Now inside Form to allow scrolling)
                     ZStack {
-                        MapPickerView(selectedCoord: $selectedCoord, radius: $radius, address: $currentCenterAddress, inferredPlaceName: Binding(get: { placeName }, set: { placeName = $0 ?? "未知地点" }), centerTrigger: centerTrigger, shouldSnapToUser: $shouldSnapToUser, userCoord: locationManager.lastLocation?.coordinate, radiusTrigger: radiusTrigger)
+                        MapPickerView(selectedCoord: $selectedCoord, radius: $radius, address: $currentCenterAddress, inferredPlaceName: Binding(get: { placeName }, set: { if !hasExplicitName { placeName = $0 ?? "未知地点" } }), centerTrigger: centerTrigger, shouldSnapToUser: $shouldSnapToUser, userCoord: locationManager.lastLocation?.coordinate, radiusTrigger: radiusTrigger)
 
                         Circle()
                             .stroke(Color.orange.opacity(0.8), lineWidth: 3)
@@ -58,17 +62,8 @@ struct AddPlaceSheet: View {
                     .frame(height: 350)
                     .listRowInsets(EdgeInsets()) // Full-width
                     .onAppear {
-                        if let name = initialName {
-                            placeName = name
-                        }
-                        
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            if let initCoord = initialCoordinate {
-                                selectedCoord = initCoord
-                                centerTrigger = UUID()
-                            } else if let loc = locationManager.lastLocation?.coordinate {
-                                selectedCoord = loc
-                            }
+                        if initialCoordinate == nil {
+                            selectedCoord = locationManager.lastLocation?.coordinate
                             shouldSnapToUser = true
                         }
                     }
@@ -85,7 +80,10 @@ struct AddPlaceSheet: View {
                     .padding(.bottom, 12)
                 ) {
                     HStack {
-                        TextField("给这个地点起个名字", text: $placeName)
+                        TextField("给这个地点起个名字", text: Binding(
+                            get: { placeName },
+                            set: { placeName = $0; hasExplicitName = true }
+                        ))
                             .font(.body)
                         if placeName == "未知地点" {
                             Image(systemName: "pencil")
@@ -159,6 +157,7 @@ struct AddPlaceSheet: View {
     private func presetBadge(_ name: String) -> some View {
         let isSelected = placeName.trimmingCharacters(in: .whitespaces) == name
         return Button {
+            hasExplicitName = true
             placeName = name
         } label: {
             Text(name)
@@ -215,6 +214,7 @@ struct AddPlaceSheet: View {
                                     isSkippingNextSearch = true
                                     selectedCoord = item.coordinate
                                     centerTrigger = UUID()
+                                    hasExplicitName = true
                                     placeName = item.name
                                     searchText = item.name
                                     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)

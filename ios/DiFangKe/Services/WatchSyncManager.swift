@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import WatchConnectivity
+import CoreLocation
 
 struct WatchActivityOption: Codable, Hashable {
     let id: String
@@ -526,9 +527,16 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         let futureTrips: [WatchTripSnapshot] = []
         let nextTrip: WatchTripSnapshot? = nil
 
-        let liveFootprint = liveStayStart.flatMap { start in
-            footprints.first { $0.startTime <= start && $0.endTime >= start }
+        let liveFootprint = LocationManager.shared.potentialStopStartLocation.flatMap { anchor in
+            Self.currentStayFootprint(
+                in: context,
+                anchor: anchor,
+                placeID: LocationManager.shared.matchedPlace?.placeID,
+                now: now,
+                distanceThreshold: AppConfig.shared.stayDistanceThreshold
+            )
         }
+        let currentFootprint = liveStayStart == nil ? latest : liveFootprint
         let livePlaceName: String? = {
             guard liveStayStart != nil else { return nil }
             if let place = LocationManager.shared.matchedPlace, !place.isIgnored { return place.name }
@@ -540,12 +548,14 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         }()
 
         return WatchSnapshot(
-            currentFootprintID: (liveStayStart == nil ? latest : liveFootprint)?.footprintID.uuidString,
+            currentFootprintID: currentFootprint?.footprintID.uuidString,
             placeName: livePlaceName ?? (latest?.address?.isEmpty == false ? latest!.address! : "正在定位"),
-            address: (liveStayStart == nil ? latest : liveFootprint)?.reason,
+            address: currentFootprint?.reason,
             startedAt: liveStayStart ?? latest?.startTime,
             isTracking: LocationManager.shared.isTracking,
-            currentActivityID: (liveStayStart == nil ? latest : liveFootprint)?.activityTypeValue,
+            currentActivityID: currentFootprint?.activityTypeValue.flatMap {
+                activityByValue[$0.trimmingCharacters(in: .whitespacesAndNewlines)]?.id
+            },
             currentTransportType: currentTransport.map { $0.manualTypeRaw ?? $0.typeRaw },
             currentTransportStartedAt: currentTransport?.startTime,
             todayFootprintCount: footprints.count,
@@ -557,6 +567,28 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             statistics: statistics,
             futureTrips: Array(futureTrips)
         )
+    }
+
+    static func currentStayFootprint(
+        in context: ModelContext,
+        anchor: CLLocation,
+        placeID: UUID?,
+        now: Date,
+        distanceThreshold: Double
+    ) -> Footprint? {
+        let stayStart = anchor.timestamp
+        // A continuing stay can be split at midnight; select its latest segment.
+        let descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate {
+                $0.statusValue != "ignored" && $0.endTime >= stayStart && $0.startTime <= now
+            },
+            sortBy: [SortDescriptor(\.endTime, order: .reverse), SortDescriptor(\.startTime, order: .reverse)]
+        )
+        return (try? context.fetch(descriptor))?.first { candidate in
+            if let placeID, candidate.placeID == placeID { return true }
+            return CLLocation(latitude: candidate.latitude, longitude: candidate.longitude)
+                .distance(from: anchor) < distanceThreshold
+        }
     }
 
     func applyActivityChange(footprintID: String, activityID: String?) {

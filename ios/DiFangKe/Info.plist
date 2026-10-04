@@ -57,6 +57,8 @@
 	<string>地方客需要权限以保存旅途精彩瞬间至相册。</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>地方客需要访问相册以自动关联您在旅途中拍摄的照片。</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -89,7 +91,5 @@
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 	</array>
-	<key>NSSupportsLiveActivities</key>
-	<true/>
 </dict>
 </plist>

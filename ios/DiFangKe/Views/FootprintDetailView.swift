@@ -345,7 +345,7 @@ struct FootprintModalView: View {
             .onDisappear {
                 if hasChanged {
                     Aptabase.shared.trackEvent("footprint_edited")
-                    footprint.status = .manual
+                    footprint.markManualMetadataEdit()
                 }
                 if !isDraft {
                     try? modelContext.save()
@@ -451,7 +451,7 @@ extension FootprintModalView {
             ensureFootprintManaged()
             footprint.reason = text
             footprint.aiAnalyzed = true
-            footprint.status = .manual
+            footprint.markManualMetadataEdit()
             if footprint.locationHash == "ONGOING_STAY" {
                 footprint.locationHash = "MANUAL_STAY"
             }
@@ -503,7 +503,7 @@ extension FootprintModalView {
                         }
                     }
                     
-                    footprint.status = .manual
+                    footprint.markManualMetadataEdit()
                     hasChanged = true
                 }
 
@@ -519,7 +519,7 @@ extension FootprintModalView {
             var ids = footprint.photoAssetIDs
             ids.removeAll(where: { $0 == assetID })
             footprint.photoAssetIDs = ids
-            footprint.status = .manual // 标记为人工修改，防止被重置
+            footprint.markManualMetadataEdit()
             hasChanged = true
             if !isDraft { try? modelContext.save() }
         }
@@ -729,7 +729,7 @@ extension FootprintModalView {
 
     private func markFootprintChanged() {
         ensureFootprintManaged()
-        footprint.status = .manual
+        footprint.markManualMetadataEdit()
         hasChanged = true
         if !isDraft { try? modelContext.save() }
     }
@@ -2644,7 +2644,7 @@ struct AddToFavoriteModal: View {
         footprint.address = finalName
         footprint.placeID = newPlace.placeID
         footprint.isAddressEditedByHand = true
-        footprint.status = .manual
+        footprint.markManualMetadataEdit()
         try? modelContext.save()
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         dismiss()

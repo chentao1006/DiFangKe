@@ -6,6 +6,72 @@ import XCTest
 
 @MainActor
 final class ManualFootprintBoundaryRegressionTests: XCTestCase {
+    func testWatchCurrentStayUsesLatestSegmentAfterMidnight() throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let boundary = Calendar.current.startOfDay(for: start).addingTimeInterval(24 * 3600)
+        let now = boundary.addingTimeInterval(15 * 3600)
+        let coordinate = CLLocationCoordinate2D(latitude: 34.5, longitude: 112.2)
+        let placeID = UUID()
+        let activityID = UUID().uuidString
+        let previous = Footprint(date: start, startTime: start, endTime: boundary,
+                                 footprintLocations: [coordinate], locationHash: "watch-previous",
+                                 duration: 0, placeID: placeID, activityTypeValue: activityID)
+        let current = Footprint(date: boundary, startTime: boundary, endTime: now,
+                                footprintLocations: [coordinate], locationHash: "watch-current",
+                                duration: 0, placeID: placeID, activityTypeValue: activityID)
+        context.insert(previous)
+        context.insert(current)
+        let anchor = CLLocation(coordinate: coordinate, altitude: 0, horizontalAccuracy: 10,
+                                verticalAccuracy: 10, timestamp: start)
+
+        let selected = WatchSyncManager.currentStayFootprint(
+            in: context, anchor: anchor, placeID: placeID, now: now, distanceThreshold: 100
+        )
+
+        XCTAssertEqual(selected?.footprintID, current.footprintID)
+        XCTAssertEqual(selected?.activityTypeValue, activityID)
+    }
+
+    func testWatchCurrentStayFindsRecordStartingBeforeToday() throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let now = start.addingTimeInterval(28 * 3600)
+        let coordinate = CLLocationCoordinate2D(latitude: 34.5, longitude: 112.2)
+        let current = Footprint(date: start, startTime: start, endTime: now,
+                                footprintLocations: [coordinate], locationHash: "watch-cross-day", duration: 0)
+        context.insert(current)
+        let anchor = CLLocation(coordinate: coordinate, altitude: 0, horizontalAccuracy: 10,
+                                verticalAccuracy: 10, timestamp: start)
+
+        XCTAssertLessThan(current.startTime, Calendar.current.startOfDay(for: now))
+        XCTAssertEqual(WatchSyncManager.currentStayFootprint(
+            in: context, anchor: anchor, placeID: nil, now: now, distanceThreshold: 100
+        )?.footprintID, current.footprintID)
+    }
+
+    func testWatchCurrentStayRejectsIgnoredAndDifferentPlaces() throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let now = start.addingTimeInterval(3600)
+        let coordinate = CLLocationCoordinate2D(latitude: 34.5, longitude: 112.2)
+        context.insert(Footprint(date: start, startTime: start, endTime: now,
+                                 footprintLocations: [coordinate], locationHash: "watch-ignored",
+                                 duration: 0, status: .ignored))
+        context.insert(Footprint(date: start, startTime: start, endTime: now,
+                                 footprintLocations: [CLLocationCoordinate2D(latitude: 35.5, longitude: 113.2)],
+                                 locationHash: "watch-other-place", duration: 0))
+        let anchor = CLLocation(coordinate: coordinate, altitude: 0, horizontalAccuracy: 10,
+                                verticalAccuracy: 10, timestamp: start)
+
+        XCTAssertNil(WatchSyncManager.currentStayFootprint(
+            in: context, anchor: anchor, placeID: nil, now: now, distanceThreshold: 100
+        ))
+    }
+
     func testNormalSparseRoundTripIsNotMarkedAsDrift() {
         let start = Date(timeIntervalSince1970: 1_800_000_000)
         let samples: [(TimeInterval, Double, Double)] = [
@@ -425,6 +491,89 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
         XCTAssertTrue(Footprint.extendActivityEditedStay(start: restored.endTime, end: start.addingTimeInterval(2700),
             coordinate: CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737), context: restarted))
         XCTAssertNil(restored.activityTypeValue)
+    }
+
+    func testMetadataEditThenActivityEditExtendsSameStayAcrossSamplingGap() throws {
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        let start = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_726_660_000))
+        let stay = footprint(start: start, end: start.addingTimeInterval(17 * 60), activity: nil, status: .confirmed)
+        context.insert(stay)
+        stay.reason = "edited note"
+        stay.address = "edited place"
+        stay.photoAssetIDs = ["kept-photo"]
+        stay.markManualMetadataEdit()
+        stay.setManualActivityType("visit")
+        try context.save()
+
+        let restarted = ModelContext(container)
+        XCTAssertTrue(Footprint.extendActivityEditedStay(
+            start: stay.endTime.addingTimeInterval(120), end: start.addingTimeInterval(30 * 60),
+            coordinate: CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737), context: restarted
+        ))
+        let remaining = try restarted.fetch(FetchDescriptor<Footprint>())
+        XCTAssertEqual(remaining.count, 1)
+        let restored = try XCTUnwrap(remaining.first)
+        XCTAssertEqual(restored.footprintID, stay.footprintID)
+        XCTAssertEqual(restored.endTime, start.addingTimeInterval(30 * 60))
+        XCTAssertEqual(restored.activityTypeValue, "visit")
+        XCTAssertEqual(restored.reason, "edited note")
+        XCTAssertEqual(restored.address, "edited place")
+        XCTAssertEqual(restored.photoAssetIDs, ["kept-photo"])
+    }
+
+    func testMetadataEditDoesNotUnlockExplicitSplitBoundary() throws {
+        let context = ModelContext(try makeContainer())
+        let start = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_726_660_000))
+        let stay = footprint(start: start, end: start.addingTimeInterval(1800), activity: nil, status: .manual)
+        context.insert(stay)
+        stay.markManualMetadataEdit()
+        stay.setManualActivityType("visit")
+        XCTAssertFalse(stay.allowsAutomaticDurationExtension)
+        XCTAssertFalse(Footprint.extendActivityEditedStay(
+            start: stay.endTime.addingTimeInterval(120), end: start.addingTimeInterval(2400),
+            coordinate: CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737), context: context
+        ))
+    }
+
+    func testEditedStayCannotExtendAcrossTransportInSamplingGap() throws {
+        let context = ModelContext(try makeContainer())
+        let start = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_726_660_000))
+        let stay = footprint(start: start, end: start.addingTimeInterval(1800), activity: "visit", status: .confirmed)
+        context.insert(stay)
+        stay.markManualMetadataEdit()
+        context.insert(TransportRecord(
+            day: start, startTime: stay.endTime.addingTimeInterval(10),
+            endTime: stay.endTime.addingTimeInterval(90), typeRaw: "slow", distance: 100,
+            averageSpeed: 1, pointsData: Data("[]".utf8)
+        ))
+        XCTAssertFalse(Footprint.extendActivityEditedStay(
+            start: stay.endTime.addingTimeInterval(120), end: start.addingTimeInterval(2400),
+            coordinate: CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737), context: context
+        ))
+        XCTAssertEqual(stay.endTime, start.addingTimeInterval(1800))
+    }
+
+    func testAdjacentAutomaticDuplicateIsAbsorbedIntoEditedStay() throws {
+        let context = ModelContext(try makeContainer())
+        let start = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_726_660_000))
+        let stay = footprint(start: start, end: start.addingTimeInterval(17 * 60), activity: "visit", status: .manual)
+        let duplicate = footprint(start: stay.endTime, end: start.addingTimeInterval(26 * 60), activity: nil, status: .confirmed)
+        stay.reason = "kept note"
+        stay.photoAssetIDs = ["original-photo"]
+        duplicate.photoAssetIDs = ["new-photo"]
+        context.insert(stay)
+        context.insert(duplicate)
+        XCTAssertTrue(Footprint.absorbAdjacentAutomaticContinuations(
+            [stay, duplicate], transports: [], context: context
+        ))
+        let remaining = try context.fetch(FetchDescriptor<Footprint>())
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining.first?.footprintID, stay.footprintID)
+        XCTAssertEqual(stay.activityTypeValue, "visit")
+        XCTAssertEqual(stay.reason, "kept note")
+        XCTAssertEqual(stay.endTime, start.addingTimeInterval(26 * 60))
+        XCTAssertEqual(stay.photoAssetIDs, ["original-photo", "new-photo"])
     }
 
     func testExplicitManualBoundaryCannotExtendAfterActivityEdit() throws {

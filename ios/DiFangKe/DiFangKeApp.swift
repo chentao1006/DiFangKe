@@ -161,9 +161,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 // 核心修复：直接将 deepLinkDate 存入单例，防止冷启动时 NotificationCenter 丢失消息
                 let dayStart = Calendar.current.startOfDay(for: date)
                 LocationManager.shared.deepLinkDate = dayStart
-                if let fid = footprintID {
-                    LocationManager.shared.deepLinkFootprintID = fid
-                }
+                LocationManager.shared.deepLinkFootprintID = footprintID
                 
                 // 使用 NotificationCenter 发送内部跳转通知 (供已在前台的 UI 捕获)
                 var notificationInfo: [String: Any] = ["type": "highlight_footprint", "date": date]

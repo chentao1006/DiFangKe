@@ -7,6 +7,12 @@ import Aptabase
 
 private let collapsedTimelineDetentHeight: CGFloat = 76
 
+private struct ImportantPlaceDraft: Identifiable {
+    let id = UUID()
+    var coordinate: CLLocationCoordinate2D?
+    var name: String?
+}
+
 struct TimelineView: View {
     var initialDate: Date?
 
@@ -142,12 +148,14 @@ private struct ContinuousTimelineView: View {
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var isTimelinePresented = true
     @State private var showLocationSettingsAlert = false
+    @State private var showingArrivalConfirmation = false
     @State private var loadedDates: [Date] = []
     @State private var timelinesByDate: [Date: [TimelineItem]] = [:]
     @State private var isLoadingEarlierDates = false
     @State private var todayScrollRequest = 0
     @State private var targetScrollDate: Date? = nil
     @State private var activeTimelineDate = Calendar.current.startOfDay(for: Date())
+    @State private var layoutViewportState = ContinuousTimelineLayoutViewportState()
     @State private var timelineDetent: PresentationDetent = .medium
     @State private var visibleTimelineItems: [TimelineItem] = []
     @State private var renderedFutureTrips: [FutureTrip] = []
@@ -321,6 +329,7 @@ private struct ContinuousTimelineView: View {
             timelinesByDate: timelinesByDate,
             futureTrips: hasCompletedInitialTimelineLoad ? futureTrips : [],
             initialTimelineLoadCompleted: hasCompletedInitialTimelineLoad,
+            layoutViewportState: layoutViewportState,
             isReloadingTimelineExternally: isReloadingTimelineExternally,
             locationManager: locationManager,
             activeTimelineDate: $activeTimelineDate,
@@ -553,6 +562,14 @@ private struct ContinuousTimelineView: View {
             Task { await refreshTimelineForCurrentDayIfNeeded() }
         }
         .onOpenURL(perform: handleDeepLinkURL)
+        .alert("确认已到达？", isPresented: $showingArrivalConfirmation) {
+            Button("取消", role: .cancel) { }
+            Button("确认到达") {
+                Task { await locationManager.confirmArrival() }
+            }
+        } message: {
+            Text("将结束当前移动，并开始记录停留。")
+        }
     }
 
     private func handleDeepLinkURL(_ url: URL) {
@@ -591,7 +608,7 @@ private struct ContinuousTimelineView: View {
                 $0.recordID == id && $0.statusRaw == "active" && $0.endTime >= recentThreshold
             })
             guard (try? modelContext.fetch(descriptor).first) != nil else { return }
-            Task { await locationManager.confirmArrival() }
+            showingArrivalConfirmation = true
             return
         }
 
@@ -909,9 +926,14 @@ private struct ContinuousTimelineView: View {
                       let date = userInfo["date"] as? Date {
                 
                 let footprintID = userInfo["footprintID"] as? UUID
+                let dayStart = Calendar.current.startOfDay(for: date)
+                // A live receiver has consumed the cold-launch fallback too.
+                if locationManager.deepLinkDate == dayStart {
+                    locationManager.deepLinkDate = nil
+                    locationManager.deepLinkFootprintID = nil
+                }
                 
                 Task {
-                    let dayStart = Calendar.current.startOfDay(for: date)
                     activeTimelineDate = dayStart
                     updateVisibleTimelineDates([dayStart])
                     _ = await refreshAvailableTimelineDateCache()
@@ -2063,7 +2085,7 @@ private struct ContinuousTimelineSheet: View {
     @State private var pendingTransportMergeCandidate: ContinuousAdjacentTransportMergeCandidate?
     @State private var hasCompletedInitialTimelinePositioning = false
     @State private var requestedHistoryImport = false
-    @State private var showingAddPlaceSheet = false
+    @State private var importantPlaceDraft: ImportantPlaceDraft?
     @State private var sharePayload: DFKShareCardPayload?
     @State private var showingTimelineShareRangePicker = false
     @AppStorage("isImportantPlaceGuideDismissed") private var isImportantPlaceGuideDismissed = false
@@ -2072,6 +2094,7 @@ private struct ContinuousTimelineSheet: View {
     let timelinesByDate: [Date: [TimelineItem]]
     let futureTrips: [FutureTrip]
     let initialTimelineLoadCompleted: Bool
+    let layoutViewportState: ContinuousTimelineLayoutViewportState
     let isReloadingTimelineExternally: Bool
     let locationManager: LocationManager
     @Binding var activeTimelineDate: Date
@@ -2376,12 +2399,16 @@ private struct ContinuousTimelineSheet: View {
                             isHistoryContentReady = true
                         }
                     }
-                    .sheet(isPresented: $showingAddPlaceSheet) {
-                        AddPlaceSheet { newPlace in
+                    .sheet(item: $importantPlaceDraft) { draft in
+                        AddPlaceSheet(
+                            initialCoordinate: draft.coordinate,
+                            initialName: draft.name
+                        ) { newPlace in
                             modelContext.insert(newPlace)
                             try? modelContext.save()
                             CloudSettingsManager.shared.triggerDataSyncPulse()
                         }
+                        .id(draft.id)
                     }
                         .sheet(item: $showingRawPointsDate) { item in
                             RawPointsListView(date: item.date)
@@ -2628,6 +2655,11 @@ private struct ContinuousTimelineSheet: View {
                             let viewportHeight = viewport.size.height
                             rawDateFrames.frames = frames
                             rawDateFrames.viewportHeight = viewportHeight
+                            if hasCompletedInitialTimelinePositioning,
+                               !isFreezingViewportDrivenUpdates,
+                               let anchor = currentDateAnchor() {
+                                layoutViewportState.anchor = anchor
+                            }
                             // LazyVStack may publish several geometry snapshots
                             // in one frame. Keep only the newest one so state/map
                             // updates cannot form a per-frame feedback loop.
@@ -3333,14 +3365,10 @@ private struct ContinuousTimelineSheet: View {
             return
         }
 
-        let anchorDate = Calendar.current.startOfDay(for: activeTimelineDate)
-        guard currentDates.contains(anchorDate) else { return }
-
-        Task { @MainActor in
-            await Task.yield()
-            guard currentDates.contains(anchorDate) else { return }
-            proxy.scrollTo(ScrollTarget.date(anchorDate), anchor: .bottom)
-        }
+        let anchor = layoutViewportState.anchor
+            ?? ContinuousTimelineDateAnchor(date: Calendar.current.startOfDay(for: activeTimelineDate), bottomOffset: 0)
+        guard currentDates.contains(anchor.date) else { return }
+        restoreDateAnchorAfterExternalReload(anchor, using: proxy)
     }
 
     private func applyDateFrameUpdate(_ frames: [Date: CGRect], viewportHeight: CGFloat) {
@@ -3358,6 +3386,9 @@ private struct ContinuousTimelineSheet: View {
         guard calendarScrollLockTarget == nil else { return }
         guard !isFreezingViewportDrivenUpdates else { return }
         applyViewportDates(from: frames, viewportHeight: viewportHeight)
+        if let anchor = currentDateAnchor() {
+            layoutViewportState.anchor = anchor
+        }
     }
 
     private func significantVisibleDates(in frames: [Date: CGRect], viewportHeight: CGFloat) -> Set<Date> {
@@ -3605,6 +3636,13 @@ private struct ContinuousTimelineSheet: View {
                             guard case .footprint(let footprint) = item else { return }
                             toggleFavorite(for: footprint)
                         },
+                        onSetImportantPlace: {
+                            guard case .footprint(let footprint) = item else { return }
+                            importantPlaceDraft = ImportantPlaceDraft(
+                                coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude),
+                                name: footprintDisplayTitle(for: footprint)
+                            )
+                        },
                         onIgnore: {
                             guard case .footprint(let footprint) = item else { return }
                             footprintPendingIgnore = footprint
@@ -3635,7 +3673,7 @@ private struct ContinuousTimelineSheet: View {
                             }.frame(width: 54)
                             
                             ImportantPlaceGuide(isGuideDismissed: $isImportantPlaceGuideDismissed) {
-                                showingAddPlaceSheet = true
+                                importantPlaceDraft = ImportantPlaceDraft()
                             }
                             .padding(.leading, -16)
                             .padding(.bottom, 14)
@@ -3740,6 +3778,7 @@ private struct ContinuousTimelineSheet: View {
     /// An explicit destination supersedes every previously captured viewport.
     /// Data loads may finish, but their old anchors must never win afterward.
     private func beginExplicitTimelineNavigation() {
+        layoutViewportState.anchor = nil
         scrollNavigationGeneration = UUID()
         isCalendarScrollLocked = true
         // From this point onward the first-launch positioning pass must never
@@ -3786,6 +3825,7 @@ private struct ContinuousTimelineSheet: View {
                 }
             }
             let today = Calendar.current.startOfDay(for: Date())
+            layoutViewportState.anchor = ContinuousTimelineDateAnchor(date: today, bottomOffset: 0)
             if !currentDates.contains(today) { _ = await loadDate(today, false) }
             for delay in [0, 90_000_000, 220_000_000, 420_000_000] {
                 if delay > 0 {
@@ -3820,7 +3860,7 @@ private struct ContinuousTimelineSheet: View {
 
         // Mirrors scrollToToday's target/anchor choice: when there's an ongoing stay or
         // transport, center that card in the timeline instead of pinning it to the bottom.
-        let hasCurrentStatus = locationManager.isTracking
+        let hasCurrentStatus = locationManager.isTracking && Calendar.current.isDateInToday(targetDate)
 
         var transaction = Transaction()
         transaction.disablesAnimations = true
@@ -3843,7 +3883,12 @@ private struct ContinuousTimelineSheet: View {
         if let target = targetScrollDate {
             scrollToDate(target, using: proxy)
             targetScrollDate = nil
-        } else if todayScrollRequest == 0 {
+        } else if let anchor = layoutViewportState.anchor, currentDates.contains(anchor.date) {
+            applySelectedCalendarDate(anchor.date)
+            restoreDateAnchorAfterExternalReload(anchor, using: proxy)
+            hasCompletedInitialTimelinePositioning = true
+            return
+        } else {
             scheduleInitialScrollToToday(using: proxy)
         }
         
@@ -3948,6 +3993,7 @@ private struct ContinuousTimelineSheet: View {
         beginExplicitTimelineNavigation()
         let generation = scrollNavigationGeneration
         let normalizedDate = Calendar.current.startOfDay(for: date)
+        layoutViewportState.anchor = ContinuousTimelineDateAnchor(date: normalizedDate, bottomOffset: 0)
 
         // Lock viewport-driven date updates while the destination is loaded.
         // Do not change activeTimelineDate yet: timelineDates automatically
@@ -4846,6 +4892,13 @@ private struct ContinuousTimelineDateAnchor {
     let bottomOffset: CGFloat
 }
 
+/// Owned above the portrait-sheet/landscape-sidebar branches. Geometry writes
+/// do not invalidate the view, and remounts retain the last stable viewport.
+@MainActor
+private final class ContinuousTimelineLayoutViewportState {
+    var anchor: ContinuousTimelineDateAnchor?
+}
+
 private final class ContinuousTimelineRawDateFrames {
     var frames: [Date: CGRect] = [:]
     var viewportHeight: CGFloat = 0
@@ -5225,6 +5278,7 @@ private struct ContinuousTimelineRow: View {
     let onMerge: () -> Void
     let onSplit: () -> Void
     let onToggleFavorite: () -> Void
+    let onSetImportantPlace: () -> Void
     let onIgnore: () -> Void
     let onDelete: () -> Void
     @State private var isResolvingUnknownPlace = false
@@ -5370,6 +5424,20 @@ private struct ContinuousTimelineRow: View {
                     onToggleFavorite()
                 } label: {
                     Label(footprint.isHighlight == true ? "取消收藏" : "收藏", systemImage: footprint.isHighlight == true ? "star.slash" : "star.fill")
+                }
+
+                if !allPlaces.contains(where: { place in
+                    guard place.isUserDefined else { return false }
+                    if place.placeID == footprint.placeID { return true }
+                    let address = (footprint.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    return !address.isEmpty && (
+                        place.name.trimmingCharacters(in: .whitespacesAndNewlines) == address ||
+                        place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == address
+                    )
+                }) {
+                    Button(action: onSetImportantPlace) {
+                        Label("设为重要地点", systemImage: "mappin.and.ellipse")
+                    }
                 }
 
                 Divider()
@@ -5715,6 +5783,7 @@ private struct ContinuousTimelinePhotoThumbnail: View {
 private struct CurrentStayTimelineCard: View {
     let locationManager: LocationManager
     @State private var showingOngoingLocationSearch = false
+    @State private var showingArrivalConfirmation = false
 
     var body: some View {
         SwiftUI.TimelineView(.periodic(from: Date(), by: 1)) { context in
@@ -5728,6 +5797,14 @@ private struct CurrentStayTimelineCard: View {
                 coordinate: ongoingSelectionCoordinate,
                 forOngoing: true
             )
+        }
+        .alert("确认已到达？", isPresented: $showingArrivalConfirmation) {
+            Button("取消", role: .cancel) { }
+            Button("确认到达") {
+                Task { await locationManager.confirmArrival() }
+            }
+        } message: {
+            Text("将结束当前移动，并开始记录停留。")
         }
     }
 
@@ -5761,8 +5838,23 @@ private struct CurrentStayTimelineCard: View {
                     ) {
                         showingOngoingLocationSearch = true
                     } label: {
-                        Text(resolvedTitle)
-                            .font(.title3.weight(.bold))
+                        HStack(alignment: .firstTextBaseline, spacing: 0) {
+                            Text("正在")
+                            Text(resolvedPlaceName)
+                                .overlay(alignment: .bottom) {
+                                    GeometryReader { geometry in
+                                        Path { path in
+                                            path.move(to: .zero)
+                                            path.addLine(to: CGPoint(x: geometry.size.width, y: 0))
+                                        }
+                                        .stroke(style: StrokeStyle(lineWidth: 1, lineCap: .round, dash: [0, 3]))
+                                    }
+                                    .frame(height: 1)
+                                    .offset(y: 3)
+                                }
+                            Text("停留")
+                        }
+                        .font(.title3.weight(.bold))
                     }
                     .buttonStyle(.plain)
                     .accessibilityHint("选择当前停留地点")
@@ -5775,7 +5867,7 @@ private struct CurrentStayTimelineCard: View {
                     .foregroundStyle(.secondary)
                 if isCurrentlyMoving {
                     Button("已到达") {
-                        Task { await locationManager.confirmArrival() }
+                        showingArrivalConfirmation = true
                     }
                     .arrivalButtonStyle()
                 }
@@ -5824,19 +5916,22 @@ private struct CurrentStayTimelineCard: View {
             return "正在移动"
         }
 
+        return "正在\(resolvedPlaceName)停留"
+    }
+
+    private var resolvedPlaceName: String {
         if let place = locationManager.matchedPlace, place.isUserDefined, !place.isIgnored {
-            return "正在\(place.name)停留"
+            return place.name
         }
 
           if hasUserDefinedPlaces,
               let title = locationManager.ongoingTitle,
               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "正在\(title)停留"
+            return title
         }
 
         let address = locationManager.currentAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-        let placeName = (address.isEmpty || address == "正在解析位置..." || address == "未知位置") ? "此处" : address
-        return "正在\(placeName)停留"
+        return (address.isEmpty || address == "正在解析位置..." || address == "未知位置") ? "此处" : address
     }
 
     private var hasUserDefinedPlaces: Bool {

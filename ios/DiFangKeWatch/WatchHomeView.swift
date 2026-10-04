@@ -107,6 +107,7 @@ private struct GlassCircleBackground: ViewModifier {
 private struct CurrentPlaceView: View {
     @EnvironmentObject private var store: WatchStore
     @State private var showingActivityPicker = false
+    @State private var showingArrivalConfirmation = false
 
     private var currentTransportIcon: String? {
         switch store.snapshot.currentTransportType {
@@ -152,7 +153,7 @@ private struct CurrentPlaceView: View {
                         .foregroundStyle(.secondary)
                 }
                 Button("已到达") {
-                    store.confirmArrival()
+                    showingArrivalConfirmation = true
                 }
                 .disabled(store.isConfirmingArrival)
                 .tint(.accentColor)
@@ -180,6 +181,14 @@ private struct CurrentPlaceView: View {
         .scenePadding()
         .sheet(isPresented: $showingActivityPicker) {
             ActivityPickerView()
+        }
+        .alert("确认已到达？", isPresented: $showingArrivalConfirmation) {
+            Button("取消", role: .cancel) { }
+            Button("确认到达") {
+                store.confirmArrival()
+            }
+        } message: {
+            Text("将结束当前移动，并开始记录停留。")
         }
         .onChange(of: store.requestedActivityPickerFootprintID) { _, footprintID in
             guard currentTransportIcon == nil, footprintID == snapshot.currentFootprintID else { return }

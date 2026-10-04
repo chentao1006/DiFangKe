@@ -955,6 +955,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke;
 				PRODUCT_NAME = "地方客";
 				SDKROOT = iphoneos;
@@ -1173,6 +1174,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke;
 				PRODUCT_NAME = "地方客";
 				SDKROOT = iphoneos;
