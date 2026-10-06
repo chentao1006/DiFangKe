@@ -67,6 +67,21 @@ struct TransportModalView: View {
     private var displayType: TransportType {
         localManualType ?? displayedTransport.currentType
     }
+
+    /// Reconstructed sparse routes can know their endpoints and distance
+    /// without knowing the real departure time. Never render the resulting
+    /// physically impossible quotient as if it were a measured average.
+    private var displayAverageSpeedKmh: Double? {
+        let speed = Measurement(
+            value: displayedTransport.averageSpeed,
+            unit: UnitSpeed.metersPerSecond
+        ).converted(to: .kilometersPerHour).value
+        guard speed.isFinite, speed > 0 else { return nil }
+        if let range = displayType.automaticSpeedRange, speed > range.upperBound {
+            return nil
+        }
+        return speed
+    }
     
     var body: some View {
         NavigationStack {
@@ -221,7 +236,13 @@ struct TransportModalView: View {
                                         .foregroundColor(.secondary)
                                 }
                                 .font(.headline)
-                                Text(String(format: "%.1f 千米/小时", displayedTransport.averageSpeed * 3.6))
+                                Group {
+                                    if let speed = displayAverageSpeedKmh {
+                                        Text(String(format: "%.1f 千米/小时", speed))
+                                    } else {
+                                        Text("速度未知")
+                                    }
+                                }
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
                                     .lineLimit(1)
@@ -1017,22 +1038,11 @@ private struct TransportTimeAdjustmentView: View {
         guard !isLoadingRawPoints else { return }
         let oldStart = record.startTime
         let oldEnd = record.endTime
-        record.startTime = start
-        record.endTime = end
-        record.day = Calendar.current.startOfDay(for: start)
+        record.updateTimeRangePreservingRoute(start: start, end: end)
         // Time boundaries are user-authored facts too.  Mark this record as
         // manual so periodic automatic consolidation cannot replace the
         // adjusted interval with a newly inferred one.
         record.manualTypeRaw = record.manualTypeRaw ?? transport.manualType?.rawValue ?? transport.type.rawValue
-        // `record.pointsData` only contains the old inferred interval.  It is
-        // safe for a shrink, but it cannot supply the points newly included by
-        // an expanded boundary.  Rebuild from the same raw points shown on the
-        // adjustment map so the saved route and distance match the selected
-        // time range.
-        let routeWithinSavedRange = rawPoints.filter {
-            $0.timestamp >= start && $0.timestamp <= end
-        }
-        refreshMetrics(record, rawRoute: routeWithinSavedRange)
         let adjacentDates = adjustAdjacentItems(
             oldStart: oldStart,
             oldEnd: oldEnd,
@@ -1083,37 +1093,6 @@ private struct TransportTimeAdjustmentView: View {
         let id = transport.id
         let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == id })
         return try? modelContext.fetch(descriptor).first
-    }
-
-    private func refreshMetrics(_ record: TransportRecord, rawRoute: [CLLocation]? = nil) {
-        if let rawRoute {
-            let routePoints = rawRoute.map {
-                CodableCoordinate(
-                    lat: $0.coordinate.latitude,
-                    lon: $0.coordinate.longitude,
-                    timestamp: $0.timestamp
-                )
-            }
-            if let data = try? JSONEncoder().encode(routePoints) {
-                record.pointsData = data
-                record.distance = TimelineBuilder.calculatePathDistance(routePoints)
-            }
-            let duration = record.endTime.timeIntervalSince(record.startTime)
-            record.averageSpeed = duration > 0 ? record.distance / duration : 0
-            return
-        }
-
-        if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData) {
-            let filtered = decoded.filter { point in
-                guard let timestamp = point.timestamp else { return point.isSyntheticPadding == true }
-                return timestamp >= record.startTime && timestamp <= record.endTime
-            }
-            if !filtered.isEmpty, let data = try? JSONEncoder().encode(filtered) {
-                record.pointsData = data
-                record.distance = TimelineBuilder.calculatePathDistance(filtered)
-            }
-        }
-        record.averageSpeed = record.distance / record.endTime.timeIntervalSince(record.startTime)
     }
 
     /// Keep a connected timeline connected when the edited transport originally
@@ -1202,9 +1181,8 @@ private struct TransportTimeAdjustmentView: View {
             record.endTime = end
             record.status = .manual
         case .transport(let record):
-            record.endTime = end
+            record.updateTimeRangePreservingRoute(start: record.startTime, end: end)
             record.manualTypeRaw = record.manualTypeRaw ?? record.typeRaw
-            refreshMetrics(record)
         }
         return touchedDates(start: min(oldEnd, end), end: max(oldEnd, end))
     }
@@ -1218,10 +1196,8 @@ private struct TransportTimeAdjustmentView: View {
             record.date = Calendar.current.startOfDay(for: start)
             record.status = .manual
         case .transport(let record):
-            record.startTime = start
-            record.day = Calendar.current.startOfDay(for: start)
+            record.updateTimeRangePreservingRoute(start: start, end: record.endTime)
             record.manualTypeRaw = record.manualTypeRaw ?? record.typeRaw
-            refreshMetrics(record)
         }
         return touchedDates(start: min(oldStart, start), end: max(oldStart, start))
     }

@@ -88,6 +88,7 @@ private struct WatchComplicationView: View {
 
     private var transport: (name: String, icon: String)? {
         switch entry.snapshot?.currentTransportType {
+        case "moving": return ("移动", "location.north.line.fill")
         case "slow": return ("步行", "figure.walk")
         case "running": return ("跑步", "figure.run")
         case "bicycle": return ("自行车", "bicycle")

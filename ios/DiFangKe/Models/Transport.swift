@@ -696,4 +696,15 @@ final class TransportRecord {
         self.statusRaw = statusRaw
         self.stepCount = stepCount
     }
+
+    /// A time correction changes only the user-authored boundary. The saved
+    /// route and its endpoint labels are independent facts and must survive
+    /// even when the raw-location archive is unavailable or has been cleaned.
+    func updateTimeRangePreservingRoute(start: Date, end: Date) {
+        startTime = start
+        endTime = end
+        day = Calendar.current.startOfDay(for: start)
+        let duration = end.timeIntervalSince(start)
+        averageSpeed = duration > 0 ? distance / duration : 0
+    }
 }

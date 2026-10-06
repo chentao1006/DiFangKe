@@ -1074,8 +1074,20 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var isCurrentlyMoving: Bool {
         isTracking && uiIsMoving && potentialStopStartLocation == nil
     }
+    /// Motion has been observed, but the last location is too old to decide
+    /// whether the device actually left the current stay. This is intentionally
+    /// a third UI state: neither a confirmed departure nor confirmed stillness.
+    var isAwaitingDepartureLocationConfirmation: Bool {
+        guard isTracking,
+              uiIsMoving,
+              potentialStopStartLocation != nil else { return false }
+        guard let lastLocation else { return true }
+        return abs(Date().timeIntervalSince(lastLocation.timestamp))
+            >= AppConfig.shared.currentLocationFreshnessThreshold
+    }
     private var lastMovingEvidenceTime: Date = .distantPast
-    
+    private(set) var uiMovingStartedAt: Date?
+
     var trackingPoints: [CLLocation] = [] // 用于足迹识别的内存滑动窗口
     private var allTodayCoordinatesUpdateTask: Task<Void, Never>?
     private var lastAllTodayCoordinatesUpdateAt: Date = .distantPast
@@ -1310,6 +1322,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 self?.updateUIMovementState(isMovingEvidence: isMoving, source: "motion:isMoving")
             }
             .store(in: &cancellables)
+
         // 核心修复：在 init() 里就启动运动传感器 + 健康授权
         // 这样即使 App 从后台被系统唤醒（不走 startTracking），运动状态变化也能触发 boost
         if UserDefaults.standard.bool(forKey: "hasRequestedHealthAuth") {
@@ -1324,6 +1337,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             lastMovingEvidenceTime = now
             if !uiIsMoving {
                 uiIsMoving = true
+                uiMovingStartedAt = now
                 print("[LocationManager] UI moving=true (\(source))")
                 // The Live Activity reflects the immediate motion state. Do
                 // not wait for the persisted stay boundary to be closed after
@@ -1332,11 +1346,22 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
             return
         }
-        
+
         // 无移动证据：必须连续一段时间都没有证据，才允许切回“停留”，避免抖动
         let holdSeconds = AppConfig.shared.uiMovingHoldDuration
         if uiIsMoving, now.timeIntervalSince(lastMovingEvidenceTime) > holdSeconds {
+            // Once GPS has confirmed a departure, a later signal gap is not
+            // evidence of arrival. Smooth train/aircraft motion may also be
+            // classified as stationary, so preserve the confirmed moving state
+            // until a fresh location can establish a new stay.
+            if potentialStopStartLocation == nil,
+               let lastLocation,
+               abs(now.timeIntervalSince(lastLocation.timestamp))
+                >= AppConfig.shared.currentLocationFreshnessThreshold {
+                return
+            }
             uiIsMoving = false
+            uiMovingStartedAt = nil
             print("[LocationManager] UI moving=false (\(source))")
             // The app now presents a stay, so establish that same current state
             // before asking the Live Activity to resolve it. Previously the
@@ -1355,7 +1380,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
     }
-    
+
     private var cancellables = Set<AnyCancellable>()
     
     private func setupSubscribers() {
@@ -1777,7 +1802,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                   let self,
                   let context = self.modelContext,
                   let lastLocation = self.lastLocation,
-                  abs(lastLocation.timestamp.timeIntervalSinceNow) < 30 else {
+                  abs(lastLocation.timestamp.timeIntervalSinceNow)
+                    < AppConfig.shared.currentLocationFreshnessThreshold else {
                 return
             }
 
@@ -1909,6 +1935,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         lastUpdateTime = now
         accuracy = arrival.horizontalAccuracy
         uiIsMoving = false
+        uiMovingStartedAt = nil
         lastMovingEvidenceTime = .distantPast
         potentialStopStartLocation = arrival
         clearOngoingPlaceOverride()
@@ -1920,6 +1947,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // Do this before rebuilding persisted timeline records, which may take
         // long enough to leave the old transport activity visibly stuck.
         checkLiveActivity(forceContentUpdate: true)
+        WatchSyncManager.shared.syncSnapshot()
 
         lastRawLocationSaveTimestamp = max(lastRawLocationSaveTimestamp, now)
         lastSavedRawLocation = arrival
@@ -2078,6 +2106,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // tracking during the same launch. Keep an authorization upgrade
             // reflected without reapplying accuracy or restarting monitors.
             locationManager.allowsBackgroundLocationUpdates = isAlwaysAuthorized
+            HealthManager.shared.startActivityTracking()
+            updateUIMovementState(
+                isMovingEvidence: HealthManager.shared.isMoving,
+                source: "startTracking:existing"
+            )
             sampleStationaryLocationIfNeeded()
             checkLiveActivity()
             return
@@ -2094,6 +2127,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationManager.startMonitoringVisits()
         lastStartTrackingAt = now
         isTracking = true
+        HealthManager.shared.startActivityTracking()
+        updateUIMovementState(
+            isMovingEvidence: HealthManager.shared.isMoving,
+            source: "startTracking:new"
+        )
         checkLiveActivity()
 
         // CLLocationManager 的参数不会跨进程可靠保留；每次恢复记录都重新应用用户选择，
@@ -2541,7 +2579,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // 全局纠正：进入中国境内后，立即将 WGS-84 转换为 GCJ-02
         // 这样后续所有逻辑（足迹存储、地标匹配、UI显示）都统一使用火星坐标系
         let location = rawLocation.gcj02
-        let isFreshLocation = abs(location.timestamp.timeIntervalSinceNow) < 30
+        let isFreshLocation = abs(location.timestamp.timeIntervalSinceNow)
+            < AppConfig.shared.currentLocationFreshnessThreshold
 
         // --- UI 移动状态证据（用于卡片标题稳定显示） ---
         let motion = HealthManager.shared.currentMotionType
@@ -2583,7 +2622,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // 或位置推算出极高速、但 Core Location 自身并没有报告高速。
                 // 不能仅因 >216km/h + 精度 >80m 就丢弃：高铁的真实定位会恰好满足它，
                 // 这样会让旧的实时停留永远得不到“已离开”的点。
-                let hasReportedHighSpeed = location.speed >= 20.0
+                let hasReportedHighSpeed = location.speed >= AppConfig.shared.reportedHighSpeedThreshold
                 let isRidiculous = (location.horizontalAccuracy > 400 && dist > 1500 && !hasReportedHighSpeed)
                     || (calcSpeed > 60.0 && location.horizontalAccuracy > 80 && !hasReportedHighSpeed)
                 if isRidiculous && !isPreciseReturnFromWeakCluster {
@@ -2856,7 +2895,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // A: 如果有匹配地点，且地点 ID 变了，判定为离开
                 // B: 如果没有匹配地点，且位移超过 150m，且精度尚可，判定为离开（放宽到 150m 减少因室内飘移导致的停留时刻重置）
                 let isSamePlace = (startPlace != nil && startPlace?.placeID == currentPlace?.placeID)
-                if hasConfirmedDeparture(from: startLoc, to: location, isSamePlace: isSamePlace, isMovingBySensor: isMovingBySensor) {
+                if Self.hasConfirmedDeparture(from: startLoc, to: location, isSamePlace: isSamePlace, isMovingBySensor: isMovingBySensor) {
                     transitionToMovingAfterConfirmedDeparture(source: "location")
                 }
             } else {
@@ -2877,10 +2916,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                location.horizontalAccuracy > 0, location.horizontalAccuracy < 100,
                let context = modelContext {
                 let observedEnd = location.timestamp
+                let continuationLookupStart = ongoingStart.addingTimeInterval(
+                    -AppConfig.shared.activityContinuationTolerance
+                )
                 var descriptor = FetchDescriptor<Footprint>(predicate: #Predicate {
                     $0.statusValue == "manual" && $0.allowsAutomaticDurationExtension &&
-                    $0.endTime >= ongoingStart && $0.startTime < observedEnd
-                }, sortBy: [SortDescriptor(\.startTime, order: .reverse)])
+                    $0.endTime >= continuationLookupStart && $0.startTime < observedEnd
+                }, sortBy: [SortDescriptor(\.endTime, order: .reverse)])
                 descriptor.fetchLimit = 1
                 if let edited = (try? context.fetch(descriptor))?.first,
                    Footprint.extendActivityEditedStay(start: max(ongoingStart, edited.startTime),
@@ -2911,31 +2953,38 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 CurrentLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: modelContext)
             }
 #endif
+            WatchSyncManager.shared.syncMovingAverageSpeedIfNeeded()
         }
     }
 
-    private func hasConfirmedDeparture(
+    static func hasConfirmedDeparture(
         from startLoc: CLLocation,
         to location: CLLocation,
         isSamePlace: Bool,
-        isMovingBySensor: Bool
+        isMovingBySensor: Bool,
+        now: Date = Date()
     ) -> Bool {
         let distance = location.distance(from: startLoc)
         // 高铁等高速交通中，系统已报告的速度是明确的离开证据；这时定位精度常会
-        // 暂时超过普通停留判定的 100m 上限。只要已远离 500m，就必须立即结束停留。
-        if location.speed >= 20.0 && distance > 500.0 {
+        // 暂时超过普通停留精度上限。只要高速且已远离配置距离，就必须立即结束停留。
+        if location.speed >= AppConfig.shared.reportedHighSpeedThreshold
+            && distance > AppConfig.shared.departureHighSpeedDistance {
             return true
         }
 
         guard !isSamePlace else { return false }
-        guard location.horizontalAccuracy >= 0 && location.horizontalAccuracy < 100.0 else { return false }
-        guard distance > 150.0 else { return false }
+        guard location.horizontalAccuracy >= 0
+            && location.horizontalAccuracy < AppConfig.shared.departureAccuracyThreshold else { return false }
+        guard distance > AppConfig.shared.departureDistanceThreshold else { return false }
 
         // 长时间宅家/办公后，启动时常会先收到一个单点 GPS 漂移。没有运动证据时不要仅凭
-        // 150m 左右的单点位移清空当前停留，否则首页会短暂或持续显示“正在移动”。
-        let stayDuration = Date().timeIntervalSince(startLoc.timestamp)
-        if stayDuration > 30 * 60 && !isMovingBySensor {
-            let driftResistantThreshold = max(300.0, location.horizontalAccuracy * 3.0)
+        // 单点位移清空当前停留，否则首页会短暂或持续显示“正在移动”。
+        let stayDuration = now.timeIntervalSince(startLoc.timestamp)
+        if stayDuration > AppConfig.shared.departureLongStayDuration && !isMovingBySensor {
+            let driftResistantThreshold = max(
+                AppConfig.shared.departureDriftResistantFloor,
+                location.horizontalAccuracy * AppConfig.shared.departureDriftResistantRatio
+            )
             return distance > driftResistantThreshold
         }
 
@@ -2952,9 +3001,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         ongoingTitle = nil
         saveOngoingTitle()
         updateUIMovementState(isMovingEvidence: true, source: "departure:\(source)")
+        if let departureFix = lastLocation {
+            uiMovingStartedAt = min(uiMovingStartedAt ?? departureFix.timestamp, departureFix.timestamp)
+        }
         // uiIsMoving may already be true, so its change handler is not guaranteed
         // to fire here. The cleared stay anchor changes the shared state itself.
         checkLiveActivity(forceContentUpdate: true)
+        WatchSyncManager.shared.syncSnapshot()
     }
     
     private func checkDailyPastMemories() {
@@ -5610,15 +5663,12 @@ final class CurrentLiveActivityManager {
         // Use exactly the same state that makes the current timeline row show
         // “正在移动”. Do not independently infer transport for Live Activity.
         if manager.isCurrentlyMoving {
-            let recentThreshold = now.addingTimeInterval(-5 * 60)
-            var descriptor = FetchDescriptor<TransportRecord>(
-                predicate: #Predicate {
-                    $0.statusRaw == "active" && $0.startTime <= now && $0.endTime >= recentThreshold
-                },
-                sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+            let transport = WatchSyncManager.currentTransportRecord(
+                in: context,
+                now: now,
+                isCurrentlyMoving: manager.isCurrentlyMoving,
+                movingStartedAt: manager.uiMovingStartedAt
             )
-            descriptor.fetchLimit = 1
-            let transport = try? context.fetch(descriptor).first
             if transport == nil {
                 return provisionalTransportState(
                     location: location,
@@ -5634,6 +5684,13 @@ final class CurrentLiveActivityManager {
             let type = TransportType(rawValue: transport.manualTypeRaw ?? transport.typeRaw) ?? .slow
             let route = ((try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData)) ?? [])
                 .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+            let averageSpeed = WatchSyncManager.currentMovementAverageSpeed(
+                persistedAverageSpeed: transport.averageSpeed,
+                locations: manager.allTodayPoints,
+                movingStartedAt: manager.uiMovingStartedAt,
+                now: now,
+                isCurrentlyMoving: manager.isCurrentlyMoving
+            )
             let placeName = normalizedPlaceName(manager.currentAddress, fallback: "当前位置")
             return (
                 CurrentTrackingActivityAttributes.ContentState(
@@ -5647,7 +5704,7 @@ final class CurrentLiveActivityManager {
                     address: nil,
                     startLocation: transport.startLocation,
                     distance: transport.distance > 0 ? transport.distance : nil,
-                    averageSpeed: transport.averageSpeed > 0 ? transport.averageSpeed : nil,
+                    averageSpeed: averageSpeed,
                     latitude: location.coordinate.latitude,
                     longitude: location.coordinate.longitude,
                     mapRevision: mapRevision,
@@ -5664,22 +5721,14 @@ final class CurrentLiveActivityManager {
         provisionalTransportStartedAt = nil
         provisionalTransportStartLocation = nil
         let stayStart = stayAnchor.timestamp
-        var descriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate {
-                $0.statusValue != "ignored" && $0.endTime >= stayStart && $0.startTime <= now
-            },
-            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
-        )
-        descriptor.fetchLimit = 8
         let activePlaceID = manager.matchedPlace?.placeID
-        let footprint = (try? context.fetch(descriptor))?.first { candidate in
-            if let activePlaceID, candidate.placeID == activePlaceID { return true }
-            let candidateLocation = CLLocation(
-                latitude: candidate.latitude,
-                longitude: candidate.longitude
-            )
-            return candidateLocation.distance(from: stayAnchor) < AppConfig.shared.stayDistanceThreshold
-        }
+        let footprint = WatchSyncManager.currentStayFootprint(
+            in: context,
+            anchor: stayAnchor,
+            placeID: activePlaceID,
+            now: now,
+            distanceThreshold: AppConfig.shared.stayDistanceThreshold
+        )
         let activities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
         let activity = footprint?.getActivityType(from: activities)
         let matchedPlaceName = manager.matchedPlace.flatMap { $0.isIgnored ? nil : $0.name }
@@ -5691,6 +5740,7 @@ final class CurrentLiveActivityManager {
             ?? normalizedPlaceName(manager.currentAddress, fallback: "正在停留")
         let currentAddress = normalizedPlaceName(manager.currentAddress, fallback: "")
         let address = currentAddress.isEmpty || currentAddress == placeName ? nil : currentAddress
+        let isAwaitingLocation = manager.isAwaitingDepartureLocationConfirmation
         if footprint == nil {
             todaySummary.placeKeys.insert(
                 placeSummaryKey(
@@ -5706,11 +5756,11 @@ final class CurrentLiveActivityManager {
                 recordID: footprint?.footprintID.uuidString
                     ?? "ongoing-\(Int(stayStart.timeIntervalSince1970))",
                 startedAt: stayStart,
-                title: activity?.name ?? "停留",
-                icon: activity?.icon ?? "questionmark",
+                title: isAwaitingLocation ? "活动待确认" : (activity?.name ?? "停留"),
+                icon: isAwaitingLocation ? "location.slash.fill" : (activity?.icon ?? FootprintIconDefaults.card),
                 colorHex: activity?.colorHex,
-                placeName: placeName,
-                address: address,
+                placeName: isAwaitingLocation ? "等待定位信号" : placeName,
+                address: isAwaitingLocation ? nil : address,
                 startLocation: nil,
                 distance: nil,
                 averageSpeed: nil,
@@ -5736,7 +5786,8 @@ final class CurrentLiveActivityManager {
         photoAssetIDs: [String]
     ) {
         let now = Date()
-        let freshLocationStart = abs(location.timestamp.timeIntervalSince(now)) < 60
+        let freshLocationStart = abs(location.timestamp.timeIntervalSince(now))
+            < AppConfig.shared.currentLocationFreshnessThreshold
             ? location.timestamp
             : now
         let startedAt = provisionalTransportStartedAt ?? freshLocationStart
@@ -5759,40 +5810,26 @@ final class CurrentLiveActivityManager {
         }
 
         let distance = TimelineBuilder.calculateDistance(routePoints)
-        let duration = max(1, location.timestamp.timeIntervalSince(startedAt))
-        let averageSpeed = distance / duration
-        let type: TransportType
-        switch HealthManager.shared.currentMotionType {
-        case .walking: type = .slow
-        case .running: type = .running
-        case .cycling: type = .bicycle
-        case .automotive:
-            type = location.speed >= 28 ? .train : .car
-        default:
-            if averageSpeed >= 28 {
-                type = .train
-            } else if averageSpeed >= 9 {
-                type = .car
-            } else if averageSpeed >= 2.2 {
-                type = .bicycle
-            } else {
-                type = .slow
-            }
-        }
-
+        let averageSpeed = WatchSyncManager.currentMovementAverageSpeed(
+            persistedAverageSpeed: nil,
+            locations: routePoints,
+            movingStartedAt: startedAt,
+            now: now,
+            isCurrentlyMoving: manager.isCurrentlyMoving
+        )
         return (
             CurrentTrackingActivityAttributes.ContentState(
                 kind: .transport,
                 recordID: "provisional-\(Int(startedAt.timeIntervalSince1970))",
                 startedAt: startedAt,
-                title: type.localizedName,
-                icon: type.sfSymbol,
+                title: "移动",
+                icon: "location.north.line.fill",
                 colorHex: nil,
                 placeName: normalizedPlaceName(manager.currentAddress, fallback: "移动中"),
                 address: nil,
                 startLocation: provisionalTransportStartLocation,
                 distance: distance > 0 ? distance : nil,
-                averageSpeed: averageSpeed > 0 ? averageSpeed : nil,
+                averageSpeed: averageSpeed,
                 latitude: location.coordinate.latitude,
                 longitude: location.coordinate.longitude,
                 mapRevision: mapRevision,

@@ -19,6 +19,7 @@ struct WatchSnapshot: Codable {
     let currentActivityID: String?
     let currentTransportType: String?
     let currentTransportStartedAt: Date?
+    let currentAverageSpeed: Double?
     let todayFootprintCount: Int
     let todayDistance: Double
     let nextTrip: WatchTripSnapshot?
@@ -104,6 +105,7 @@ private struct WatchComplicationSnapshot: Codable {
     let currentActivityID: String?
     let currentTransportType: String?
     let currentTransportStartedAt: Date?
+    let currentAverageSpeed: Double?
     let todayFootprintCount: Int
     let todayDistance: Double
     let activities: [WatchActivityOption]
@@ -118,6 +120,7 @@ private struct WatchComplicationSnapshot: Codable {
         currentActivityID = snapshot.currentActivityID
         currentTransportType = snapshot.currentTransportType
         currentTransportStartedAt = snapshot.currentTransportStartedAt
+        currentAverageSpeed = snapshot.currentAverageSpeed
         todayFootprintCount = snapshot.todayFootprintCount
         todayDistance = snapshot.todayDistance
         activities = snapshot.activities
@@ -183,12 +186,14 @@ private struct WatchComplicationTimelineItem: Codable {
 @MainActor
 final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     static let shared = WatchSyncManager()
+    static let provisionalMovingType = "moving"
     private var modelContext: ModelContext?
     private let pendingActivityFootprintKey = "pendingWatchActivityFootprintID"
     private let pendingActivityIDKey = "pendingWatchActivityID"
     private let lastHourlySyncKey = "lastWatchHourlySyncTimestamp"
     private var footprintDataChangedObserver: NSObjectProtocol?
     private var pendingSnapshotSync: Task<Void, Never>?
+    private var lastMovingAverageSpeedSyncAt: Date = .distantPast
     private var pendingBackgroundSnapshotTransfer: WCSessionUserInfoTransfer?
     private var cachedStatistics: WatchStatisticsSnapshot?
     private var statisticsCacheDay: Date?
@@ -240,6 +245,9 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
               WCSession.default.activationState == .activated,
               WCSession.default.isWatchAppInstalled else { return }
         let snapshot = makeSnapshot(context: context)
+        if snapshot.currentTransportType != nil, snapshot.currentAverageSpeed != nil {
+            lastMovingAverageSpeedSyncAt = Date()
+        }
         let complicationSnapshot = WatchComplicationSnapshot(snapshot: snapshot)
         guard let complicationData = try? JSONEncoder().encode(complicationSnapshot) else { return }
         let complicationPayload = ["complicationSnapshot": complicationData]
@@ -307,6 +315,32 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         }
     }
 
+    /// While the Watch app is open, publish the same route-average speed used by
+    /// the iPhone transport UI without waiting for a full timeline rebuild.
+    func syncMovingAverageSpeedIfNeeded(now: Date = Date()) {
+        guard let context = modelContext,
+              LocationManager.shared.isCurrentlyMoving,
+              Self.currentMovementAverageSpeed(
+                persistedAverageSpeed: Self.currentTransportRecord(
+                    in: context,
+                    now: now,
+                    isCurrentlyMoving: true,
+                    movingStartedAt: LocationManager.shared.uiMovingStartedAt
+                )?.averageSpeed,
+                locations: LocationManager.shared.allTodayPoints,
+                movingStartedAt: LocationManager.shared.uiMovingStartedAt,
+                now: now,
+                isCurrentlyMoving: true
+              ) != nil,
+              now.timeIntervalSince(lastMovingAverageSpeedSyncAt)
+                >= AppConfig.shared.watchMovingSpeedSyncInterval,
+              WCSession.isSupported(),
+              WCSession.default.activationState == .activated,
+              WCSession.default.isWatchAppInstalled,
+              WCSession.default.isReachable else { return }
+        syncSnapshot()
+    }
+
     /// A best-effort hourly catch-up for the installed companion app. Location-triggered
     /// sync remains immediate; this covers changes that otherwise have no location event.
     func syncHourlyIfNeeded(now: Date = Date()) {
@@ -343,18 +377,32 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         let activities = ((try? context.fetch(FetchDescriptor<ActivityType>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? [])
             .map { WatchActivityOption(id: $0.id.uuidString, name: $0.name, icon: $0.icon, colorHex: $0.colorHex) }
         let latest = footprints.first
-        let recentTransportEndThreshold = now.addingTimeInterval(-5 * 60)
-        let transports = (try? context.fetch(FetchDescriptor<TransportRecord>(
-            predicate: #Predicate { $0.statusRaw == "active" && $0.startTime <= now && $0.endTime >= recentTransportEndThreshold },
-            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
-        ))) ?? []
         // A recently persisted transport may still end within the five-minute
         // lookup window after the user has explicitly arrived. Live stay state
         // is authoritative for whether Watch should continue showing "moving".
         let liveStayStart = LocationManager.shared.potentialStopStartLocation?.timestamp
-        let currentTransport = LocationManager.shared.isTracking && liveStayStart == nil
-            ? transports.first
-            : nil
+        let movingStartedAt = LocationManager.shared.uiMovingStartedAt
+        let currentTransport = Self.currentTransportRecord(
+            in: context,
+            now: now,
+            isCurrentlyMoving: LocationManager.shared.isCurrentlyMoving,
+            movingStartedAt: movingStartedAt
+        )
+        let currentTransportPresentation = Self.currentTransportPresentation(
+            persistedType: currentTransport.map { $0.manualTypeRaw ?? $0.typeRaw },
+            persistedStartedAt: currentTransport?.startTime,
+            isCurrentlyMoving: LocationManager.shared.isCurrentlyMoving,
+            provisionalType: Self.provisionalMovingType,
+            provisionalStartedAt: movingStartedAt
+                ?? LocationManager.shared.lastLocation?.timestamp
+        )
+        let currentAverageSpeed = Self.currentMovementAverageSpeed(
+            persistedAverageSpeed: currentTransport?.averageSpeed,
+            locations: LocationManager.shared.allTodayPoints,
+            movingStartedAt: movingStartedAt,
+            now: now,
+            isCurrentlyMoving: LocationManager.shared.isCurrentlyMoving
+        )
         let todayTransports = (try? context.fetch(FetchDescriptor<TransportRecord>(
             predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < todayEnd && $0.endTime >= todayStart },
             sortBy: [SortDescriptor(\.startTime)]
@@ -539,6 +587,9 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         let currentFootprint = liveStayStart == nil ? latest : liveFootprint
         let livePlaceName: String? = {
             guard liveStayStart != nil else { return nil }
+            if LocationManager.shared.isAwaitingDepartureLocationConfirmation {
+                return "检测到活动，等待定位"
+            }
             if let place = LocationManager.shared.matchedPlace, !place.isIgnored { return place.name }
             if let title = LocationManager.shared.ongoingTitle,
                !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
@@ -550,14 +601,15 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         return WatchSnapshot(
             currentFootprintID: currentFootprint?.footprintID.uuidString,
             placeName: livePlaceName ?? (latest?.address?.isEmpty == false ? latest!.address! : "正在定位"),
-            address: currentFootprint?.reason,
+            address: LocationManager.shared.isAwaitingDepartureLocationConfirmation ? nil : currentFootprint?.reason,
             startedAt: liveStayStart ?? latest?.startTime,
             isTracking: LocationManager.shared.isTracking,
             currentActivityID: currentFootprint?.activityTypeValue.flatMap {
                 activityByValue[$0.trimmingCharacters(in: .whitespacesAndNewlines)]?.id
             },
-            currentTransportType: currentTransport.map { $0.manualTypeRaw ?? $0.typeRaw },
-            currentTransportStartedAt: currentTransport?.startTime,
+            currentTransportType: currentTransportPresentation.type,
+            currentTransportStartedAt: currentTransportPresentation.startedAt,
+            currentAverageSpeed: currentAverageSpeed,
             todayFootprintCount: footprints.count,
             todayDistance: footprints.compactMap(\.walkingDistance).reduce(0, +),
             nextTrip: nextTrip,
@@ -569,26 +621,110 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         )
     }
 
+    static func currentTransportPresentation(
+        persistedType: String?,
+        persistedStartedAt: Date?,
+        isCurrentlyMoving: Bool,
+        provisionalType: String,
+        provisionalStartedAt: Date?
+    ) -> (type: String?, startedAt: Date?) {
+        if let persistedType {
+            return (persistedType, persistedStartedAt)
+        }
+        guard isCurrentlyMoving else { return (nil, nil) }
+        return (provisionalType, provisionalStartedAt)
+    }
+
+    /// Matches the iPhone transport model: accumulated route distance divided
+    /// by elapsed route time. A persisted TransportRecord is authoritative;
+    /// before one exists, calculate the same formula from the current route.
+    static func currentMovementAverageSpeed(
+        persistedAverageSpeed: Double?,
+        locations: [CLLocation],
+        movingStartedAt: Date?,
+        now: Date,
+        isCurrentlyMoving: Bool
+    ) -> Double? {
+        guard isCurrentlyMoving else { return nil }
+        if let persistedAverageSpeed,
+           persistedAverageSpeed.isFinite,
+           persistedAverageSpeed > 0 {
+            return persistedAverageSpeed
+        }
+
+        let route = locations
+            .filter { location in
+                location.timestamp <= now
+                    && (movingStartedAt.map { location.timestamp >= $0 } ?? true)
+                    && CLLocationCoordinate2DIsValid(location.coordinate)
+            }
+            .sorted { $0.timestamp < $1.timestamp }
+        guard let first = route.first,
+              let last = route.last,
+              route.count >= 2 else { return nil }
+        let duration = last.timestamp.timeIntervalSince(first.timestamp)
+        guard duration > 0 else { return nil }
+        let speed = TimelineBuilder.calculateDistance(route) / duration
+        return speed.isFinite && speed > 0 ? speed : nil
+    }
+
+    /// Single source of truth for the current persisted trip. Both Watch and
+    /// Live Activity must select the same record; otherwise one surface can
+    /// retain the previous trip while another independently classifies the new one.
+    static func currentTransportRecord(
+        in context: ModelContext,
+        now: Date,
+        isCurrentlyMoving: Bool,
+        movingStartedAt: Date?
+    ) -> TransportRecord? {
+        guard isCurrentlyMoving else { return nil }
+        let recentThreshold = now.addingTimeInterval(-AppConfig.shared.currentTransportLookback)
+        let descriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate {
+                $0.statusRaw == "active" && $0.startTime <= now && $0.endTime >= recentThreshold
+            },
+            sortBy: [SortDescriptor(\.endTime, order: .reverse)]
+        )
+        return ((try? context.fetch(descriptor)) ?? []).first { transport in
+            guard let movingStartedAt else { return true }
+            return transport.endTime >= movingStartedAt
+        }
+    }
+
     static func currentStayFootprint(
         in context: ModelContext,
         anchor: CLLocation,
         placeID: UUID?,
         now: Date,
-        distanceThreshold: Double
+        distanceThreshold: Double,
+        continuationTolerance: TimeInterval = AppConfig.shared.activityContinuationTolerance
     ) -> Footprint? {
         let stayStart = anchor.timestamp
+        let lookupStart = stayStart.addingTimeInterval(-continuationTolerance)
         // A continuing stay can be split at midnight; select its latest segment.
         let descriptor = FetchDescriptor<Footprint>(
             predicate: #Predicate {
-                $0.statusValue != "ignored" && $0.endTime >= stayStart && $0.startTime <= now
+                $0.statusValue != "ignored" && $0.endTime >= lookupStart && $0.startTime <= now
             },
             sortBy: [SortDescriptor(\.endTime, order: .reverse), SortDescriptor(\.startTime, order: .reverse)]
         )
-        return (try? context.fetch(descriptor))?.first { candidate in
+        let matches = ((try? context.fetch(descriptor)) ?? []).filter { candidate in
             if let placeID, candidate.placeID == placeID { return true }
             return CLLocation(latitude: candidate.latitude, longitude: candidate.longitude)
                 .distance(from: anchor) < distanceThreshold
         }
+
+        // Activity-only edits deliberately keep the current stay extendable. The
+        // live processor may advance its provisional anchor a few seconds beyond
+        // the persisted footprint end; retain that edited record across this
+        // sampling seam instead of briefly falling back to an unknown activity.
+        if let editedContinuation = matches.first(where: {
+            $0.status == .manual && $0.allowsAutomaticDurationExtension &&
+            $0.endTime >= lookupStart
+        }) {
+            return editedContinuation
+        }
+        return matches.first(where: { $0.endTime >= stayStart })
     }
 
     func applyActivityChange(footprintID: String, activityID: String?) {

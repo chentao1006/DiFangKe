@@ -603,7 +603,7 @@ private struct ContinuousTimelineView: View {
 
         if url.path == "/action",
            components.queryItems?.first(where: { $0.name == "type" })?.value == "arrive" {
-            let recentThreshold = Date().addingTimeInterval(-5 * 60)
+            let recentThreshold = Date().addingTimeInterval(-AppConfig.shared.currentTransportLookback)
             let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
                 $0.recordID == id && $0.statusRaw == "active" && $0.endTime >= recentThreshold
             })
@@ -5781,6 +5781,7 @@ private struct ContinuousTimelinePhotoThumbnail: View {
 }
 
 private struct CurrentStayTimelineCard: View {
+    @Environment(\.modelContext) private var modelContext
     let locationManager: LocationManager
     @State private var showingOngoingLocationSearch = false
     @State private var showingArrivalConfirmation = false
@@ -5916,6 +5917,10 @@ private struct CurrentStayTimelineCard: View {
             return "正在移动"
         }
 
+        if locationManager.isAwaitingDepartureLocationConfirmation {
+            return "检测到活动，等待定位"
+        }
+
         return "正在\(resolvedPlaceName)停留"
     }
 
@@ -5939,12 +5944,33 @@ private struct CurrentStayTimelineCard: View {
     }
 
     private func detailText(for timestamp: Date, now: Date) -> String {
+        if locationManager.isAwaitingDepartureLocationConfirmation {
+            return "暂不判定离开或停留"
+        }
+
         if locationManager.potentialStopStartLocation != nil || !locationManager.uiIsMoving {
             return "已 \(now.timeIntervalSince(timestamp).formattedTimelineDuration)"
         }
 
-        let speedKmh = max(locationManager.lastLocation?.speed ?? 0, 0) * 3.6
-        return String(format: "当前速度 %.1f 千米/小时", speedKmh)
+        let currentTransport = WatchSyncManager.currentTransportRecord(
+            in: modelContext,
+            now: now,
+            isCurrentlyMoving: locationManager.isCurrentlyMoving,
+            movingStartedAt: locationManager.uiMovingStartedAt
+        )
+        if let averageSpeed = WatchSyncManager.currentMovementAverageSpeed(
+            persistedAverageSpeed: currentTransport?.averageSpeed,
+            locations: locationManager.allTodayPoints,
+            movingStartedAt: locationManager.uiMovingStartedAt,
+            now: now,
+            isCurrentlyMoving: locationManager.isCurrentlyMoving
+        ) {
+            let speedKmh = Measurement(value: averageSpeed, unit: UnitSpeed.metersPerSecond)
+                .converted(to: .kilometersPerHour)
+                .value
+            return String(format: "平均速度 %.1f 千米/小时", speedKmh)
+        }
+        return "运动传感器检测到移动"
     }
 }
 

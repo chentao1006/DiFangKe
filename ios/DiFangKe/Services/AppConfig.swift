@@ -411,6 +411,22 @@ class AppConfig {
         double(forKey: "UI_MOVING_HOLD_DURATION")
     }
 
+    var currentLocationFreshnessThreshold: Double {
+        double(forKey: "CURRENT_LOCATION_FRESHNESS_THRESHOLD")
+    }
+
+    var activityContinuationTolerance: Double {
+        double(forKey: "ACTIVITY_CONTINUATION_TOLERANCE")
+    }
+
+    var currentTransportLookback: Double {
+        double(forKey: "CURRENT_TRANSPORT_LOOKBACK")
+    }
+
+    var watchMovingSpeedSyncInterval: Double {
+        double(forKey: "WATCH_MOVING_SPEED_SYNC_INTERVAL")
+    }
+
     var geocodeHighSpeedThreshold: Double {
         double(forKey: "GEOCODE_HIGH_SPEED_THRESHOLD")
     }
@@ -655,6 +671,10 @@ class AppConfig {
 
     var walkingSuspiciousSpeed: Double {
         double(forKey: "WALKING_SUSPICIOUS_SPEED")
+    }
+
+    var transportRepairFallbackPointCount: Int {
+        int(forKey: "TRANSPORT_REPAIR_FALLBACK_POINT_COUNT")
     }
 
     var reconstructionBoundaryTolerance: Double {

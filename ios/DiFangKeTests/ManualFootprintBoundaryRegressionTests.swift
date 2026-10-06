@@ -72,6 +72,34 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
         ))
     }
 
+    func testCurrentStayKeepsActivityEditedFootprintAcrossAdvancedAnchor() throws {
+        let context = ModelContext(try makeContainer())
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let coordinate = CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
+        let editedEnd = start.addingTimeInterval(20 * 60)
+        let edited = footprint(start: start, end: editedEnd, activity: "food", status: .confirmed)
+        context.insert(edited)
+        edited.setManualActivityType("food")
+        let anchor = CLLocation(
+            coordinate: coordinate,
+            altitude: 0,
+            horizontalAccuracy: 10,
+            verticalAccuracy: 10,
+            timestamp: editedEnd.addingTimeInterval(45)
+        )
+
+        let selected = WatchSyncManager.currentStayFootprint(
+            in: context,
+            anchor: anchor,
+            placeID: nil,
+            now: anchor.timestamp.addingTimeInterval(60),
+            distanceThreshold: 100
+        )
+
+        XCTAssertEqual(selected?.footprintID, edited.footprintID)
+        XCTAssertEqual(selected?.activityTypeValue, "food")
+    }
+
     func testNormalSparseRoundTripIsNotMarkedAsDrift() {
         let start = Date(timeIntervalSince1970: 1_800_000_000)
         let samples: [(TimeInterval, Double, Double)] = [
@@ -194,6 +222,87 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
         )
     }
 
+    func testAutomaticCarIsReclassifiedAfterItsMergedSpeedBecomesRailScale() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let distance = 124_700.0
+        let duration = distance / (596.8 / 3.6)
+        let record = TransportRecord(
+            day: Calendar.current.startOfDay(for: start),
+            startTime: start,
+            endTime: start.addingTimeInterval(duration),
+            typeRaw: TransportType.car.rawValue,
+            distance: distance,
+            averageSpeed: distance / duration,
+            pointsData: Data()
+        )
+
+        XCTAssertTrue(PersistentTimelineBuilder.repairImpossibleAutomaticTransportTypes(
+            [record],
+            preferredAuto: .car,
+            preferredCycling: .bicycle,
+            preferredTransport: .car
+        ))
+        XCTAssertEqual(record.typeRaw, TransportType.train.rawValue)
+        XCTAssertEqual(record.averageSpeed, 0)
+    }
+
+    func testImpossibleSparseTrainSpeedIsMarkedUnavailable() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let distance = 124_700.0
+        let duration = distance / (596.8 / 3.6)
+        let record = TransportRecord(
+            day: Calendar.current.startOfDay(for: start),
+            startTime: start,
+            endTime: start.addingTimeInterval(duration),
+            typeRaw: TransportType.train.rawValue,
+            distance: distance,
+            averageSpeed: distance / duration,
+            pointsData: Data()
+        )
+
+        XCTAssertTrue(PersistentTimelineBuilder.repairImpossibleAutomaticTransportTypes(
+            [record],
+            preferredAuto: .car,
+            preferredCycling: .bicycle,
+            preferredTransport: .car
+        ))
+        XCTAssertEqual(record.typeRaw, TransportType.train.rawValue)
+        XCTAssertEqual(record.averageSpeed, 0)
+    }
+
+    func testTransportTimeEditPreservesRouteDistanceAndEndpointNames() throws {
+        let originalStart = Date(timeIntervalSince1970: 1_800_000_000)
+        let originalEnd = originalStart.addingTimeInterval(30 * 60)
+        let points = [
+            CodableCoordinate(lat: 31.2304, lon: 121.4737, timestamp: originalStart),
+            CodableCoordinate(lat: 31.2500, lon: 121.5000, timestamp: originalEnd),
+        ]
+        let pointsData = try JSONEncoder().encode(points)
+        let record = TransportRecord(
+            day: Calendar.current.startOfDay(for: originalStart),
+            startTime: originalStart,
+            endTime: originalEnd,
+            startLocation: "上海虹桥站",
+            endLocation: "上海站",
+            typeRaw: TransportType.train.rawValue,
+            distance: 18_500,
+            averageSpeed: 18_500 / (30 * 60),
+            pointsData: pointsData
+        )
+
+        let editedStart = originalStart.addingTimeInterval(-15 * 60)
+        let editedEnd = originalEnd.addingTimeInterval(20 * 60)
+        record.updateTimeRangePreservingRoute(start: editedStart, end: editedEnd)
+
+        XCTAssertEqual(record.startTime, editedStart)
+        XCTAssertEqual(record.endTime, editedEnd)
+        XCTAssertEqual(record.startLocation, "上海虹桥站")
+        XCTAssertEqual(record.endLocation, "上海站")
+        XCTAssertEqual(record.pointsData, pointsData)
+        XCTAssertEqual(record.distance, 18_500)
+        XCTAssertEqual(record.averageSpeed, 18_500 / editedEnd.timeIntervalSince(editedStart), accuracy: 0.000_001)
+    }
+
     func testStableStayBoundariesRecoverClippedShortTransportWithoutAcceptingDrift() throws {
         let base = Date(timeIntervalSince1970: 1_790_207_077)
         func point(
@@ -291,6 +400,157 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
         XCTAssertFalse(LocationManager.hasPromptAutomaticDepartureEvidence(
             fix(latitude: 31.23075, speed: 0.2), from: anchor
         ))
+    }
+
+    func testReportedHighSpeedConfirmsDepartureAfterMeaningfulDistance() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let anchor = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737),
+            altitude: 0,
+            horizontalAccuracy: 10,
+            verticalAccuracy: 10,
+            timestamp: now.addingTimeInterval(-3600)
+        )
+        func fix(latitude: Double) -> CLLocation {
+            CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: 121.4737),
+                altitude: 0,
+                horizontalAccuracy: 180,
+                verticalAccuracy: 20,
+                course: 0,
+                speed: 40,
+                timestamp: now
+            )
+        }
+
+        XCTAssertTrue(LocationManager.hasConfirmedDeparture(
+            from: anchor,
+            to: fix(latitude: 31.2360),
+            isSamePlace: true,
+            isMovingBySensor: false,
+            now: now
+        ))
+        XCTAssertFalse(LocationManager.hasConfirmedDeparture(
+            from: anchor,
+            to: fix(latitude: 31.2330),
+            isSamePlace: false,
+            isMovingBySensor: true,
+            now: now
+        ))
+    }
+
+    func testWatchShowsProvisionalMovingStateBeforeTransportIsPersisted() {
+        let startedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let presentation = WatchSyncManager.currentTransportPresentation(
+            persistedType: nil,
+            persistedStartedAt: nil,
+            isCurrentlyMoving: true,
+            provisionalType: WatchSyncManager.provisionalMovingType,
+            provisionalStartedAt: startedAt
+        )
+
+        XCTAssertEqual(presentation.type, WatchSyncManager.provisionalMovingType)
+        XCTAssertEqual(presentation.startedAt, startedAt)
+    }
+
+    func testCurrentMovementAverageSpeedMatchesTransportDistanceOverDuration() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let first = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737),
+            altitude: 0,
+            horizontalAccuracy: 10,
+            verticalAccuracy: 10,
+            course: 0,
+            speed: 50,
+            timestamp: now.addingTimeInterval(-60)
+        )
+        let last = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 31.2394, longitude: 121.4737),
+            altitude: 0,
+            horizontalAccuracy: 10,
+            verticalAccuracy: 10,
+            course: 0,
+            speed: 1,
+            timestamp: now
+        )
+        let expected = first.distance(from: last) / 60
+
+        let calculated = WatchSyncManager.currentMovementAverageSpeed(
+            persistedAverageSpeed: nil,
+            locations: [first, last],
+            movingStartedAt: first.timestamp,
+            now: now,
+            isCurrentlyMoving: true
+        )
+        XCTAssertNotNil(calculated)
+        XCTAssertEqual(calculated!, expected, accuracy: 0.001)
+        XCTAssertEqual(
+            WatchSyncManager.currentMovementAverageSpeed(
+                persistedAverageSpeed: 12.5,
+                locations: [first, last],
+                movingStartedAt: first.timestamp,
+                now: now,
+                isCurrentlyMoving: true
+            ),
+            12.5
+        )
+        XCTAssertNil(
+            WatchSyncManager.currentMovementAverageSpeed(
+                persistedAverageSpeed: 12.5,
+                locations: [first, last],
+                movingStartedAt: first.timestamp,
+                now: now,
+                isCurrentlyMoving: false
+            )
+        )
+    }
+
+    func testWatchDoesNotInventTransportBeforeDepartureIsConfirmed() {
+        let presentation = WatchSyncManager.currentTransportPresentation(
+            persistedType: nil,
+            persistedStartedAt: nil,
+            isCurrentlyMoving: false,
+            provisionalType: TransportType.car.rawValue,
+            provisionalStartedAt: Date()
+        )
+
+        XCTAssertNil(presentation.type)
+        XCTAssertNil(presentation.startedAt)
+    }
+
+    func testWatchAndLiveActivitySelectTheSameCurrentTransport() throws {
+        let context = ModelContext(try makeContainer())
+        let movingStartedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let previous = TransportRecord(
+            day: Calendar.current.startOfDay(for: movingStartedAt),
+            startTime: movingStartedAt.addingTimeInterval(-20 * 60),
+            endTime: movingStartedAt.addingTimeInterval(-30),
+            typeRaw: TransportType.subway.rawValue,
+            distance: 8_000,
+            averageSpeed: 10,
+            pointsData: Data()
+        )
+        let current = TransportRecord(
+            day: Calendar.current.startOfDay(for: movingStartedAt),
+            startTime: movingStartedAt,
+            endTime: movingStartedAt.addingTimeInterval(90),
+            typeRaw: TransportType.bicycle.rawValue,
+            distance: 500,
+            averageSpeed: 5,
+            pointsData: Data()
+        )
+        context.insert(previous)
+        context.insert(current)
+
+        let selected = WatchSyncManager.currentTransportRecord(
+            in: context,
+            now: movingStartedAt.addingTimeInterval(90),
+            isCurrentlyMoving: true,
+            movingStartedAt: movingStartedAt
+        )
+
+        XCTAssertEqual(selected?.recordID, current.recordID)
+        XCTAssertEqual(selected?.typeRaw, TransportType.bicycle.rawValue)
     }
 
     func testAutomaticStartDoesNotKeepOldHeartbeatOrMergedStart() throws {
@@ -805,6 +1065,45 @@ final class DuplicateTransportEndpointRegressionTests: XCTestCase {
         let second = try record(offset: 600, route: [(25, 102), (25.01, 102.01)])
         XCTAssertTrue(PersistentTimelineBuilder.isSameAutomaticTrip(first, second))
         XCTAssertTrue(PersistentTimelineBuilder.isSameAutomaticTrip(second, first))
+    }
+
+    func testPostGapFillMergeCombinesAdjacentRailSegments() async throws {
+        let schema = Schema([
+            Footprint.self, Place.self, TransportManualSelection.self, ActivityType.self,
+            DailyInsight.self, TransportRecord.self, FutureTrip.self,
+        ])
+        let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = ModelContext(container)
+        let first = try record(
+            offset: 0,
+            duration: 6 * 60,
+            route: [(25.0000, 102.0000), (25.0200, 102.0200)]
+        )
+        first.typeRaw = TransportType.train.rawValue
+        first.distance = 3_600
+        first.averageSpeed = first.distance / first.endTime.timeIntervalSince(first.startTime)
+        let second = try record(
+            offset: 7 * 60,
+            duration: 27 * 60,
+            route: [(25.0200, 102.0200), (25.1600, 102.1600)]
+        )
+        second.typeRaw = TransportType.train.rawValue
+        second.distance = 20_600
+        second.averageSpeed = second.distance / second.endTime.timeIntervalSince(second.startTime)
+        let expectedEnd = second.endTime
+        context.insert(first)
+        context.insert(second)
+        try context.save()
+
+        await PersistentTimelineBuilder.mergeConsecutiveTransports(for: day, in: context)
+        try context.save()
+
+        let remaining = try context.fetch(FetchDescriptor<TransportRecord>())
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining.first?.startTime, first.startTime)
+        XCTAssertEqual(remaining.first?.endTime, expectedEnd)
+        XCTAssertEqual(remaining.first?.distance, 24_200)
     }
 
     func testSameSamplesWithShiftedRecordBoundsStillDeduplicate() throws {

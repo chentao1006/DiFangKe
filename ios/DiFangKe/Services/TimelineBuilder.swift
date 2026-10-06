@@ -1557,11 +1557,12 @@ class PersistentTimelineBuilder {
         return TransportType.allCases.first { counts[$0] == highestCount }
     }
 
-    /// 修正历史上已经落库、但物理上不可能是步行的自动交通记录。
+    /// 修正历史上已经落库、但当前距离/时长已使原类型在物理上不可能的自动交通记录。
+    /// 合并、补洞和边界修复都会改变平均速度，不能只修复“步行”而放任一条
+    /// 596km/h 的记录继续保留早期暂定的“汽车”类型。
     /// 手动选择过的记录属于用户事实，绝不能被自动纠正覆盖。
-    private static func repairImpossibleAutomaticTransportTypes(
+    static func repairImpossibleAutomaticTransportTypes(
         _ transports: [TransportRecord],
-        in context: ModelContext,
         preferredAuto: TransportType,
         preferredCycling: TransportType,
         preferredTransport: TransportType?
@@ -1569,32 +1570,55 @@ class PersistentTimelineBuilder {
         var changed = false
         for transport in transports {
             guard transport.manualTypeRaw == nil,
-                  transport.typeRaw == TransportType.slow.rawValue || transport.typeRaw == TransportType.running.rawValue else {
-                continue
-            }
+                  transport.statusRaw != "ignored",
+                  let storedType = TransportType(rawValue: transport.typeRaw) else { continue }
 
             // Nearby trips with similar distances may be a real walking
             // connection. Type repair must never delete their observations;
             // duplicate removal is owned by the shared route-aware cleanup.
             let duration = transport.endTime.timeIntervalSince(transport.startTime)
-            guard duration > 0, transport.distance >= 1_000 else { continue }
-            let kmh = transport.distance / duration * 3.6
+            guard duration > 0,
+                  transport.distance >= AppConfig.shared.walkingSanityMinDistance else { continue }
+            let kmh = Measurement(
+                value: transport.distance / duration,
+                unit: UnitSpeed.metersPerSecond
+            ).converted(to: .kilometersPerHour).value
             let stepCount = transport.stepCount ?? 0
-            let minutes = duration / 60
+            let minutes = Measurement(value: duration, unit: UnitDuration.seconds)
+                .converted(to: .minutes)
+                .value
             let stepsPerMinute = minutes > 0 ? Double(stepCount) / minutes : 0
-            // 普通城市电动车行程常年被红灯/拥堵拉到 15km/h 以下，物理速度上界
+            // 普通城市电动车行程可能被红灯/拥堵拉低，物理速度上界
             // 抓不住它们。这里额外用步数兜底：真实步行的步频远高于电动车骑行，
             // 步数明显低于正常步行水平时，即使均速不算"不可能"也当作误判处理。
-            let hasImpossibleWalkingSpeed = kmh >= 15
-            let hasImplausiblyFewSteps = transport.stepCount != nil && stepsPerMinute < 12 && stepCount < 40
-            guard hasImpossibleWalkingSpeed || (hasImplausiblyFewSteps && kmh >= 3) else { continue }
+            let hasImpossibleWalkingSpeed = kmh >= AppConfig.shared.walkingImpossibleSpeed
+            let hasImplausiblyFewSteps = transport.stepCount != nil
+                && stepsPerMinute < AppConfig.shared.walkingMinStepsPerMinute
+                && stepCount < AppConfig.shared.walkingMinStepCount
+            let needsFootRepair =
+                (storedType == .slow || storedType == .running) &&
+                (hasImpossibleWalkingSpeed
+                    || (hasImplausiblyFewSteps && kmh >= AppConfig.shared.walkingSuspiciousSpeed))
+            // Lower-than-usual averages can be congestion or waiting time, so
+            // only enforce the physical upper bound for an existing vehicle.
+            let exceedsStoredTypeMaximum = storedType.automaticSpeedRange.map {
+                kmh > $0.upperBound
+            } ?? false
+            guard needsFootRepair || exceedsStoredTypeMaximum else { continue }
+
+            let decodedPoints = (try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData)) ?? []
+            let observedPointCount = decodedPoints.filter { $0.isSyntheticPadding != true }.count
 
             let inferred = TransportType.from(
                 speed: transport.distance / duration,
                 stepCount: stepCount,
                 duration: duration,
                 distanceMeters: transport.distance,
-                pointCount: 2,
+                pointCount: max(
+                    decodedPoints.count,
+                    AppConfig.shared.transportRepairFallbackPointCount
+                ),
+                observedPointCount: decodedPoints.isEmpty ? nil : observedPointCount,
                 preferredAutomotive: preferredAuto,
                 preferredCycling: preferredCycling,
                 preferredTransport: preferredTransport
@@ -1606,8 +1630,28 @@ class PersistentTimelineBuilder {
                 corrected = inferred
             }
             guard corrected != .slow, corrected != .running else { continue }
-            transport.typeRaw = corrected.rawValue
-            changed = true
+
+            var recordChanged = false
+            if corrected != storedType {
+                transport.typeRaw = corrected.rawValue
+                recordChanged = true
+            }
+
+            // Sparse GPS can provide a full endpoint-to-endpoint distance but
+            // only a clipped observation interval.  That quotient is not an
+            // observed speed: 124.7 km divided by 12m32s produced 596.8 km/h
+            // for a real high-speed-rail trip.  Keep the route and inferred
+            // type, but persist zero as the existing "unavailable" sentinel
+            // instead of presenting an impossible number as measured fact.
+            let remainsPhysicallyImpossible = corrected.automaticSpeedRange.map {
+                kmh > $0.upperBound
+            } ?? false
+            if remainsPhysicallyImpossible && transport.averageSpeed != 0 {
+                transport.averageSpeed = 0
+                recordChanged = true
+            }
+
+            changed = recordChanged || changed
         }
         return changed
     }
@@ -1783,7 +1827,6 @@ class PersistentTimelineBuilder {
 
         if repairImpossibleAutomaticTransportTypes(
             allTps,
-            in: context,
             preferredAuto: preferredAuto,
             preferredCycling: preferredCycling,
             preferredTransport: preferredRoadTransport
@@ -2022,8 +2065,26 @@ class PersistentTimelineBuilder {
         await removeDuplicateRouteTransports(for: date, in: context)
         await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredRoadTransport)
         await fillGapsBetweenItems(for: date, in: context, allRawPoints: allRawPoints, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredRoadTransport)
+        // Gap filling is also a transport writer. It can append a continuation
+        // immediately after the trip that was already merged above, so clean
+        // up again after the new records exist. Without this second merge a
+        // single continuous journey is displayed as two adjacent transports.
+        await removeDuplicateRouteTransports(for: date, in: context)
+        await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredRoadTransport)
         await removeDuplicateRouteTransports(for: date, in: context)
         await snapTransportsToFootprints(for: date, in: context, allRawPoints: allRawPoints)
+        // Every writer above can change distance or time. Re-run the same
+        // physical-limit repair in this sync so a provisional road type cannot
+        // survive until the next launch after becoming a rail/air-speed record.
+        let finalAutomaticTransports = (try? context.fetch(tpDesc)) ?? []
+        if repairImpossibleAutomaticTransportTypes(
+            finalAutomaticTransports,
+            preferredAuto: preferredAuto,
+            preferredCycling: preferredCycling,
+            preferredTransport: preferredRoadTransport
+        ) {
+            try? context.save()
+        }
         try? context.save()
         // ----------------------------------------------------
         
@@ -2058,7 +2119,7 @@ class PersistentTimelineBuilder {
 
 
     @MainActor
-    private static func mergeConsecutiveTransports(for date: Date, in context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle, preferredTransport: TransportType? = nil) async {
+    static func mergeConsecutiveTransports(for date: Date, in context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle, preferredTransport: TransportType? = nil) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
@@ -2116,16 +2177,19 @@ class PersistentTimelineBuilder {
             // 遇红灯，均速被拖到步行区间）。这种情况下放行合并，交给下面
             // 1937-1951行的重新分类逻辑按合并后的整段速度重判类型，而不是让
             // "类别必须相同"卡住合并，把一趟连续行程硬生生拆成步行+电动车。
-            let isImmediatelyAdjacent = gap >= -60 && gap <= 60
+            let adjacencyTolerance = AppConfig.shared.transportAdjacencyTolerance
+            let isImmediatelyAdjacent = gap >= -adjacencyTolerance && gap <= adjacencyTolerance
             let isCompatible = getCategory(currentType) == getCategory(nextType) || (isImmediatelyAdjacent && !hasFpBetween)
 
-            // If they are less than 15 minutes apart and no footprint in between, merge them!
+            // Merge only within the configured gap and never across a real stay.
             let crossesDeletedTransport = overlapsDeletedTransportOverride(
                 start: min(current.startTime, next.startTime),
                 end: max(current.endTime, next.endTime),
                 deletedRanges: deletedTransportRanges
             )
-            if gap >= -60 && gap <= 900 && !hasFpBetween && isCompatible && !crossesDeletedTransport {
+            if gap >= -adjacencyTolerance
+                && gap <= AppConfig.shared.transportMergeGapTolerance
+                && !hasFpBetween && isCompatible && !crossesDeletedTransport {
                 current.endTime = max(current.endTime, next.endTime)
                 current.distance += next.distance
                 let duration = current.endTime.timeIntervalSince(current.startTime)
@@ -3997,7 +4061,8 @@ class PersistentTimelineBuilder {
                 second.endTime.timeIntervalSince(second.startTime)
             )
         }
-        if shorterDuration > 0 && overlap / shorterDuration >= 0.8 {
+        if shorterDuration > 0
+            && overlap / shorterDuration >= AppConfig.shared.transportOverlapRatioThreshold {
             return true
         }
         // Manual intervals are boundaries, even if a neighboring automatic
@@ -4014,7 +4079,8 @@ class PersistentTimelineBuilder {
         } else {
             intervalGap = 0
         }
-        guard startDiff <= 20 * 60, endDiff <= 20 * 60,
+        guard startDiff <= AppConfig.shared.transportMatchTimeTolerance,
+              endDiff <= AppConfig.shared.transportMatchTimeTolerance,
               first.distance > 0, second.distance > 0,
               let firstPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: first.pointsData),
               let secondPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: second.pointsData),
@@ -4052,13 +4118,13 @@ class PersistentTimelineBuilder {
         // cannot identify this case. Require matching directed endpoints and
         // a meaningful displacement, so B -> A returns and local loops remain
         // distinct. Do not treat merely nearby time windows as equivalent.
-        if intervalGap <= 120,
+        if intervalGap <= AppConfig.shared.roundTripIntervalGap,
            let firstStart = firstRoute.first, let firstEnd = firstRoute.last,
            let secondStart = secondRoute.first, let secondEnd = secondRoute.last,
-           firstStart.distance(from: firstEnd) >= 300,
-           secondStart.distance(from: secondEnd) >= 300,
-           firstStart.distance(from: secondStart) <= 150,
-           firstEnd.distance(from: secondEnd) <= 150 {
+           firstStart.distance(from: firstEnd) >= AppConfig.shared.roundTripMinLegLength,
+           secondStart.distance(from: secondEnd) >= AppConfig.shared.roundTripMinLegLength,
+           firstStart.distance(from: secondStart) <= AppConfig.shared.roundTripEndpointTolerance,
+           firstEnd.distance(from: secondEnd) <= AppConfig.shared.roundTripEndpointTolerance {
             return true
         }
 

@@ -77,6 +77,7 @@ struct WatchSnapshot: Codable, Hashable {
     let currentActivityID: String?
     let currentTransportType: String?
     let currentTransportStartedAt: Date?
+    let currentAverageSpeed: Double?
     let todayFootprintCount: Int
     let todayDistance: Double
     let nextTrip: WatchTripSnapshot?
@@ -86,7 +87,7 @@ struct WatchSnapshot: Codable, Hashable {
     let statistics: WatchStatisticsSnapshot?
     let futureTrips: [WatchTripSnapshot]?
 
-    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, currentTransportType: nil, currentTransportStartedAt: nil, todayFootprintCount: 0, todayDistance: 0, nextTrip: nil, activities: [], todayTimeline: [], recentDays: [], statistics: nil, futureTrips: [])
+    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, currentTransportType: nil, currentTransportStartedAt: nil, currentAverageSpeed: nil, todayFootprintCount: 0, todayDistance: 0, nextTrip: nil, activities: [], todayTimeline: [], recentDays: [], statistics: nil, futureTrips: [])
 }
 
 /// The compact payload the phone sends over the fast/high-priority channels
@@ -102,6 +103,7 @@ private struct WatchCompactSnapshot: Codable {
     let currentActivityID: String?
     let currentTransportType: String?
     let currentTransportStartedAt: Date?
+    let currentAverageSpeed: Double?
     let todayFootprintCount: Int
     let todayDistance: Double
     let activities: [WatchActivityOption]
@@ -170,7 +172,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         } else {
             session.transferUserInfo(payload)
         }
-        snapshot = WatchSnapshot(currentFootprintID: snapshot.currentFootprintID, placeName: snapshot.placeName, address: snapshot.address, startedAt: snapshot.startedAt, isTracking: snapshot.isTracking, currentActivityID: activity?.id, currentTransportType: snapshot.currentTransportType, currentTransportStartedAt: snapshot.currentTransportStartedAt, todayFootprintCount: snapshot.todayFootprintCount, todayDistance: snapshot.todayDistance, nextTrip: snapshot.nextTrip, activities: snapshot.activities, todayTimeline: snapshot.todayTimeline, recentDays: snapshot.recentDays, statistics: snapshot.statistics, futureTrips: snapshot.futureTrips)
+        snapshot = WatchSnapshot(currentFootprintID: snapshot.currentFootprintID, placeName: snapshot.placeName, address: snapshot.address, startedAt: snapshot.startedAt, isTracking: snapshot.isTracking, currentActivityID: activity?.id, currentTransportType: snapshot.currentTransportType, currentTransportStartedAt: snapshot.currentTransportStartedAt, currentAverageSpeed: snapshot.currentAverageSpeed, todayFootprintCount: snapshot.todayFootprintCount, todayDistance: snapshot.todayDistance, nextTrip: snapshot.nextTrip, activities: snapshot.activities, todayTimeline: snapshot.todayTimeline, recentDays: snapshot.recentDays, statistics: snapshot.statistics, futureTrips: snapshot.futureTrips)
     }
 
     func confirmArrival() {
@@ -189,6 +191,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
             currentActivityID: nil,
             currentTransportType: nil,
             currentTransportStartedAt: nil,
+            currentAverageSpeed: nil,
             todayFootprintCount: snapshot.todayFootprintCount,
             todayDistance: snapshot.todayDistance,
             nextTrip: snapshot.nextTrip,
@@ -313,6 +316,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
             currentActivityID: compact.currentActivityID,
             currentTransportType: compact.currentTransportType,
             currentTransportStartedAt: compact.currentTransportStartedAt,
+            currentAverageSpeed: compact.currentAverageSpeed,
             todayFootprintCount: compact.todayFootprintCount,
             todayDistance: compact.todayDistance,
             nextTrip: snapshot.nextTrip,

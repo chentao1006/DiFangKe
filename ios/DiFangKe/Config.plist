@@ -300,7 +300,7 @@
     <key>RAW_STATIONARY_HEARTBEAT_INTERVAL</key>
     <real>300</real>
 
-    <!-- GPS 上报速度达到此值（km/h）即视为"确有移动"的强证据 -->
+    <!-- GPS 上报速度达到此值（m/s）即视为"确有移动"的强证据 -->
     <key>REPORTED_HIGH_SPEED_THRESHOLD</key>
     <real>20</real>
 
@@ -358,6 +358,19 @@
     <!-- UI 移动状态滞回及看门狗可使用该证据的时长（秒） -->
     <key>UI_MOVING_HOLD_DURATION</key>
     <real>120</real>
+
+    <!-- 当前定位可用于实时状态/速度的最长年龄（秒） -->
+    <key>CURRENT_LOCATION_FRESHNESS_THRESHOLD</key>
+    <real>30</real>
+    <!-- 活动编辑后的进行中停留允许跨越的采样接缝（秒） -->
+    <key>ACTIVITY_CONTINUATION_TOLERANCE</key>
+    <real>300</real>
+    <!-- 当前交通记录查询的回溯窗口（秒） -->
+    <key>CURRENT_TRANSPORT_LOOKBACK</key>
+    <real>300</real>
+    <!-- 手表 App 可达时，移动速度快照的最短同步间隔（秒） -->
+    <key>WATCH_MOVING_SPEED_SYNC_INTERVAL</key>
+    <real>5</real>
 
     <!-- 反地理编码节流：高速时使用的速度门槛（m/s）及对应的节流距离（米），
          低速时使用的节流距离（米） -->
@@ -510,6 +523,9 @@
     <integer>40</integer>
     <key>WALKING_SUSPICIOUS_SPEED</key>
     <real>3</real>
+    <!-- 历史交通修复缺少轨迹点时，提供给统一类型判定器的保守点数 -->
+    <key>TRANSPORT_REPAIR_FALLBACK_POINT_COUNT</key>
+    <integer>2</integer>
 
     <!-- 时间线重建时的边界容差（秒） -->
     <key>RECONSTRUCTION_BOUNDARY_TOLERANCE</key>

@@ -818,6 +818,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
 				INFOPLIST_KEY_WKApplication = YES;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.ct106.difangke;
+				INFOPLIST_KEY_WKSupportsLiveActivityLaunchAttributeTypes = CurrentTrackingActivityAttributes;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.watchkitapp;
 				PRODUCT_NAME = DiFangKeWatch;
 				SDKROOT = watchos;
@@ -887,7 +888,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.5.5;
+				MARKETING_VERSION = 1.6.1;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -955,7 +956,6 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke;
 				PRODUCT_NAME = "地方客";
 				SDKROOT = iphoneos;
@@ -1019,7 +1019,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.5.5;
+				MARKETING_VERSION = 1.6.1;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1146,6 +1146,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "地方客";
 				INFOPLIST_KEY_WKApplication = YES;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.ct106.difangke;
+				INFOPLIST_KEY_WKSupportsLiveActivityLaunchAttributeTypes = CurrentTrackingActivityAttributes;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke.watchkitapp;
 				PRODUCT_NAME = DiFangKeWatch;
 				SDKROOT = watchos;
@@ -1174,7 +1175,6 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ct106.difangke;
 				PRODUCT_NAME = "地方客";
 				SDKROOT = iphoneos;

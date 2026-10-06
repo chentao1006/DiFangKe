@@ -111,6 +111,7 @@ private struct CurrentPlaceView: View {
 
     private var currentTransportIcon: String? {
         switch store.snapshot.currentTransportType {
+        case "moving": return "location.north.line.fill"
         case "slow": return "figure.walk"
         case "running": return "figure.run"
         case "bicycle": return "bicycle"
@@ -147,6 +148,13 @@ private struct CurrentPlaceView: View {
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
             if currentTransportIcon != nil {
+                if let speed = snapshot.currentAverageSpeed {
+                    let speedKmh = Measurement(value: speed, unit: UnitSpeed.metersPerSecond)
+                        .converted(to: .kilometersPerHour)
+                        .value
+                    Text(String(format: "平均速度 %.1f 千米/小时", speedKmh))
+                        .font(.headline.monospacedDigit())
+                }
                 if let startedAt = snapshot.currentTransportStartedAt {
                     Text("已 \(startedAt, style: .relative)")
                         .font(.caption)

@@ -659,7 +659,7 @@ struct CurrentTrackingLiveActivityWidget: Widget {
                 DynamicIslandExpandedRegion(.leading) {
                     HStack(spacing: 6) {
                         Image(systemName: context.state.icon)
-                            .foregroundStyle(currentActivityColor(context.state.colorHex))
+                            .foregroundStyle(currentTrackingAccent(context.state))
                         Text(context.state.title)
                             .font(.subheadline.bold())
                             .lineLimit(1)
@@ -678,16 +678,16 @@ struct CurrentTrackingLiveActivityWidget: Widget {
                 }
             } compactLeading: {
                 Image(systemName: context.state.icon)
-                    .foregroundStyle(currentActivityColor(context.state.colorHex))
+                    .foregroundStyle(currentTrackingAccent(context.state))
             } compactTrailing: {
                 CurrentActivityDuration(startedAt: context.state.startedAt, compact: true)
                     .monospacedDigit()
                     .foregroundStyle(.white)
             } minimal: {
                 Image(systemName: context.state.icon)
-                    .foregroundStyle(currentActivityColor(context.state.colorHex))
+                    .foregroundStyle(currentTrackingAccent(context.state))
             }
-            .keylineTint(currentActivityColor(context.state.colorHex))
+            .keylineTint(currentTrackingAccent(context.state))
             .widgetURL(currentActivityDetailURL(for: context.state))
         }
     }
@@ -698,11 +698,11 @@ private struct CurrentTrackingLockScreenContent: View {
     let context: ActivityViewContext<CurrentTrackingActivityAttributes>
 
     private var state: CurrentTrackingActivityAttributes.ContentState { context.state }
-    private var accent: Color { currentActivityColor(state.colorHex) }
+    private var accent: Color { currentTrackingAccent(state) }
     private var usesDarkMap: Bool { state.prefersDarkMap ?? false }
     private var primaryForeground: Color { usesDarkMap ? .white : .black }
     private var secondaryForeground: Color { primaryForeground.opacity(0.72) }
-    private let contentHeight: CGFloat = 120
+    private var contentHeight: CGFloat { state.kind == .footprint ? 160 : 140 }
 
     var body: some View {
         ZStack {
@@ -793,7 +793,8 @@ private struct CurrentTrackingLockScreenContent: View {
                 CurrentFootprintTodaySummary(
                     placeCount: state.todayPlaceCount,
                     distance: state.todayDistance,
-                    foreground: secondaryForeground
+                    foreground: secondaryForeground,
+                    showsBrand: true
                 )
                 .padding(.horizontal, 16)
                 .padding(.bottom, 8)
@@ -810,8 +811,11 @@ private struct CurrentTrackingIslandBottomContent: View {
     let context: ActivityViewContext<CurrentTrackingActivityAttributes>
 
     private var state: CurrentTrackingActivityAttributes.ContentState { context.state }
-    private var accent: Color { currentActivityColor(state.colorHex) }
-    private var mapHeight: CGFloat { state.kind == .transport ? 108 : 94 }
+    private var accent: Color { currentTrackingAccent(state) }
+    // The system adds the sensor-safe top region and the leading/trailing row.
+    // Keep the bottom region at 112pt so the complete expanded island reaches
+    // its intended height without turning that reserved area into a huge band.
+    private let expandedBottomHeight: CGFloat = 112
 
     var body: some View {
         VStack(spacing: 6) {
@@ -820,7 +824,11 @@ private struct CurrentTrackingIslandBottomContent: View {
                 revision: state.mapRevision,
                 prefersDarkMap: true
             )
-            .frame(maxWidth: .infinity, minHeight: mapHeight, maxHeight: mapHeight)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: expandedBottomHeight,
+                maxHeight: expandedBottomHeight
+            )
             .clipped()
             .overlay(
                 LinearGradient(
@@ -887,7 +895,8 @@ private struct CurrentTrackingIslandBottomContent: View {
                     CurrentFootprintTodaySummary(
                         placeCount: state.todayPlaceCount,
                         distance: state.todayDistance,
-                        foreground: .white.opacity(0.78)
+                        foreground: .white.opacity(0.78),
+                        showsBrand: true
                     )
                     .padding(.horizontal, 8)
                     .padding(.bottom, 6)
@@ -899,7 +908,12 @@ private struct CurrentTrackingIslandBottomContent: View {
         .padding(.horizontal, 0)
         .padding(.top, 0)
         .padding(.bottom, 0)
-        .frame(maxWidth: .infinity, alignment: .top)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: expandedBottomHeight,
+            maxHeight: expandedBottomHeight,
+            alignment: .top
+        )
         .widgetURL(currentActivityDetailURL(for: state))
     }
 }
@@ -908,16 +922,31 @@ private struct CurrentFootprintTodaySummary: View {
     let placeCount: Int?
     let distance: Double?
     let foreground: Color
+    var showsBrand = false
 
     var body: some View {
         if let placeCount, let distance {
-            HStack(spacing: 8) {
+            HStack(spacing: 5) {
                 Text("今日停留 \(placeCount) 个地点")
-                Spacer(minLength: 8)
+                    .foregroundStyle(foreground)
+                Text("·")
+                    .foregroundStyle(foreground)
                 Text("里程 \(formatCurrentTodayDistance(distance))")
+                    .foregroundStyle(foreground)
+                if showsBrand {
+                    Spacer(minLength: 8)
+                    HStack(spacing: 4) {
+                        Image("AppLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 18, height: 18)
+                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        Text("地方客")
+                            .foregroundStyle(foreground)
+                    }
+                }
             }
             .font(.caption2.weight(.semibold))
-            .foregroundStyle(foreground)
             .lineLimit(1)
             .minimumScaleFactor(0.8)
         }
@@ -1181,6 +1210,15 @@ private func currentActivityColor(_ hex: String?) -> Color {
         green: Double((number >> 8) & 0xff) / 255,
         blue: Double(number & 0xff) / 255
     )
+}
+
+private func currentTrackingAccent(
+    _ state: CurrentTrackingActivityAttributes.ContentState
+) -> Color {
+    if state.kind == .footprint, state.colorHex == nil {
+        return .secondary.opacity(0.4)
+    }
+    return currentActivityColor(state.colorHex)
 }
 
 private func formatCurrentDistance(_ distance: Double?) -> String {
