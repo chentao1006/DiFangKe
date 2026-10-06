@@ -64,7 +64,6 @@ class DataManagerViewModel(application: Application) : AndroidViewModel(applicat
                     - 重要地点: ${report.newPlacesUser} 新增, ${report.skippedPlacesUser} 跳过
                     - 其他地点: ${report.newPlacesSystem} 新增, ${report.skippedPlacesSystem} 跳过
                     - 活动类型: ${report.newActivityTypes} 新增
-                    - 行程计划: ${report.newFutureTrips} 新增, ${report.skippedFutureTrips} 跳过
                 """.trimIndent()
             } catch (e: Exception) {
                 _importResult.value = "导入失败: ${e.message}"
@@ -156,7 +155,7 @@ class DataManagerViewModel(application: Application) : AndroidViewModel(applicat
             withContext(Dispatchers.IO) {
                 db.footprintDao().deleteAll()
                 db.placeDao().deleteAll()
-                db.futureTripDao().deleteAll()
+                db.futureTripDao().deleteAll() // purge rows left by the retired future-trip feature
                 db.transportRecordDao().deleteAll()
                 db.transportManualSelectionDao().deleteAll()
                 db.dailyInsightDao().deleteAll()

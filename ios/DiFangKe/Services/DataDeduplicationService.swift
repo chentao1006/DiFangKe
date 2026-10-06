@@ -137,11 +137,6 @@ enum DataDeduplicationService {
         })
         collapse(try context.fetch(FetchDescriptor<ActivityType>()), id: \.id,
                  score: { $0.isSystem ? 0 : 1 }, merge: { _, _ in })
-        collapse(try context.fetch(FetchDescriptor<FutureTrip>()), id: \.id,
-                 score: { ($0.isCompleted ? 100 : 0) + ($0.placeID != nil ? 10 : 0) },
-                 merge: { duplicate, keeper in
-            if keeper.placeID == nil { keeper.placeID = duplicate.placeID }
-        })
         return deleted
     }
 
@@ -206,7 +201,6 @@ enum DataDeduplicationService {
         let footprints = ((try? context.fetch(FetchDescriptor<Footprint>())) ?? []).filter { !$0.isDeleted }
         let transports = ((try? context.fetch(FetchDescriptor<TransportRecord>())) ?? []).filter { !$0.isDeleted }
         let activityTypes = ((try? context.fetch(FetchDescriptor<ActivityType>())) ?? []).filter { !$0.isDeleted }
-        let futureTrips = ((try? context.fetch(FetchDescriptor<FutureTrip>())) ?? []).filter { !$0.isDeleted }
 
         print("[DataDeduplication] before places=\(places.count), footprints=\(footprints.count), transports=\(transports.count), activityTypes=\(activityTypes.count)")
 
@@ -214,7 +208,7 @@ enum DataDeduplicationService {
         let normalizedFootprints = rewriteFootprintPlaceReferences(footprints, placeRewriteMap: placeRewriteMap, report: &report)
         deduplicateFootprints(normalizedFootprints, context: context, report: &report)
         deduplicateTransports(transports, context: context, report: &report)
-        deduplicateActivityTypes(activityTypes, footprints: normalizedFootprints, futureTrips: futureTrips, context: context, report: &report)
+        deduplicateActivityTypes(activityTypes, footprints: normalizedFootprints, context: context, report: &report)
 
         if report.didChange {
             do {
@@ -485,7 +479,7 @@ enum DataDeduplicationService {
         }
     }
 
-    private static func deduplicateActivityTypes(_ activityTypes: [ActivityType], footprints: [Footprint], futureTrips: [FutureTrip], context: ModelContext, report: inout Report) {
+    private static func deduplicateActivityTypes(_ activityTypes: [ActivityType], footprints: [Footprint], context: ModelContext, report: inout Report) {
         let groupedByName = Dictionary(grouping: activityTypes) { $0.name }
         
         for (_, group) in groupedByName where group.count > 1 {
@@ -503,10 +497,6 @@ enum DataDeduplicationService {
                 for footprint in footprints where footprint.activityTypeValue == duplicateIDString {
                     footprint.activityTypeValue = keeperIDString
                     report.footprintReferencesRewritten += 1
-                }
-                
-                for trip in futureTrips where trip.activityTypeValue == duplicateIDString {
-                    trip.activityTypeValue = keeperIDString
                 }
                 
                 context.delete(duplicate)

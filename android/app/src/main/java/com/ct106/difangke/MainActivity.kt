@@ -30,14 +30,12 @@ class MainActivity : ComponentActivity() {
         }
         
         val deepLinkDate = intent.getLongExtra("date", -1L).let { if (it == -1L) null else it }
-        val deepLinkFutureTripID = intent.getStringExtra("futureTripID")
         val deepLinkFootprintID = intent.getStringExtra("footprintID")
         
         setContent {
             DiFangKeTheme {
                 NavGraph(
                     initialDate = deepLinkDate,
-                    initialFutureTripID = deepLinkFutureTripID,
                     initialFootprintID = deepLinkFootprintID
                 )
             }

@@ -64,6 +64,7 @@ fun HistoryScreen(
     onNavigateToDetail: (String) -> Unit,
     onDateSelected: (Date) -> Unit, // 跳向主页特定日期
     onNavigateToRawPoints: (Date) -> Unit,
+    onNavigateToStatistics: () -> Unit = {},
     initialDate: Date = Date(),
     viewModel: HistoryViewModel = viewModel()
 ) {
@@ -137,6 +138,10 @@ fun HistoryScreen(
                     }
                 },
                 actions = {
+                    // iOS History hosts the statistics view.
+                    IconButton(onClick = onNavigateToStatistics) {
+                        Icon(Icons.Default.BarChart, contentDescription = "统计洞察")
+                    }
                     IconButton(onClick = { launchPhotoImport() }) {
                         Icon(Icons.Default.AddPhotoAlternate, contentDescription = "从照片导入足迹")
                     }
@@ -557,7 +562,7 @@ fun MonthDayCell(
     onViewRawPoints: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    val hasData = summary != null && (summary.timelineSegments.isNotEmpty() || summary.plannedArrivalTimes.isNotEmpty())
+    val hasData = summary != null && summary.timelineSegments.isNotEmpty()
     val isToday = isSameDay(date, Date())
     
     Box(
@@ -617,11 +622,6 @@ private fun MonthDayTimelineRing(date: Date, summary: DaySummary) {
         summary.timelineSegments.filterNot { it.isTransport }.forEach {
             val color = runCatching { Color(android.graphics.Color.parseColor(it.colorHex)) }.getOrDefault(accent)
             drawHistoryRingArc(historyArcRange(date, it.startTime, it.endTime), bounds, if (it.isCurrent) 5.4.dp.toPx() else 3.5.dp.toPx(), color)
-        }
-        summary.plannedArrivalTimes.forEach { arrival ->
-            val range = historyArcRange(date, arrival, Date(arrival.time + 600_000L))
-            if (range.length > 0) drawArc(accent, -90f + (range.start * 360).toFloat(), maxOf(4.32f, (range.length * 360).toFloat()), false,
-                bounds.topLeft, bounds.size, style = Stroke(2.2.dp.toPx(), cap = StrokeCap.Round))
         }
     }
 }

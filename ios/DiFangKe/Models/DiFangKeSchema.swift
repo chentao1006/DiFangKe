@@ -26,6 +26,8 @@ enum DiFangKeSchemaV2: VersionedSchema {
             ActivityType.self,
             DailyInsight.self,
             TransportRecord.self,
+            // Legacy entity of the removed trip-plan feature; kept so existing
+            // stores still match this schema. See FutureTrip.swift.
             FutureTrip.self
         ]
     }

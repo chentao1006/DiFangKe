@@ -60,6 +60,24 @@ interface TransportRecordDao {
 
     @Query("UPDATE transport_records SET statusRaw = 'ignored' WHERE recordID = :id")
     suspend fun ignoreById(id: String)
+
+    // ── Timeline engine (iOS syncDay parity) ──
+
+    @Query("DELETE FROM transport_records WHERE recordID = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("SELECT * FROM transport_records WHERE startTime < :end AND endTime > :start AND statusRaw != 'ignored' ORDER BY startTime ASC")
+    suspend fun getNonIgnoredIntersecting(start: Date, end: Date): List<TransportRecordEntity>
+
+    @Query("SELECT * FROM transport_records WHERE startTime < :end AND endTime > :start ORDER BY startTime ASC")
+    suspend fun getAllIntersecting(start: Date, end: Date): List<TransportRecordEntity>
+
+    /** iOS transportPreferenceDescriptor: skip the target day's unedited records. */
+    @Query("SELECT * FROM transport_records WHERE statusRaw != 'ignored' AND (startTime < :dayStart OR startTime >= :dayEnd OR manualTypeRaw IS NOT NULL) ORDER BY startTime DESC LIMIT :limit")
+    suspend fun getPreferenceHistory(dayStart: Date, dayEnd: Date, limit: Int): List<TransportRecordEntity>
+
+    @Query("DELETE FROM transport_records WHERE startTime < :end AND endTime > :start")
+    suspend fun deleteIntersecting(start: Date, end: Date)
 }
 
 @Dao
@@ -85,6 +103,9 @@ interface DailyInsightDao {
 
     @Query("DELETE FROM daily_insights")
     suspend fun deleteAll()
+
+    @Query("DELETE FROM daily_insights WHERE date >= :start AND date < :end")
+    suspend fun deleteForDay(start: Date, end: Date)
 }
 
 @Dao
@@ -98,6 +119,9 @@ interface TransportManualSelectionDao {
 
     @Query("DELETE FROM transport_manual_selections")
     suspend fun deleteAll()
+
+    @Query("DELETE FROM transport_manual_selections WHERE startTime >= :start AND startTime < :end")
+    suspend fun deleteStartingBetween(start: Date, end: Date)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(selection: TransportManualSelectionEntity)

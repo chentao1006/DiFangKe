@@ -34,6 +34,9 @@ class DiFangKeApp : Application() {
         com.tencent.map.geolocation.TencentLocationManager.setUserAgreePrivacy(true)
         
         createNotificationChannels()
+
+        // 主屏小组件：仅在已放置小组件时保持 15 分钟周期刷新
+        com.ct106.difangke.widget.FootprintWidgetUpdater.ensureScheduled(this)
         
         // 调度每日任务
         kotlinx.coroutines.MainScope().launch {
@@ -45,8 +48,10 @@ class DiFangKeApp : Application() {
             if (preferences.isPastMemoriesNotificationEnabled.first()) {
                 com.ct106.difangke.service.PastMemoriesWorker.schedule(this@DiFangKeApp)
             }
-            // Retired feature: cancel work left behind by older versions.
-            com.ct106.difangke.service.FutureTripReminderWorker.rescheduleAll(this@DiFangKeApp)
+            // Retired future-trip reminders: WorkManager tags every request with its
+            // worker's class name, so this clears anything older versions enqueued.
+            androidx.work.WorkManager.getInstance(this@DiFangKeApp)
+                .cancelAllWorkByTag("com.ct106.difangke.service.FutureTripReminderWorker")
         }
     }
 

@@ -43,7 +43,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val isPastMemoriesNotificationEnabled: StateFlow<Boolean> = prefs.isPastMemoriesNotificationEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
-    val isFutureTripNotificationEnabled: StateFlow<Boolean> = prefs.isFutureTripNotificationEnabled
+    val isAutoPhotoLinkEnabled: StateFlow<Boolean> = prefs.isAutoPhotoLinkEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val isLiveNotificationEnabled: StateFlow<Boolean> = prefs.isLiveNotificationEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
     val notificationHour: StateFlow<Int> = prefs.notificationHour
@@ -114,18 +117,32 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun setFutureTripNotificationEnabled(enabled: Boolean) {
+    fun setAutoPhotoLinkEnabled(enabled: Boolean) {
         viewModelScope.launch {
-            prefs.setFutureTripNotificationEnabled(enabled)
-            database.futureTripDao().getAll().forEach { trip ->
-                if (!trip.isCompleted && trip.hasPlanDate) {
-                    if (enabled) {
-                        com.ct106.difangke.service.FutureTripReminderWorker.schedule(getApplication(), trip.tripID, trip.arrivalDate, trip.hasArrivalTime)
-                    } else {
-                        com.ct106.difangke.service.FutureTripReminderWorker.cancel(getApplication(), trip.tripID)
-                    }
-                }
-            }
+            prefs.setAutoPhotoLinkEnabled(enabled)
+        }
+    }
+
+    fun setLiveNotificationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefs.setLiveNotificationEnabled(enabled)
+        }
+    }
+
+    /**
+     * iOS parity: when the system has notifications turned off, reflect that in the
+     * in-app toggles so they never claim to be on while nothing can be delivered.
+     */
+    fun disableNotificationTogglesForSystemDenial() {
+        viewModelScope.launch {
+            val anyOn = prefs.isDailyNotificationEnabled.first() ||
+                prefs.isHighlightNotificationEnabled.first() ||
+                prefs.isPastMemoriesNotificationEnabled.first()
+            if (!anyOn) return@launch
+            prefs.setDailyNotificationEnabled(false)
+            prefs.setHighlightNotificationEnabled(false)
+            prefs.setPastMemoriesNotificationEnabled(false)
+            updateNotificationSchedule()
         }
     }
 

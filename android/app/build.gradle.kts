@@ -186,6 +186,9 @@ dependencies {
     // WorkManager
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 
+    // Jetpack Glance 主屏小组件（今日足迹）
+    implementation("androidx.glance:glance-appwidget:1.1.1")
+
     // Splash Screen API
     implementation("androidx.core:core-splashscreen:1.0.1")
 

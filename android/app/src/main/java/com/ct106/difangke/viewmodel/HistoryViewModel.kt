@@ -5,7 +5,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.FootprintEntity
-import com.ct106.difangke.data.db.entity.FutureTripEntity
 import com.ct106.difangke.service.OpenAIService
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -71,9 +70,8 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             combine(
                 db.footprintDao().observeAll(),
-                db.futureTripDao().observeAll(),
                 db.transportRecordDao().observeAll()
-            ) { _, _, _ -> Unit }.drop(1).collect { refreshData() }
+            ) { _, _ -> Unit }.drop(1).collect { refreshData() }
         }
     }
 
@@ -83,7 +81,6 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             val allFootprints = db.footprintDao().getAll()
             val allActivityTypes = db.activityTypeDao().getAll()
             val allPlaces = db.placeDao().getAll()
-            val allFutureTrips = db.futureTripDao().getAll()
             val allTransports = db.transportRecordDao().getAllSync().filter { it.statusRaw == "active" }
             
             _footprints.value = allFootprints
@@ -101,9 +98,6 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                         set(Calendar.MILLISECOND, 0)
                     }.time
                 }
-                // Legacy trip plans remain in Room for upgrade compatibility,
-                // but do not contribute to the history calendar.
-                val futureTripsByDate = emptyMap<Date, List<FutureTripEntity>>()
                 val transportsByDate = allTransports.groupBy { transport ->
                     Calendar.getInstance().apply {
                         time = transport.day
@@ -115,14 +109,12 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                 }
                 
                 val summaryMap = mutableMapOf<Date, DaySummary>()
-                (grouped.keys + futureTripsByDate.keys + transportsByDate.keys).forEach { date ->
+                (grouped.keys + transportsByDate.keys).forEach { date ->
                     val fps = grouped[date].orEmpty()
-                    val futureTrips = futureTripsByDate[date].orEmpty()
                     val transports = transportsByDate[date].orEmpty()
                     
                     val timelineItems = (fps.map { TimelineItem.FootprintItem(it) } + 
-                                       transports.map { TimelineItem.TransportItem(it) } +
-                                       futureTrips.map { TimelineItem.FutureTripItem(it) })
+                                       transports.map { TimelineItem.TransportItem(it) })
                                        .sortedByDescending { it.startTime }
                     
                     val store = RawLocationStore.getInstance(getApplication())
@@ -167,11 +159,10 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                         footprintCount = fps.map { (it.title ?: "").ifEmpty { it.locationHash } }.distinct().size,
                         highlightCount = fps.count { it.isHighlight == true },
                         highlightTitle = fps.firstOrNull { it.isHighlight == true }?.title,
-                        hasConfirmed = fps.any { it.aiAnalyzed } || futureTrips.isNotEmpty(),
+                        hasConfirmed = fps.any { it.aiAnalyzed },
                         hasCandidate = fps.any { !it.aiAnalyzed },
                         timelineIcons = icons,
                         timelineSegments = segments,
-                        plannedArrivalTimes = futureTrips.filter { it.hasArrivalTime }.map { it.arrivalDate },
                         trajectoryCount = totalPoints,
                         mileage = totalMileage
                     )
@@ -281,14 +272,12 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                         activityTypeById[item.footprint.activityTypeValue]?.icon ?: "place"
                     }
                     is TimelineItem.TransportItem -> "directions_bus"
-                    is TimelineItem.FutureTripItem -> "explore"
                 }
                 val colorHex = when (item) {
                     is TimelineItem.FootprintItem -> {
                         activityTypeById[item.footprint.activityTypeValue]?.colorHex ?: "#00A0AC"
                     }
                     is TimelineItem.TransportItem -> "#8E8E93"
-                    is TimelineItem.FutureTripItem -> "#FF9500"
                 }
                 val key = "$icon|$isTransport"
                 val existingIndex = positions[key]

@@ -21,6 +21,26 @@ class GeocodeService private constructor() {
         val shared: GeocodeService by lazy { GeocodeService() }
         private const val TAG = "GeocodeService"
         private const val BASE_URL = "https://apis.map.qq.com/ws"
+
+        /** iOS `applyingTransform("Traditional-Simplified")`; identity before API 29. */
+        fun simplifiedChinese(value: String): String {
+            if (value.isEmpty() || android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return value
+            return runCatching {
+                android.icu.text.Transliterator.getInstance("Traditional-Simplified").transliterate(value)
+            }.getOrDefault(value)
+        }
+
+        /** zh_Hans_CN country name for an ISO region code. */
+        fun countryDisplayName(countryCode: String?): String? {
+            val code = countryCode?.trim()?.uppercase()?.takeIf { it.length == 2 } ?: return null
+            return Locale("", code).getDisplayCountry(Locale.SIMPLIFIED_CHINESE).takeIf { it.isNotBlank() && it != code }
+        }
+
+        fun flagEmoji(countryCode: String): String {
+            val code = countryCode.trim().uppercase()
+            if (code.length != 2 || !code.all { it in 'A'..'Z' }) return ""
+            return code.map { String(Character.toChars(127397 + it.code)) }.joinToString("")
+        }
     }
 
     private val httpClient = OkHttpClient()
@@ -143,7 +163,12 @@ class GeocodeService private constructor() {
     }.sortedBy { it.second }
         .map { it.first }
 
-    private fun getJson(pathAndQuery: String): JSONObject? = try {
+    /**
+     * Builds a signed Tencent WebService URL. Tencent validates the decoded
+     * parameter values in its MD5 source string, while the actual HTTP URL must
+     * remain percent-encoded. The signed path includes the /ws prefix.
+     */
+    private fun signedUrl(pathAndQuery: String): String {
         val path = pathAndQuery.substringBefore('?')
         val parameters = pathAndQuery.substringAfter('?', "")
             .split('&')
@@ -154,16 +179,16 @@ class GeocodeService private constructor() {
             .toMutableMap()
         parameters["key"] = BuildConfig.TENCENT_MAP_KEY
         val query = parameters.toSortedMap().entries.joinToString("&") { (name, value) -> "$name=$value" }
-        // Tencent validates the decoded parameter values in its MD5 source
-        // string, while the actual HTTP URL must remain percent-encoded.
         val signatureQuery = parameters.toSortedMap().entries.joinToString("&") { (name, value) ->
             "$name=${Uri.decode(value)}"
         }
-        // Tencent signs the request path including the /ws prefix used by the
-        // public WebService endpoint. BASE_URL owns that prefix, so put it
-        // back only for the MD5 source string.
         val signature = md5("/ws$path?$signatureQuery${BuildConfig.TENCENT_MAP_SECRET}")
-        val url = "$BASE_URL$path?$query&sig=$signature"
+        return "$BASE_URL$path?$query&sig=$signature"
+    }
+
+    private fun getJson(pathAndQuery: String): JSONObject? = try {
+        val path = pathAndQuery.substringBefore('?')
+        val url = signedUrl(pathAndQuery)
         Log.i(TAG, "POI request started: $path")
         httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
             val body = response.body?.string()
@@ -175,6 +200,39 @@ class GeocodeService private constructor() {
     } catch (error: Exception) {
         Log.w(TAG, "Tencent location service request failed", error)
         null
+    }
+
+    /**
+     * Tencent static map (GCJ-02). `width`/`height` are logical pixels; the
+     * returned bitmap is `width*scale` x `height*scale`. Returns null when the
+     * key has no static-map quota or the network fails, so callers can fall
+     * back to a drawn map.
+     */
+    suspend fun staticMap(
+        centerLat: Double,
+        centerLon: Double,
+        zoom: Int,
+        width: Int,
+        height: Int,
+        scale: Int = 2
+    ): android.graphics.Bitmap? = withContext(Dispatchers.IO) {
+        if (BuildConfig.TENCENT_MAP_KEY.isBlank()) return@withContext null
+        try {
+            val center = String.format(Locale.US, "%.6f,%.6f", centerLat, centerLon)
+            val url = signedUrl("/staticmap/v2/?center=$center&zoom=$zoom&size=${width}*${height}&scale=$scale&maptype=roadmap")
+            httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+                val contentType = response.header("Content-Type").orEmpty()
+                if (!response.isSuccessful || !contentType.startsWith("image")) {
+                    Log.w(TAG, "Static map unavailable: http=${response.code}, type=$contentType")
+                    return@withContext null
+                }
+                val bytes = response.body?.bytes() ?: return@withContext null
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "Static map request failed", error)
+            null
+        }
     }
 
     private fun md5(value: String): String = MessageDigest.getInstance("MD5")

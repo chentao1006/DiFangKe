@@ -30,8 +30,6 @@ fun DailyTimelineScreen(
     onNavigateToRawPoints: (Date) -> Unit,
     viewModel: MainViewModel = viewModel()
 ) {
-    val trackingState by viewModel.trackingState.collectAsState()
-    val isTrackingEnabled by viewModel.isTrackingEnabled.collectAsState()
     val activityTypes by viewModel.activityTypes.collectAsState()
     val allPlaces by viewModel.allPlaces.collectAsState()
     
@@ -118,21 +116,9 @@ fun DailyTimelineScreen(
             TimelinePage(
                 date = date,
                 viewModel = viewModel,
-                trackingState = trackingState,
-                isTrackingEnabled = isTrackingEnabled,
                 activityTypes = activityTypes,
                 allPlaces = allPlaces,
-                isFirstPage = false,
-                isLastPage = false,
-                hasLocationPermission = true,
-                hasNotificationPermission = true,
-                isNotificationGuideDismissed = true,
-                onRequestPermission = { },
-                onRequestNotification = { },
-                onDismissNotificationGuide = { },
-                onItemClick = onNavigateToDetail,
-                onMapClick = { onNavigateToMap(date) },
-                allowAutoRebuild = false
+                onItemClick = onNavigateToDetail
             )
         }
     }

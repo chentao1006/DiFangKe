@@ -274,30 +274,6 @@ private struct DayTimelinePage: View {
     }
 }
 
-private struct FutureTripPage: View {
-    let trip: WatchTripSnapshot
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("未来计划")
-                .font(.headline)
-            Image(systemName: "calendar.badge.clock")
-                .font(.title2)
-                .foregroundStyle(.tint)
-            Text(trip.placeName)
-                .font(.title3.bold())
-                .lineLimit(3)
-            if trip.hasArrivalTime {
-                Text(trip.arrivalDate.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .scenePadding()
-    }
-}
-
 private struct WatchStatisticsView: View {
     @EnvironmentObject private var store: WatchStore
     @State private var range: Range = .last7Days

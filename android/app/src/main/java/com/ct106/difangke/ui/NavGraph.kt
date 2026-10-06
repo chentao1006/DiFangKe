@@ -21,7 +21,7 @@ import kotlinx.coroutines.runBlocking
 
 object NavRoutes {
     const val ONBOARDING = "onboarding"
-    const val MAIN = "main?date={date}&tripID={tripID}"
+    const val MAIN = "main?date={date}"
     const val HISTORY = "history?date={date}"
     const val SETTINGS = "settings"
     const val MAP = "map?date={date}"
@@ -43,7 +43,6 @@ object NavRoutes {
 @Composable
 fun NavGraph(
     initialDate: Long? = null,
-    initialFutureTripID: String? = null,
     initialFootprintID: String? = null
 ) {
     val navController = rememberNavController()
@@ -73,15 +72,13 @@ fun NavGraph(
     DisposableEffect(activity, navController) {
         val listener = androidx.core.util.Consumer<android.content.Intent> { intent ->
             val date = intent.getLongExtra("date", -1L)
-            val tripID = intent.getStringExtra("futureTripID")
             val footprintID = intent.getStringExtra("footprintID")
             if (footprintID != null) {
                 intent.removeExtra("footprintID")
                 navController.navigate("footprint_detail/$footprintID")
-            } else if (date != -1L || tripID != null) {
+            } else if (date != -1L) {
                 intent.removeExtra("date")
-                intent.removeExtra("futureTripID")
-                navController.navigate("main?date=${if (date == -1L) "" else date}&tripID=${tripID ?: ""}") {
+                navController.navigate("main?date=$date") {
                     popUpTo(NavRoutes.MAIN) { inclusive = true }
                 }
             }
@@ -124,11 +121,9 @@ fun NavGraph(
         composable(NavRoutes.MAIN) { backStackEntry ->
             val initialDateStr = backStackEntry.arguments?.getString("date")
             val initialDate = initialDateStr?.toLongOrNull()?.let { java.util.Date(it) }
-            val initialFutureTripID = backStackEntry.arguments?.getString("tripID")?.takeIf { it.isNotBlank() }
             
             MainScreen(
                 initialDate = initialDate,
-                initialFutureTripID = initialFutureTripID,
                 onNavigateToHistory = { date -> navController.navigate("history?date=${date.time}") },
                 onNavigateToStatistics = { navController.navigate(NavRoutes.STATISTICS) },
                 onNavigateToSettings = { navController.navigate(NavRoutes.SETTINGS) },
@@ -169,9 +164,15 @@ fun NavGraph(
                         navController.navigate("footprint_detail/$id")
                     }
                 },
-                onDateSelected = { date -> 
-                    navController.navigate("daily_timeline/${date.time}")
+                // iOS HistoryListView.onDateSelected: close History and scroll
+                // the continuous timeline to that day.
+                onDateSelected = { date ->
+                    navController.navigate("main?date=${date.time}") {
+                        popUpTo(NavRoutes.MAIN) { inclusive = true }
+                        launchSingleTop = true
+                    }
                 },
+                onNavigateToStatistics = { navController.navigate(NavRoutes.STATISTICS) },
                 onNavigateToRawPoints = { date ->
                     navController.navigate("raw_points?date=${date.time}")
                 }
@@ -276,10 +277,8 @@ fun NavGraph(
             initialFootprintID != null -> {
                 navController.navigate("footprint_detail/$initialFootprintID")
             }
-            initialFutureTripID != null || initialDate != null -> {
-                navController.navigate(
-                    "main?date=${initialDate ?: ""}&tripID=${initialFutureTripID ?: ""}"
-                )
+            initialDate != null -> {
+                navController.navigate("main?date=$initialDate")
             }
         }
     }

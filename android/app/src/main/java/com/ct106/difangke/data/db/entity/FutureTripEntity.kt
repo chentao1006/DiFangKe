@@ -6,6 +6,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.UUID
 
+/** Retired future-trip feature; kept only so the Room schema needs no migration. */
 @Entity(tableName = "future_trips")
 data class FutureTripEntity(
     @PrimaryKey

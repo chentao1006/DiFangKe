@@ -28,7 +28,6 @@ class AppPreferences(private val context: Context) {
         val KEY_IS_DAILY_NOTIFICATION_ENABLED = booleanPreferencesKey("isDailyNotificationEnabled")
         val KEY_IS_HIGHLIGHT_NOTIFICATION_ENABLED = booleanPreferencesKey("isHighlightNotificationEnabled")
         val KEY_IS_PAST_MEMORIES_NOTIFICATION_ENABLED = booleanPreferencesKey("isPastMemoriesNotificationEnabled")
-        val KEY_IS_FUTURE_TRIP_NOTIFICATION_ENABLED = booleanPreferencesKey("isFutureTripNotificationEnabled")
         val KEY_NOTIFICATION_HOUR = intPreferencesKey("dailyNotificationHour")
         val KEY_NOTIFICATION_MINUTE = intPreferencesKey("dailyNotificationMinute")
         val KEY_HAS_SEEDED_DEFAULT_DATA = booleanPreferencesKey("hasSeededDefaultData")
@@ -45,6 +44,8 @@ class AppPreferences(private val context: Context) {
         val KEY_PENDING_STAY_PLACE_OVERRIDE_ID = stringPreferencesKey("pending_stay_place_override_id")
         
         val KEY_LOCATION_ACCURACY_MODE = stringPreferencesKey("locationAccuracyMode")
+        val KEY_IS_AUTO_PHOTO_LINK_ENABLED = booleanPreferencesKey("isAutoPhotoLinkEnabled")
+        val KEY_IS_LIVE_NOTIFICATION_ENABLED = booleanPreferencesKey("isLiveNotificationEnabled")
     }
 
     // ── Flows（响应式读取）──────────────────────────────────────────
@@ -68,9 +69,6 @@ class AppPreferences(private val context: Context) {
     }
     val isPastMemoriesNotificationEnabled: Flow<Boolean> = context.dataStore.data.map {
         it[KEY_IS_PAST_MEMORIES_NOTIFICATION_ENABLED] ?: true
-    }
-    val isFutureTripNotificationEnabled: Flow<Boolean> = context.dataStore.data.map {
-        it[KEY_IS_FUTURE_TRIP_NOTIFICATION_ENABLED] ?: true
     }
     val notificationHour: Flow<Int> = context.dataStore.data.map {
         it[KEY_NOTIFICATION_HOUR] ?: 21
@@ -118,9 +116,6 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setPastMemoriesNotificationEnabled(enabled: Boolean) =
         context.dataStore.edit { it[KEY_IS_PAST_MEMORIES_NOTIFICATION_ENABLED] = enabled }
-
-    suspend fun setFutureTripNotificationEnabled(enabled: Boolean) =
-        context.dataStore.edit { it[KEY_IS_FUTURE_TRIP_NOTIFICATION_ENABLED] = enabled }
 
     suspend fun setNotificationTime(hour: Int, minute: Int) =
         context.dataStore.edit {
@@ -186,4 +181,17 @@ class AppPreferences(private val context: Context) {
 
     suspend fun getCustomAiModel(): String =
         context.dataStore.data.map { it[KEY_CUSTOM_AI_MODEL] ?: "gpt-4o-mini" }.first()
+
+    // ── 自动关联照片 / 实时通知（对应 iOS isAutoPhotoLinkEnabled / isCurrentLiveActivityEnabled）──
+    val isAutoPhotoLinkEnabled: Flow<Boolean> = context.dataStore.data.map {
+        it[KEY_IS_AUTO_PHOTO_LINK_ENABLED] ?: true
+    }
+    suspend fun setAutoPhotoLinkEnabled(enabled: Boolean) =
+        context.dataStore.edit { it[KEY_IS_AUTO_PHOTO_LINK_ENABLED] = enabled }
+
+    val isLiveNotificationEnabled: Flow<Boolean> = context.dataStore.data.map {
+        it[KEY_IS_LIVE_NOTIFICATION_ENABLED] ?: true
+    }
+    suspend fun setLiveNotificationEnabled(enabled: Boolean) =
+        context.dataStore.edit { it[KEY_IS_LIVE_NOTIFICATION_ENABLED] = enabled }
 }

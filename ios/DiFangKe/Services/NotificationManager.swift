@@ -69,7 +69,7 @@ class NotificationManager {
     // Dynamic scheduling based on Settings
     func updateDailySummary(isEnabled: Bool, hour: Int, minute: Int, title: String? = nil, body: String? = nil) {
         // A refreshed daily summary must not cancel other scheduled reminders
-        // (past memories, future trips, etc.).  More importantly, cancelling
+        // (past memories, etc.).  More importantly, cancelling
         // every request while the configured time is being reached can make
         // today's summary disappear before the system presents it.
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["dailySummary"])
@@ -265,75 +265,20 @@ class NotificationManager {
         }
     }
 
-    func scheduleFutureTripNotification(for tripID: UUID, placeName: String, arrivalDate: Date, hasArrivalTime: Bool) {
-        let isEnabled = UserDefaults.standard.object(forKey: "isFutureTripNotificationEnabled") as? Bool ?? true
-        guard isEnabled else { return }
-        
-        if hasArrivalTime {
-            let preNotificationDate = arrivalDate.addingTimeInterval(-3600)
-            if preNotificationDate > Date() {
-                scheduleSingleFutureTripNotification(tripID: tripID, placeName: placeName, notificationDate: preNotificationDate, identifierSuffix: "_pre", isAtTime: false, arrivalDate: arrivalDate, hasArrivalTime: true)
-            }
-            
-            if arrivalDate > Date() {
-                scheduleSingleFutureTripNotification(tripID: tripID, placeName: placeName, notificationDate: arrivalDate, identifierSuffix: "_at", isAtTime: true, arrivalDate: arrivalDate, hasArrivalTime: true)
-            }
-        } else {
-            let notificationDate0 = Calendar.current.date(bySettingHour: 0, minute: 0, second: 0, of: arrivalDate) ?? arrivalDate
-            if notificationDate0 > Date() {
-                scheduleSingleFutureTripNotification(tripID: tripID, placeName: placeName, notificationDate: notificationDate0, identifierSuffix: "_0", isAtTime: false, arrivalDate: arrivalDate, hasArrivalTime: false)
-            }
-            
-            let notificationDate9 = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: arrivalDate) ?? arrivalDate
-            if notificationDate9 > Date() {
-                scheduleSingleFutureTripNotification(tripID: tripID, placeName: placeName, notificationDate: notificationDate9, identifierSuffix: "_9", isAtTime: false, arrivalDate: arrivalDate, hasArrivalTime: false)
-            }
+    /// The trip-plan feature has been removed. Older builds scheduled its
+    /// reminders with a `trip_<uuid>[suffix]` identifier, so drop any that are
+    /// still pending (or already delivered) so users stop receiving them.
+    func removeLegacyTripNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.getPendingNotificationRequests { requests in
+            let identifiers = requests.map(\.identifier).filter { $0.hasPrefix("trip_") }
+            guard !identifiers.isEmpty else { return }
+            center.removePendingNotificationRequests(withIdentifiers: identifiers)
         }
-    }
-    
-    private func scheduleSingleFutureTripNotification(tripID: UUID, placeName: String, notificationDate: Date, identifierSuffix: String, isAtTime: Bool, arrivalDate: Date, hasArrivalTime: Bool) {
-        let content = UNMutableNotificationContent()
-        content.title = "行程提醒"
-        
-        if isAtTime {
-            content.body = "您计划的时间已到，地点：\(placeName)。"
-        } else {
-            if hasArrivalTime {
-                content.body = "您计划在 \(arrivalDate.formatted(date: .omitted, time: .shortened)) 到达 \(placeName)，还有 1 小时。"
-            } else {
-                content.body = "您计划在 今天 到达 \(placeName)。"
-            }
-        }
-        
-        content.sound = .default
-        content.userInfo = ["type": "future_trip", "tripID": tripID.uuidString]
-        
-        let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: notificationDate)
-        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
-        
-        let request = UNNotificationRequest(identifier: "trip_\(tripID.uuidString)\(identifierSuffix)", content: content, trigger: trigger)
-        
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
-                print("Failed to schedule trip notification: \(error)")
-            }
-        }
-    }
-    
-    func cancelFutureTripNotification(for tripID: UUID) {
-        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [
-            "trip_\(tripID.uuidString)",
-            "trip_\(tripID.uuidString)_pre",
-            "trip_\(tripID.uuidString)_at",
-            "trip_\(tripID.uuidString)_0",
-            "trip_\(tripID.uuidString)_9"
-        ])
-    }
-    
-    func cancelAllFutureTripNotifications() {
-        UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
-            let tripIdentifiers = requests.filter { $0.identifier.hasPrefix("trip_") }.map { $0.identifier }
-            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: tripIdentifiers)
+        center.getDeliveredNotifications { notifications in
+            let identifiers = notifications.map(\.request.identifier).filter { $0.hasPrefix("trip_") }
+            guard !identifiers.isEmpty else { return }
+            center.removeDeliveredNotifications(withIdentifiers: identifiers)
         }
     }
 }

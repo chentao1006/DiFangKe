@@ -20,9 +20,10 @@ import java.util.Date
         TransportRecordEntity::class,
         DailyInsightEntity::class,
         TransportManualSelectionEntity::class,
+        // Retired future-trip feature: table kept only for schema compatibility.
         FutureTripEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -34,6 +35,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun transportRecordDao(): TransportRecordDao
     abstract fun dailyInsightDao(): DailyInsightDao
     abstract fun transportManualSelectionDao(): TransportManualSelectionDao
+    /** Retained only for schema compatibility (future trips were removed). */
     abstract fun futureTripDao(): FutureTripDao
 
     companion object {
@@ -152,6 +154,14 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** iOS parity fields for manual-boundary semantics. */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `footprints` ADD COLUMN `allowsAutomaticDurationExtension` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `footprints` ADD COLUMN `isAddressEditedByHand` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -159,7 +169,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "dfk_v1_stable.db"
                 )
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 .build()
                 INSTANCE = instance
                 instance

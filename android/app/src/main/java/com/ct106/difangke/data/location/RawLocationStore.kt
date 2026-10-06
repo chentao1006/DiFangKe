@@ -89,44 +89,18 @@ class RawLocationStore private constructor(context: Context) {
             }
         }
 
-        if (!filtered) return rawList
-        return filterRidiculousSpikes(rawList)
+        // iOS parity: disk append order is not chronological (late batches);
+        // normalize and keep the best accuracy for duplicate timestamps.
+        val chronological = DriftMarker.normalizeChronological(rawList)
+        if (!filtered) return chronological
+        return DriftMarker.filterRidiculousSpikes(chronological)
     }
 
-    /** 过滤离谱漂移点（对应 iOS filterRidiculousSpikes） */
-    private fun filterRidiculousSpikes(locations: List<RawPoint>): List<RawPoint> {
-        if (locations.size < 3) return locations
-        val result = mutableListOf<RawPoint>()
-        result.add(locations[0])
-
-        for (i in 1 until locations.size - 1) {
-            val prev = result.last()
-            val curr = locations[i]
-            val next = locations[i + 1]
-
-            val d1 = haversineMeters(prev.latitude, prev.longitude, curr.latitude, curr.longitude)
-            val d2 = haversineMeters(curr.latitude, curr.longitude, next.latitude, next.longitude)
-            val gap = haversineMeters(prev.latitude, prev.longitude, next.latitude, next.longitude)
-
-            // 跳出 > 1km 且 跳回 > 1km，且起终点差距不大 -> 判定为坐标突跳
-            if (d1 > AppConfig.RIDICULOUS_DISTANCE_THRESHOLD / 2 &&
-                            d2 > AppConfig.RIDICULOUS_DISTANCE_THRESHOLD / 2 &&
-                            gap < AppConfig.RIDICULOUS_ACCURACY_THRESHOLD
-            ) {
-                continue
-            }
-
-            // 基础精度/速度过滤
-            if (curr.accuracy > AppConfig.RIDICULOUS_ACCURACY_THRESHOLD &&
-                            d1 > AppConfig.RIDICULOUS_DISTANCE_THRESHOLD
-            )
-                    continue
-
-            result.add(curr)
-        }
-        result.add(locations.last())
-        return result
-    }
+    /**
+     * Loads unfiltered chronological points for [date] and marks drift (iOS
+     * syncDay step 5). Returns valid points plus the drift timestamp set.
+     */
+    fun loadMarkedLocations(date: Date): DriftMarkResult = DriftMarker.mark(loadLocations(date, filtered = false))
 
     /** 删除指定时间点的数据（用于手动纠错，对应 iOS deleteLocation） */
     fun deleteLocation(timestamp: Double, date: Date, context: Context) {
@@ -296,218 +270,14 @@ class RawLocationStore private constructor(context: Context) {
     /** 加载带漂移标记的原始轨迹点（用于 RawPointsScreen 显示） */
     fun loadLocationsWithDriftFlags(date: Date): List<RawPointEntry> {
         val rawPoints = loadLocations(date, filtered = false)
-        return markDriftPoints(rawPoints)
+        return DriftMarker.markEntries(rawPoints)
     }
 
     /**
-     * 核心算法：标记轨迹中的漂移点（不删除，只打标记） 对应 iOS RawLocationStore.markDriftPoints() 检测模式：
-     * 1. 三点回弹检测：A≈C 但 B 远离（用户描述的典型场景）
-     * 2. 连续多点回弹检测
-     * 3. 物理速度不可能 + 精度极差检测
-     * 4. 大跳变集群检测
+     * 核心算法：标记轨迹中的漂移点（不删除，只打标记），对应 iOS
+     * RawLocationStore.markDriftPoints()。返回带标记条目、有效点与漂移时间戳集合。
      */
-    private fun markDriftPoints(points: List<RawPoint>): List<RawPointEntry> {
-        if (points.size < 2) {
-            return points.mapIndexed { index, p -> RawPointEntry(p, false, index) }
-        }
-
-        val driftFlags = BooleanArray(points.size)
-
-        // --- Pass 1: 三点回弹检测（核心新算法）---
-        for (i in 1 until points.size - 1) {
-            val a = points[i - 1]
-            val b = points[i]
-            val c = points[i + 1]
-
-            val timeAC = abs((c.timestamp.time - a.timestamp.time) / 1000.0)
-            if (timeAC >= 30) continue
-
-            val distAC = haversineMeters(a.latitude, a.longitude, c.latitude, c.longitude)
-            val distAB = haversineMeters(a.latitude, a.longitude, b.latitude, b.longitude)
-            val distBC = haversineMeters(b.latitude, b.longitude, c.latitude, c.longitude)
-
-            // A 和 C 距离很近（< 80m），但 B 跳到了很远（> 100m）
-            if (distAC < 80 && distAB > 100 && distBC > 100) {
-                driftFlags[i] = true
-                continue
-            }
-
-            // 更宽松的变体：A 和 C 距离适中（< 150m），但 B 跳得很远（> 300m）
-            if (distAC < 150 && distAB > 300 && distBC > 300) {
-                driftFlags[i] = true
-                continue
-            }
-
-            // 补充：B 的精度很差且跳变明显
-            if (b.accuracy > 100 && distAC < 100 && distAB > 150) {
-                driftFlags[i] = true
-                continue
-            }
-        }
-
-        // --- Pass 2: 连续多点回弹检测 ---
-        for (i in 1 until points.size - 1) {
-            if (driftFlags[i]) continue
-
-            var prevIdx = i - 1
-            while (prevIdx >= 0 && driftFlags[prevIdx]) prevIdx--
-            if (prevIdx < 0) continue
-
-            var nextIdx = i + 1
-            while (nextIdx < points.size && driftFlags[nextIdx]) nextIdx++
-            if (nextIdx >= points.size) continue
-
-            val prev = points[prevIdx]
-            val current = points[i]
-            val next = points[nextIdx]
-
-            val timePN = abs((next.timestamp.time - prev.timestamp.time) / 1000.0)
-            if (timePN >= 60) continue
-
-            val distPN =
-                    haversineMeters(prev.latitude, prev.longitude, next.latitude, next.longitude)
-            val distPC =
-                    haversineMeters(
-                            prev.latitude,
-                            prev.longitude,
-                            current.latitude,
-                            current.longitude
-                    )
-            val distCN =
-                    haversineMeters(
-                            current.latitude,
-                            current.longitude,
-                            next.latitude,
-                            next.longitude
-                    )
-
-            if (distPN < 100 && distPC > 150 && distCN > 150) {
-                driftFlags[i] = true
-            }
-        }
-
-        // --- Pass 3: 物理速度不可能 + 精度极差的孤立跳变 ---
-        for (i in points.indices) {
-            if (driftFlags[i]) continue
-            val current = points[i]
-
-            // 3a: 物理不可能的瞬时速度
-            if (i > 0 && !driftFlags[i - 1]) {
-                val prev = points[i - 1]
-                val dist =
-                        haversineMeters(
-                                prev.latitude,
-                                prev.longitude,
-                                current.latitude,
-                                current.longitude
-                        )
-                val time = max(0.1, (current.timestamp.time - prev.timestamp.time) / 1000.0)
-                val speed = dist / time
-
-                if (speed > AppConfig.PHYSICAL_MAX_SPEED_THRESHOLD) {
-                    if (i + 1 < points.size) {
-                        val next = points[i + 1]
-                        val distPrevNext =
-                                haversineMeters(
-                                        prev.latitude,
-                                        prev.longitude,
-                                        next.latitude,
-                                        next.longitude
-                                )
-                        if (distPrevNext < dist * 0.5) {
-                            driftFlags[i] = true
-                            continue
-                        }
-                    }
-                }
-            }
-
-            // 3b: 极差精度 + 大位移
-            if (current.accuracy > 1500) {
-                var nearbyGood = false
-                val checkStart = max(0, i - 3)
-                val checkEnd = min(points.size - 1, i + 3)
-                for (j in checkStart..checkEnd) {
-                    if (j != i && !driftFlags[j]) {
-                        if (haversineMeters(
-                                        current.latitude,
-                                        current.longitude,
-                                        points[j].latitude,
-                                        points[j].longitude
-                                ) < 500
-                        ) {
-                            nearbyGood = true
-                            break
-                        }
-                    }
-                }
-                if (!nearbyGood) {
-                    driftFlags[i] = true
-                }
-            }
-        }
-
-        // --- Pass 4: 大跳变集群检测（对应 filterRidiculousSpikes 逻辑）---
-        var cleanedIndex = 0
-        for (i in 1 until points.size) {
-            if (driftFlags[i]) continue
-
-            val prev = points[cleanedIndex]
-            val current = points[i]
-            val dist =
-                    haversineMeters(
-                            prev.latitude,
-                            prev.longitude,
-                            current.latitude,
-                            current.longitude
-                    )
-            val time = max(0.1, (current.timestamp.time - prev.timestamp.time) / 1000.0)
-            val speed = dist / time
-
-            if (speed > 60 || (dist > 800 && speed > 20) || dist > 2000) {
-                var foundReturn = false
-                val searchLimit = min(i + 15, points.size)
-                for (j in (i + 1) until searchLimit) {
-                    val next = points[j]
-                    val tPrevToNext = max(0.1, (next.timestamp.time - prev.timestamp.time) / 1000.0)
-                    val dPrevToNext =
-                            haversineMeters(
-                                    prev.latitude,
-                                    prev.longitude,
-                                    next.latitude,
-                                    next.longitude
-                            )
-                    val avgSpeed = dPrevToNext / tPrevToNext
-
-                    if (avgSpeed < 42 &&
-                                    dist > 800 &&
-                                    haversineMeters(
-                                            current.latitude,
-                                            current.longitude,
-                                            next.latitude,
-                                            next.longitude
-                                    ) > 800
-                    ) {
-                        for (k in i until j) {
-                            driftFlags[k] = true
-                        }
-                        foundReturn = true
-                        break
-                    }
-                }
-
-                if (!foundReturn && current.accuracy > 1500 && dist > 2000) {
-                    driftFlags[i] = true
-                }
-            }
-
-            if (!driftFlags[i]) {
-                cleanedIndex = i
-            }
-        }
-
-        return points.mapIndexed { index, point -> RawPointEntry(point, driftFlags[index], index) }
-    }
+    fun markDriftPoints(points: List<RawPoint>): DriftMarkResult = DriftMarker.mark(points)
 
     private fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
         val R = 6371000.0

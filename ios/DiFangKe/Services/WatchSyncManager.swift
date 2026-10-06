@@ -22,20 +22,10 @@ struct WatchSnapshot: Codable {
     let currentAverageSpeed: Double?
     let todayFootprintCount: Int
     let todayDistance: Double
-    let nextTrip: WatchTripSnapshot?
     let activities: [WatchActivityOption]
     let todayTimeline: [WatchTimelineItem]
     let recentDays: [WatchDaySnapshot]
     let statistics: WatchStatisticsSnapshot
-    let futureTrips: [WatchTripSnapshot]
-}
-
-struct WatchTripSnapshot: Codable {
-    let id: String
-    let placeName: String
-    let distance: Double?
-    let arrivalDate: Date
-    let hasArrivalTime: Bool
 }
 
 struct WatchCoordinate: Codable {
@@ -571,10 +561,6 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         } else {
             statistics = WatchStatisticsSnapshot(summaries: statisticsSummaries, availableYears: statisticsYears)
         }
-        // Do not expose legacy trip-plan data on the Watch after retirement.
-        let futureTrips: [WatchTripSnapshot] = []
-        let nextTrip: WatchTripSnapshot? = nil
-
         let liveFootprint = LocationManager.shared.potentialStopStartLocation.flatMap { anchor in
             Self.currentStayFootprint(
                 in: context,
@@ -612,12 +598,10 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             currentAverageSpeed: currentAverageSpeed,
             todayFootprintCount: footprints.count,
             todayDistance: footprints.compactMap(\.walkingDistance).reduce(0, +),
-            nextTrip: nextTrip,
             activities: activities,
             todayTimeline: timeline(footprints: footprints, transports: todayTransports),
             recentDays: recentDays,
-            statistics: statistics,
-            futureTrips: Array(futureTrips)
+            statistics: statistics
         )
     }
 

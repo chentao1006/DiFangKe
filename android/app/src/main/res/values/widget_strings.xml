@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_footprint_title">今日足迹</string>
+    <string name="widget_footprint_description">在主屏查看今天的足迹轨迹、地点数和里程，可切换查看最近 7 天。</string>
+    <string name="widget_footprint_preview_stats">3 个地点 · 12.4 公里</string>
+</resources>

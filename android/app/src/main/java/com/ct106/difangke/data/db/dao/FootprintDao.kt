@@ -115,4 +115,25 @@ interface FootprintDao {
     """
         )
         suspend fun deleteStartBoundaryCandidates(start: Date)
+
+        // ── Timeline engine (iOS syncDay parity) ──
+
+        @Query("SELECT * FROM footprints WHERE startTime < :end AND endTime > :start AND statusValue = 'ignored' ORDER BY startTime ASC")
+        suspend fun getIgnoredIntersecting(start: Date, end: Date): List<FootprintEntity>
+
+        @Query("SELECT * FROM footprints WHERE endTime <= :time AND statusValue != 'ignored' ORDER BY endTime DESC LIMIT 1")
+        suspend fun getLatestEndingAtOrBefore(time: Date): FootprintEntity?
+
+        @Query("SELECT * FROM footprints WHERE startTime >= :time AND statusValue != 'ignored' ORDER BY startTime ASC LIMIT 1")
+        suspend fun getEarliestStartingAtOrAfter(time: Date): FootprintEntity?
+
+        /** Activity habit history: every stay at a place with an activity (any status, like iOS). */
+        @Query("SELECT * FROM footprints WHERE placeID IS NOT NULL AND activityTypeValue IS NOT NULL")
+        suspend fun getWithPlaceAndActivity(): List<FootprintEntity>
+
+        @Query("SELECT * FROM footprints")
+        suspend fun getAllIncludingIgnored(): List<FootprintEntity>
+
+        @Query("DELETE FROM footprints WHERE startTime < :end AND endTime > :start")
+        suspend fun deleteIntersecting(start: Date, end: Date)
 }

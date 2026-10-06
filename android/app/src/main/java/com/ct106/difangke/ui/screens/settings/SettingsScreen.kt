@@ -40,7 +40,8 @@ fun SettingsScreen(
     val notificationMinute by viewModel.notificationMinute.collectAsState()
     val isHighlightNotificationEnabled by viewModel.isHighlightNotificationEnabled.collectAsState()
     val isPastMemoriesNotificationEnabled by viewModel.isPastMemoriesNotificationEnabled.collectAsState()
-    val isFutureTripNotificationEnabled by viewModel.isFutureTripNotificationEnabled.collectAsState()
+    val isAutoPhotoLinkEnabled by viewModel.isAutoPhotoLinkEnabled.collectAsState()
+    val isLiveNotificationEnabled by viewModel.isLiveNotificationEnabled.collectAsState()
     
     val importantPlacesCount by viewModel.importantPlacesCount.collectAsState()
     val savedPlacesCount by viewModel.savedPlacesCount.collectAsState()
@@ -90,6 +91,25 @@ fun SettingsScreen(
         }
     }
 
+    // iOS parity: if the system has notifications turned off, switch the in-app toggles off.
+    // Use the hosting activity's lifecycle (see MainScreen: LocalLifecycleOwner may be absent under NavHost).
+    val hostActivity = remember(context) { context.findHostActivity() }
+    DisposableEffect(hostActivity) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                val enabled = androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()
+                if (!enabled) viewModel.disableNotificationTogglesForSystemDenial()
+            }
+        }
+        hostActivity?.lifecycle?.addObserver(observer)
+        if (hostActivity == null &&
+            !androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()
+        ) {
+            viewModel.disableNotificationTogglesForSystemDenial()
+        }
+        onDispose { hostActivity?.lifecycle?.removeObserver(observer) }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -136,6 +156,30 @@ fun SettingsScreen(
                         }
                     },
                     colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                )
+            }
+            item {
+                SettingsToggleItem(
+                    title = "自动关联照片到足迹",
+                    subtitle = "查看足迹时自动关联停留期间拍摄的照片",
+                    checked = isAutoPhotoLinkEnabled,
+                    onCheckedChange = { viewModel.setAutoPhotoLinkEnabled(it) }
+                )
+            }
+            item {
+                SettingsToggleItem(
+                    title = "实时通知",
+                    subtitle = "在通知栏和锁屏显示当前足迹与交通",
+                    checked = isLiveNotificationEnabled,
+                    onCheckedChange = { isEnabled ->
+                        if (isEnabled) {
+                            checkNotificationPermission {
+                                viewModel.setLiveNotificationEnabled(true)
+                            }
+                        } else {
+                            viewModel.setLiveNotificationEnabled(false)
+                        }
+                    }
                 )
             }
             // ── 地点管理 ──────────────────────────────────────────────
@@ -259,6 +303,7 @@ fun SettingsScreen(
                     )
                 }
             }
+            item { SettingsFooter("智能分析服务将根据您的地点历史自动建议标题。") }
             item {
                 SettingsNavigationItem(
                     title = "检查更新",
@@ -273,6 +318,32 @@ fun SettingsScreen(
                 SettingsNavigationItem(
                     title = "数据备份与清理",
                     onClick = { onNavigate("settings/data") }
+                )
+            }
+
+            // ── 关于 ──────────────────────────────────────────────────
+            item { SettingsHeader("关于") }
+            item {
+                SettingsNavigationItem(
+                    title = "作者主页",
+                    badge = "ct106.com",
+                    onClick = { openUrl(context, "https://ct106.com") }
+                )
+            }
+            item {
+                SettingsNavigationItem(
+                    title = "反馈建议",
+                    badge = "GitHub Issues",
+                    onClick = { openUrl(context, "https://github.com/chentao1006/DiFangKe/issues") }
+                )
+            }
+            item {
+                ListItem(
+                    modifier = Modifier.clickable { openStoreListing(context) },
+                    headlineContent = {
+                        Text("给个好评", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary)
+                    },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
                 )
             }
 
@@ -419,4 +490,44 @@ fun SettingsScreen(
             }
         )
     }
+}
+
+@Composable
+private fun SettingsFooter(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+    )
+}
+
+private fun openUrl(context: android.content.Context, url: String) {
+    try {
+        context.startActivity(
+            android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    } catch (e: Exception) {
+        android.widget.Toast.makeText(context, "无法打开链接", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** 给个好评：优先打开应用商店详情页，失败时回退到 Google Play 网页。 */
+private fun openStoreListing(context: android.content.Context) {
+    val pkg = context.packageName
+    try {
+        context.startActivity(
+            android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("market://details?id=$pkg"))
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    } catch (e: Exception) {
+        openUrl(context, "https://play.google.com/store/apps/details?id=$pkg")
+    }
+}
+
+private tailrec fun android.content.Context.findHostActivity(): androidx.activity.ComponentActivity? = when (this) {
+    is androidx.activity.ComponentActivity -> this
+    is android.content.ContextWrapper -> baseContext.findHostActivity()
+    else -> null
 }

@@ -42,7 +42,15 @@ data class FootprintEntity(
     /** Health Connect 聚合的停留期间指标；未授权或无数据时保持为空。 */
     val stepCount: Int? = null,
     val walkingDistance: Double? = null,
-    val floorsAscended: Int? = null
+    val floorsAscended: Int? = null,
+    /**
+     * iOS parity: a metadata/activity edit marks the stay manual but still lets
+     * it grow automatically while the user remains there. Time edits and
+     * splits leave this false so their explicit boundary is authoritative.
+     */
+    val allowsAutomaticDurationExtension: Boolean = false,
+    /** The user typed the address; automatic geocoding must not overwrite it. */
+    val isAddressEditedByHand: Boolean = false
 ) {
     val status: FootprintStatus get() = FootprintStatus.from(statusValue)
 
@@ -56,3 +64,15 @@ data class FootprintEntity(
         }
     }
 }
+
+/**
+ * Mirrors iOS `Footprint.markManualMetadataEdit()`: metadata edits (title,
+ * activity, notes, place) make the stay manual. If it was not manual yet,
+ * automatic duration growth stays allowed; time edits/splits that already
+ * marked it manual keep their explicit boundary.
+ */
+fun FootprintEntity.markManualMetadataEdit(): FootprintEntity = copy(
+    statusValue = FootprintStatus.MANUAL.raw,
+    allowsAutomaticDurationExtension =
+        if (statusValue != FootprintStatus.MANUAL.raw) true else allowsAutomaticDurationExtension
+)

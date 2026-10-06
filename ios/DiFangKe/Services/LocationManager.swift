@@ -1056,7 +1056,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     // Deep Linking State
     var deepLinkFootprintID: UUID?
-    var deepLinkFutureTripID: UUID?
     var deepLinkDate: Date?
     
     var isTracking: Bool = false
@@ -1295,17 +1294,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.syncOngoingStayFromCloud()
-            }
-        }
-        
-        // Listen for FutureTrip changes to update Live Activities
-        NotificationCenter.default.addObserver(
-            forName: FutureTrip.didChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.checkLiveActivity()
             }
         }
         
@@ -5641,11 +5629,6 @@ final class CurrentLiveActivityManager {
             await activity.update(ActivityContent(state: state, staleDate: nil))
         }
         lastState = state
-
-        // Clean up any plan-based activity left behind by an older build.
-        for legacy in Activity<TripActivityAttributes>.activities {
-            await legacy.end(nil, dismissalPolicy: .immediate)
-        }
     }
 
     private func resolveState(
@@ -5919,42 +5902,6 @@ final class CurrentLiveActivityManager {
             await activity.end(nil, dismissalPolicy: .immediate)
         }
     }
-}
-
-@available(iOS 16.1, *)
-class TripLiveActivityManager {
-    static let shared = TripLiveActivityManager()
-    private var currentActivity: Activity<TripActivityAttributes>?
-
-    func updateLiveActivity(location: CLLocation, modelContext: ModelContext?) {
-        // Trip plans are no longer an active feature. End any activity created
-        // by an older app version and skip all plan completion/selection work.
-        if let currentActivity {
-            Task {
-                await currentActivity.end(nil, dismissalPolicy: .immediate)
-            }
-        }
-        currentActivity = nil
-    }
-
-    func endActivity(for tripID: UUID) {
-        let tripIDString = tripID.uuidString
-
-        if currentActivity?.attributes.tripId == tripIDString {
-            let activity = currentActivity
-            currentActivity = nil
-            Task {
-                await activity?.end(nil, dismissalPolicy: .immediate)
-            }
-        }
-
-        for activity in Activity<TripActivityAttributes>.activities where activity.attributes.tripId == tripIDString {
-            Task {
-                await activity.end(nil, dismissalPolicy: .immediate)
-            }
-        }
-    }
-
 }
 #endif
 

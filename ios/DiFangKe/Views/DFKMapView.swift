@@ -191,7 +191,6 @@ struct DFKMapView: View {
     var mainAnnotationCoordinate: CLLocationCoordinate2D? = nil
     var mainAnnotationTitle: String? = nil
     var timelineItems: [TimelineItem] = []
-    var futureTrips: [FutureTrip] = []
     var photoAssets: [PHAsset] = []
     var widgetSnapshotOffset: Int? = nil
     var allowsGeneratedSnapshot: Bool = true
@@ -199,7 +198,6 @@ struct DFKMapView: View {
     var prefersActivityIcons: Bool = false
     var isMiniTimelineMode: Bool = false
     var selectedFootprintID: UUID? = nil
-    var selectedFutureTripID: UUID? = nil
     var selectedTimeCoordinate: CLLocationCoordinate2D? = nil
     var timelineUpdateIdentifier: Int? = nil
     var onMapInteraction: ((MapInteractionType) -> Void)? = nil
@@ -238,7 +236,6 @@ struct DFKMapView: View {
     var heatmapPoints: [HeatmapPoint] = []
 
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
-    var onFutureTripTap: ((FutureTrip) -> Void)? = nil
     var onPhotoTap: ((PHAsset) -> Void)? = nil
     var onUserLocationTap: (() -> Void)? = nil
 
@@ -255,20 +252,17 @@ struct DFKMapView: View {
         mainAnnotationCoordinate: CLLocationCoordinate2D? = nil,
         mainAnnotationTitle: String? = nil,
         timelineItems: [TimelineItem] = [],
-        futureTrips: [FutureTrip] = [],
         photoAssets: [PHAsset] = [],
         heatmapPoints: [HeatmapPoint] = [],
         showsStandalonePhotos: Bool = false,
         prefersActivityIcons: Bool = false,
         isMiniTimelineMode: Bool = false,
         selectedFootprintID: UUID? = nil,
-        selectedFutureTripID: UUID? = nil,
         selectedTimeCoordinate: CLLocationCoordinate2D? = nil,
         timelineUpdateIdentifier: Int? = nil,
         onMapInteraction: ((MapInteractionType) -> Void)? = nil,
         showsMapControls: Bool = true,
         onTimelineItemTap: ((TimelineItem) -> Void)? = nil,
-        onFutureTripTap: ((FutureTrip) -> Void)? = nil,
         onPhotoTap: ((PHAsset) -> Void)? = nil,
         onUserLocationTap: (() -> Void)? = nil
     ) {
@@ -281,20 +275,17 @@ struct DFKMapView: View {
         self.mainAnnotationCoordinate = mainAnnotationCoordinate
         self.mainAnnotationTitle = mainAnnotationTitle
         self.timelineItems = timelineItems
-        self.futureTrips = futureTrips
         self.photoAssets = photoAssets
         self.heatmapPoints = heatmapPoints
         self.showsStandalonePhotos = showsStandalonePhotos
         self.prefersActivityIcons = prefersActivityIcons
         self.isMiniTimelineMode = isMiniTimelineMode
         self.selectedFootprintID = selectedFootprintID
-        self.selectedFutureTripID = selectedFutureTripID
         self.selectedTimeCoordinate = selectedTimeCoordinate
         self.timelineUpdateIdentifier = timelineUpdateIdentifier
         self.onMapInteraction = onMapInteraction
         self.showsMapControls = showsMapControls
         self.onTimelineItemTap = onTimelineItemTap
-        self.onFutureTripTap = onFutureTripTap
         self.onPhotoTap = onPhotoTap
         self.onUserLocationTap = onUserLocationTap
     }
@@ -316,7 +307,6 @@ struct DFKMapView: View {
         !points.isEmpty ||
         validMainAnnotationCoordinate != nil ||
         !timelineItems.isEmpty ||
-        !validFutureTrips.isEmpty ||
         !validPhotoAnnotations.isEmpty ||
         !validHeatmapPoints.isEmpty ||
         showsUserLocation
@@ -370,10 +360,6 @@ struct DFKMapView: View {
         heatmapPoints.filter { $0.coordinate.isRenderableMapCoordinate }
     }
 
-    private var validFutureTrips: [FutureTrip] {
-        futureTrips.filter { $0.coordinate.isRenderableMapCoordinate }
-    }
-
     private var interactiveRegion: MKCoordinateRegion? {
         var allCoords = points.filter(\.isRenderableMapCoordinate)
         if let mainAnnotationCoordinate = validMainAnnotationCoordinate {
@@ -390,7 +376,6 @@ struct DFKMapView: View {
                 allCoords.append(contentsOf: transport.points.filter(\.isRenderableMapCoordinate))
             }
         }
-        allCoords.append(contentsOf: validFutureTrips.map(\.coordinate))
         allCoords.append(contentsOf: validPhotoAnnotations.map(\.coordinate))
         allCoords.append(contentsOf: validHeatmapPoints.map(\.coordinate))
         if let selectedTimeCoordinate, selectedTimeCoordinate.isRenderableMapCoordinate {
@@ -521,7 +506,6 @@ struct DFKMapView: View {
                                 aggregatedFootprints: validAggregatedFootprints,
                                 photoAnnotations: validPhotoAnnotations,
                                 heatmapPoints: validHeatmapPoints,
-                                futureTrips: validFutureTrips,
                                 mainAnnotationCoordinate: validMainAnnotationCoordinate,
                                 selectedTimeCoordinate: selectedTimeCoordinate,
                                 allActivities: allActivities,
@@ -529,9 +513,6 @@ struct DFKMapView: View {
                                 onFootprintTap: handleFootprintTap(for:),
                                 onTransportTap: { transport in
                                     onTimelineItemTap?(.transport(transport))
-                                },
-                                onFutureTripTap: { trip in
-                                    onFutureTripTap?(trip)
                                 },
                                 onPhotoTap: { asset in
                                     onPhotoTap?(asset)
@@ -573,17 +554,6 @@ struct DFKMapView: View {
                                 ForEach(validHeatmapPoints) { point in
                                     Annotation("", coordinate: point.coordinate) {
                                         heatmapAnnotationContent(for: point)
-                                    }
-                                }
-
-                                ForEach(validFutureTrips) { trip in
-                                    Annotation("", coordinate: trip.coordinate, anchor: .bottom) {
-                                        Button {
-                                            onFutureTripTap?(trip)
-                                        } label: {
-                                            futureTripAnnotationContent(for: trip)
-                                        }
-                                        .buttonStyle(.plain)
                                     }
                                 }
 
@@ -858,7 +828,6 @@ struct DFKMapView: View {
         .scaleEffect(isSelected ? 1.5 : 1.0, anchor: .bottom)
         .contentShape(Rectangle())
         .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFootprintID)
-        .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFutureTripID)
     }
 
     @ViewBuilder
@@ -886,84 +855,6 @@ struct DFKMapView: View {
         } else {
             transportIcon
         }
-    }
-
-    private func futureTripAnnotationContent(for trip: FutureTrip) -> some View {
-        let isSelected = trip.id == selectedFutureTripID
-        let activity = activity(for: trip)
-        let tint = activity?.color ?? Color.dfkAccent
-        let iconName = activity?.icon ?? "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted"
-        
-        let constantScale: CGFloat = 1.32
-        let baseSize: CGFloat = isInteractive ? 25 : 20
-        let size = isMiniTimelineMode ? 11 : baseSize * constantScale
-        let iconColor: Color = .white
-        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (activity?.icon == nil ? 18 : 10) * constantScale
-        let fontSize = isInteractive ? 6.5 * constantScale : 5.5 * constantScale
-
-        return ZStack(alignment: .top) {
-            MapPinTeardropShape()
-                .fill(Color(uiColor: .systemBackground))
-                .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
-                .frame(width: size, height: size * 1.2)
-
-            Circle()
-                .fill(
-                    LinearGradient(
-                        gradient: Gradient(colors: [tint.lighter(by: 0.25), tint]),
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(width: size - 5, height: size - 5)
-                .offset(y: 2.5)
-
-            Image(systemName: iconName)
-                .font(.system(size: iconSize, weight: .bold))
-                .foregroundColor(iconColor)
-                .frame(width: size, height: size)
-
-            if !isMiniTimelineMode {
-                HStack(alignment: .lastTextBaseline, spacing: 0) {
-                    Text(mapDistanceText(for: trip))
-                        .font(.system(size: fontSize, weight: .bold, design: .rounded))
-                }
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-                .foregroundColor(tint.darker(by: 0.30))
-                .padding(.horizontal, 2)
-                .padding(.vertical, 1)
-                .background(
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color(uiColor: .systemBackground))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 3)
-                        .stroke(tint, lineWidth: 0.5)
-                )
-                .offset(y: size - 6 * constantScale)
-            }
-        }
-        .opacity(isSelected ? 1.0 : 0.58)
-        .padding(2 * constantScale)
-        .frame(width: size + 4 * constantScale, height: size * 1.2 + 4 * constantScale)
-        .scaleEffect(isSelected ? 1.5 : 1.0, anchor: .bottom)
-        .contentShape(Rectangle())
-        .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFutureTripID)
-    }
-
-    private func mapDistanceText(for trip: FutureTrip) -> String {
-        guard let userLocation = LocationManager.shared.lastLocation else {
-            return "--"
-        }
-        let tripLocation = CLLocation(latitude: trip.latitude, longitude: trip.longitude)
-        let distance = userLocation.distance(from: tripLocation)
-        return String(format: "%.1fkm", distance / 1000)
-    }
-
-    private func activity(for trip: FutureTrip) -> ActivityType? {
-        guard let activityTypeValue = trip.activityTypeValue else { return nil }
-        return allActivities.first { $0.id.uuidString == activityTypeValue || $0.name == activityTypeValue }
     }
 
     @MapContentBuilder
@@ -1710,14 +1601,12 @@ private struct StableInteractiveMapView: UIViewRepresentable {
     let aggregatedFootprints: [DFKMapView.AggregatedFootprint]
     let photoAnnotations: [(asset: PHAsset, coordinate: CLLocationCoordinate2D)]
     let heatmapPoints: [DFKMapView.HeatmapPoint]
-    let futureTrips: [FutureTrip]
     let mainAnnotationCoordinate: CLLocationCoordinate2D?
     let selectedTimeCoordinate: CLLocationCoordinate2D?
     let allActivities: [ActivityType]
     let colorScheme: ColorScheme
     let onFootprintTap: (DFKMapView.AggregatedFootprint) -> Void
     let onTransportTap: (Transport) -> Void
-    let onFutureTripTap: (FutureTrip) -> Void
     let onPhotoTap: (PHAsset) -> Void
     let onUserLocationTap: (() -> Void)?
 
@@ -1849,7 +1738,6 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         context.coordinator.overlayStyles.removeAll()
         context.coordinator.footprintsByID = Dictionary(uniqueKeysWithValues: aggregatedFootprints.map { ($0.id, $0) })
         context.coordinator.transportsByID = Dictionary(uniqueKeysWithValues: transportItems.map { ($0.id.uuidString, $0) })
-        context.coordinator.futureTripsByID = Dictionary(uniqueKeysWithValues: futureTrips.map { ($0.id.uuidString, $0) })
         context.coordinator.photosByID = Dictionary(uniqueKeysWithValues: photoAnnotations.map { ($0.asset.localIdentifier, $0.asset) })
 
         let removableAnnotations = mapView.annotations.filter { !($0 is MKUserLocation) }
@@ -1922,23 +1810,6 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             ))
         }
 
-        for trip in futureTrips {
-            let activity = allActivities.first { activity in
-                activity.id.uuidString == trip.activityTypeValue || activity.name == trip.activityTypeValue
-            }
-            let iconColor: UIColor = colorScheme == .dark ? .black : .white
-            mapView.addAnnotation(MapImageAnnotation(
-                coordinate: trip.coordinate,
-                kind: .futureTrip(trip.id.uuidString),
-                image: Coordinator.futureTripImage(
-                    symbolName: activity?.icon ?? "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted",
-                    color: UIColor(activity?.color ?? Color.dfkAccent),
-                    iconColor: iconColor
-                ),
-                centerOffset: CGPoint(x: 0, y: -9)
-            ))
-        }
-
         if let mainAnnotationCoordinate {
             mapView.addAnnotation(MapImageAnnotation(
                 coordinate: mainAnnotationCoordinate,
@@ -1964,7 +1835,6 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         var overlayStyles: [ObjectIdentifier: OverlayStyle] = [:]
         var footprintsByID: [String: DFKMapView.AggregatedFootprint] = [:]
         var transportsByID: [String: Transport] = [:]
-        var futureTripsByID: [String: FutureTrip] = [:]
         var photosByID: [String: PHAsset] = [:]
         
         var lastUpdateIdentifier: Int? = -1
@@ -2030,7 +1900,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 view.zPriority = .max
                 view.displayPriority = .required
                 view.layer.zPosition = 10
-            case .photo, .heatmap, .futureTrip, .main, .selectedTime:
+            case .photo, .heatmap, .main, .selectedTime:
                 view.zPriority = .max
                 view.displayPriority = .required
                 view.layer.zPosition = 20
@@ -2060,10 +1930,6 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             case .photo(let id):
                 if let asset = photosByID[id] {
                     parent.onPhotoTap(asset)
-                }
-            case .futureTrip(let id):
-                if let trip = futureTripsByID[id] {
-                    parent.onFutureTripTap(trip)
                 }
             case .heatmap, .main, .selectedTime:
                 break
@@ -2104,35 +1970,6 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             }
         }
 
-        static func futureTripImage(symbolName: String, color: UIColor, iconColor: UIColor) -> UIImage {
-            let size = CGSize(width: 26, height: 32)
-            let renderer = UIGraphicsImageRenderer(size: size)
-            return renderer.image { context in
-                let pinRect = CGRect(x: 2, y: 1, width: 22, height: 26.4)
-                let radius = pinRect.width / 2
-                let tipRadius: CGFloat = 1.5
-                let shellCenter = CGPoint(x: pinRect.midX, y: pinRect.minY + radius)
-
-                let shell = UIBezierPath()
-                shell.addArc(withCenter: shellCenter, radius: radius, startAngle: 140 * .pi / 180, endAngle: 40 * .pi / 180, clockwise: false)
-                shell.addLine(to: CGPoint(x: pinRect.midX + tipRadius, y: pinRect.maxY - tipRadius))
-                shell.addArc(withCenter: CGPoint(x: pinRect.midX, y: pinRect.maxY - tipRadius), radius: tipRadius, startAngle: 0, endAngle: .pi, clockwise: false)
-                shell.close()
-                context.cgContext.setShadow(offset: CGSize(width: 0, height: 2), blur: 2, color: UIColor.black.withAlphaComponent(0.15).cgColor)
-                UIColor.systemBackground.setFill()
-                shell.fill()
-                context.cgContext.setShadow(offset: .zero, blur: 0, color: nil)
-
-                let bodyDiameter: CGFloat = 17
-                let bodyCenter = CGPoint(x: pinRect.midX, y: pinRect.midY + 2.5)
-                color.setFill()
-                UIBezierPath(ovalIn: CGRect(x: bodyCenter.x - bodyDiameter / 2, y: bodyCenter.y - bodyDiameter / 2, width: bodyDiameter, height: bodyDiameter)).fill()
-
-                UIImage(systemName: symbolName)?
-                    .withTintColor(iconColor, renderingMode: .alwaysOriginal)
-                    .draw(in: CGRect(x: bodyCenter.x - 5, y: bodyCenter.y - 5, width: 10, height: 10))
-            }
-        }
 
         static func photoImage() -> UIImage {
             let bodySize: CGFloat = 28
@@ -2221,7 +2058,6 @@ private final class MapImageAnnotation: NSObject, MKAnnotation {
     enum Kind {
         case footprint(String)
         case transport(String)
-        case futureTrip(String)
         case photo(String)
         case heatmap(String)
         case main

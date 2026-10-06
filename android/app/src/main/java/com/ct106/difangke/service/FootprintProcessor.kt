@@ -4,6 +4,7 @@ import android.location.Location
 import com.ct106.difangke.AppConfig
 import com.ct106.difangke.data.location.RawLocationStore
 import com.ct106.difangke.data.model.CandidateFootprint
+import com.ct106.difangke.service.tracking.TrackingConfig
 import java.util.Date
 import kotlin.math.*
 
@@ -23,10 +24,11 @@ class FootprintProcessor private constructor() {
     }
 
     // 从 AppConfig 读取阈值
-    private val stayRadius get() = AppConfig.STAY_DISTANCE_THRESHOLD
-    private val stayDuration get() = AppConfig.LIVE_STAY_MIN_DURATION_THRESHOLD  // seconds
-    private val mergeTimeThreshold get() = AppConfig.LIVE_STAY_MERGE_TIME_THRESHOLD  // seconds
-    private val mergeDistance get() = AppConfig.LIVE_STAY_MERGE_DISTANCE_THRESHOLD  // meters
+    // 与 iOS FootprintProcessor 一致的阈值（见 TrackingConfig）
+    private val stayRadius get() = TrackingConfig.STAY_DISTANCE_THRESHOLD
+    private val stayDuration get() = TrackingConfig.LIVE_STAY_MIN_DURATION_THRESHOLD  // seconds
+    private val mergeTimeThreshold get() = TrackingConfig.STAY_MERGE_GAP_THRESHOLD  // seconds
+    private val mergeDistance get() = TrackingConfig.MERGE_DISTANCE_THRESHOLD  // meters
 
     /**
      * 处理新定位点（对应 iOS processNewLocation）
@@ -42,34 +44,40 @@ class FootprintProcessor private constructor() {
     ): CandidateFootprint? {
 
         // 1. 精度过滤
-        if (location.accuracy <= 0 || location.accuracy >= AppConfig.MAX_LOCATION_ACCURACY) return null
+        if (location.accuracy <= 0 || location.accuracy >= TrackingConfig.MAX_GPS_ACCURACY_FILTER) return null
 
         // 2. 实时点鲜度过滤
         if (!isHistorical) {
             val ageMs = System.currentTimeMillis() - location.timestamp.time
-            if (ageMs > 60_000) return null
+            if (kotlin.math.abs(ageMs) >= TrackingConfig.LIVE_FIX_MAX_AGE * 1000) return null
         }
 
-        // 3. 漂移过滤
+        // 3. 漂移过滤（iOS FootprintProcessor.processNewLocation）
         queue.lastOrNull()?.let { last ->
             val dt = (location.timestamp.time - last.timestamp.time) / 1000.0
-            if (dt < 5.0) return null
+            if (dt < TrackingConfig.FOOTPRINT_MIN_SAMPLE_INTERVAL) return null
 
             val dist = haversineMeters(last.latitude, last.longitude, location.latitude, location.longitude)
             val calcSpeed = if (dt > 0) dist / dt else 0.0
+            // 系统报告的高速（高铁等）是真实移动的强证据，不能让 A/B/C 规则抹掉整段行程。
+            val hasReportedHighSpeed = location.speed >= TrackingConfig.REPORTED_HIGH_SPEED_THRESHOLD
 
             // A. 物理不可能性
-            if (calcSpeed > AppConfig.DRIFT_SPEED_THRESHOLD && location.accuracy > AppConfig.DRIFT_ACCURACY_THRESHOLD) {
+            if (calcSpeed > TrackingConfig.DRIFT_SPEED_MAX_POSSIBLE &&
+                location.accuracy > TrackingConfig.DRIFT_ACCURACY_THRESHOLD && !hasReportedHighSpeed) {
                 return null
             }
 
             // B. 精度断崖
-            if (dist > AppConfig.DRIFT_DISTANCE_GAP && location.accuracy > last.accuracy * 3 && location.accuracy > 150) {
+            if (dist > TrackingConfig.DRIFT_DISTANCE_GAP &&
+                location.accuracy > last.accuracy * TrackingConfig.DRIFT_ACCURACY_DEGRADATION_RATIO &&
+                location.accuracy > TrackingConfig.DRIFT_ACCURACY_ABSOLUTE_FLOOR && !hasReportedHighSpeed) {
                 return null
             }
 
             // C. 基础漂移
-            if (dist > stayRadius && location.speed > AppConfig.DRIFT_SPEED_THRESHOLD) {
+            if (dist > TrackingConfig.DRIFT_DISTANCE_THRESHOLD &&
+                location.speed > TrackingConfig.DRIFT_SPEED_THRESHOLD && !hasReportedHighSpeed) {
                 return null
             }
         }
@@ -141,7 +149,7 @@ class FootprintProcessor private constructor() {
             haversineMeters(centerLat, centerLon, it.latitude, it.longitude)
         }.sorted()
 
-        val percentileIndex = (distances.size * AppConfig.STAY_PERCENTILE).toInt()
+        val percentileIndex = (distances.size * TrackingConfig.STAY_PERCENTILE).toInt()
             .coerceAtMost(distances.size - 1)
 
         if (distances[percentileIndex] > stayRadius) return null
@@ -155,6 +163,22 @@ class FootprintProcessor private constructor() {
             rawLatitudes = locations.map { it.latitude },
             rawLongitudes = locations.map { it.longitude }
         )
+    }
+
+    /**
+     * iOS confirmedStationaryCandidate: before the low-power watch takes over,
+     * persist the observed stay from the samples clustered around the anchor.
+     */
+    fun confirmedStationaryCandidate(
+        points: List<RawLocationStore.RawPoint>,
+        anchorLat: Double,
+        anchorLon: Double
+    ): CandidateFootprint? {
+        val clustered = points.filter {
+            it.accuracy > 0 && it.accuracy < TrackingConfig.MAX_GPS_ACCURACY_FILTER &&
+                haversineMeters(it.latitude, it.longitude, anchorLat, anchorLon) < TrackingConfig.STAY_DISTANCE_THRESHOLD
+        }.sortedBy { it.timestamp }
+        return detectStayPoint(clustered)
     }
 
     /** 强制结算当前队列（对应 iOS finalizeCurrentStay） */

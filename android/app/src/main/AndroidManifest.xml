@@ -12,6 +12,9 @@
     <!-- 定位类型前台服务（Android 14+） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
+    <!-- 计步传感器（运动证据，对应 iOS CMPedometer；Android 10+ 运行时权限） -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+
     <!-- 网络权限（AI 服务 + 腾讯地理编码） -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -33,6 +36,17 @@
     <!-- 读取用户在系统照片选择器中主动选中的照片的 GPS 拍摄地点（用于"从照片导入足迹"）。
          不授予时，导入仍可进行，但无法读取到照片的拍摄坐标。 -->
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+
+    <!-- 足迹详情“自动关联照片到足迹”：按拍摄时间/地点查询相册（对应 iOS linkPhotos）。 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- 足迹详情“拍摄照片”在 Android 9 及以下写入系统相册所需。 -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <!-- 腾讯定位 SDK 会自动合入此权限；本应用不枚举用户安装的应用。 -->
     <uses-permission
@@ -80,6 +94,30 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+        <!-- 主屏小组件：今日足迹（Jetpack Glance） -->
+        <receiver
+            android:name=".widget.FootprintWidgetReceiver"
+            android:exported="true"
+            android:label="@string/widget_footprint_title">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/footprint_widget_info" />
+        </receiver>
+
+
+        <!-- 分享卡片图片（ui/share）通过 FileProvider 交给其它应用 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/share_file_paths" />
+        </provider>
 
     </application>
 

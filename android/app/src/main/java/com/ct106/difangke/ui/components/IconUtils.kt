@@ -6,7 +6,98 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.Color
 
+/**
+ * Maps iOS SF Symbol names (synced/backed-up activity types) to Material icons.
+ * Returns null for unknown names.
+ */
+fun sfSymbolToMaterialIcon(name: String?): ImageVector? = when (name) {
+    "house.fill" -> Icons.Default.Home
+    "briefcase.fill" -> Icons.Default.Work
+    "fork.knife" -> Icons.Default.Restaurant
+    "cart.fill" -> Icons.Default.ShoppingCart
+    "bag.fill" -> Icons.Default.ShoppingBag
+    "figure.run" -> Icons.AutoMirrored.Filled.DirectionsRun
+    "figure.walk" -> Icons.AutoMirrored.Filled.DirectionsWalk
+    "figure.outdoor.cycle" -> Icons.AutoMirrored.Filled.DirectionsBike
+    "figure.hiking", "figure.climbing" -> Icons.Default.Hiking
+    "figure.pool.swim" -> Icons.Default.Pool
+    "figure.yoga" -> Icons.Default.SelfImprovement
+    "figure.dance" -> Icons.Default.Nightlife
+    "figure.skiing.downhill" -> Icons.Default.DownhillSkiing
+    "figure.surfing" -> Icons.Default.Surfing
+    "figure.skateboarding" -> Icons.Default.Skateboarding
+    "figure.soccer" -> Icons.Default.SportsSoccer
+    "figure.basketball" -> Icons.Default.SportsBasketball
+    "figure.tennis", "figure.badminton" -> Icons.Default.SportsTennis
+    "figure.table.tennis" -> Icons.Default.SportsTennis
+    "figure.golf" -> Icons.Default.SportsGolf
+    "figure.bowling" -> Icons.Default.SportsScore
+    "figure.fishing" -> Icons.Default.Phishing
+    "figure.strengthtraining.traditional" -> Icons.Default.FitnessCenter
+    "figure.and.child.holdinghands" -> Icons.Default.FamilyRestroom
+    "airplane" -> Icons.Default.Flight
+    "cross.fill" -> Icons.Default.MedicalServices
+    "pills.fill" -> Icons.Default.Medication
+    "facemask.fill" -> Icons.Default.Masks
+    "bed.double.fill" -> Icons.Default.Bedtime
+    "moon.stars.fill" -> Icons.Default.NightsStay
+    "tram.fill" -> Icons.Default.Tram
+    "bus.fill" -> Icons.Default.DirectionsBus
+    "car.fill" -> Icons.Default.DirectionsCar
+    "ferry.fill" -> Icons.Default.DirectionsBoat
+    "fuelpump.fill" -> Icons.Default.LocalGasStation
+    "cup.and.saucer.fill" -> Icons.Default.LocalCafe
+    "wineglass.fill" -> Icons.Default.WineBar
+    "birthday.cake.fill" -> Icons.Default.Cake
+    "party.popper.fill" -> Icons.Default.Celebration
+    "gift.fill" -> Icons.Default.CardGiftcard
+    "book.fill" -> Icons.AutoMirrored.Filled.MenuBook
+    "graduationcap.fill" -> Icons.Default.School
+    "brain.head.profile", "lightbulb.fill" -> Icons.Default.Lightbulb
+    "gamecontroller.fill", "puzzlepiece.fill" -> Icons.Default.SportsEsports
+    "theatermasks.fill" -> Icons.Default.TheaterComedy
+    "play.rectangle.fill" -> Icons.Default.Movie
+    "tv.fill" -> Icons.Default.Tv
+    "music.note" -> Icons.Default.MusicNote
+    "mic.fill" -> Icons.Default.Mic
+    "paintpalette.fill" -> Icons.Default.Palette
+    "camera.fill", "camera.aperture" -> Icons.Default.CameraAlt
+    "heart.fill" -> Icons.Default.Favorite
+    "star.fill" -> Icons.Default.Star
+    "person.fill" -> Icons.Default.Person
+    "person.2.fill", "person.3.fill" -> Icons.Default.Group
+    "face.smiling" -> Icons.Default.SentimentSatisfied
+    "pawprint.fill" -> Icons.Default.Pets
+    "leaf.fill" -> Icons.Default.Park
+    "mountain.2.fill" -> Icons.Default.Landscape
+    "sun.max.fill" -> Icons.Default.WbSunny
+    "cloud.fill" -> Icons.Default.Cloud
+    "umbrella.fill" -> Icons.Default.BeachAccess
+    "drop.fill" -> Icons.Default.WaterDrop
+    "flame.fill" -> Icons.Default.LocalFireDepartment
+    "bolt.fill" -> Icons.Default.Bolt
+    "map.fill" -> Icons.Default.Map
+    "mappin.and.ellipse" -> Icons.Default.Place
+    "tag.fill" -> Icons.Default.LocalOffer
+    "bell.fill" -> Icons.Default.Notifications
+    "envelope.fill" -> Icons.Default.Email
+    "phone.fill" -> Icons.Default.Phone
+    "printer.fill" -> Icons.Default.Print
+    "hammer.fill" -> Icons.Default.Construction
+    "wrench.adjustable.fill" -> Icons.Default.Build
+    "tshirt.fill" -> Icons.Default.Checkroom
+    "comb.fill" -> Icons.Default.ContentCut
+    "shower.fill" -> Icons.Default.Shower
+    "toilet.fill" -> Icons.Default.Wc
+    "sofa.fill" -> Icons.Default.Weekend
+    "lamp.floor.fill" -> Icons.Default.Light
+    "circle.fill" -> Icons.Default.Circle
+    "questionmark.circle.dashed" -> Icons.AutoMirrored.Filled.HelpOutline
+    else -> null
+}
+
 fun getIconForName(name: String?): ImageVector {
+    sfSymbolToMaterialIcon(name)?.let { return it }
     return when(name?.lowercase()) {
         "home" -> Icons.Default.Home
         "work" -> Icons.Default.Work

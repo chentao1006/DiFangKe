@@ -11,7 +11,6 @@ struct DataManagerView: View {
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: \ActivityType.sortOrder) private var allActivities: [ActivityType]
     @Query(sort: \TransportRecord.startTime, order: .reverse) private var allTransports: [TransportRecord]
-    @Query(sort: \FutureTrip.arrivalDate) private var allFutureTrips: [FutureTrip]
     
     @State private var showDeleteAlert = false
     @State private var showingImportFilePicker = false
@@ -200,8 +199,7 @@ struct DataManagerView: View {
                     footprints: allFootprints, 
                     places: allPlaces,
                     activities: allActivities,
-                    transports: allTransports,
-                    futureTrips: allFutureTrips
+                    transports: allTransports
                 )
                 
                 let filename = "DiFangKe_Backup_\(Date().formatted(.dateTime.year().month().day())).json"
@@ -239,7 +237,7 @@ struct DataManagerView: View {
             
             let data = try Data(contentsOf: url)
             let report = try BackupService.shared.restoreBackup(data: data, context: modelContext)
-            if report.newFootprints == 0 && report.newPlacesUser == 0 && report.newPlacesSystem == 0 && report.newTransports == 0 && report.newFutureTrips == 0 {
+            if report.newFootprints == 0 && report.newPlacesUser == 0 && report.newPlacesSystem == 0 && report.newTransports == 0 {
                 self.alertTitle = "导入结果"
                 self.alertMessage = "文件中未发现任何新数据（已跳过重复项）。"
             } else {
@@ -250,7 +248,6 @@ struct DataManagerView: View {
                 message += "\n• 重要地点: 新增 \(report.newPlacesUser), 跳过 \(report.skippedPlacesUser)"
                 message += "\n• 其他地点: 新增 \(report.newPlacesSystem), 跳过 \(report.skippedPlacesSystem)"
                 message += "\n• 活动类型: 新增 \(report.newActivityTypes)"
-                message += "\n• 行程计划: 新增 \(report.newFutureTrips), 跳过 \(report.skippedFutureTrips)"
                 
                 self.alertMessage = message
             }
@@ -306,10 +303,10 @@ struct DataManagerView: View {
             try modelContext.delete(model: TransportManualSelection.self)
             try modelContext.delete(model: TransportRecord.self)
             try modelContext.delete(model: DailyInsight.self)
+            // Retired trip-plan rows still live in the store for schema
+            // compatibility; clearing local data should remove them too.
             try modelContext.delete(model: FutureTrip.self)
-            
-            NotificationManager.shared.cancelAllFutureTripNotifications()
-            
+
             try modelContext.save()
             
             locationManager.allTodayPoints = []
@@ -396,15 +393,16 @@ struct BackupDTO: Codable {
     let footprints: [FootprintDTO]
     let activityTypes: [ActivityTypeDTO]?
     let transports: [TransportDTO]?
-    let futureTrips: [FutureTripDTO]?
-    
-    init(version: Int, places: [PlaceDTO], footprints: [FootprintDTO], activityTypes: [ActivityTypeDTO]?, transports: [TransportDTO]?, futureTrips: [FutureTripDTO]?) {
+    // Older backups may also contain a "futureTrips" array from the retired
+    // trip-plan feature. JSONDecoder ignores unknown keys, so those files
+    // still import; the trip entries are simply skipped.
+
+    init(version: Int, places: [PlaceDTO], footprints: [FootprintDTO], activityTypes: [ActivityTypeDTO]?, transports: [TransportDTO]?) {
         self.version = version
         self.places = places
         self.footprints = footprints
         self.activityTypes = activityTypes
         self.transports = transports
-        self.futureTrips = futureTrips
     }
     
     struct PlaceDTO: Codable {
@@ -487,31 +485,13 @@ struct BackupDTO: Codable {
         let manualType: String?
         let status: String?
     }
-
-    struct FutureTripDTO: Codable {
-        let id: String
-        let placeName: String
-        let address: String?
-        let notes: String?
-        let lat: Double
-        let lon: Double
-        let arrivalDate: Date
-        let hasPlanDate: Bool?
-        let hasArrivalTime: Bool
-        let scheduleMode: String?
-        let orderIndex: Int?
-        let activityType: String?
-        let createdAt: Date
-        let isCompleted: Bool?
-        let completedAt: Date?
-    }
 }
 
 @MainActor
 final class BackupService {
     static let shared = BackupService()
     
-    func generateBackup(footprints: [Footprint], places: [Place], activities: [ActivityType], transports: [TransportRecord], futureTrips: [FutureTrip]) throws -> Data {
+    func generateBackup(footprints: [Footprint], places: [Place], activities: [ActivityType], transports: [TransportRecord]) throws -> Data {
         let dto = BackupDTO(
             version: 2,
             places: places.map { BackupDTO.PlaceDTO(id: $0.placeID.uuidString, name: $0.name, lat: $0.latitude, lon: $0.longitude, rad: $0.radius, addr: $0.address, isPriority: $0.isPriority, isIgnored: $0.isIgnored, isUserDefined: $0.isUserDefined) },
@@ -549,25 +529,6 @@ final class BackupService {
                     manualType: t.manualTypeRaw,
                     status: t.statusRaw
                 )
-            },
-            futureTrips: futureTrips.map { trip in
-                BackupDTO.FutureTripDTO(
-                    id: trip.id.uuidString,
-                    placeName: trip.placeName,
-                    address: trip.address,
-                    notes: trip.notes,
-                    lat: trip.latitude,
-                    lon: trip.longitude,
-                    arrivalDate: trip.arrivalDate,
-                    hasPlanDate: trip.hasPlanDate,
-                    hasArrivalTime: trip.hasArrivalTime,
-                    scheduleMode: trip.scheduleModeValue,
-                    orderIndex: trip.orderIndex,
-                    activityType: trip.activityTypeValue,
-                    createdAt: trip.createdAt,
-                    isCompleted: trip.isCompleted,
-                    completedAt: trip.completedAt
-                )
             }
         )
         
@@ -587,8 +548,6 @@ final class BackupService {
         let newTransports: Int
         let skippedTransports: Int
         let newActivityTypes: Int
-        let newFutureTrips: Int
-        let skippedFutureTrips: Int
     }
     
     func restoreBackup(data: Data, context: ModelContext) throws -> RestoreReport {
@@ -707,39 +666,6 @@ final class BackupService {
             }
         }
 
-        // 6. Restore Future Trips
-        var newFutureTrips = 0
-        var skippedFutureTrips = 0
-        if let futureTripDTOs = backup.futureTrips {
-            for t in futureTripDTOs {
-                if let uuid = UUID(uuidString: t.id) {
-                    let descriptor = FetchDescriptor<FutureTrip>(predicate: #Predicate { $0.id == uuid })
-                    if (try context.fetch(descriptor).first) == nil {
-                        let trip = FutureTrip(
-                            id: uuid,
-                            placeName: t.placeName,
-                            address: t.address,
-                            notes: t.notes,
-                            coordinate: CLLocationCoordinate2D(latitude: t.lat, longitude: t.lon),
-                            arrivalDate: t.arrivalDate,
-                            hasPlanDate: t.hasPlanDate ?? true,
-                            hasArrivalTime: t.hasArrivalTime,
-                            scheduleMode: FutureTripScheduleMode(rawValue: t.scheduleMode ?? "") ?? .timed,
-                            orderIndex: t.orderIndex ?? 0,
-                            activityTypeValue: t.activityType,
-                            createdAt: t.createdAt,
-                            isCompleted: t.isCompleted ?? false,
-                            completedAt: t.completedAt
-                        )
-                        context.insert(trip)
-                        newFutureTrips += 1
-                    } else {
-                        skippedFutureTrips += 1
-                    }
-                }
-            }
-        }
-        
         // Covers duplicates already downloaded before/during this import.
         // Later CloudKit imports run the same identity pass from LocationManager.
         _ = try DataDeduplicationService.reconcileBackupIdentities(context: context)
@@ -755,9 +681,7 @@ final class BackupService {
             skippedPlacesSystem: skippedPlacesSystem,
             newTransports: newTransports,
             skippedTransports: skippedTransports,
-            newActivityTypes: newActivityTypes,
-            newFutureTrips: newFutureTrips,
-            skippedFutureTrips: skippedFutureTrips
+            newActivityTypes: newActivityTypes
         )
     }
 }

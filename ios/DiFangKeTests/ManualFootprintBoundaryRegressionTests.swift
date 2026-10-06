@@ -929,7 +929,7 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
                                    typeRaw: "slow", distance: 300, averageSpeed: 0.6, pointsData: Data("[]".utf8))
         sourceContext.insert(trip)
         try sourceContext.save()
-        let backup = try BackupService.shared.generateBackup(footprints: [original], places: [], activities: [], transports: [trip], futureTrips: [])
+        let backup = try BackupService.shared.generateBackup(footprints: [original], places: [], activities: [], transports: [trip])
 
         for cloudFirst in [false, true] {
             let destination = try makeContainer()

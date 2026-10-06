@@ -8,6 +8,21 @@ import WidgetKit
 import Aptabase
 
 
+// Brand toolbar icon styles
+extension Image {
+    func dfkToolbarDismissIcon() -> some View {
+        symbolRenderingMode(.monochrome)
+            .foregroundStyle(.primary)
+            .frame(width: 28, height: 28)
+    }
+
+    func dfkToolbarConfirmIcon() -> some View {
+        symbolRenderingMode(.monochrome)
+            .foregroundStyle(Color.dfkAccent)
+            .frame(width: 28, height: 28)
+    }
+}
+
 // Brand Theme Extensions
 extension Color {
     static let dfkAccent = Color("AccentColor")
@@ -46,9 +61,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // 设置通知代理以响应通知点击
         UNUserNotificationCenter.current().delegate = self
         NotificationManager.shared.registerNotificationCategories()
-        // The trip-planning feature has been retired. Clear any requests that
-        // were scheduled by an older version before the user can receive one.
-        NotificationManager.shared.cancelAllFutureTripNotifications()
+        // The trip-planning feature has been removed. Clear any reminders that
+        // an older version scheduled before the user can receive one.
+        NotificationManager.shared.removeLegacyTripNotifications()
         // The initial install path does not necessarily visit Settings or
         // receive a cloud-settings update.  Ensure the user's persisted daily
         // reminder is always present after launch.
@@ -360,6 +375,9 @@ struct DiFangKeApp: App {
         // Existing installations were created with an unversioned SwiftData schema.
         // Keep opening that store directly so SwiftData can perform its normal
         // lightweight migration when FutureTrip is added.
+        // FutureTrip belongs to the removed trip-plan feature. It must stay
+        // registered so existing (and CloudKit-mirrored) stores keep matching
+        // this schema; dropping an entity is not a safe change for them.
         let schema = Schema([
             Footprint.self,
             Place.self,

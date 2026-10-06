@@ -107,22 +107,14 @@ private struct HistoryTransportIndexEntry: Equatable {
     let status: String
 }
 
-private struct HistoryFutureTripIndexEntry: Equatable {
-    let id: UUID
-    let arrivalDate: Date
-    let hasPlanDate: Bool
-}
-
 private struct HistoryCalendarIndexSource: Equatable {
     let footprints: [HistoryFootprintIndexEntry]
     let transports: [HistoryTransportIndexEntry]
-    let futureTrips: [HistoryFutureTripIndexEntry]
 }
 
 private struct HistoryCalendarDayIndex {
     let footprintsByDay: [Date: [Footprint]]
     let transportsByDay: [Date: [TransportRecord]]
-    let futureTripsByDay: [Date: [FutureTrip]]
 }
 
 @MainActor
@@ -156,9 +148,6 @@ struct HistoryListView: View {
     @Query(sort: \Footprint.date, order: .reverse) private var allFootprints: [Footprint]
     @Query(sort: \TransportRecord.startTime, order: .reverse) private var allTransportRecords: [TransportRecord]
     @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
-    // Existing trip-plan records remain in the store for upgrade safety but
-    // are intentionally excluded from history and calendar presentation.
-    private var futureTrips: [FutureTrip] { [] }
     
     let initialDate: Date
     let showImportOnAppear: Bool
@@ -255,7 +244,6 @@ struct HistoryListView: View {
         }
         .onChange(of: allFootprints) { scheduleCalendarIndexRefresh() }
         .onChange(of: allTransportRecords) { scheduleCalendarIndexRefresh() }
-        .onChange(of: futureTrips) { scheduleCalendarIndexRefresh() }
         .sheet(item: $showingDate) { item in
             TimelineView(initialDate: item.date)
                 .environment(locationManager)
@@ -347,7 +335,6 @@ struct HistoryListView: View {
             HistoryMonthView(
                 footprintsByDay: footprintsByDay,
                 transportsByDay: transportsByDay,
-                futureTripsByDay: futureTripsByDay,
                 allActivityTypes: allActivityTypes,
                 targetDate: selectedDate,
                 earliestDate: earliestHistoryDate,
@@ -440,16 +427,13 @@ struct HistoryListView: View {
     }
     
     private var earliestHistoryDate: Date {
-        let footprintDate = allFootprints.last?.startTime
-        let futureTripDate = futureTrips.filter(\.hasPlanDate).map(\.arrivalDate).min()
-        return [footprintDate, futureTripDate].compactMap { $0 }.min() ?? Calendar.current.startOfDay(for: Date())
+        allFootprints.last?.startTime ?? Calendar.current.startOfDay(for: Date())
     }
 
     private var latestHistoryDate: Date {
         let today = Calendar.current.startOfDay(for: Date())
         let footprintDate = allFootprints.first?.startTime
-        let futureTripDate = futureTrips.filter(\.hasPlanDate).map(\.arrivalDate).max()
-        return [today, footprintDate, futureTripDate].compactMap { $0 }.max() ?? today
+        return [today, footprintDate].compactMap { $0 }.max() ?? today
     }
     
     private var shouldShowYearJump: Bool {
@@ -458,7 +442,7 @@ struct HistoryListView: View {
     
     private var historyYears: [(year: Int, date: Date)] {
         let calendar = Calendar.current
-        let dates = allFootprints.map(\.startTime) + futureTrips.filter(\.hasPlanDate).map(\.arrivalDate)
+        let dates = allFootprints.map(\.startTime)
         let grouped = Dictionary(grouping: dates) { date in
             calendar.component(.year, from: date)
         }
@@ -479,7 +463,6 @@ struct HistoryListView: View {
     
     @State private var footprintsByDay: [Date: [Footprint]] = [:]
     @State private var transportsByDay: [Date: [TransportRecord]] = [:]
-    @State private var futureTripsByDay: [Date: [FutureTrip]] = [:]
 
     private var calendarIndexSource: HistoryCalendarIndexSource {
         HistoryCalendarIndexSource(
@@ -496,9 +479,6 @@ struct HistoryListView: View {
             },
             transports: allTransportRecords.map {
                 HistoryTransportIndexEntry(id: $0.recordID, startTime: $0.startTime, endTime: $0.endTime, status: $0.statusRaw)
-            },
-            futureTrips: futureTrips.map {
-                HistoryFutureTripIndexEntry(id: $0.id, arrivalDate: $0.arrivalDate, hasPlanDate: $0.hasPlanDate)
             }
         )
     }
@@ -533,7 +513,6 @@ struct HistoryListView: View {
         let calendar = Calendar.current
         var fpMap: [Date: [Footprint]] = [:]
         var tpMap: [Date: [TransportRecord]] = [:]
-        var tripMap: [Date: [FutureTrip]] = [:]
 
         for fp in allFootprints where fp.statusValue != "ignored" {
             for day in daysWithMeaningfulOverlap(from: fp.startTime, to: fp.endTime, calendar: calendar) {
@@ -547,15 +526,9 @@ struct HistoryListView: View {
             }
         }
 
-        for trip in futureTrips where trip.hasPlanDate {
-            let day = calendar.startOfDay(for: trip.arrivalDate)
-            tripMap[day, default: []].append(trip)
-        }
-        
         let index = HistoryCalendarDayIndex(
             footprintsByDay: fpMap,
-            transportsByDay: tpMap,
-            futureTripsByDay: tripMap
+            transportsByDay: tpMap
         )
         applyCalendarIndex(index)
         HistoryCalendarIndexCache.shared.store(index, for: source)
@@ -564,7 +537,6 @@ struct HistoryListView: View {
     private func applyCalendarIndex(_ index: HistoryCalendarDayIndex) {
         footprintsByDay = index.footprintsByDay
         transportsByDay = index.transportsByDay
-        futureTripsByDay = index.futureTripsByDay
     }
 
     private func prepareCalendarIndex() {
@@ -755,7 +727,6 @@ struct DayStatsView: View {
 struct HistoryMonthView: View {
     let footprintsByDay: [Date: [Footprint]]
     let transportsByDay: [Date: [TransportRecord]]
-    let futureTripsByDay: [Date: [FutureTrip]]
     let allActivityTypes: [ActivityType]
     let targetDate: Date
     let earliestDate: Date
@@ -963,7 +934,6 @@ struct HistoryMonthView: View {
                         targetDate: targetDate,
                         footprints: footprintsByDay[date] ?? [],
                         transports: transportsByDay[date] ?? [],
-                        futureTrips: futureTripsByDay[date] ?? [],
                         activityTypes: allActivityTypes,
                         locationChangeLabels: locationLabels,
                         allowsLocationLabelOverflow: allowsLocationLabelOverflow,
@@ -1100,7 +1070,6 @@ struct MonthDayCell: View {
     let targetDate: Date
     let footprints: [Footprint]
     let transports: [TransportRecord]
-    let futureTrips: [FutureTrip]
     let activityTypes: [ActivityType]
     let locationChangeLabels: [String]
     let allowsLocationLabelOverflow: Bool
@@ -1131,7 +1100,7 @@ struct MonthDayCell: View {
     }
 
     var body: some View {
-        let hasData = !footprints.isEmpty || !transports.isEmpty || !futureTrips.isEmpty
+        let hasData = !footprints.isEmpty || !transports.isEmpty
         let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
         let isTarget = Calendar.current.isDate(date, inSameDayAs: targetDate)
         // 没数据的格子仍然要能点进去：否则一旦某天的数据被清空（例如 bug 或用户手动
@@ -1143,8 +1112,7 @@ struct MonthDayCell: View {
                 if hasData {
                     MonthDayTimelineRing(
                         date: date,
-                        segments: timelineSegments,
-                        plannedTrips: futureTrips
+                        segments: timelineSegments
                     )
                     .frame(width: 34, height: 34)
                 }
@@ -1225,7 +1193,6 @@ private struct MonthDayTimelineSegment: Identifiable {
 private struct MonthDayTimelineRing: View {
     let date: Date
     let segments: [MonthDayTimelineSegment]
-    let plannedTrips: [FutureTrip]
 
     private let calendar = Calendar.current
 
@@ -1244,9 +1211,6 @@ private struct MonthDayTimelineRing: View {
             }
             ForEach(segments.filter { !$0.isTransport }) { segment in
                 arc(for: segment, lineWidth: 3.5)
-            }
-            ForEach(plannedTrips.filter(\.hasArrivalTime), id: \.id) { trip in
-                planMarker(for: trip)
             }
         }
         .rotationEffect(.degrees(-90))
@@ -1281,13 +1245,6 @@ private struct MonthDayTimelineRing: View {
                 .trim(from: start, to: end)
                 .stroke(.white, style: StrokeStyle(lineWidth: 1.4, lineCap: .round))
         }
-    }
-
-    private func planMarker(for trip: FutureTrip) -> some View {
-        let range = clippedFractionRange(start: trip.arrivalDate, end: trip.arrivalDate.addingTimeInterval(10 * 60))
-        return Circle()
-            .trim(from: range.start, to: min(1, range.start + max(0.012, range.length)))
-            .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
     }
 
     private var unrecordedOpacity: Double {

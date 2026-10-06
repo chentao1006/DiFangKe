@@ -113,7 +113,6 @@ enum DFKShareCardTheme: String, CaseIterable, Identifiable {
 enum DFKShareCardKind {
     case moment
     case timeline
-    case plan
     case stats
 }
 
@@ -139,7 +138,6 @@ struct DFKShareCardPayload: Identifiable {
     var mapTransports: [TransportRecord] = []
     var mapActivities: [ActivityType] = []
     var entries: [DFKShareEntry] = []
-    var plans: [DFKSharePlanEntry] = []
     var stats: [DFKShareStatEntry] = []
     var placeRankings: [DFKShareRankingEntry] = []
     var activityRankings: [DFKShareRankingEntry] = []
@@ -163,18 +161,6 @@ struct DFKShareEntry: Identifiable {
     var isIncluded: Bool = true
     var dayDividerText: String?
     var footprintIDs: [UUID] = []
-}
-
-struct DFKSharePlanEntry: Identifiable {
-    let id = UUID()
-    var time: String
-    var place: String
-    var note: String?
-    var isUndated: Bool = false
-    var markerIconName: String = "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted"
-    var markerColor: Color = .dfkAccent
-    var isIncluded: Bool = true
-    var coordinate: CLLocationCoordinate2D?
 }
 
 struct DFKShareStatEntry: Identifiable {
@@ -505,37 +491,6 @@ struct DFKShareCardPreviewView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .frame(maxHeight: 156)
-        } else if editablePayload.kind == .plan,
-                  !editablePayload.plans.isEmpty,
-                  !editablePayload.isLoading {
-            List {
-                ForEach($editablePayload.plans) { $plan in
-                    HStack(spacing: 10) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(plan.place)
-                                .font(.system(size: 15, weight: .semibold))
-                                .lineLimit(1)
-                            Text(plan.time)
-                                .font(.system(size: 12, weight: .medium).monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Toggle("", isOn: Binding(
-                            get: { plan.isIncluded },
-                            set: { isIncluded in
-                                plan.isIncluded = isIncluded
-                                refreshSelectedMap()
-                            }
-                        ))
-                            .labelsHidden()
-                    }
-                    .listRowInsets(.init(top: 8, leading: 12, bottom: 8, trailing: 12))
-                    .listRowBackground(Color.clear)
-                }
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .frame(maxHeight: 156)
         }
     }
 
@@ -554,10 +509,6 @@ struct DFKShareCardPreviewView: View {
         case .timeline:
             selectedTimelineEntries = editablePayload.entries.filter(\.isIncluded)
             coordinates = selectedTimelineEntries.compactMap(\.coordinate)
-        case .plan:
-            coordinates = editablePayload.plans
-                .filter(\.isIncluded)
-                .compactMap(\.coordinate)
         case .moment, .stats:
             return
         }
@@ -594,12 +545,7 @@ struct DFKShareCardPreviewView: View {
             editablePayload.backgroundMapLightImage = mapImages.light
             editablePayload.backgroundMapDarkImage = mapImages.dark
         }
-        if case .plan = editablePayload.kind {
-            DFKShareImageLoader.loadPlanMapImages(
-                plans: editablePayload.plans.filter(\.isIncluded),
-                completion: applyMapImages
-            )
-        } else if !editablePayload.mapFootprints.isEmpty || !editablePayload.mapTransports.isEmpty {
+        if !editablePayload.mapFootprints.isEmpty || !editablePayload.mapTransports.isEmpty {
             let includedFootprintIDs = Set(selectedTimelineEntries.flatMap(\.footprintIDs))
             let selectedFootprints = editablePayload.mapFootprints.filter {
                 includedFootprintIDs.contains($0.footprintID)
@@ -655,12 +601,6 @@ struct DFKShareCardPreviewView: View {
                 .filter { !$0.isEmpty }
                 .joined(separator: "｜")
         }.joined(separator: "\n")
-        let plans = editablePayload.plans.filter(\.isIncluded).map { plan in
-            [plan.time, plan.place, plan.note]
-                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .joined(separator: "｜")
-        }.joined(separator: "\n")
         let transports = editablePayload.mapTransports
             .filter { $0.statusRaw == "active" }
             .sorted { $0.startTime < $1.startTime }
@@ -679,7 +619,7 @@ struct DFKShareCardPreviewView: View {
         let prompt = """
         为一张地方客分享卡片写一个适合传播的中文标题。
         请随机采用“\(styles.randomElement()!)”风格，标题要自然、有记忆点，控制在 8 到 22 个字，只输出标题本身，不要引号、解释、标签或换行。标题绝对不要包含日期、年份、月份、几号、星期、今天、昨天、明天等任何日期表达。
-        必须以提供的时间、地点、活动、交通等事实为依据；交通信息若没有明确提供，绝不能虚构交通方式或行程。不要编造心情、人物、事件或具体细节。不要罗列地点名称，要提炼行程或计划的主线，用一句话概括重点。
+        必须以提供的时间、地点、活动、交通等事实为依据；交通信息若没有明确提供，绝不能虚构交通方式或行程。不要编造心情、人物、事件或具体细节。不要罗列地点名称，要提炼行程的主线，用一句话概括重点。
 
         标题场景要求：
         \(shareTitleScenarioInstruction)
@@ -691,8 +631,6 @@ struct DFKShareCardPreviewView: View {
         \(facts.isEmpty ? "无" : facts)
         交通：
         \(transports.isEmpty ? "无" : transports)
-        计划：
-        \(plans.isEmpty ? "无" : plans)
         """
 
         OpenAIService.shared.getCustomSummary(prompt: prompt) { title in
@@ -717,15 +655,12 @@ struct DFKShareCardPreviewView: View {
         switch editablePayload.kind {
         case .moment: "单次足迹"
         case .timeline: "时间线"
-        case .plan: "出行计划"
         case .stats: "生活统计"
         }
     }
 
     private var shareTitleScenarioInstruction: String {
         switch editablePayload.kind {
-        case .plan:
-            return "这是尚未发生的未来计划。标题必须表达准备、期待、将要或计划中的方向；严禁使用“去了、玩了、吃了、走过、经历、回忆、这一天”等已完成或回顾性的说法。只能根据已选计划提炼未来安排，不能暗示任何计划已经发生。"
         case .stats:
             return "这是一个统计时间区间内的生活总结，不是单日行程。必须基于所给时间范围概括整个统计周期，严禁写成“一日盘点”“一天”“今日”“当日”或任何单日叙事。"
         case .moment, .timeline:
@@ -1043,21 +978,6 @@ struct DFKShareCardView: View {
             let rows = max(2, payload.placeRankings.count + payload.activityRankings.count)
             return CGSize(width: width, height: max(2_060, 1_160 + CGFloat(rows) * 130) + locationExtraHeight)
         }
-        if case .plan = payload.kind {
-            let includedPlans = payload.plans.filter(\.isIncluded)
-            let planCount = max(1, includedPlans.count)
-            let titleLineCount = max(1, Int(ceil(CGFloat(payload.title.count) / 10)))
-            let titleExtraHeight = CGFloat(titleLineCount - 1) * 180
-            // A note adds a third text block to a plan row. Give it its own
-            // vertical budget so it cannot run underneath the fixed footer.
-            let notesExtraHeight = CGFloat(includedPlans.filter {
-                !($0.note?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-            }.count) * 100
-            return CGSize(
-                width: width,
-                height: max(CGFloat(1_280), 960 + CGFloat(planCount) * 220 + titleExtraHeight + notesExtraHeight)
-            )
-        }
         guard case .timeline = payload.kind else {
             return CGSize(width: width, height: (hasPhoto ? 1970 : 1440) + locationExtraHeight)
         }
@@ -1142,13 +1062,6 @@ struct DFKShareCardView: View {
         var updated = payload
         guard let index = updated.entries.firstIndex(where: { $0.id == id }) else { return }
         mutate(&updated.entries[index])
-        onPayloadUpdate(updated)
-    }
-
-    private func updatePlan(_ id: UUID, mutate: (inout DFKSharePlanEntry) -> Void) {
-        var updated = payload
-        guard let index = updated.plans.firstIndex(where: { $0.id == id }) else { return }
-        mutate(&updated.plans[index])
         onPayloadUpdate(updated)
     }
 
@@ -1264,8 +1177,6 @@ struct DFKShareCardView: View {
             momentContent
         case .timeline:
             timelineContent
-        case .plan:
-            planContent
         case .stats:
             statsContent
         }
@@ -1285,58 +1196,6 @@ struct DFKShareCardView: View {
             entryList(includedEntries, isTimeline: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var planContent: some View {
-        VStack(alignment: .leading, spacing: s(28)) {
-            mediaBlock(height: s(400))
-            ForEach(payload.plans.filter(\.isIncluded)) { plan in
-                HStack(alignment: .top, spacing: s(20)) {
-                    VStack(spacing: 0) {
-                        Circle()
-                            .fill(plan.markerColor)
-                            .frame(width: s(48), height: s(48))
-                            .overlay {
-                                Image(systemName: plan.markerIconName)
-                                    .font(.system(size: fs(24), weight: .bold))
-                                    .foregroundStyle(.white)
-                            }
-                        Rectangle().fill(plan.markerColor.opacity(0.28)).frame(width: max(1, s(3)), height: s(88))
-                    }
-
-                    VStack(alignment: .leading, spacing: s(8)) {
-                        editableText(plan.time, update: { newText in
-                            updatePlan(plan.id) { $0.time = newText }
-                        }) {
-                            Text(plan.time)
-                                .font(.system(size: fs(46), weight: .bold).monospacedDigit())
-                                .foregroundStyle(theme.foreground)
-                        }
-                        editableText(plan.place, update: { newText in
-                            updatePlan(plan.id) { $0.place = newText }
-                        }) {
-                            Text(plan.place)
-                                .font(.system(size: fs(60), weight: .semibold))
-                                .foregroundStyle(theme.foreground)
-                                .lineLimit(2)
-                        }
-                        if let note = plan.note, !note.isEmpty {
-                            editableText(note, update: { newText in
-                                updatePlan(plan.id) { $0.note = newText }
-                            }) {
-                                Text(note)
-                                    .font(.system(size: fs(42), weight: .regular))
-                                    .foregroundStyle(theme.secondary)
-                                    .lineLimit(2)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(.top, s(16))
-                .padding(.bottom, s(20))
-            }
-        }
     }
 
     private var statsContent: some View {
@@ -2015,32 +1874,6 @@ enum DFKShareCardFactory {
         return "\(dateText(start)) - \(dateText(end))"
     }
 
-    static func planPayload(title: String, rangeText: String, trips: [FutureTrip], activities: [ActivityType] = []) -> DFKShareCardPayload {
-        let sortedTrips = FutureTrip.dayOrdered(trips)
-        return DFKShareCardPayload(
-            kind: .plan,
-            title: sortedTrips.isEmpty ? "暂时没有安排" : title,
-            subtitle: "接下来准备做什么",
-            rangeText: rangeText,
-            backgroundMapImage: nil,
-            coordinates: sortedTrips.map(\.coordinate),
-            plans: sortedTrips.map { trip in
-                let activity = activities.first {
-                    $0.id.uuidString == trip.activityTypeValue || $0.name == trip.activityTypeValue
-                }
-                return DFKSharePlanEntry(
-                    time: trip.hasPlanDate ? (trip.hasArrivalTime ? trip.arrivalDate.formatted(.dateTime.month().day().hour().minute()) : trip.arrivalDate.formatted(.dateTime.month().day())) : "计划",
-                    place: trip.placeName,
-                    note: trip.notes?.trimmingCharacters(in: .whitespacesAndNewlines),
-                    isUndated: !trip.hasPlanDate,
-                    markerIconName: activity?.icon ?? (!trip.hasPlanDate ? "target" : "clock.arrow.trianglehead.clockwise.rotate.90.path.dotted"),
-                    markerColor: activity?.color ?? .dfkAccent,
-                    coordinate: trip.coordinate
-                )
-            }
-        )
-    }
-
     static func statsPayload(rangeText: String, footprints: [Footprint], transports: [TransportRecord], places: [Place], activities: [ActivityType]) -> DFKShareCardPayload {
         let uniquePlaceKeys = Set(footprints.map { footprint in
             footprint.placeID?.uuidString ?? displayPlace(for: footprint)
@@ -2414,28 +2247,6 @@ private struct DFKShareMapSnapshotMarker {
     let color: UIColor
     let duration: TimeInterval
     let scale: CGFloat
-    let style: Style
-
-    enum Style {
-        case footprint
-        case futureTrip
-    }
-
-    init(
-        coordinate: CLLocationCoordinate2D,
-        iconName: String,
-        color: UIColor,
-        duration: TimeInterval,
-        scale: CGFloat,
-        style: Style = .footprint
-    ) {
-        self.coordinate = coordinate
-        self.iconName = iconName
-        self.color = color
-        self.duration = duration
-        self.scale = scale
-        self.style = style
-    }
 }
 
 enum DFKShareImageLoader {
@@ -2465,56 +2276,6 @@ enum DFKShareImageLoader {
             )
             let images = await (light, dark)
             await MainActor.run { completion(images) }
-        }
-    }
-
-    static func loadPlanMapImages(
-        plans: [DFKSharePlanEntry],
-        completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
-    ) {
-        let validPlans = plans.filter { plan in
-            guard let coordinate = plan.coordinate else { return false }
-            return CLLocationCoordinate2DIsValid(coordinate) &&
-                abs(coordinate.latitude) > 0.000001 &&
-                abs(coordinate.longitude) > 0.000001
-        }
-        let validCoordinates = validPlans.compactMap(\.coordinate)
-        let markers = validPlans.compactMap { plan -> DFKShareMapSnapshotMarker? in
-            guard let coordinate = plan.coordinate else { return nil }
-            return DFKShareMapSnapshotMarker(
-                coordinate: coordinate,
-                iconName: plan.markerIconName,
-                color: UIColor(plan.markerColor),
-                duration: 0,
-                scale: validPlans.count <= 1 ? 2.2 : 1.5,
-                style: .futureTrip
-            )
-        }
-        Task {
-            async let light = makeMapSnapshot(
-                coordinates: validCoordinates,
-                markers: markers,
-                style: .light,
-                drawsPath: false,
-                size: CGSize(width: 329, height: 139),
-                spanMultiplier: 1.5,
-                minimumSpan: 0.004,
-                verticalCenterBias: 0.17
-            )
-            async let dark = makeMapSnapshot(
-                coordinates: validCoordinates,
-                markers: markers,
-                style: .dark,
-                drawsPath: false,
-                size: CGSize(width: 329, height: 139),
-                spanMultiplier: 1.5,
-                minimumSpan: 0.004,
-                verticalCenterBias: 0.17
-            )
-            let images = await (light, dark)
-            await MainActor.run {
-                completion(images)
-            }
         }
     }
 
@@ -2962,61 +2723,19 @@ enum DFKShareImageLoader {
             context.saveGState()
             context.setShadow(offset: CGSize(width: 0, height: 3), blur: 5, color: UIColor.black.withAlphaComponent(0.22).cgColor)
 
-            switch marker.style {
-            case .futureTrip:
-                // Identical geometry to the footprint-share marker, except
-                // that plan cards do not draw a duration badge.
-                let markerScale = scale
-                radius = 9 * markerScale
-                iconSize = 11 * markerScale
-                center = CGPoint(x: point.x, y: point.y - radius * 1.4)
-                let bottomY = point.y - 1.5 * markerScale
-                let shell = CGMutablePath()
-                shell.addArc(center: center, radius: radius, startAngle: 140 * .pi / 180, endAngle: 40 * .pi / 180, clockwise: false)
-                shell.addLine(to: CGPoint(x: center.x + 1.5 * markerScale, y: bottomY))
-                shell.addArc(center: CGPoint(x: center.x, y: bottomY), radius: 1.5 * markerScale, startAngle: 0, endAngle: .pi, clockwise: false)
-                shell.closeSubpath()
-                context.setFillColor((style == .dark ? UIColor.black : UIColor.white).cgColor)
-                context.addPath(shell)
-                context.fillPath()
+            let markerSize = 20 * scale
+            radius = markerSize / 2
+            iconSize = 23 * scale * 0.52
+            center = CGPoint(x: point.x, y: point.y - radius * 1.4)
 
-                let innerRadius = radius - 1.5 * markerScale
-                let innerCenter = center
-                let bodyRect = CGRect(x: innerCenter.x - innerRadius, y: innerCenter.y - innerRadius, width: innerRadius * 2, height: innerRadius * 2)
-                let bodyPath = UIBezierPath(ovalIn: bodyRect)
-                context.saveGState()
-                bodyPath.addClip()
-                let colors = style == .dark
-                    ? [marker.color.cgColor, marker.color.withAlphaComponent(0.7).cgColor] as CFArray
-                    : [marker.color.withAlphaComponent(0.7).cgColor, marker.color.cgColor] as CFArray
-                if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
-                    context.drawLinearGradient(
-                        gradient,
-                        start: CGPoint(x: innerCenter.x, y: innerCenter.y - innerRadius),
-                        end: CGPoint(x: innerCenter.x, y: innerCenter.y + innerRadius),
-                        options: []
-                    )
-                } else {
-                    context.setFillColor(marker.color.cgColor)
-                    context.fillEllipse(in: bodyRect)
-                }
-                context.restoreGState()
+            let pinPath = CGMutablePath()
+            pinPath.addArc(center: center, radius: radius, startAngle: 125 * .pi / 180, endAngle: 55 * .pi / 180, clockwise: false)
+            pinPath.addLine(to: CGPoint(x: center.x, y: center.y + radius * 1.4))
+            pinPath.closeSubpath()
 
-            case .footprint:
-                let markerSize = 20 * scale
-                radius = markerSize / 2
-                iconSize = 23 * scale * 0.52
-                center = CGPoint(x: point.x, y: point.y - radius * 1.4)
-
-                let pinPath = CGMutablePath()
-                pinPath.addArc(center: center, radius: radius, startAngle: 125 * .pi / 180, endAngle: 55 * .pi / 180, clockwise: false)
-                pinPath.addLine(to: CGPoint(x: center.x, y: center.y + radius * 1.4))
-                pinPath.closeSubpath()
-
-                context.setFillColor(marker.color.cgColor)
-                context.addPath(pinPath)
-                context.fillPath()
-            }
+            context.setFillColor(marker.color.cgColor)
+            context.addPath(pinPath)
+            context.fillPath()
             context.restoreGState()
 
             if let iconImage = UIImage(systemName: marker.iconName) {

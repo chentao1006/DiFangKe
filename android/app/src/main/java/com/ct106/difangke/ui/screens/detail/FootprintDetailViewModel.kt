@@ -3,39 +3,50 @@ package com.ct106.difangke.ui.screens.detail
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.aptabase.Aptabase
 import com.ct106.difangke.DiFangKeApp
-import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
+import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.PlaceEntity
-import com.ct106.difangke.data.location.RawLocationStore
+import com.ct106.difangke.data.prefs.AppPreferences
+import com.ct106.difangke.service.ActivitySuggestion
+import com.ct106.difangke.service.GeocodeService
+import com.ct106.difangke.service.PhotoAutoLinker
+import com.ct106.difangke.ui.shared.TimelineEditActions
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import com.aptabase.Aptabase
 import org.json.JSONArray
-import java.util.Calendar
 import java.util.Date
-import java.util.UUID
-import kotlin.math.max
-import kotlin.math.min
 
+/**
+ * Footprint detail state. Every edit is persisted immediately (iOS parity) through
+ * [TimelineEditActions]; there is no explicit "保存".
+ */
 class FootprintDetailViewModel(application: Application) : AndroidViewModel(application) {
     private val db = DiFangKeApp.instance.database
-    private val rawStore = RawLocationStore.getInstance(application)
+    private val prefs = AppPreferences(application)
 
     private val _footprint = MutableStateFlow<FootprintEntity?>(null)
     val footprint: StateFlow<FootprintEntity?> = _footprint.asStateFlow()
 
-    private val _matchedPlace = MutableStateFlow<com.ct106.difangke.data.db.entity.PlaceEntity?>(null)
-    val matchedPlace: StateFlow<com.ct106.difangke.data.db.entity.PlaceEntity?> = _matchedPlace.asStateFlow()
+    /** True once the footprint was removed/ignored/merged away — the host should dismiss. */
+    private val _isGone = MutableStateFlow(false)
+    val isGone: StateFlow<Boolean> = _isGone.asStateFlow()
 
-    val allPlaces: StateFlow<List<com.ct106.difangke.data.db.entity.PlaceEntity>> = db.placeDao().observeAll()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val allPlaces: StateFlow<List<PlaceEntity>> = db.placeDao().observeAll()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    private val _activityTypes = MutableStateFlow<List<ActivityTypeEntity>>(emptyList())
-    val activityTypes: StateFlow<List<ActivityTypeEntity>> = _activityTypes.asStateFlow()
+    val activityTypes: StateFlow<List<ActivityTypeEntity>> = db.activityTypeDao().observeAll()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    private val _nearbyPOIs = MutableStateFlow<List<com.ct106.difangke.service.GeocodeService.SearchResult>>(emptyList())
-    val nearbyPOIs: StateFlow<List<com.ct106.difangke.service.GeocodeService.SearchResult>> = _nearbyPOIs.asStateFlow()
+    private val _placeHistory = MutableStateFlow<List<FootprintEntity>>(emptyList())
+
+    /** iOS getSuggestedActivities(includeFallback: false) for the activity picker. */
+    val suggestedActivities: StateFlow<List<ActivityTypeEntity>> =
+        combine(_footprint, activityTypes, allPlaces, _placeHistory) { fp, types, places, history ->
+            if (fp == null) emptyList()
+            else ActivitySuggestion.getSuggestedActivities(fp, types, places, history, includeFallback = false)
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private val _previousFootprint = MutableStateFlow<FootprintEntity?>(null)
     val previousFootprint: StateFlow<FootprintEntity?> = _previousFootprint.asStateFlow()
@@ -43,467 +54,194 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
     private val _nextFootprint = MutableStateFlow<FootprintEntity?>(null)
     val nextFootprint: StateFlow<FootprintEntity?> = _nextFootprint.asStateFlow()
 
-    private val geocodeService = com.ct106.difangke.service.GeocodeService.shared
+    private val _mergePartner = MutableStateFlow<FootprintEntity?>(null)
+    val mergePartner: StateFlow<FootprintEntity?> = _mergePartner.asStateFlow()
 
-    init {
-        viewModelScope.launch {
-            db.activityTypeDao().observeAll().collect {
-                _activityTypes.value = it
-            }
-        }
-    }
+    private val _isUpdatingAddress = MutableStateFlow(false)
+    val isUpdatingAddress: StateFlow<Boolean> = _isUpdatingAddress.asStateFlow()
+
+    private var loadedId: String? = null
+    private var didAutoLink = false
 
     fun loadFootprint(id: String) {
-        viewModelScope.launch {
-            val fp = db.footprintDao().getById(id)
+        if (loadedId == id && _footprint.value != null) return
+        loadedId = id
+        didAutoLink = false
+        _isGone.value = false
+        viewModelScope.launch { reload(id) }
+    }
+
+    /** Re-read the current footprint from the DB (e.g. after photos were linked externally). */
+    fun refresh() {
+        val id = loadedId ?: return
+        viewModelScope.launch { reload(id) }
+    }
+
+    private suspend fun reload(id: String? = loadedId) {
+        id ?: return
+        val fp = db.footprintDao().getById(id)
+        if (fp == null || fp.statusValue == "ignored") {
             _footprint.value = fp
-            refreshAdjacentFootprints(fp)
-            
-            val allPlaces = db.placeDao().getAll()
-            _matchedPlace.value = fp?.placeID?.let { placeID ->
-                allPlaces.find { place -> place.placeID == placeID && place.isUserDefined }
-            }
-
-            // 加载周边 POI
-            if (fp != null) {
-                try {
-                    val lats = org.json.JSONArray(fp.latitudeJson)
-                    val lons = org.json.JSONArray(fp.longitudeJson)
-                    if (lats.length() > 0 && lons.length() > 0) {
-                        val lat = lats.getDouble(0)
-                        val lon = lons.getDouble(0)
-                        
-                        val amapPois = geocodeService.getNearbyPOIs(lat, lon)
-                        
-                        // 加载已保存地点
-                        val allSaved = db.placeDao().getAll()
-                        val nearbySaved = allSaved.filter { 
-                             val results = FloatArray(1)
-                             android.location.Location.distanceBetween(lat, lon, it.latitude, it.longitude, results)
-                             results[0] < 500 // 500米以内视为“附近”
-                        }.map {
-                            com.ct106.difangke.service.GeocodeService.SearchResult(
-                                name = it.name,
-                                address = it.address ?: "已保存地点",
-                                latitude = it.latitude,
-                                longitude = it.longitude,
-                                isSavedPlace = true,
-                                placeID = it.placeID
-                            )
-                        }
-                        
-                        // 合并列表，已保存地点优先
-                        _nearbyPOIs.value = (nearbySaved + amapPois).distinctBy { it.name }
-
-                        // 如果地址缺失，自动反查
-                        if (fp.address.isNullOrEmpty()) {
-                            val addr = geocodeService.reverseGeocode(lat, lon)
-                            if (!addr.isNullOrEmpty()) {
-                                val updated = fp.copy(address = addr)
-                                db.footprintDao().update(updated)
-                                _footprint.value = updated
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    _nearbyPOIs.value = emptyList()
-                }
-            }
-        }
-    }
-
-    fun searchPOI(keyword: String) {
-        if (keyword.isBlank()) {
-             // 如果关键字为空，还原为初始状态列表
-             val id = _footprint.value?.footprintID ?: return
-             loadFootprint(id)
-             return
-        }
-        
-        val fp = _footprint.value ?: return
-        viewModelScope.launch {
-            try {
-                val lats = org.json.JSONArray(fp.latitudeJson)
-                val lons = org.json.JSONArray(fp.longitudeJson)
-                if (lats.length() > 0 && lons.length() > 0) {
-                    val lat = lats.getDouble(0)
-                    val lon = lons.getDouble(0)
-                    _nearbyPOIs.value = geocodeService.searchNearby(keyword, lat, lon)
-                }
-            } catch (e: Exception) {
-                _nearbyPOIs.value = emptyList()
-            }
-        }
-    }
-
-    fun updateFootprint(
-        title: String,
-        reason: String,
-        address: String,
-        placeID: String? = null,
-        activityTypeValue: String? = null,
-        isHighlight: Boolean = false,
-        onSaved: () -> Unit = {}
-    ) {
-        val current = _footprint.value ?: return
-        Aptabase.instance.trackEvent("footprint_edited")
-        viewModelScope.launch {
-            val updated = current.copy(
-                title = title, 
-                reason = reason,
-                address = address.ifBlank { null },
-                placeID = placeID,
-                activityTypeValue = activityTypeValue ?: current.activityTypeValue,
-                isHighlight = isHighlight,
-                isTitleEditedByHand = true,
-                aiAnalyzed = true
-            )
-            db.footprintDao().update(updated)
-            _footprint.value = updated
-            val allPlaces = db.placeDao().getAll()
-            _matchedPlace.value = updated.placeID?.let { id ->
-                allPlaces.find { place -> place.placeID == id && place.isUserDefined }
-            }
-            onSaved()
-        }
-    }
-
-    fun updateActivityType(activityTypeValue: String?) {
-        val current = _footprint.value ?: return
-        viewModelScope.launch {
-            val updated = current.copy(
-                activityTypeValue = activityTypeValue,
-                statusValue = "manual",
-                aiAnalyzed = true
-            )
-            db.footprintDao().update(updated)
-            _footprint.value = updated
-            refreshAdjacentFootprints(updated)
-        }
-    }
-
-    /** 收藏是独立即时操作，不能依赖详情页最后的“保存”按钮。 */
-    fun setHighlight(isHighlight: Boolean) {
-        val current = _footprint.value ?: return
-        if (current.isHighlight == isHighlight) return
-        Aptabase.instance.trackEvent("footprint_highlighted")
-        viewModelScope.launch {
-            val updated = current.copy(isHighlight = isHighlight)
-            db.footprintDao().update(updated)
-            _footprint.value = updated
-        }
-    }
-
-    fun updatePhotos(uris: List<String>) {
-        val current = _footprint.value ?: return
-        viewModelScope.launch {
-            val updated = current.copy(photoAssetIDsJson = JSONArray(uris.distinct()).toString())
-            db.footprintDao().update(updated)
-            _footprint.value = updated
-            Aptabase.instance.trackEvent("footprint_photos_edited")
-        }
-    }
-
-    fun adjustTime(newStart: Date, newEnd: Date, onSaved: () -> Unit = {}) {
-        val current = _footprint.value ?: return
-        // A footprint is an observed event, never a future plan.  Keep the
-        // persisted value safe even if an older UI or another caller supplies
-        // a future time.
-        val latestAllowedEnd = Date((System.currentTimeMillis() / 60_000L) * 60_000L)
-        val requestedEnd = minOf(roundedToMinute(newEnd).time, latestAllowedEnd.time)
-        val roundedStart = Date(
-            minOf(roundedToMinute(newStart).time, requestedEnd - 60_000L)
-        )
-        val roundedEnd = Date(maxOf(requestedEnd, roundedStart.time + 60_000L))
-        if (roundedStart == current.startTime && roundedEnd == current.endTime) return
-
-        viewModelScope.launch {
-            val updatedCoordinates = coordinatesJsonForRange(roundedStart, roundedEnd)
-            val updated = current.copy(
-                date = startOfDay(roundedStart),
-                startTime = roundedStart,
-                endTime = roundedEnd,
-                latitudeJson = updatedCoordinates?.first ?: current.latitudeJson,
-                longitudeJson = updatedCoordinates?.second ?: current.longitudeJson,
-                locationHash = if (current.locationHash == "ONGOING_STAY" || current.locationHash.startsWith("GAP_STAY")) "MANUAL_STAY" else current.locationHash,
-                statusValue = "manual",
-                aiAnalyzed = true
-            )
-
-            db.transportRecordDao().getAdjacentEndingAt(
-                current.startTime,
-                Date(current.startTime.time - 30 * 60_000L),
-                Date(current.startTime.time + 60_000L)
-            )?.let { transport ->
-                if (roundedStart.after(transport.startTime)) {
-                    db.transportRecordDao().update(refreshTransportTiming(transport.copy(endTime = roundedStart)))
-                }
-            }
-
-            db.transportRecordDao().getAdjacentStartingAt(
-                current.endTime,
-                Date(current.endTime.time - 60_000L),
-                Date(current.endTime.time + 30 * 60_000L)
-            )?.let { transport ->
-                if (roundedEnd.before(transport.endTime)) {
-                    db.transportRecordDao().update(refreshTransportTiming(transport.copy(startTime = roundedEnd, day = startOfDay(roundedEnd))))
-                }
-            }
-
-            db.footprintDao().update(updated)
-            _footprint.value = updated
-            refreshAdjacentFootprints(updated)
-            Aptabase.instance.trackEvent("footprint_time_adjusted")
-            onSaved()
-        }
-    }
-
-    fun splitFootprint(splitTime: Date, onSaved: () -> Unit = {}) {
-        val current = _footprint.value ?: return
-        if (current.endTime.time - current.startTime.time < 120_000L) return
-        val split = roundedToMinute(Date(splitTime.time.coerceIn(current.startTime.time + 60_000L, current.endTime.time - 60_000L)))
-
-        viewModelScope.launch {
-            val firstRatio = (split.time - current.startTime.time).toDouble() /
-                (current.endTime.time - current.startTime.time).toDouble()
-            val firstSteps = current.stepCount?.let { (it * firstRatio).toInt() }
-            val firstDistance = current.walkingDistance?.times(firstRatio)
-            val firstFloors = current.floorsAscended?.let { (it * firstRatio).toInt() }
-            val firstCoords = coordinatesJsonForRange(current.startTime, split)
-                ?: fallbackCoordinatesByRatio(current, 0.0, (split.time - current.startTime.time).toDouble() / (current.endTime.time - current.startTime.time).toDouble())
-            val secondCoords = coordinatesJsonForRange(split, current.endTime)
-                ?: fallbackCoordinatesByRatio(current, (split.time - current.startTime.time).toDouble() / (current.endTime.time - current.startTime.time).toDouble(), 1.0)
-
-            val first = current.copy(
-                endTime = split,
-                latitudeJson = firstCoords.first,
-                longitudeJson = firstCoords.second,
-                stepCount = firstSteps,
-                walkingDistance = firstDistance,
-                floorsAscended = firstFloors,
-                statusValue = "manual",
-                aiAnalyzed = true
-            )
-            val second = current.copy(
-                footprintID = UUID.randomUUID().toString(),
-                date = startOfDay(split),
-                startTime = split,
-                latitudeJson = secondCoords.first,
-                longitudeJson = secondCoords.second,
-                stepCount = current.stepCount?.minus(firstSteps ?: 0),
-                walkingDistance = current.walkingDistance?.minus(firstDistance ?: 0.0),
-                floorsAscended = current.floorsAscended?.minus(firstFloors ?: 0),
-                isHighlight = false,
-                statusValue = "manual",
-                aiAnalyzed = true
-            )
-            db.footprintDao().update(first)
-            db.footprintDao().insert(second)
-            _footprint.value = first
-            refreshAdjacentFootprints(first)
-            Aptabase.instance.trackEvent("footprint_split")
-            onSaved()
-        }
-    }
-
-    fun mergeAdjacent(usePrevious: Boolean, onSaved: () -> Unit = {}) {
-        val current = _footprint.value ?: return
-        val other = (if (usePrevious) _previousFootprint.value else _nextFootprint.value) ?: return
-
-        viewModelScope.launch {
-            val first = if (current.startTime <= other.startTime) current else other
-            val second = if (current.startTime <= other.startTime) other else current
-            if (!canMerge(first, second)) return@launch
-
-            val mergedLat = JSONArray()
-            val mergedLon = JSONArray()
-            appendCoordinates(mergedLat, mergedLon, first)
-            appendCoordinates(mergedLat, mergedLon, second)
-
-            val photos = (jsonStringArray(first.photoAssetIDsJson) + jsonStringArray(second.photoAssetIDsJson)).distinct()
-            val merged = first.copy(
-                startTime = minDate(first.startTime, second.startTime),
-                endTime = maxDate(first.endTime, second.endTime),
-                date = startOfDay(minDate(first.startTime, second.startTime)),
-                latitudeJson = mergedLat.toString(),
-                longitudeJson = mergedLon.toString(),
-                reason = first.reason?.takeIf { it.isNotBlank() } ?: second.reason,
-                address = first.address?.takeIf { it.isNotBlank() } ?: second.address,
-                placeID = first.placeID ?: second.placeID,
-                activityTypeValue = first.activityTypeValue ?: second.activityTypeValue,
-                isHighlight = if (first.isHighlight == true) true else second.isHighlight,
-                photoAssetIDsJson = JSONArray(photos).toString(),
-                stepCount = nullableIntSum(first.stepCount, second.stepCount),
-                walkingDistance = nullableDoubleSum(first.walkingDistance, second.walkingDistance),
-                floorsAscended = nullableIntSum(first.floorsAscended, second.floorsAscended),
-                statusValue = "manual",
-                aiAnalyzed = true
-            )
-
-            db.footprintDao().update(merged)
-            db.footprintDao().delete(second)
-            _footprint.value = merged
-            refreshAdjacentFootprints(merged)
-            Aptabase.instance.trackEvent("footprint_adjacent_merged")
-            onSaved()
-        }
-    }
-
-    private fun nullableIntSum(first: Int?, second: Int?): Int? =
-        if (first == null && second == null) null else (first ?: 0) + (second ?: 0)
-
-    private fun nullableDoubleSum(first: Double?, second: Double?): Double? =
-        if (first == null && second == null) null else (first ?: 0.0) + (second ?: 0.0)
-
-    fun deleteFootprint() {
-        Aptabase.instance.trackEvent("footprint_deleted")
-        val current = _footprint.value ?: return
-        viewModelScope.launch {
-            // iOS deletes into the footprint recycle bin first; preserve the
-            // record so the user can restore it from Data Manager.
-            db.footprintDao().update(current.copy(statusValue = "ignored"))
-            _footprint.value = null
-        }
-    }
-
-    /** Mirrors iOS: create/update a 100 m ignored place and hide all nearby stays. */
-    fun ignoreLocation(onSaved: () -> Unit = {}) {
-        val current = _footprint.value ?: return
-        val coordinate = representativeCoordinate(current) ?: return
-        viewModelScope.launch {
-            val existing = current.placeID?.let { db.placeDao().getById(it) }
-            val ignoredPlace = existing?.copy(isIgnored = true) ?: PlaceEntity(
-                name = current.address?.takeIf { it.isNotBlank() } ?: "已忽略地点",
-                latitude = coordinate.first,
-                longitude = coordinate.second,
-                radius = 100f,
-                address = current.address,
-                isIgnored = true,
-                isUserDefined = false
-            )
-            db.placeDao().insert(ignoredPlace)
-            val threshold = ignoredPlace.radius + 100f
-            db.footprintDao().getAll().forEach { footprint ->
-                val other = representativeCoordinate(footprint) ?: return@forEach
-                if (footprint.placeID == ignoredPlace.placeID || distanceMeters(coordinate, other) <= threshold) {
-                    db.footprintDao().update(footprint.copy(statusValue = "ignored", placeID = ignoredPlace.placeID))
-                }
-            }
-            _footprint.value = null
-            Aptabase.instance.trackEvent("footprint_location_ignored")
-            onSaved()
-        }
-    }
-
-    private suspend fun refreshAdjacentFootprints(fp: FootprintEntity?) {
-        if (fp == null) {
-            _previousFootprint.value = null
-            _nextFootprint.value = null
+            _isGone.value = true
             return
         }
+        _footprint.value = fp
+        refreshAdjacent(fp)
+        _placeHistory.value = fp.placeID?.let { pid -> db.footprintDao().getAll().filter { it.placeID == pid } }.orEmpty()
+        if (fp.address == null) refreshAddress(fp)
+    }
+
+    private suspend fun refreshAdjacent(fp: FootprintEntity) {
         _previousFootprint.value = db.footprintDao().getPreviousBefore(fp.footprintID, fp.startTime)
         _nextFootprint.value = db.footprintDao().getNextAfter(fp.footprintID, fp.endTime)
+        _mergePartner.value = TimelineEditActions.findFootprintMergePartner(db, fp)
     }
 
-    private suspend fun canMerge(first: FootprintEntity, second: FootprintEntity): Boolean {
-        if (first.footprintID == second.footprintID) return false
-        val lower = minDate(first.endTime, second.endTime)
-        val upper = maxDate(first.startTime, second.startTime)
-        if (!upper.after(lower)) return true
-        return db.transportRecordDao().getActiveBetween(lower, upper).isEmpty()
-    }
-
-    private fun startOfDay(date: Date): Date = Calendar.getInstance().apply {
-        time = date
-        set(Calendar.HOUR_OF_DAY, 0)
-        set(Calendar.MINUTE, 0)
-        set(Calendar.SECOND, 0)
-        set(Calendar.MILLISECOND, 0)
-    }.time
-
-    private fun roundedToMinute(date: Date): Date = Date(((date.time + 30_000L) / 60_000L) * 60_000L)
-
-    private fun touchedDates(start: Date, end: Date): List<Date> {
-        val result = mutableListOf<Date>()
-        val cal = Calendar.getInstance().apply { time = startOfDay(start) }
-        val endDay = startOfDay(Date(max(start.time, end.time - 1L)))
-        while (!cal.time.after(endDay)) {
-            result += cal.time
-            cal.add(Calendar.DATE, 1)
-        }
-        return result
-    }
-
-    private fun coordinatesJsonForRange(start: Date, end: Date): Pair<String, String>? {
-        val points = touchedDates(start, end)
-            .flatMap { rawStore.loadLocations(it) }
-            .filter { it.timestamp >= start && it.timestamp <= end }
-            .sortedBy { it.timestamp }
-        if (points.isEmpty()) return null
-        val lats = JSONArray()
-        val lons = JSONArray()
-        points.forEach {
-            lats.put(it.latitude)
-            lons.put(it.longitude)
-        }
-        return lats.toString() to lons.toString()
-    }
-
-    private fun fallbackCoordinatesByRatio(fp: FootprintEntity, startRatio: Double, endRatio: Double): Pair<String, String> {
-        val lats = JSONArray(fp.latitudeJson)
-        val lons = JSONArray(fp.longitudeJson)
-        val count = min(lats.length(), lons.length())
-        if (count == 0) return "[]" to "[]"
-        val start = (count * startRatio).toInt().coerceIn(0, count - 1)
-        val endExclusive = max(start + 1, (count * endRatio).toInt().coerceIn(1, count))
-        val outLat = JSONArray()
-        val outLon = JSONArray()
-        for (i in start until endExclusive) {
-            outLat.put(lats.getDouble(i))
-            outLon.put(lons.getDouble(i))
-        }
-        return outLat.toString() to outLon.toString()
-    }
-
-    private fun appendCoordinates(latsOut: JSONArray, lonsOut: JSONArray, fp: FootprintEntity) {
-        val lats = JSONArray(fp.latitudeJson)
-        val lons = JSONArray(fp.longitudeJson)
-        for (i in 0 until min(lats.length(), lons.length())) {
-            latsOut.put(lats.getDouble(i))
-            lonsOut.put(lons.getDouble(i))
+    private suspend fun refreshAddress(fp: FootprintEntity) {
+        val coord = TimelineEditActions.representativeCoordinate(fp) ?: return
+        _isUpdatingAddress.value = true
+        val addr = runCatching { GeocodeService.shared.reverseGeocode(coord.first, coord.second) }.getOrNull()
+        _isUpdatingAddress.value = false
+        if (!addr.isNullOrEmpty()) {
+            val current = db.footprintDao().getById(fp.footprintID) ?: return
+            if (current.address == null) {
+                val updated = current.copy(address = addr)
+                db.footprintDao().update(updated)
+                _footprint.value = updated
+            }
         }
     }
 
-    private fun representativeCoordinate(fp: FootprintEntity): Pair<Double, Double>? = runCatching {
-        val lats = JSONArray(fp.latitudeJson)
-        val lons = JSONArray(fp.longitudeJson)
-        val count = min(lats.length(), lons.length())
-        if (count == 0) return@runCatching null
-        val latitudes = (0 until count).map { lats.getDouble(it) }.filter(Double::isFinite)
-        val longitudes = (0 until count).map { lons.getDouble(it) }.filter(Double::isFinite)
-        if (latitudes.isEmpty() || longitudes.isEmpty()) null else latitudes.average() to longitudes.average()
-    }.getOrNull()
-
-    private fun distanceMeters(first: Pair<Double, Double>, second: Pair<Double, Double>): Float {
-        val result = FloatArray(1)
-        android.location.Location.distanceBetween(first.first, first.second, second.first, second.second, result)
-        return result[0]
+    /** iOS onAppear: `if isAutoPhotoLinkEnabled { locationManager.linkPhotos(...) }`. */
+    fun autoLinkPhotosIfEnabled() {
+        val fp = _footprint.value ?: return
+        if (didAutoLink) return
+        didAutoLink = true
+        viewModelScope.launch {
+            if (!prefs.isAutoPhotoLinkEnabled.first()) return@launch
+            PhotoAutoLinker.linkPhotos(getApplication(), db, fp)?.let { _footprint.value = it }
+        }
     }
 
-    private fun jsonStringArray(json: String): List<String> = runCatching {
-        val array = JSONArray(json)
-        (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
-    }.getOrDefault(emptyList())
+    private fun edit(block: suspend (FootprintEntity) -> FootprintEntity?) {
+        val current = _footprint.value ?: return
+        viewModelScope.launch {
+            val updated = block(current)
+            if (updated != null) {
+                _footprint.value = updated
+                refreshAdjacent(updated)
+            }
+        }
+    }
 
-    private fun refreshTransportTiming(record: com.ct106.difangke.data.db.entity.TransportRecordEntity): com.ct106.difangke.data.db.entity.TransportRecordEntity {
-        val duration = max(1.0, (record.endTime.time - record.startTime.time) / 1000.0)
-        return record.copy(
-            day = startOfDay(record.startTime),
-            averageSpeed = record.distance / duration,
-            statusRaw = if (record.endTime.after(record.startTime)) record.statusRaw else "ignored"
+    fun setActivity(activityTypeId: String?) = edit {
+        TimelineEditActions.setActivity(db, it, activityTypeId)
+    }
+
+    fun setHighlight(isHighlight: Boolean) = edit {
+        TimelineEditActions.setHighlight(db, it, isHighlight)
+    }
+
+    fun toggleHighlight() = edit { TimelineEditActions.toggleHighlight(db, it) }
+
+    /** iOS saveReason: only when changed; marks AI analysed + manual metadata edit. */
+    fun saveReason(text: String) {
+        val current = _footprint.value ?: return
+        if (text == (current.reason ?: "")) return
+        edit { fp ->
+            TimelineEditActions.updateFootprintMetadata(db, fp) {
+                it.copy(
+                    reason = text,
+                    aiAnalyzed = true,
+                    locationHash = if (it.locationHash == "ONGOING_STAY") "MANUAL_STAY" else it.locationHash
+                )
+            }.also { Aptabase.instance.trackEvent("footprint_edited") }
+        }
+    }
+
+    fun selectPlace(result: GeocodeService.SearchResult) = edit { fp ->
+        TimelineEditActions.applyPlaceSelection(db, fp, result).also {
+            _placeHistory.value = it.placeID?.let { pid -> db.footprintDao().getAll().filter { f -> f.placeID == pid } }.orEmpty()
+        }
+    }
+
+    fun updatePhotos(uris: List<String>) = edit { fp ->
+        TimelineEditActions.updateFootprintMetadata(db, fp) {
+            it.copy(photoAssetIDsJson = JSONArray(uris.distinct()).toString())
+        }.also { Aptabase.instance.trackEvent("footprint_photos_edited") }
+    }
+
+    fun addPhotos(uris: List<String>) {
+        val existing = _footprint.value?.let(::footprintPhotoUris).orEmpty()
+        val added = uris.filterNot { it in existing }
+        if (added.isNotEmpty()) updatePhotos(existing + added)
+    }
+
+    fun removePhoto(uri: String) {
+        val existing = _footprint.value?.let(::footprintPhotoUris).orEmpty()
+        updatePhotos(existing.filterNot { it == uri })
+    }
+
+    fun adjustTime(newStart: Date, newEnd: Date, onSaved: () -> Unit = {}) = edit { fp ->
+        TimelineEditActions.adjustFootprintTime(db, getApplication(), fp, newStart, newEnd).also { onSaved() }
+    }
+
+    fun splitFootprint(splitTime: Date, firstActivity: String?, secondActivity: String?, onSaved: () -> Unit = {}) = edit { fp ->
+        TimelineEditActions.splitFootprint(db, getApplication(), fp, splitTime, firstActivity, secondActivity)?.first.also { onSaved() }
+    }
+
+    fun mergeAdjacent(onSaved: () -> Unit = {}) {
+        val current = _footprint.value ?: return
+        val partner = _mergePartner.value ?: return
+        viewModelScope.launch {
+            val merged = TimelineEditActions.mergeFootprints(db, current, partner)
+            loadedId = merged.footprintID
+            _footprint.value = merged
+            refreshAdjacent(merged)
+            onSaved()
+        }
+    }
+
+    fun deleteFootprint(onDone: () -> Unit = {}) {
+        val current = _footprint.value ?: return
+        viewModelScope.launch {
+            TimelineEditActions.deleteFootprint(db, current)
+            _isGone.value = true
+            onDone()
+        }
+    }
+
+    fun ignoreLocation(onSaved: () -> Unit = {}) {
+        val current = _footprint.value ?: return
+        viewModelScope.launch {
+            TimelineEditActions.ignorePlace(db, current)
+            _isGone.value = true
+            onSaved()
+        }
+    }
+
+    /** iOS AddToFavoriteModal save: create a user-defined place and link the footprint. */
+    fun addAsImportantPlace(name: String, latitude: Double, longitude: Double, radius: Float, address: String?, onSaved: () -> Unit = {}) = edit { fp ->
+        val finalName = name.trim().ifEmpty { fp.address ?: "未知地点" }
+        val place = PlaceEntity(
+            name = finalName,
+            latitude = latitude,
+            longitude = longitude,
+            radius = radius,
+            address = address,
+            isUserDefined = true
         )
+        db.placeDao().insert(place)
+        TimelineEditActions.updateFootprintMetadata(db, fp) {
+            it.copy(placeID = place.placeID, address = finalName, isAddressEditedByHand = true)
+        }.also {
+            Aptabase.instance.trackEvent("place_added")
+            onSaved()
+        }
     }
-
-    private fun minDate(a: Date, b: Date): Date = if (a <= b) a else b
-    private fun maxDate(a: Date, b: Date): Date = if (a >= b) a else b
 }
+
+fun footprintPhotoUris(footprint: FootprintEntity): List<String> = runCatching {
+    val array = JSONArray(footprint.photoAssetIDsJson)
+    (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
+}.getOrDefault(emptyList())

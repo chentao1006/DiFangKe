@@ -14,13 +14,16 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED ||
             intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+            val pending = goAsync()
             CoroutineScope(Dispatchers.IO).launch {
-                val prefs = AppPreferences(context)
-                val isTracking = prefs.isTrackingEnabled.first()
-                if (isTracking) {
-                    LocationTrackingService.start(context)
+                try {
+                    val prefs = AppPreferences(context)
+                    if (prefs.isTrackingEnabled.first()) {
+                        LocationTrackingService.start(context)
+                    }
+                } finally {
+                    pending.finish()
                 }
-                FutureTripReminderWorker.rescheduleAll(context)
             }
         }
     }

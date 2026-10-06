@@ -9,14 +9,6 @@ struct WatchActivityOption: Codable, Hashable, Identifiable {
     let colorHex: String
 }
 
-struct WatchTripSnapshot: Codable, Hashable, Identifiable {
-    let id: String
-    let placeName: String
-    let distance: Double?
-    let arrivalDate: Date
-    let hasArrivalTime: Bool
-}
-
 struct WatchCoordinate: Codable, Hashable {
     let lat: Double
     let lon: Double
@@ -80,14 +72,12 @@ struct WatchSnapshot: Codable, Hashable {
     let currentAverageSpeed: Double?
     let todayFootprintCount: Int
     let todayDistance: Double
-    let nextTrip: WatchTripSnapshot?
     let activities: [WatchActivityOption]
     let todayTimeline: [WatchTimelineItem]?
     let recentDays: [WatchDaySnapshot]?
     let statistics: WatchStatisticsSnapshot?
-    let futureTrips: [WatchTripSnapshot]?
 
-    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, currentTransportType: nil, currentTransportStartedAt: nil, currentAverageSpeed: nil, todayFootprintCount: 0, todayDistance: 0, nextTrip: nil, activities: [], todayTimeline: [], recentDays: [], statistics: nil, futureTrips: [])
+    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, currentTransportType: nil, currentTransportStartedAt: nil, currentAverageSpeed: nil, todayFootprintCount: 0, todayDistance: 0, activities: [], todayTimeline: [], recentDays: [], statistics: nil)
 }
 
 /// The compact payload the phone sends over the fast/high-priority channels
@@ -172,7 +162,7 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         } else {
             session.transferUserInfo(payload)
         }
-        snapshot = WatchSnapshot(currentFootprintID: snapshot.currentFootprintID, placeName: snapshot.placeName, address: snapshot.address, startedAt: snapshot.startedAt, isTracking: snapshot.isTracking, currentActivityID: activity?.id, currentTransportType: snapshot.currentTransportType, currentTransportStartedAt: snapshot.currentTransportStartedAt, currentAverageSpeed: snapshot.currentAverageSpeed, todayFootprintCount: snapshot.todayFootprintCount, todayDistance: snapshot.todayDistance, nextTrip: snapshot.nextTrip, activities: snapshot.activities, todayTimeline: snapshot.todayTimeline, recentDays: snapshot.recentDays, statistics: snapshot.statistics, futureTrips: snapshot.futureTrips)
+        snapshot = WatchSnapshot(currentFootprintID: snapshot.currentFootprintID, placeName: snapshot.placeName, address: snapshot.address, startedAt: snapshot.startedAt, isTracking: snapshot.isTracking, currentActivityID: activity?.id, currentTransportType: snapshot.currentTransportType, currentTransportStartedAt: snapshot.currentTransportStartedAt, currentAverageSpeed: snapshot.currentAverageSpeed, todayFootprintCount: snapshot.todayFootprintCount, todayDistance: snapshot.todayDistance, activities: snapshot.activities, todayTimeline: snapshot.todayTimeline, recentDays: snapshot.recentDays, statistics: snapshot.statistics)
     }
 
     func confirmArrival() {
@@ -194,12 +184,10 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
             currentAverageSpeed: nil,
             todayFootprintCount: snapshot.todayFootprintCount,
             todayDistance: snapshot.todayDistance,
-            nextTrip: snapshot.nextTrip,
             activities: snapshot.activities,
             todayTimeline: snapshot.todayTimeline,
             recentDays: snapshot.recentDays,
-            statistics: snapshot.statistics,
-            futureTrips: snapshot.futureTrips
+            statistics: snapshot.statistics
         )
 
         let session = WCSession.default
@@ -319,12 +307,10 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
             currentAverageSpeed: compact.currentAverageSpeed,
             todayFootprintCount: compact.todayFootprintCount,
             todayDistance: compact.todayDistance,
-            nextTrip: snapshot.nextTrip,
             activities: compact.activities,
             todayTimeline: snapshot.todayTimeline,
             recentDays: snapshot.recentDays,
-            statistics: snapshot.statistics,
-            futureTrips: snapshot.futureTrips
+            statistics: snapshot.statistics
         )
     }
 }

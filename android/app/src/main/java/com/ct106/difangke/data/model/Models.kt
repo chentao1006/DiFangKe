@@ -57,23 +57,49 @@ enum class TransportType(val raw: String) {
         SHIP -> "directions_boat"
     }
 
-    companion object {
-        private fun automaticSpeedRange(type: TransportType): ClosedFloatingPointRange<Double>? = when (type) {
-            SLOW, RUNNING -> null
-            BICYCLE -> 0.0..30.0
-            EBIKE -> 8.0..50.0
-            MOTORCYCLE -> 20.0..110.0
-            BUS -> 15.0..100.0
-            CAR -> 15.0..150.0
-            SUBWAY -> 25.0..120.0
-            TRAIN -> 60.0..350.0
-            AIRPLANE -> 180.0..1200.0
-            SHIP -> 3.0..60.0
-        }
+    /** iOS `TransportType.category`: 1=foot, 2=cycle, 3=road vehicle, 4=rail/air/sea. */
+    val category: Int get() = getCategory(this)
 
+    /** iOS `automaticSpeedRange` (km/h). Ranges deliberately overlap. */
+    val automaticSpeedRange: ClosedFloatingPointRange<Double>? get() = when (this) {
+        SLOW, RUNNING -> null
+        BICYCLE -> 0.0..30.0
+        EBIKE -> 3.0..50.0
+        MOTORCYCLE -> 20.0..110.0
+        BUS -> 15.0..100.0
+        CAR -> 15.0..150.0
+        SUBWAY -> 25.0..120.0
+        TRAIN -> 60.0..350.0
+        AIRPLANE -> 180.0..1200.0
+        SHIP -> 3.0..60.0
+    }
+
+    fun canBeAutomaticallyInferred(speedKmh: Double, maxCategory: Int): Boolean {
+        if (category > maxCategory) return false
+        return automaticSpeedRange?.contains(speedKmh) == true
+    }
+
+    /** Android DetectedActivity codes used as the motion hint (iOS MotionType). */
+    object Motion {
+        const val IN_VEHICLE = 0
+        const val ON_BICYCLE = 1
+        const val ON_FOOT = 2
+        const val STILL = 3
+        const val UNKNOWN = 4
+        const val TILTING = 5
+        const val WALKING = 7
+        const val RUNNING = 8
+    }
+
+    companion object {
+        /**
+         * Backward-compatible entry point. Health metrics are optional: with no
+         * Health Connect data (null) classification degrades to speed/distance
+         * and history only, exactly as iOS does without HealthKit samples.
+         */
         fun from(
             speedMs: Double,
-            motionType: Int = 4, // 对应 Android DetectedActivity 类型 (4 = UNKNOWN)
+            motionType: Int = Motion.UNKNOWN,
             stepCount: Int = 0,
             durationSec: Long = 0,
             distanceMeters: Double = 0.0,
@@ -81,104 +107,176 @@ enum class TransportType(val raw: String) {
             observedPointCount: Int? = null,
             preferredAuto: TransportType = CAR,
             preferredCycling: TransportType = BICYCLE,
+            preferredTransport: TransportType? = null,
+            walkingDistance: Double? = null,
+            floorsClimbed: Int? = null
+        ): TransportType = classify(
+            speedMs = speedMs,
+            motionType = motionType,
+            stepCount = stepCount,
+            walkingDistance = walkingDistance ?: 0.0,
+            floorsClimbed = floorsClimbed ?: 0,
+            durationSec = durationSec.toDouble(),
+            distanceMeters = distanceMeters,
+            pointCount = pointCount,
+            observedPointCount = observedPointCount,
+            preferredAuto = preferredAuto,
+            preferredCycling = preferredCycling,
+            preferredTransport = preferredTransport
+        )
+
+        /** Line-by-line port of iOS `TransportType.from(speed:...)` (Models/Transport.swift). */
+        fun classify(
+            speedMs: Double,
+            motionType: Int = Motion.UNKNOWN,
+            stepCount: Int? = 0,
+            walkingDistance: Double? = 0.0,
+            floorsClimbed: Int? = 0,
+            durationSec: Double = 0.0,
+            distanceMeters: Double = 0.0,
+            pointCount: Int = 0,
+            observedPointCount: Int? = null,
+            preferredAuto: TransportType = CAR,
+            preferredCycling: TransportType = BICYCLE,
             preferredTransport: TransportType? = null
         ): TransportType {
+            val steps = stepCount ?: 0
+            val walkDist = walkingDistance ?: 0.0
+            val floors = floorsClimbed ?: 0
+            val duration = durationSec
             val kmh = speedMs * 3.6
-            val effectiveDistance = if (distanceMeters > 0) distanceMeters else (speedMs * durationSec)
-            
-            // --- 物理常识铁律：最高速度约束 ---
-            var effectiveMotion = motionType
-            // 步行不可能超过 15km/h (约 4.2m/s)
-            if (kmh > 15.0 && motionType == 7 /* WALKING */) effectiveMotion = 4 /* UNKNOWN */
-            // 跑步不可能超过 35km/h
-            if (kmh > 35.0 && motionType == 8 /* RUNNING */) effectiveMotion = 4 /* UNKNOWN */
-            // 确定车载速度 (45km/h 以上，甚至未知状态也判定为车载)
-            if (kmh > 45.0 && (motionType == 7 || motionType == 8 || motionType == 4)) effectiveMotion = 0 /* IN_VEHICLE */
+            val minutes = maxOf(duration / 60.0, 0.0)
+            val estimatedDistance = maxOf(speedMs * duration, 0.0)
+            val effectiveDistance = if (distanceMeters > 0) distanceMeters else estimatedDistance
+            val stepsPerMinute = if (minutes > 0) steps / minutes else 0.0
+            val walkingDistanceRatio = if (estimatedDistance > 0) minOf(1.5, walkDist / estimatedDistance) else 0.0
+            val hasStrongOnFootEvidence =
+                (walkDist > 250 && walkingDistanceRatio > 0.55) ||
+                    (stepsPerMinute > 35 && walkDist > 120) ||
+                    (floors >= 2 && walkDist > 80)
+            val hasDominantOnFootEvidence =
+                (walkDist > 250 && walkingDistanceRatio > 0.75) ||
+                    (stepsPerMinute > 65 && walkDist > 180) ||
+                    (floors >= 3 && walkDist > 120)
+            val hasMeaningfulTrip =
+                effectiveDistance >= maxOf(800.0, com.ct106.difangke.AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD) &&
+                    duration >= 3 * 60
+            val hasCorroboratedRunningEvidence =
+                motionType == Motion.RUNNING &&
+                    stepsPerMinute >= 120 &&
+                    walkDist >= maxOf(120.0, minutes * 70) &&
+                    walkingDistanceRatio >= 0.45 &&
+                    kmh >= 6.5 && kmh <= 25
 
-            // --- 综合常识铁律：距离与时间的合理性 ---
-            var maxAllowedTypeCategory = 4 // 默认允许所有 (4=Train/Airplane/Ship)
-            
-            // 不到 3 公里，不可能是轨交、火车、飞机（强制降级为汽车）
-            if (effectiveDistance < 3000) {
-                maxAllowedTypeCategory = 3
+            // Android ON_FOOT is the generic "walking or running" hint.
+            val motion = if (motionType == Motion.ON_FOOT) Motion.WALKING else motionType
+            var effectiveMotion = motion
+            if (kmh > 15 && motion == Motion.WALKING) effectiveMotion = Motion.UNKNOWN
+            if (kmh > 35 && motion == Motion.RUNNING) effectiveMotion = Motion.UNKNOWN
+            if (motion == Motion.RUNNING && !hasCorroboratedRunningEvidence) effectiveMotion = Motion.UNKNOWN
+            val isUnknownLike = motion == Motion.UNKNOWN || motion == Motion.TILTING
+            if (kmh > 45 && (motion == Motion.WALKING || motion == Motion.RUNNING || isUnknownLike)) {
+                effectiveMotion = Motion.IN_VEHICLE
             }
-            // 不到 500 米，不可能是汽车（强制降级为自行车或以下，排除短途高漂移）
-            if (effectiveDistance < 500) {
-                maxAllowedTypeCategory = 2 
+            if (kmh > 100 && motion == Motion.ON_BICYCLE) effectiveMotion = Motion.IN_VEHICLE
+            if (effectiveMotion == Motion.IN_VEHICLE && hasDominantOnFootEvidence && kmh < 14) {
+                effectiveMotion = Motion.WALKING
             }
+
+            var maxAllowedTypeCategory = 4
+            if (effectiveDistance < 3000) maxAllowedTypeCategory = 3
+            if (effectiveDistance < 500) maxAllowedTypeCategory = 2
 
             var safePreferredAuto = preferredAuto
-            if (maxAllowedTypeCategory < 4 && getCategory(safePreferredAuto) >= 4) {
-                safePreferredAuto = CAR
-            }
-            if (maxAllowedTypeCategory < 3 && getCategory(safePreferredAuto) >= 3) {
-                safePreferredAuto = preferredCycling
-            }
-            val habitualTransport = preferredTransport?.takeIf { type ->
-                getCategory(type) <= maxAllowedTypeCategory &&
-                    automaticSpeedRange(type)?.contains(kmh) == true
+            if (maxAllowedTypeCategory < 4 && safePreferredAuto.category >= 4) safePreferredAuto = CAR
+            if (maxAllowedTypeCategory < 3 && safePreferredAuto.category >= 3) safePreferredAuto = preferredCycling
+            val habitualTransport = preferredTransport?.takeIf {
+                it.canBeAutomaticallyInferred(kmh, maxAllowedTypeCategory)
             }
 
-            inferLongPublicTransitType(
+            val longPublicTransitType = inferLongPublicTransitType(
                 kmh = kmh,
                 distanceMeters = effectiveDistance,
-                durationSec = durationSec,
+                durationSec = duration,
                 pointCount = observedPointCount ?: pointCount
-            )?.let { return it }
+            )
+            if (longPublicTransitType != null && !hasStrongOnFootEvidence) return longPublicTransitType
 
-            // 1. 优先使用传感器数据 (Google Play Services Activity Recognition)
             when (effectiveMotion) {
-                7 /* WALKING */ -> return if (kmh > 7.0) RUNNING else SLOW
-                8 /* RUNNING */ -> return RUNNING
-                1 /* ON_BICYCLE */ -> return if (kmh > 55.0) safePreferredAuto else preferredCycling
-                0 /* IN_VEHICLE */ -> {
-                    if (kmh > 100.0 && maxAllowedTypeCategory >= 4) return TRAIN
-                    if (kmh > 80.0 && safePreferredAuto == BUS) return CAR
+                Motion.WALKING -> {
+                    if (hasDominantOnFootEvidence) return SLOW
+                    if (hasMeaningfulTrip) {
+                        if (habitualTransport != null) return habitualTransport
+                        if (kmh >= 8) return preferredCycling
+                    }
+                    return SLOW
+                }
+                Motion.RUNNING -> return RUNNING
+                Motion.ON_BICYCLE -> {
+                    if (kmh > 55) return safePreferredAuto
+                    return preferredCycling
+                }
+                Motion.IN_VEHICLE -> {
+                    if (kmh > 100 && maxAllowedTypeCategory >= 4) return TRAIN
+                    if (kmh > 80 && safePreferredAuto == BUS) return CAR
+                    if (habitualTransport != null &&
+                        habitualTransport.canBeAutomaticallyInferred(kmh, maxAllowedTypeCategory)
+                    ) return habitualTransport
                     return safePreferredAuto
                 }
             }
 
-            // 2. 结合步数判定
-            if (stepCount > 100 && durationSec > 0) {
-                val stepsPerMin = stepCount / (durationSec / 60.0)
-                if (stepsPerMin > 140 && kmh < 35.0) return RUNNING
-                if (stepsPerMin > 30 && kmh < 15.0) return SLOW
+            if (hasStrongOnFootEvidence) {
+                if (hasDominantOnFootEvidence && stepsPerMinute > 65 && kmh < 14) return SLOW
+                if (hasDominantOnFootEvidence && walkingDistanceRatio > 0.75 && kmh < 14) return SLOW
+            }
+            if (steps > 100 && duration > 0) {
+                if (stepsPerMinute > 30 && kmh < 15) return SLOW
             }
 
-            // 3. 速度兜底 (及堵车判定)
             if (kmh < 4.5) {
-                val stepsPerMin = if (durationSec > 0L) stepCount / (durationSec / 60.0) else 0.0
-                // 如果速度极低但步数很少，判定为车载堵车
-                if (stepsPerMin < 5.0 && stepCount < 20) return habitualTransport ?: safePreferredAuto
+                if (hasMeaningfulTrip && !hasDominantOnFootEvidence) {
+                    return habitualTransport ?: preferredCycling
+                }
+                if (stepsPerMinute < 5 && steps < 20 && walkDist < 80) {
+                    return habitualTransport ?: safePreferredAuto
+                }
                 return SLOW
             }
-            
-            var effectiveKmh = kmh
-            if (maxAllowedTypeCategory < 4 && effectiveKmh >= 120.0) effectiveKmh = 119.0 // 强行拉回汽车区间
-            if (maxAllowedTypeCategory < 3 && effectiveKmh >= 25.0) effectiveKmh = 24.0 // 强行拉回自行车区间
 
-            return when {
-                effectiveKmh < 12.0 -> habitualTransport?.takeIf { getCategory(it) == 2 } ?: preferredCycling
-                effectiveKmh < 35.0 -> habitualTransport ?: preferredCycling
-                habitualTransport != null -> habitualTransport
-                effectiveKmh < 120.0 -> safePreferredAuto
-                effectiveKmh < 350.0 -> TRAIN
-                else -> AIRPLANE
+            var effectiveKmh = kmh
+            if (maxAllowedTypeCategory < 4 && effectiveKmh >= 120.0) effectiveKmh = 119.0
+            if (maxAllowedTypeCategory < 3 && effectiveKmh >= 25.0) effectiveKmh = 24.0
+
+            if (effectiveKmh < 12 && hasDominantOnFootEvidence) return SLOW
+            if (effectiveKmh < 18 && hasStrongOnFootEvidence && walkingDistanceRatio > 0.45) return preferredCycling
+            if (effectiveKmh < 35) {
+                if (habitualTransport != null) {
+                    val plausible =
+                        (habitualTransport.category == 2 && effectiveDistance <= 20_000) ||
+                            (habitualTransport.category == 3 && hasMeaningfulTrip) ||
+                            (habitualTransport.category == 4 && effectiveDistance >= 10_000)
+                    if (plausible) return habitualTransport
+                }
+                return preferredCycling
             }
+            if (habitualTransport != null) return habitualTransport
+            if (effectiveKmh < 120) return safePreferredAuto
+            if (effectiveKmh < 350) return TRAIN
+            return AIRPLANE
         }
 
         private fun inferLongPublicTransitType(
             kmh: Double,
             distanceMeters: Double,
-            durationSec: Long,
+            durationSec: Double,
             pointCount: Int
         ): TransportType? {
             val isSparseUrbanRailTrip =
-                pointCount in 0..2 &&
-                    distanceMeters >= 5_000.0 &&
-                    distanceMeters <= 30_000.0 &&
-                    durationSec in (8 * 60)..(90 * 60) &&
-                    kmh >= 12.0 && kmh < 45.0
+                distanceMeters >= 5_000 && distanceMeters <= 30_000 &&
+                    durationSec >= 8 * 60 && durationSec <= 90 * 60 &&
+                    pointCount in 0..4 &&
+                    kmh >= 12 && kmh < 45
             if (isSparseUrbanRailTrip) return SUBWAY
 
             if (distanceMeters < 10_000.0 || durationSec < 20 * 60) return null
@@ -240,34 +338,28 @@ data class Transport(
 sealed class TimelineItem {
     data class FootprintItem(val footprint: com.ct106.difangke.data.db.entity.FootprintEntity) : TimelineItem()
     data class TransportItem(val transport: com.ct106.difangke.data.db.entity.TransportRecordEntity) : TimelineItem()
-    data class FutureTripItem(val trip: com.ct106.difangke.data.db.entity.FutureTripEntity) : TimelineItem()
 
     val startTime: java.util.Date get() = when (this) {
         is FootprintItem -> footprint.startTime
         is TransportItem -> transport.startTime
-        is FutureTripItem -> trip.effectiveArrivalDate()
     }
     val endTime: java.util.Date get() = when (this) {
         is FootprintItem -> footprint.endTime
         is TransportItem -> transport.endTime
-        is FutureTripItem -> trip.effectiveArrivalDate()
     }
     val id: String get() = when (this) {
         is FootprintItem -> "f_${footprint.footprintID}"
         is TransportItem -> "t_${transport.recordID}"
-        is FutureTripItem -> "trip_${trip.tripID}"
     }
     
     val latitude: Double get() = when (this) {
         is FootprintItem -> footprint.representativeLatitude
         is TransportItem -> transport.startLatitude
-        is FutureTripItem -> trip.latitude
     }
     
     val longitude: Double get() = when (this) {
         is FootprintItem -> footprint.representativeLongitude
         is TransportItem -> transport.startLongitude
-        is FutureTripItem -> trip.longitude
     }
 }
 
@@ -316,7 +408,6 @@ data class DaySummary(
     val hasCandidate: Boolean,
     val timelineIcons: List<TimelineIcon>,
     val timelineSegments: List<TimelineSegment> = emptyList(),
-    val plannedArrivalTimes: List<Date> = emptyList(),
     val trajectoryCount: Int,
     val mileage: Double,
     var photoCount: Int = 0

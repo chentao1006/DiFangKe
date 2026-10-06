@@ -31,13 +31,20 @@ data class FootprintMapMarker(
     val longitude: Double,
     val icon: String?,
     val colorHex: String?,
-    val durationSeconds: Long = 0L
+    val durationSeconds: Long = 0L,
+    /** Every footprint aggregated into this pin, oldest first (iOS AggregatedFootprint). */
+    val memberIDs: List<String> = emptyList(),
+    /** Latest linked photo; rendered inside the pin instead of the icon (iOS photo pins). */
+    val photoUri: String? = null,
+    /** 1.5 for the item selected from the timeline (iOS selected marker). */
+    val scale: Float = 1f
 )
 
 fun TencentMap.addFootprintMarkers(
     markers: List<FootprintMapMarker>,
     isDark: Boolean = false,
-    onMarkerClick: ((String) -> Unit)? = null
+    onMarkerClick: ((String) -> Unit)? = null,
+    photoBitmaps: Map<String, Bitmap> = emptyMap()
 ) {
     setOnMarkerClickListener { marker ->
         val id = marker.tag as? String
@@ -47,10 +54,10 @@ fun TencentMap.addFootprintMarkers(
     markers
         .filter { it.latitude.isFinite() && it.longitude.isFinite() }
         .forEach { marker ->
-            val bitmap = createFootprintMarkerBitmap(marker, isDark)
+            val bitmap = createFootprintMarkerBitmap(marker, isDark, marker.photoUri?.let { photoBitmaps[it] })
             
             // Calculate anchor based on uniform size
-            val scale = 2.9f
+            val scale = 2.9f * marker.scale
             val size = (34f * scale).toInt()
             val bitmapHeight = (size * 1.4f).toInt() + 8
             val radius = size / 2f
@@ -63,7 +70,7 @@ fun TencentMap.addFootprintMarkers(
                     .position(LatLng(marker.latitude, marker.longitude))
                     .anchor(0.5f, anchorV)
                     .icon(BitmapDescriptorFactory.fromBitmap(bitmap))
-                    .zIndex(100f)
+                    .zIndex(if (marker.scale > 1f) 150f else 100f)
             ).setTag(marker.id)
         }
 }
@@ -79,7 +86,8 @@ fun buildFootprintMapMarkers(
         var weightedLatitude: Double,
         var weightedLongitude: Double,
         var totalDurationSeconds: Long,
-        var representative: FootprintEntity
+        var representative: FootprintEntity,
+        val members: MutableList<FootprintEntity> = mutableListOf()
     )
 
     val buckets = linkedMapOf<String, Bucket>()
@@ -95,9 +103,11 @@ fun buildFootprintMapMarkers(
                 weightedLatitude = coordinate.first * durationWeight,
                 weightedLongitude = coordinate.second * durationWeight,
                 totalDurationSeconds = visibleDuration,
-                representative = footprint
+                representative = footprint,
+                members = mutableListOf(footprint)
             )
         } else {
+            bucket.members.add(footprint)
             bucket.weightedLatitude += coordinate.first * durationWeight
             bucket.weightedLongitude += coordinate.second * durationWeight
             bucket.totalDurationSeconds += visibleDuration
@@ -116,10 +126,18 @@ fun buildFootprintMapMarkers(
             longitude = bucket.weightedLongitude / divisor,
             icon = activity?.icon ?: "place",
             colorHex = activity?.colorHex ?: "#00A0AC",
-            durationSeconds = bucket.totalDurationSeconds
+            durationSeconds = bucket.totalDurationSeconds,
+            memberIDs = bucket.members.sortedBy { it.startTime }.map { it.footprintID },
+            photoUri = bucket.members.sortedByDescending { it.startTime }
+                .firstNotNullOfOrNull { it.photoUris().lastOrNull() }
         )
     }
 }
+
+private fun FootprintEntity.photoUris(): List<String> = runCatching {
+    val array = JSONArray(photoAssetIDsJson)
+    List(array.length()) { array.getString(it) }.filter { it.isNotBlank() }
+}.getOrDefault(emptyList())
 
 private fun FootprintEntity.visibleDurationSeconds(visibleStart: Date?, visibleEnd: Date?): Long {
     val clippedStart = visibleStart?.let { maxOf(startTime.time, it.time) } ?: startTime.time
@@ -227,8 +245,8 @@ private fun formatDurationMinimal(durationSeconds: Long): Pair<String, String> {
     return Pair(formattedStr, "小时")
 }
 
-private fun createFootprintMarkerBitmap(marker: FootprintMapMarker, isDark: Boolean): Bitmap {
-    val scale = 2.9f // 统一大小, 缩小一点
+private fun createFootprintMarkerBitmap(marker: FootprintMapMarker, isDark: Boolean, photo: Bitmap? = null): Bitmap {
+    val scale = 2.9f * marker.scale // 统一大小；选中项放大 1.5 倍
     val size = (34f * scale).toInt()
     val stroke = max(2f, 2.5f * scale)
     val bitmap = Bitmap.createBitmap(size + 8, (size * 1.4f).toInt() + 8, Bitmap.Config.ARGB_8888)
@@ -274,7 +292,23 @@ private fun createFootprintMarkerBitmap(marker: FootprintMapMarker, isDark: Bool
     }
     canvas.drawCircle(center, pinTopCenterY, radius * 0.8f, whiteCirclePaint)
 
-    drawActivityIcon(canvas, marker.icon, center, pinTopCenterY, radius * 0.95f, iconPaint)
+    if (photo != null) {
+        // iOS photo pins show the latest linked photo inside the pin head.
+        val photoRadius = radius * 0.8f
+        val save = canvas.save()
+        val clip = Path().apply { addCircle(center, pinTopCenterY, photoRadius, Path.Direction.CW) }
+        canvas.clipPath(clip)
+        val side = minOf(photo.width, photo.height)
+        val src = android.graphics.Rect(
+            (photo.width - side) / 2, (photo.height - side) / 2,
+            (photo.width + side) / 2, (photo.height + side) / 2
+        )
+        val dst = RectF(center - photoRadius, pinTopCenterY - photoRadius, center + photoRadius, pinTopCenterY + photoRadius)
+        canvas.drawBitmap(photo, src, dst, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+        canvas.restoreToCount(save)
+    } else {
+        drawActivityIcon(canvas, marker.icon, center, pinTopCenterY, radius * 0.95f, iconPaint)
+    }
 
     if (marker.durationSeconds >= AppConfig.STAY_DURATION_THRESHOLD.toLong()) {
     val durationTuple = formatDurationMinimal(marker.durationSeconds)

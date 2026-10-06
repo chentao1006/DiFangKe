@@ -7,8 +7,7 @@ import com.ct106.difangke.AppConfig
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.DailyInsightEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
-import com.ct106.difangke.data.db.entity.FutureTripEntity
-import com.ct106.difangke.data.db.entity.FutureTripScheduleMode
+import com.ct106.difangke.data.db.entity.markManualMetadataEdit
 import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
 import com.ct106.difangke.data.model.TimelineItem
@@ -16,7 +15,6 @@ import com.ct106.difangke.data.model.representativeLatitude
 import com.ct106.difangke.data.model.representativeLongitude
 import com.ct106.difangke.service.LocationTrackingService
 import com.ct106.difangke.service.OpenAIService
-import com.ct106.difangke.service.FutureTripReminderWorker
 import com.ct106.difangke.ui.components.buildFootprintMapMarkers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -86,18 +84,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+    private val _initialTimelineLoadCompleted = MutableStateFlow(false)
+    /** iOS shows "正在加载时间轴" until the first date list is known. */
+    val initialTimelineLoadCompleted: StateFlow<Boolean> = _initialTimelineLoadCompleted.asStateFlow()
+
     val availableDates: StateFlow<List<Date>> = combine(
         db.footprintDao().observeAvailableDates(),
-        db.futureTripDao().observeAvailableDates(),
         availableRawDates,
         midnightRefreshTick
-        ) { footprintDates, _, rawDates, _ ->
+        ) { footprintDates, rawDates, _ ->
             val dates: MutableSet<Date> = footprintDates.mapNotNull {
                 try { sdf.parse(it)?.let { d -> zeroTime(d) } } catch(e: Exception) { null }
             }.toMutableSet()
             val today = zeroTime(Date())
             dates.addAll(rawDates.map(::zeroTime).filter { it == today })
 
+            _initialTimelineLoadCompleted.value = true
             dates.toList().sortedBy { it.time }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -107,9 +109,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
         combine(
             db.footprintDao().observeBetween(start, end),
-            db.transportRecordDao().observeForDay(start, end),
-            db.futureTripDao().observeForDay(start, end)
-        ) { fps, tps, _ ->
+            db.transportRecordDao().observeForDay(start, end)
+        ) { fps, tps ->
             // 足迹的时间范围要限制在0点到次日0点：裁切跨天记录
             val boundedFps = fps.map { fp ->
                 val bStart = if (fp.startTime.before(start)) start else fp.startTime
@@ -126,7 +127,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else tp
             }
 
-            mergeTimelineItems(boundedFps, boundedTps, emptyList())
+            mergeTimelineItems(boundedFps, boundedTps)
         }.flowOn(Dispatchers.Default)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -203,9 +204,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val end = Calendar.getInstance().apply { time = start; add(Calendar.DAY_OF_YEAR, 1) }.time
             combine(
                 db.footprintDao().observeBetween(start, end),
-                db.transportRecordDao().observeForDay(start, end),
-                db.futureTripDao().observeForDay(start, end)
-            ) { fps, tps, trips ->
+                db.transportRecordDao().observeForDay(start, end)
+            ) { fps, tps ->
                 val visibleFps = fps.filter { it.statusValue != "ignored" }
                 
                 // 足迹的时间范围要限制在0点到次日0点：裁切跨天记录
@@ -224,7 +224,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     } else tp
                 }
 
-                val rawItems = mergeTimelineItems(boundedFps, boundedTps, trips)
+                val rawItems = mergeTimelineItems(boundedFps, boundedTps)
                 
                 alignTransportItems(rawItems, boundedFps)
             }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -638,14 +638,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    val allFutureTripsForEditor: Flow<List<FutureTripEntity>> = db.futureTripDao().observeAll()
-        .map { emptyList<FutureTripEntity>() }
-        .flowOn(Dispatchers.Default)
-
-    val undatedFutureTrips: Flow<List<FutureTripEntity>> = db.futureTripDao().observeUndated()
-        .map { emptyList<FutureTripEntity>() }
-        .flowOn(Dispatchers.Default)
-
     fun loadTimelineItemsForRange(start: Date, end: Date, onLoaded: (List<TimelineItem>) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             val items = (
@@ -656,219 +648,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun saveFutureTrip(
-        editingTrip: FutureTripEntity?,
-        place: PlaceEntity,
-        date: Date,
-        hasPlanDate: Boolean,
-        hasArrivalTime: Boolean,
-        hour: Int,
-        minute: Int,
-        insertionAnchorTripID: String?,
-        activityTypeValue: String?,
-        notes: String?
-    ) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val normalizedDate = normalizedFutureTripDate(date, hasPlanDate && hasArrivalTime, hour, minute)
-            val previousDay = editingTrip?.takeIf { it.hasPlanDate }?.let { zeroTime(it.arrivalDate) }
-            val scheduleMode = if (hasPlanDate && hasArrivalTime) FutureTripScheduleMode.TIMED else FutureTripScheduleMode.ORDERED
-            val trip = editingTrip?.copy(
-                placeID = place.placeID,
-                placeName = place.name,
-                address = place.address,
-                notes = notes?.trim()?.takeIf { it.isNotEmpty() },
-                latitude = place.latitude,
-                longitude = place.longitude,
-                arrivalDate = normalizedDate,
-                hasPlanDate = hasPlanDate,
-                hasArrivalTime = hasPlanDate && hasArrivalTime,
-                scheduleModeValue = scheduleMode.raw,
-                activityTypeValue = activityTypeValue,
-                isCompleted = false,
-                completedAt = null
-            ) ?: FutureTripEntity(
-                placeID = place.placeID,
-                placeName = place.name,
-                address = place.address,
-                notes = notes?.trim()?.takeIf { it.isNotEmpty() },
-                latitude = place.latitude,
-                longitude = place.longitude,
-                arrivalDate = normalizedDate,
-                hasPlanDate = hasPlanDate,
-                hasArrivalTime = hasPlanDate && hasArrivalTime,
-                scheduleModeValue = scheduleMode.raw,
-                activityTypeValue = activityTypeValue
-            )
-
-            db.futureTripDao().insert(trip)
-            val day = zeroTime(normalizedDate)
-            if (!hasPlanDate) {
-                reindexUndatedTrips(trip, insertionAnchorTripID)
-                FutureTripReminderWorker.cancel(getApplication(), trip.tripID)
-            } else if (hasArrivalTime) {
-                reindexTimedTrip(day, trip)
-            } else {
-                reindexDayTrips(day, trip, insertionAnchorTripID)
-            }
-            if (hasPlanDate) {
-                if (DiFangKeApp.instance.preferences.isFutureTripNotificationEnabled.first()) {
-                    FutureTripReminderWorker.schedule(getApplication(), trip.tripID, trip.arrivalDate, trip.hasArrivalTime)
-                } else {
-                    FutureTripReminderWorker.cancel(getApplication(), trip.tripID)
-                }
-            }
-            if (editingTrip?.isUndated == true && hasPlanDate) {
-                reindexUndatedTrips(null, null)
-            }
-            if (previousDay != null && (!hasPlanDate || previousDay.time != day.time)) {
-                reindexDayTrips(previousDay, null, null)
-            }
-            _lastDataSyncTrigger.value = Date()
-        }
-    }
-
-    fun completeFutureTrip(trip: FutureTripEntity) {
-        viewModelScope.launch(Dispatchers.IO) {
-            db.futureTripDao().update(trip.copy(isCompleted = true, completedAt = Date()))
-            FutureTripReminderWorker.cancel(getApplication(), trip.tripID)
-            _lastDataSyncTrigger.value = Date()
-        }
-    }
-
-    fun delayFutureTrip(trip: FutureTripEntity, delayMillis: Long) {
-        if (trip.isUndated || trip.isOrdered) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val oldDay = zeroTime(trip.arrivalDate)
-            val delayed = trip.copy(
-                arrivalDate = Date(maxOf(Date().time, trip.arrivalDate.time) + delayMillis),
-                isCompleted = false,
-                completedAt = null
-            )
-            db.futureTripDao().update(delayed)
-            reindexTimedTrip(zeroTime(delayed.arrivalDate), delayed)
-            if (DiFangKeApp.instance.preferences.isFutureTripNotificationEnabled.first()) {
-                FutureTripReminderWorker.schedule(getApplication(), delayed.tripID, delayed.arrivalDate, delayed.hasArrivalTime)
-            } else {
-                FutureTripReminderWorker.cancel(getApplication(), delayed.tripID)
-            }
-            if (oldDay.time != zeroTime(delayed.arrivalDate).time) {
-                reindexDayTrips(oldDay, null, null)
-            }
-            _lastDataSyncTrigger.value = Date()
-        }
-    }
-
-    fun deleteFutureTrip(trip: FutureTripEntity) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val day = zeroTime(trip.arrivalDate)
-            db.futureTripDao().delete(trip)
-            FutureTripReminderWorker.cancel(getApplication(), trip.tripID)
-            if (trip.isUndated) reindexUndatedTrips(null, null) else reindexDayTrips(day, null, null)
-            _lastDataSyncTrigger.value = Date()
-        }
-    }
-
-    private suspend fun reindexDayTrips(day: Date, movingTrip: FutureTripEntity?, insertionAnchorTripID: String?) {
-        val end = Calendar.getInstance().apply { time = day; add(Calendar.DAY_OF_YEAR, 1) }.time
-        val trips = FutureTripEntity.dayOrdered(db.futureTripDao().getForDay(day, end))
-            .filter { movingTrip == null || it.tripID != movingTrip.tripID }
-            .toMutableList()
-        movingTrip?.let { trip ->
-            val targetIndex = when (insertionAnchorTripID) {
-                "__first__" -> 0
-                null, "__end__" -> trips.size
-                else -> trips.indexOfFirst { it.tripID == insertionAnchorTripID }.takeIf { it >= 0 }?.plus(1) ?: trips.size
-            }
-            trips.add(targetIndex.coerceIn(0, trips.size), trip)
-        }
-        trips.forEachIndexed { index, trip ->
-            if (trip.orderIndex != index + 1) {
-                db.futureTripDao().update(trip.copy(orderIndex = index + 1))
-            }
-        }
-    }
-
-    private suspend fun reindexTimedTrip(day: Date, movingTrip: FutureTripEntity) {
-        val end = Calendar.getInstance().apply { time = day; add(Calendar.DAY_OF_YEAR, 1) }.time
-        val trips = FutureTripEntity.dayOrdered(db.futureTripDao().getForDay(day, end))
-            .filter { it.tripID != movingTrip.tripID }
-            .toMutableList()
-        val sortTimes = futureTripSortTimes(trips, day)
-        val targetIndex = trips.indexOfFirst { (sortTimes[it.tripID] ?: it.arrivalDate) > movingTrip.arrivalDate }
-            .let { if (it >= 0) it else trips.size }
-        trips.add(targetIndex, movingTrip)
-        trips.forEachIndexed { index, trip ->
-            if (trip.orderIndex != index + 1) {
-                db.futureTripDao().update(trip.copy(orderIndex = index + 1))
-            }
-        }
-    }
-
-    private suspend fun reindexUndatedTrips(movingTrip: FutureTripEntity?, insertionAnchorTripID: String?) {
-        val trips = FutureTripEntity.dayOrdered(db.futureTripDao().getUndated())
-            .filter { !it.isCompleted && (movingTrip == null || it.tripID != movingTrip.tripID) }
-            .toMutableList()
-        movingTrip?.let { trip ->
-            val targetIndex = when (insertionAnchorTripID) {
-                "__first__" -> 0
-                null, "__end__" -> trips.size
-                else -> trips.indexOfFirst { it.tripID == insertionAnchorTripID }.takeIf { it >= 0 }?.plus(1) ?: trips.size
-            }
-            trips.add(targetIndex.coerceIn(0, trips.size), trip)
-        }
-        trips.forEachIndexed { index, trip ->
-            if (trip.orderIndex != index + 1) db.futureTripDao().update(trip.copy(orderIndex = index + 1))
-        }
-    }
-
-    private fun normalizedFutureTripDate(date: Date, hasArrivalTime: Boolean, hour: Int, minute: Int): Date {
-        return Calendar.getInstance().apply {
-            time = date
-            if (hasArrivalTime) {
-                set(Calendar.HOUR_OF_DAY, hour)
-                set(Calendar.MINUTE, minute)
-            } else {
-                set(Calendar.HOUR_OF_DAY, 12)
-                set(Calendar.MINUTE, 0)
-            }
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.time
-    }
-
     private fun mergeTimelineItems(
         footprints: List<FootprintEntity>,
-        transports: List<TransportRecordEntity>,
-        trips: List<FutureTripEntity>
+        transports: List<TransportRecordEntity>
     ): List<TimelineItem> {
         return (
             footprints.map { TimelineItem.FootprintItem(it) } +
                 transports.map { TimelineItem.TransportItem(it) }
             ).sortedBy { it.startTime }
-    }
-
-    private fun futureTripSortTimes(trips: List<FutureTripEntity>, day: Date): Map<String, Date> {
-        val sortTimes = mutableMapOf<String, Date>()
-        var anchorTime = Calendar.getInstance().apply {
-            time = zeroTime(day)
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.time
-        var orderedOffset = 1
-        trips.forEach { trip ->
-            if (trip.isOrdered) {
-                sortTimes[trip.tripID] = Date(anchorTime.time + orderedOffset * 1000L)
-                orderedOffset += 1
-            } else {
-                val effective = trip.effectiveArrivalDate()
-                sortTimes[trip.tripID] = effective
-                anchorTime = effective
-                orderedOffset = 1
-            }
-        }
-        return sortTimes
     }
 
     private fun alignTransportItems(items: List<TimelineItem>, visibleFps: List<com.ct106.difangke.data.db.entity.FootprintEntity>): List<TimelineItem> {
@@ -925,5 +712,357 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         return if (array.length() > 0) array.toString() else null
+    }
+
+    // ── Timeline row edit actions (iOS ContinuousTimelineSheet handlers) ─────
+    // These mirror the iOS long-press menu and icon pickers so the main
+    // timeline can edit records without opening the detail screen.
+
+    /** Long-press "收藏/取消收藏". Metadata edit → markManualMetadataEdit. */
+    fun toggleFavorite(footprintID: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = db.footprintDao().getById(footprintID) ?: return@launch
+            db.footprintDao().update(
+                stored.copy(isHighlight = !(stored.isHighlight ?: false)).markManualMetadataEdit()
+            )
+            Aptabase.instance.trackEvent("footprint_favorite_toggled")
+        }
+    }
+
+    /** Row-icon activity picker; null means "无". */
+    fun setFootprintActivity(footprintID: String, activityID: String?) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = db.footprintDao().getById(footprintID) ?: return@launch
+            db.footprintDao().update(stored.copy(activityTypeValue = activityID).markManualMetadataEdit())
+        }
+    }
+
+    /** Row-icon transport menu: pin the user's choice as the manual type. */
+    fun setTransportType(recordID: String, type: com.ct106.difangke.data.model.TransportType) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = db.transportRecordDao().getById(recordID) ?: return@launch
+            db.transportRecordDao().update(stored.copy(manualTypeRaw = type.raw, typeRaw = type.raw))
+        }
+    }
+
+    /** iOS deleteFootprint: moves the stay into the recycle bin (status ignored). */
+    fun deleteFootprint(footprintID: String) {
+        Aptabase.instance.trackEvent("footprint_deleted")
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = db.footprintDao().getById(footprintID) ?: return@launch
+            db.footprintDao().update(stored.copy(statusValue = "ignored"))
+        }
+    }
+
+    /** iOS deleteTransport: delete the record and persist a deletion override. */
+    fun deleteTransport(recordID: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = db.transportRecordDao().getById(recordID) ?: return@launch
+            db.transportManualSelectionDao().insert(
+                com.ct106.difangke.data.db.entity.TransportManualSelectionEntity(
+                    recordID = stored.recordID,
+                    startTime = stored.startTime,
+                    endTime = stored.endTime,
+                    vehicleType = stored.manualTypeRaw ?: stored.typeRaw,
+                    isDeleted = true
+                )
+            )
+            db.transportRecordDao().delete(stored)
+        }
+    }
+
+    /** "忽略地点": create/update an ignored place and hide all stays there. */
+    fun ignoreFootprintLocation(footprintID: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val current = db.footprintDao().getById(footprintID) ?: return@launch
+            val lat = current.representativeLatitude
+            val lon = current.representativeLongitude
+            if (!lat.isFinite() || !lon.isFinite() || (lat == 0.0 && lon == 0.0)) return@launch
+            val existing = current.placeID?.let { db.placeDao().getById(it) }
+            val ignoredPlace = existing?.copy(isIgnored = true) ?: PlaceEntity(
+                name = current.address?.takeIf { it.isNotBlank() } ?: "已忽略地点",
+                latitude = lat,
+                longitude = lon,
+                radius = 100f,
+                address = current.address,
+                isIgnored = true,
+                isUserDefined = false
+            )
+            db.placeDao().insert(ignoredPlace)
+            val threshold = ignoredPlace.radius + 100f
+            val results = FloatArray(1)
+            db.footprintDao().getAll().forEach { footprint ->
+                val oLat = footprint.representativeLatitude
+                val oLon = footprint.representativeLongitude
+                if (!oLat.isFinite() || !oLon.isFinite()) return@forEach
+                android.location.Location.distanceBetween(lat, lon, oLat, oLon, results)
+                if (footprint.placeID == ignoredPlace.placeID || results[0] <= threshold) {
+                    db.footprintDao().update(footprint.copy(statusValue = "ignored", placeID = ignoredPlace.placeID))
+                }
+            }
+            Aptabase.instance.trackEvent("footprint_location_ignored")
+        }
+    }
+
+    data class FootprintMergeCandidate(val first: FootprintEntity, val second: FootprintEntity)
+    data class TransportMergeCandidate(val first: TransportRecordEntity, val second: TransportRecordEntity)
+
+    private fun isSameCalendarDay(a: Date, b: Date): Boolean = zeroTime(a).time == zeroTime(b).time
+
+    private fun isSameDayFootprint(fp: FootprintEntity): Boolean =
+        isSameCalendarDay(fp.startTime, Date(fp.endTime.time - 1))
+
+    /** iOS adjacentMergeCandidate(for:) — previous first, then next. */
+    suspend fun footprintMergeCandidate(footprintID: String): FootprintMergeCandidate? = withContext(Dispatchers.IO) {
+        val footprint = db.footprintDao().getById(footprintID) ?: return@withContext null
+        val window = 172_800_000L
+        val all = db.footprintDao().getBetween(
+            Date(footprint.startTime.time - window),
+            Date(footprint.endTime.time + window)
+        ).filter { it.statusValue != "ignored" }.sortedBy { it.startTime }
+        val index = all.indexOfFirst { it.footprintID == footprint.footprintID }
+        if (index < 0) return@withContext null
+        suspend fun canMerge(first: FootprintEntity, second: FootprintEntity): Boolean {
+            if (first.footprintID == second.footprintID) return false
+            if (!isSameDayFootprint(first) || !isSameDayFootprint(second)) return false
+            if (!isSameCalendarDay(first.startTime, second.startTime)) return false
+            val lower = minOf(first.endTime, second.endTime)
+            val upper = maxOf(first.startTime, second.startTime)
+            if (!upper.after(lower)) return true
+            return db.transportRecordDao().getActiveBetween(lower, upper).isEmpty()
+        }
+        if (index > 0 && canMerge(all[index - 1], footprint)) {
+            return@withContext FootprintMergeCandidate(all[index - 1], footprint)
+        }
+        if (index < all.lastIndex && canMerge(footprint, all[index + 1])) {
+            return@withContext FootprintMergeCandidate(footprint, all[index + 1])
+        }
+        null
+    }
+
+    /** iOS adjacentTransportMergeCandidate(for:). */
+    suspend fun transportMergeCandidate(recordID: String): TransportMergeCandidate? = withContext(Dispatchers.IO) {
+        val record = db.transportRecordDao().getById(recordID) ?: return@withContext null
+        val window = 172_800_000L
+        val all = db.transportRecordDao().getActiveBetween(
+            Date(record.startTime.time - window),
+            Date(record.endTime.time + window)
+        ).sortedBy { it.startTime }
+        val index = all.indexOfFirst { it.recordID == record.recordID }
+        if (index < 0) return@withContext null
+        suspend fun canMerge(first: TransportRecordEntity, second: TransportRecordEntity): Boolean {
+            if (first.recordID == second.recordID) return false
+            if (!isSameCalendarDay(first.startTime, second.startTime)) return false
+            val lower = minOf(first.endTime, second.endTime)
+            val upper = maxOf(first.startTime, second.startTime)
+            if (!upper.after(lower)) return true
+            return db.footprintDao().getBetween(lower, upper).none {
+                it.statusValue != "ignored" && it.endTime.after(lower) && it.startTime.before(upper)
+            }
+        }
+        if (index > 0 && canMerge(all[index - 1], record)) {
+            return@withContext TransportMergeCandidate(all[index - 1], record)
+        }
+        if (index < all.lastIndex && canMerge(record, all[index + 1])) {
+            return@withContext TransportMergeCandidate(record, all[index + 1])
+        }
+        null
+    }
+
+    /** iOS mergeAdjacentFootprints: keep the earlier stay, delete the other. */
+    fun mergeFootprints(candidate: FootprintMergeCandidate) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val base = db.footprintDao().getById(candidate.first.footprintID) ?: return@launch
+            val other = db.footprintDao().getById(candidate.second.footprintID) ?: return@launch
+            fun jsonDoubles(raw: String): List<Double> = runCatching {
+                val array = org.json.JSONArray(raw)
+                List(array.length()) { array.getDouble(it) }
+            }.getOrDefault(emptyList())
+            fun jsonStrings(raw: String): List<String> = runCatching {
+                val array = org.json.JSONArray(raw)
+                List(array.length()) { array.getString(it) }
+            }.getOrDefault(emptyList())
+            fun <T : Number> sum(a: T?, b: T?, add: (T, T) -> T): T? = when {
+                a != null && b != null -> add(a, b)
+                else -> a ?: b
+            }
+            val start = minOf(base.startTime, other.startTime)
+            val end = maxOf(base.endTime, other.endTime)
+            val baseAddressEmpty = base.address.isNullOrEmpty()
+            val merged = base.copy(
+                startTime = start,
+                endTime = end,
+                date = zeroTime(start),
+                latitudeJson = org.json.JSONArray(jsonDoubles(base.latitudeJson) + jsonDoubles(other.latitudeJson)).toString(),
+                longitudeJson = org.json.JSONArray(jsonDoubles(base.longitudeJson) + jsonDoubles(other.longitudeJson)).toString(),
+                reason = if (base.reason.isNullOrEmpty()) other.reason else base.reason,
+                address = if (baseAddressEmpty) other.address else base.address,
+                isAddressEditedByHand = if (baseAddressEmpty) other.isAddressEditedByHand else base.isAddressEditedByHand,
+                placeID = base.placeID ?: other.placeID,
+                activityTypeValue = base.activityTypeValue ?: other.activityTypeValue,
+                isHighlight = if (base.isHighlight == true) true else other.isHighlight,
+                stepCount = sum(base.stepCount, other.stepCount) { a, b -> a + b },
+                walkingDistance = sum(base.walkingDistance, other.walkingDistance) { a, b -> a + b },
+                floorsAscended = sum(base.floorsAscended, other.floorsAscended) { a, b -> a + b },
+                photoAssetIDsJson = org.json.JSONArray(
+                    (jsonStrings(base.photoAssetIDsJson) + jsonStrings(other.photoAssetIDsJson)).distinct()
+                ).toString(),
+                statusValue = "manual",
+                allowsAutomaticDurationExtension = true
+            )
+            db.footprintDao().update(merged)
+            db.footprintDao().delete(other)
+            Aptabase.instance.trackEvent("footprint_adjacent_merged")
+        }
+    }
+
+    /** iOS mergeAdjacentTransports: earlier record survives and owns the type. */
+    fun mergeTransports(candidate: TransportMergeCandidate) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val base = db.transportRecordDao().getById(candidate.first.recordID) ?: return@launch
+            val other = db.transportRecordDao().getById(candidate.second.recordID) ?: return@launch
+            val start = minOf(base.startTime, other.startTime)
+            val end = maxOf(base.endTime, other.endTime)
+            val distance = base.distance + other.distance
+            val durationSec = ((end.time - start.time) / 1000L).coerceAtLeast(0L)
+            val speed = if (durationSec > 0) distance / durationSec else 0.0
+            val stepCount = when {
+                base.stepCount != null && other.stepCount != null -> base.stepCount + other.stepCount
+                else -> base.stepCount ?: other.stepCount
+            }
+            val points = runCatching {
+                val mergedPoints = org.json.JSONArray()
+                listOf(base.pointsJson, other.pointsJson).forEach { raw ->
+                    val array = org.json.JSONArray(raw)
+                    for (i in 0 until array.length()) mergedPoints.put(array.get(i))
+                }
+                mergedPoints
+            }.getOrNull()
+            val pointCount = points?.length() ?: 0
+            val explicitType = base.manualTypeRaw ?: other.manualTypeRaw
+            val inferred = com.ct106.difangke.data.model.TransportType.from(
+                speedMs = speed,
+                stepCount = stepCount ?: 0,
+                durationSec = durationSec,
+                distanceMeters = distance,
+                pointCount = pointCount,
+                observedPointCount = pointCount
+            ).raw
+            val type = explicitType ?: inferred
+            val endLocation = other.endLocation.trim().let {
+                if (it.isNotEmpty() && it != "终点" && it != "正在获取位置...") other.endLocation else base.endLocation
+            }
+            val merged = base.copy(
+                day = zeroTime(start),
+                startTime = start,
+                endTime = end,
+                distance = distance,
+                averageSpeed = speed,
+                stepCount = stepCount,
+                endLocation = endLocation,
+                pointsJson = points?.toString() ?: base.pointsJson,
+                typeRaw = type,
+                manualTypeRaw = type
+            )
+            db.transportRecordDao().update(merged)
+            db.transportRecordDao().delete(other)
+            Aptabase.instance.trackEvent("transport_adjacent_merged")
+        }
+    }
+
+    /** ActivityType.getSuggestedActivities(includeFallback: false) with place history. */
+    suspend fun suggestedActivities(
+        footprint: FootprintEntity,
+        activities: List<com.ct106.difangke.data.db.entity.ActivityTypeEntity>,
+        places: List<PlaceEntity>
+    ): List<com.ct106.difangke.data.db.entity.ActivityTypeEntity> = withContext(Dispatchers.IO) {
+        val history = footprint.placeID?.let { placeID ->
+            db.footprintDao().getAll().filter { it.placeID == placeID }
+        } ?: emptyList()
+        com.ct106.difangke.service.ActivitySuggestion.getSuggestedActivities(
+            footprint = footprint,
+            allActivities = activities,
+            allPlaces = places,
+            history = history,
+            includeFallback = false
+        )
+    }
+
+    private val addressRetryAttempted = Collections.synchronizedSet(mutableSetOf<String>())
+
+    /**
+     * iOS retryUnknownFootprintLocationIfNeeded: placeholder addresses get one
+     * background reverse-geocode per session; the result is written back unless
+     * the user typed the address by hand.
+     */
+    suspend fun retryUnknownAddress(footprint: FootprintEntity) {
+        if (!addressRetryAttempted.add(footprint.footprintID)) return
+        val lat = footprint.representativeLatitude
+        val lon = footprint.representativeLongitude
+        if (!lat.isFinite() || !lon.isFinite() || (lat == 0.0 && lon == 0.0)) return
+        val result = runCatching {
+            com.ct106.difangke.service.GeocodeService.shared.reverseGeocodeDetails(lat, lon)
+        }.getOrNull() ?: return
+        val address = result.address?.trim()?.takeIf { it.isNotEmpty() && it !in UNRESOLVED_ADDRESSES } ?: return
+        withContext(Dispatchers.IO) {
+            val stored = db.footprintDao().getById(footprint.footprintID) ?: return@withContext
+            if (stored.isAddressEditedByHand) return@withContext
+            if (stored.address?.trim().orEmpty() !in UNRESOLVED_ADDRESSES) return@withContext
+            db.footprintDao().update(
+                stored.copy(
+                    address = address,
+                    cityName = stored.cityName ?: result.cityName,
+                    countryName = stored.countryName ?: result.countryName,
+                    countryCode = stored.countryCode ?: result.countryCode
+                )
+            )
+        }
+    }
+
+    suspend fun storedFootprint(footprintID: String): FootprintEntity? =
+        withContext(Dispatchers.IO) { db.footprintDao().getById(footprintID) }
+
+    suspend fun storedTransport(recordID: String): TransportRecordEntity? =
+        withContext(Dispatchers.IO) { db.transportRecordDao().getById(recordID) }
+
+    /** iOS FootprintSplitView save from the timeline context menu. */
+    fun splitFootprint(footprint: FootprintEntity, splitTime: Date, firstActivity: String?, secondActivity: String?) {
+        viewModelScope.launch {
+            com.ct106.difangke.ui.shared.TimelineEditActions.splitFootprint(
+                db, getApplication(), footprint, splitTime, firstActivity, secondActivity
+            )
+        }
+    }
+
+    /** iOS TransportSplitView save from the timeline context menu. */
+    fun splitTransport(record: TransportRecordEntity, splitTime: Date) {
+        viewModelScope.launch {
+            com.ct106.difangke.ui.shared.TimelineEditActions.splitTransport(db, record, splitTime)
+        }
+    }
+
+    /** iOS "设为重要地点" → AddPlaceSheet: saves the place and links the footprint to it. */
+    fun addImportantPlace(footprint: FootprintEntity, name: String, latitude: Double, longitude: Double, radius: Float, address: String?) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val finalName = name.trim().ifEmpty { footprint.address ?: "未知地点" }
+            val place = PlaceEntity(
+                name = finalName,
+                latitude = latitude,
+                longitude = longitude,
+                radius = radius,
+                address = address,
+                isUserDefined = true
+            )
+            db.placeDao().insert(place)
+            com.ct106.difangke.ui.shared.TimelineEditActions.updateFootprintMetadata(db, footprint) {
+                it.copy(placeID = place.placeID, address = finalName, isAddressEditedByHand = true)
+            }
+            Aptabase.instance.trackEvent("place_added")
+        }
+    }
+
+    companion object {
+        /** Placeholder titles iOS treats as "still unresolved". */
+        val UNRESOLVED_ADDRESSES = setOf("", "未知位置", "未知地点", "地点记录", "正在解析位置...", "此处")
     }
 }
