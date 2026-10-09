@@ -132,6 +132,12 @@ struct SettingsView: View {
                 }
                 Toggle("自动关联照片到足迹", isOn: $isAutoPhotoLinkEnabled)
 
+                NavigationLink {
+                    HealthSettingsView()
+                } label: {
+                    Text("Apple 健康")
+                }
+
                 Toggle("实时活动", isOn: $isCurrentLiveActivityEnabled)
                     .onChange(of: isCurrentLiveActivityEnabled) { _, isEnabled in
 #if canImport(ActivityKit)
@@ -369,6 +375,51 @@ struct SettingsView: View {
             if hour >= 18 {
                 locationManager.triggerNotificationSummaryRefresh()
             }
+        }
+    }
+}
+
+private struct HealthSettingsView: View {
+    @ObservedObject private var healthManager = HealthManager.shared
+
+    var body: some View {
+        Form {
+            Section(footer: Text("地方客通过 HealthKit 从「健康」App 读取步数、步行距离和已爬楼层，用于区分步行与慢速交通，并在交通详情中显示步数，不会写入任何健康数据。可随时在系统设置中修改权限。")) {
+                HStack {
+                    Text("状态")
+                    Spacer()
+                    Text(statusText)
+                        .foregroundColor(.secondary)
+                }
+
+                switch healthManager.authorizationRequestStatus {
+                case .shouldRequest:
+                    Button("连接 Apple 健康") {
+                        healthManager.requestAuthorization { _ in }
+                    }
+                case .unnecessary:
+                    Button("前往设置管理权限") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                default:
+                    EmptyView()
+                }
+            }
+        }
+        .navigationTitle("Apple 健康")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            healthManager.refreshAuthorizationRequestStatus()
+        }
+    }
+
+    private var statusText: String {
+        switch healthManager.authorizationRequestStatus {
+        case .shouldRequest: return "未连接"
+        case .unnecessary: return "已设置"
+        default: return "不可用"
         }
     }
 }

@@ -471,6 +471,22 @@ class AppConfig {
         double(forKey: "DEPARTURE_DRIFT_RESISTANT_RATIO")
     }
 
+    var departureConfirmationMinProgress: Double {
+        double(forKey: "DEPARTURE_CONFIRMATION_MIN_PROGRESS")
+    }
+
+    var departureConfirmationMinInterval: Double {
+        double(forKey: "DEPARTURE_CONFIRMATION_MIN_INTERVAL")
+    }
+
+    var departureConfirmationMaxInterval: Double {
+        double(forKey: "DEPARTURE_CONFIRMATION_MAX_INTERVAL")
+    }
+
+    var departureConfirmationMinAverageSpeed: Double {
+        double(forKey: "DEPARTURE_CONFIRMATION_MIN_AVERAGE_SPEED")
+    }
+
     var movingRecoveryGapThreshold: Double {
         double(forKey: "MOVING_RECOVERY_GAP_THRESHOLD")
     }

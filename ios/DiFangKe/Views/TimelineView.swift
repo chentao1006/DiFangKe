@@ -7,6 +7,56 @@ import Aptabase
 
 private let collapsedTimelineDetentHeight: CGFloat = 76
 
+/// Fits only a selected footprint into the unobscured part of the map.
+/// Map points use the same Mercator projection on both axes, so fitting does
+/// not depend on latitude/longitude spans having different physical scales.
+enum FootprintCameraFraming {
+    static func coordinates(rawPoints: [CLLocation], start: Date, end: Date,
+                            fallback: [CLLocationCoordinate2D]) -> [CLLocationCoordinate2D] {
+        // Adjacent timeline items share a boundary. The sample at `end`
+        // belongs to the next item (often the first fix after departure),
+        // not to the stay whose camera we are fitting.
+        let selected = rawPoints.filter { $0.timestamp >= start && $0.timestamp < end }
+            .map(\.coordinate).filter { CLLocationCoordinate2DIsValid($0) }
+        return selected.isEmpty ? fallback : selected
+    }
+
+    static func mapRect(coordinates: [CLLocationCoordinate2D], viewport: CGSize, visibleRect: CGRect) -> MKMapRect? {
+        let coordinates = coordinates.filter { CLLocationCoordinate2DIsValid($0) && abs($0.latitude) < 85 }
+        guard !coordinates.isEmpty, viewport.width > 1, viewport.height > 1,
+              visibleRect.width > 1, visibleRect.height > 1 else { return nil }
+
+        let worldWidth = MKMapRect.world.size.width
+        let originX = MKMapPoint(coordinates[0]).x
+        let points = coordinates.map { coordinate -> MKMapPoint in
+            var point = MKMapPoint(coordinate)
+            // Keep a footprint crossing the date line local, not world-wide.
+            if point.x - originX > worldWidth / 2 { point.x -= worldWidth }
+            if point.x - originX < -worldWidth / 2 { point.x += worldWidth }
+            return point
+        }
+        let center = MKMapPoint(x: points.map(\.x).reduce(0, +) / Double(points.count),
+                                y: points.map(\.y).reduce(0, +) / Double(points.count))
+        let halfWidth = points.map { abs($0.x - center.x) }.max() ?? 0
+        let halfHeight = points.map { abs($0.y - center.y) }.max() ?? 0
+        // A single point still needs a usable street-level view. Larger
+        // footprints scale with their actual extent; there is no fixed zoom.
+        let minimumExtent = 120 * MKMapPointsPerMeterAtLatitude(center.coordinate.latitude)
+        let scale = max(max(halfWidth * 2.4, minimumExtent) / visibleRect.width,
+                        max(halfHeight * 2.4, minimumExtent) / visibleRect.height)
+        return MKMapRect(x: center.x - visibleRect.midX * scale,
+                         y: center.y - visibleRect.midY * scale,
+                         width: viewport.width * scale,
+                         height: viewport.height * scale)
+    }
+}
+
+private struct FootprintCameraSourceKey: Hashable {
+    let id: UUID
+    let start: Date
+    let end: Date
+}
+
 private struct ImportantPlaceDraft: Identifiable {
     let id = UUID()
     var coordinate: CLLocationCoordinate2D?
@@ -183,6 +233,8 @@ private struct ContinuousTimelineView: View {
     @State private var isReloadingTimelineExternally = false
     @State private var mapInteractionEnableTask: Task<Void, Never>?
     @State private var selectedFootprint: Footprint?
+    @State private var loadedFootprintCameraKey: FootprintCameraSourceKey?
+    @State private var loadedFootprintCameraCoordinates: [CLLocationCoordinate2D] = []
     @State private var selectedTransport: Transport?
     @State private var selectedMapPhotoAssetID: String? = nil
     @State private var isFollowingUserLocation = false
@@ -199,7 +251,19 @@ private struct ContinuousTimelineView: View {
     }
     
     private var mapPoints: [CLLocationCoordinate2D] {
-        selectedFootprint?.coordinates ?? []
+        guard let key = footprintCameraSourceKey, loadedFootprintCameraKey == key else { return [] }
+        return loadedFootprintCameraCoordinates
+    }
+
+    private var footprintCameraSourceKey: FootprintCameraSourceKey? {
+        selectedFootprint.map { FootprintCameraSourceKey(id: $0.footprintID, start: $0.startTime, end: $0.endTime) }
+    }
+
+    private var selectedFootprintMapCoordinate: CLLocationCoordinate2D? {
+        let points = mapPoints
+        guard !points.isEmpty else { return nil }
+        return CLLocationCoordinate2D(latitude: points.map(\.latitude).reduce(0, +) / Double(points.count),
+                                      longitude: points.map(\.longitude).reduce(0, +) / Double(points.count))
     }
     
     private var mapPrefersActivityIcons: Bool {
@@ -218,6 +282,7 @@ private struct ContinuousTimelineView: View {
             showsStandalonePhotos: false,
             prefersActivityIcons: mapPrefersActivityIcons,
             selectedFootprintID: selectedFootprint?.footprintID,
+            selectedFootprintCoordinate: selectedFootprintMapCoordinate,
             onMapInteraction: handleMapInteraction,
             onTimelineItemTap: { item in
                 withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
@@ -409,8 +474,11 @@ private struct ContinuousTimelineView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DFKDeepLinkNotification"))) { notification in
             handleDeepLink(userInfo: notification.userInfo)
         }
-        .onChange(of: selectedFootprint) { _, newFootprint in
-            handleSelectedFootprintChange(newFootprint)
+        .onChange(of: selectedFootprint?.footprintID) { _, _ in
+            handleSelectedFootprintChange(selectedFootprint)
+        }
+        .task(id: footprintCameraSourceKey) {
+            await loadSelectedFootprintCameraCoordinates()
         }
         .onChange(of: allPlaces) { _, newValue in
             locationManager.allPlaces = newValue
@@ -604,6 +672,9 @@ private struct ContinuousTimelineView: View {
         guard size.width > 1, size.height > 1 else { return }
         guard abs(mapViewportSize.width - size.width) > 0.5 || abs(mapViewportSize.height - size.height) > 0.5 else { return }
         mapViewportSize = size
+        if let footprint = selectedFootprint {
+            focusMap(on: footprint, animated: false)
+        }
     }
 
     private func handleSelectedFootprintChange(_ newFootprint: Footprint?) {
@@ -617,17 +688,65 @@ private struct ContinuousTimelineView: View {
             return
         }
 
-        focusMap(on: footprint)
-        refreshVisibleTimelineMap(delayNanoseconds: 0)
+        // Selection takes ownership from any pending timeline camera update.
+        visibleMapUpdateTask?.cancel()
         timelineDetent = .medium
+        focusMap(on: footprint)
     }
 
-    private func focusMap(on footprint: Footprint) {
-        let coordinates = footprint.coordinates.isEmpty
+    private func loadSelectedFootprintCameraCoordinates() async {
+        guard let footprint = selectedFootprint, let key = footprintCameraSourceKey else {
+            loadedFootprintCameraKey = nil
+            loadedFootprintCameraCoordinates = []
+            return
+        }
+        let fallback = footprint.coordinates.isEmpty
             ? [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
             : footprint.coordinates
-        guard let region = adjustedMapRegion(for: coordinates) else { return }
-        moveMapCamera(to: region, animated: true)
+        let coordinates = await Task.detached(priority: .userInitiated) {
+            let calendar = Calendar.current
+            var day = calendar.startOfDay(for: key.start)
+            let lastDay = calendar.startOfDay(for: max(key.start, key.end))
+            var rawPoints: [CLLocation] = []
+            while day <= lastDay {
+                rawPoints.append(contentsOf: RawLocationStore.shared.loadAllDevicesLocations(for: day))
+                guard let next = calendar.date(byAdding: .day, value: 1, to: day), next > day else { break }
+                day = next
+            }
+            return FootprintCameraFraming.coordinates(rawPoints: rawPoints, start: key.start, end: key.end,
+                                                     fallback: fallback)
+        }.value
+        guard !Task.isCancelled, footprintCameraSourceKey == key else { return }
+        loadedFootprintCameraCoordinates = coordinates
+        loadedFootprintCameraKey = key
+        focusMap(on: footprint)
+    }
+
+    private func focusMap(on footprint: Footprint, animated: Bool = true) {
+        mapCameraTransitionTask?.cancel()
+        isFollowingUserLocation = false
+        let key = FootprintCameraSourceKey(id: footprint.footprintID, start: footprint.startTime, end: footprint.endTime)
+        guard loadedFootprintCameraKey == key else { return }
+        let coordinates = loadedFootprintCameraCoordinates
+        // Wait for real geometry instead of fitting with a guessed aspect ratio.
+        guard mapViewportSize.width > 1, mapViewportSize.height > 1 else { return }
+        let visibleRect = CGRect(
+            x: mapViewportSize.width * 0.08,
+            y: mapViewportSize.height * 0.10,
+            width: mapViewportSize.width * 0.84,
+            height: mapViewportSize.height * (isSideBySide ? 0.80 : 0.33)
+        )
+        guard let rect = FootprintCameraFraming.mapRect(
+            coordinates: coordinates, viewport: mapViewportSize, visibleRect: visibleRect
+        ) else { return }
+        renderedSelectedFootprintID = footprint.footprintID
+        renderedMapRegion = MKCoordinateRegion(rect)
+        displayedMapRegion = renderedMapRegion
+        // Commit the destination once; a sheet lifecycle change cannot cancel
+        // a multi-step flight halfway to this footprint.
+        withAnimation(animated ? .easeInOut(duration: 0.35) : nil) {
+            cameraPosition = .rect(rect)
+        }
     }
 
     private func storedFootprint(matching footprint: Footprint) -> Footprint {
@@ -653,6 +772,11 @@ private struct ContinuousTimelineView: View {
             resetLockedMapCamera(animated: true)
             return
         }
+        // The selected footprint was explicitly focused above. Changing the
+        // sheet detent must not immediately replace that camera with the
+        // timeline viewport (which can be transiently empty during detail
+        // presentation and therefore expand to the whole day).
+        guard selectedFootprint == nil else { return }
         guard mapInteractionLockedVisibleDates == nil || isSideBySide else { return }
         refreshVisibleTimelineMap()
     }
@@ -1346,6 +1470,10 @@ private struct ContinuousTimelineView: View {
     }
 
     private func resetLockedMapCamera(animated: Bool) {
+        if let footprint = selectedFootprint {
+            focusMap(on: footprint, animated: animated)
+            return
+        }
         let lockedDates = mapInteractionLockedVisibleDates ?? (visibleTimelineDates.isEmpty ? [activeTimelineDate] : visibleTimelineDates)
         let items = timelineItemsForVisibleDates(visibleDates: lockedDates)
         let cameraItems = filteredForVisibleItems(items)
@@ -1358,13 +1486,7 @@ private struct ContinuousTimelineView: View {
         renderedSelectedFootprintID = selectedFootprint?.footprintID
 
         let region: MKCoordinateRegion?
-        if let footprint = selectedFootprint {
-            var coordinates = footprint.coordinates
-            if coordinates.isEmpty {
-                coordinates = [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
-            }
-            region = adjustedMapRegion(for: coordinates)
-        } else if items.isEmpty {
+        if items.isEmpty {
             region = currentLocationMapRegion()
         } else {
             region = adjustedMapRegion(for: mapCameraCoordinates(for: cameraItems))
@@ -1406,6 +1528,19 @@ private struct ContinuousTimelineView: View {
             let mapDates = targetVisibleDates ?? ((isSideBySide || timelineDetent == .large) ? visibleTimelineDates : (mapInteractionLockedVisibleDates ?? visibleTimelineDates))
             let items = timelineItemsForVisibleDates(visibleDates: mapDates)
             let cameraItems = filteredForVisibleItems(items)
+
+            // A detail selection owns the camera. Today is continually
+            // reloaded as new raw locations arrive; those reloads still need
+            // to update routes and markers, but must never replace the
+            // selected footprint's camera with the day's transport bounds.
+            if selectedFootprint != nil {
+                visibleTimelineItems = items
+                renderedMapItemIDs = mapContentIDs(for: items)
+                renderedCameraItemIDs = mapContentIDs(for: cameraItems)
+                renderedMapDetentKey = currentMapDetentKey
+                renderedSelectedFootprintID = selectedFootprint?.footprintID
+                return
+            }
             guard !items.isEmpty else {
                 visibleTimelineItems = []
                 renderedMapItemIDs = []
@@ -1413,15 +1548,7 @@ private struct ContinuousTimelineView: View {
                 renderedMapDetentKey = currentMapDetentKey
                 renderedSelectedFootprintID = selectedFootprint?.footprintID
 
-                let emptyDayCoordinates: [CLLocationCoordinate2D]
-                if let footprint = selectedFootprint {
-                    emptyDayCoordinates = footprint.coordinates.isEmpty
-                        ? [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
-                        : footprint.coordinates
-                } else {
-                    emptyDayCoordinates = []
-                }
-                let region = adjustedMapRegion(for: emptyDayCoordinates) ?? currentLocationMapRegion()
+                let region = currentLocationMapRegion()
                 if let region {
                     if shouldUpdateMapRegion(to: region) {
                         moveMapCamera(to: region, animated: true)
@@ -1446,15 +1573,7 @@ private struct ContinuousTimelineView: View {
             visibleTimelineItems = items
             guard mapStateChanged || cameraStateChanged else { return }
 
-            var coordinates: [CLLocationCoordinate2D] = []
-            if let footprint = selectedFootprint {
-                coordinates = footprint.coordinates
-                if coordinates.isEmpty {
-                    coordinates = [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
-                }
-            } else {
-                coordinates = mapCameraCoordinates(for: cameraItems)
-            }
+            let coordinates = mapCameraCoordinates(for: cameraItems)
 
             if let region = adjustedMapRegion(for: coordinates), shouldUpdateMapRegion(to: region) {
                 moveMapCamera(to: region, animated: true)
@@ -5370,10 +5489,6 @@ private struct CurrentStayTimelineCard: View {
             return "正在移动"
         }
 
-        if locationManager.isAwaitingDepartureLocationConfirmation {
-            return "检测到活动，等待定位"
-        }
-
         return "正在\(resolvedPlaceName)停留"
     }
 
@@ -5397,10 +5512,6 @@ private struct CurrentStayTimelineCard: View {
     }
 
     private func detailText(for timestamp: Date, now: Date) -> String {
-        if locationManager.isAwaitingDepartureLocationConfirmation {
-            return "暂不判定离开或停留"
-        }
-
         if locationManager.potentialStopStartLocation != nil || !locationManager.uiIsMoving {
             return "已 \(now.timeIntervalSince(timestamp).formattedTimelineDuration)"
         }

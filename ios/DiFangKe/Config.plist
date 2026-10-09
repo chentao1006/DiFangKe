@@ -402,6 +402,15 @@
     <real>300</real>
     <key>DEPARTURE_DRIFT_RESISTANT_RATIO</key>
     <real>3</real>
+    <!-- 长时间停留后的普通离开必须由连续向外位移确认，避免室内走动叠加 GPS 漂移误报 -->
+    <key>DEPARTURE_CONFIRMATION_MIN_PROGRESS</key>
+    <real>20</real>
+    <key>DEPARTURE_CONFIRMATION_MIN_INTERVAL</key>
+    <real>10</real>
+    <key>DEPARTURE_CONFIRMATION_MAX_INTERVAL</key>
+    <real>120</real>
+    <key>DEPARTURE_CONFIRMATION_MIN_AVERAGE_SPEED</key>
+    <real>0.8</real>
 
     <!-- 移动中但长时间无定位更新的看门狗：恢复检查间隔（秒）/恢复节流间隔（秒） -->
     <key>MOVING_RECOVERY_GAP_THRESHOLD</key>

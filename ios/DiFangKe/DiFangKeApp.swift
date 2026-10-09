@@ -516,11 +516,11 @@ struct OnboardingView: View {
                 
             } else if step == 1 {
                 onboardingStep(
-                    title: "更精准的足迹判定",
-                    description: "结合您的运动状态（步行、骑行等），地方客可以更准确地判断您何时停留或离开，极大节省电量并提高记录准确度。",
-                    image: "figure.walk",
+                    title: "连接 Apple 健康",
+                    description: "地方客通过 HealthKit 读取「健康」App 中的步数、步行距离和已爬楼层，并结合运动状态（步行、骑行等）更准确地判断您何时停留或离开，同时在交通详情中显示步数。地方客不会向「健康」写入任何数据。",
+                    image: "heart.text.square.fill",
                     color: .orange,
-                    buttonText: "继续"
+                    buttonText: "连接 Apple 健康"
                 ) {
                     HealthManager.shared.requestAuthorization { _ in
                         withAnimation {

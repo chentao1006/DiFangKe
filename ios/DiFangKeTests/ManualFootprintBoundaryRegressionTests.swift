@@ -1,4 +1,5 @@
 import CoreLocation
+import MapKit
 import SwiftData
 import XCTest
 
@@ -6,6 +7,230 @@ import XCTest
 
 @MainActor
 final class ManualFootprintBoundaryRegressionTests: XCTestCase {
+    func testTransportSplitsAutoExtendedActivityButPreservesFixedManualTime() async throws {
+        for extendable in [true, false] {
+            let context = ModelContext(try makeContainer())
+            let day = Calendar.current.startOfDay(for: Date())
+            let start = day.addingTimeInterval(13 * 3600 + 50 * 60)
+            let departure = day.addingTimeInterval(19 * 3600 + 50 * 60)
+            let arrival = day.addingTimeInterval(20 * 3600 + 14 * 60)
+            let end = day.addingTimeInterval(21 * 3600 + 6 * 60)
+            let home = CLLocationCoordinate2D(latitude: 25.09975, longitude: 102.73702)
+            let away = CLLocationCoordinate2D(latitude: 25.1032, longitude: 102.7348)
+            let original = Footprint(date: day, startTime: start, endTime: end,
+                                     footprintLocations: [home, away, home], locationHash: "home",
+                                     duration: 0, reason: "keep note", status: .manual,
+                                     photoAssetIDs: ["keep-photo"], address: "家", activityTypeValue: "home")
+            original.allowsAutomaticDurationExtension = extendable
+            let originalID = original.footprintID
+            context.insert(original)
+            context.insert(TransportRecord(day: day, startTime: departure, endTime: arrival,
+                                           typeRaw: TransportType.bicycle.rawValue, distance: 2800,
+                                           averageSpeed: 2, pointsData: Data()))
+            func point(_ coordinate: CLLocationCoordinate2D, _ timestamp: Date) -> CLLocation {
+                CLLocation(coordinate: coordinate, altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5, timestamp: timestamp)
+            }
+            await PersistentTimelineBuilder.splitFootprintsByTransports(
+                for: day, in: context,
+                allRawPoints: [point(home, start), point(away, departure), point(home, arrival)]
+            )
+            let stays = try context.fetch(FetchDescriptor<Footprint>(sortBy: [SortDescriptor(\.startTime)]))
+            XCTAssertEqual(stays.count, extendable ? 2 : 1)
+            XCTAssertEqual(original.footprintID, originalID)
+            XCTAssertEqual(original.reason, "keep note")
+            XCTAssertEqual(original.photoAssetIDs, ["keep-photo"])
+            XCTAssertEqual(original.activityTypeValue, "home")
+            XCTAssertEqual(original.endTime, extendable ? departure : end)
+            if extendable {
+                XCTAssertEqual(stays.last?.startTime, arrival)
+                XCTAssertEqual(stays.last?.endTime, end)
+                XCTAssertFalse(original.allowsAutomaticDurationExtension)
+                XCTAssertTrue(stays.last?.allowsAutomaticDurationExtension == true)
+                XCTAssertTrue(stays.allSatisfy { $0.coordinates.allSatisfy { $0.latitude == home.latitude } })
+                // A second refresh must not keep splitting or create duplicates.
+                await PersistentTimelineBuilder.splitFootprintsByTransports(for: day, in: context)
+                XCTAssertEqual(try context.fetchCount(FetchDescriptor<Footprint>()), 2)
+            }
+        }
+    }
+
+    func testAlreadyOverextendedStayCannotContinueAcrossEmbeddedTransport() throws {
+        let context = ModelContext(try makeContainer())
+        let now = Date()
+        let start = now.addingTimeInterval(-3600)
+        let end = now.addingTimeInterval(-30)
+        let home = CLLocationCoordinate2D(latitude: 25.09975, longitude: 102.73702)
+        let footprint = Footprint(date: start, startTime: start, endTime: end,
+                                  footprintLocations: [home], locationHash: "home", duration: 0, status: .manual)
+        footprint.allowsAutomaticDurationExtension = true
+        context.insert(footprint)
+        context.insert(TransportRecord(day: start, startTime: start.addingTimeInterval(600),
+                                       endTime: start.addingTimeInterval(1200), typeRaw: TransportType.bicycle.rawValue,
+                                       distance: 1000, averageSpeed: 2, pointsData: Data()))
+        let anchor = CLLocation(coordinate: home, altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5, timestamp: start)
+        let current = CLLocation(coordinate: home, altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5, timestamp: now)
+        XCTAssertFalse(Footprint.continueCurrentEditedStay(footprint, anchor: anchor, current: current,
+                                                         rawPoints: [], context: context, holdingStationaryStay: true))
+        XCTAssertFalse(Footprint.extendActivityEditedStay(start: end, end: now, coordinate: home, context: context))
+        XCTAssertEqual(footprint.endTime, end)
+    }
+
+    func testExistingClassifierPreservesStayBetweenTwoTransports() async throws {
+        let context = ModelContext(try makeContainer())
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let end = start.addingTimeInterval(8 * 60)
+        let home = CLLocationCoordinate2D(latitude: 25.09975, longitude: 102.73702)
+        for (a, b) in [(start.addingTimeInterval(-600), start), (end, end.addingTimeInterval(600))] {
+            context.insert(TransportRecord(day: Calendar.current.startOfDay(for: start), startTime: a, endTime: b,
+                                           typeRaw: TransportType.bicycle.rawValue, distance: 1000,
+                                           averageSpeed: 2, pointsData: Data()))
+        }
+        let points = (0...8).map { minute in
+            CLLocation(coordinate: home, altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5,
+                       timestamp: start.addingTimeInterval(Double(minute) * 60))
+        }
+        // Exercise the existing classifier, not a parallel stay heuristic.
+        await PersistentTimelineBuilder.processPoints(points: points, date: start, context: context)
+        let stays = try context.fetch(FetchDescriptor<Footprint>())
+        XCTAssertEqual(stays.count, 1)
+        XCTAssertEqual(stays.first?.startTime, start)
+        XCTAssertEqual(stays.first?.endTime, end)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<TransportRecord>()).count, 2)
+    }
+
+    func testCurrentStayDoesNotHideEarlierEditedVisitAcrossTransport() throws {
+        let context = ModelContext(try makeContainer())
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let departure = start.addingTimeInterval(6 * 3600)
+        let returned = departure.addingTimeInterval(24 * 60)
+        let home = CLLocationCoordinate2D(latitude: 25.09975, longitude: 102.73702)
+        let old = Footprint(date: start, startTime: start, endTime: departure,
+                            footprintLocations: [home], locationHash: "old-home", duration: 0, status: .manual)
+        old.allowsAutomaticDurationExtension = true
+        let current = Footprint(date: start, startTime: returned, endTime: returned.addingTimeInterval(1200),
+                                footprintLocations: [home], locationHash: "returned-home", duration: 0)
+        context.insert(old)
+        context.insert(current)
+        context.insert(TransportRecord(day: Calendar.current.startOfDay(for: start), startTime: departure,
+                                       endTime: returned, typeRaw: TransportType.bicycle.rawValue,
+                                       distance: 1700, averageSpeed: 3, pointsData: Data()))
+        let anchor = CLLocation(coordinate: home, altitude: 0, horizontalAccuracy: 10, verticalAccuracy: 10, timestamp: start)
+        let now = returned.addingTimeInterval(1200)
+        let selected = WatchSyncManager.currentStayFootprint(in: context, anchor: anchor, placeID: nil,
+                                                           now: now, distanceThreshold: 100)
+        XCTAssertEqual(selected?.footprintID, current.footprintID)
+        XCTAssertEqual(WatchSyncManager.continuousStayStart(
+            anchorStart: start, persistedStart: selected?.startTime, persistedEnd: selected?.endTime,
+            interruptionEnd: WatchSyncManager.latestStayInterruptionEnd(in: context, after: start, now: now)
+        ), returned)
+    }
+
+    func testFootprintCameraUsesRawTimeWindowInsteadOfUntrimmedStoredCoordinates() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let end = start.addingTimeInterval(8 * 60)
+        let home = CLLocationCoordinate2D(latitude: 25.0997, longitude: 102.737)
+        let outside = CLLocationCoordinate2D(latitude: 25.12, longitude: 102.72)
+        func point(_ coordinate: CLLocationCoordinate2D, _ date: Date) -> CLLocation {
+            CLLocation(coordinate: coordinate, altitude: 0, horizontalAccuracy: 10,
+                       verticalAccuracy: 10, timestamp: date)
+        }
+        let coordinates = FootprintCameraFraming.coordinates(
+            rawPoints: [point(outside, start.addingTimeInterval(-1)), point(home, start),
+                        point(home, end.addingTimeInterval(-1)), point(outside, end),
+                        point(outside, end.addingTimeInterval(1))],
+            start: start, end: end, fallback: [home, outside]
+        )
+        XCTAssertEqual(coordinates.count, 2)
+        XCTAssertTrue(coordinates.allSatisfy { $0.latitude == home.latitude && $0.longitude == home.longitude })
+        let fallback = FootprintCameraFraming.coordinates(rawPoints: [], start: start, end: end, fallback: [home])
+        XCTAssertEqual(fallback.first?.latitude, home.latitude)
+    }
+
+    func testFootprintCameraExcludesOctober8DepartureBoundary() throws {
+        // Actual consecutive fixes from the supplied 2026-10-08 CSV.
+        let start = Date(timeIntervalSince1970: 1791388800)
+        let departure = Date(timeIntervalSince1970: 1791414687.598)
+        let home = CLLocation(coordinate: CLLocationCoordinate2D(latitude: 25.09970518, longitude: 102.73703525),
+                              altitude: 0, horizontalAccuracy: 14.72, verticalAccuracy: 10,
+                              timestamp: Date(timeIntervalSince1970: 1791414105.999))
+        let moving = CLLocation(coordinate: CLLocationCoordinate2D(latitude: 25.09604651, longitude: 102.72064523),
+                                altitude: 0, horizontalAccuracy: 21, verticalAccuracy: 10, timestamp: departure)
+        let stay = FootprintCameraFraming.coordinates(rawPoints: [home, moving], start: start, end: departure,
+                                                    fallback: [home.coordinate, moving.coordinate])
+        XCTAssertEqual(stay.count, 1)
+        XCTAssertEqual(stay.first?.longitude, home.coordinate.longitude)
+        let rect = try XCTUnwrap(FootprintCameraFraming.mapRect(
+            coordinates: stay, viewport: CGSize(width: 390, height: 844),
+            visibleRect: CGRect(x: 31.2, y: 84.4, width: 327.6, height: 278.52)
+        ))
+        XCTAssertLessThan(rect.width * MKMetersPerMapPointAtLatitude(home.coordinate.latitude), 300)
+        let next = FootprintCameraFraming.coordinates(rawPoints: [home, moving], start: departure,
+                                                    end: departure.addingTimeInterval(60), fallback: [])
+        XCTAssertEqual(next.count, 1)
+        XCTAssertEqual(next.first?.longitude, moving.coordinate.longitude)
+    }
+
+    func testFootprintCameraFitsLocalClusterAboveDetailSheet() throws {
+        let viewport = CGSize(width: 390, height: 844)
+        let visible = CGRect(x: 31.2, y: 84.4, width: 327.6, height: 278.52)
+        // Synthetic local cluster, not a reconstruction of the user's raw data.
+        let coordinates = (0..<73).map { index in
+            CLLocationCoordinate2D(latitude: 25.0997 + Double(index % 9) * 0.00002,
+                                   longitude: 102.737 + Double(index / 9) * 0.00002)
+        }
+        let rect = try XCTUnwrap(FootprintCameraFraming.mapRect(
+            coordinates: coordinates, viewport: viewport, visibleRect: visible
+        ))
+        XCTAssertEqual(rect.width / rect.height, viewport.width / viewport.height, accuracy: 0.000001)
+        for coordinate in coordinates {
+            let point = MKMapPoint(coordinate)
+            let screen = CGPoint(x: (point.x - rect.minX) / rect.width * viewport.width,
+                                 y: (point.y - rect.minY) / rect.height * viewport.height)
+            XCTAssertTrue(visible.contains(screen))
+        }
+        let widthMeters = rect.width * MKMetersPerMapPointAtLatitude(25.0997)
+        XCTAssertLessThan(widthMeters, 200)
+    }
+
+    func testFootprintCameraScalesWithItsOwnPoints() throws {
+        let viewport = CGSize(width: 390, height: 844)
+        let visible = CGRect(x: 31, y: 84, width: 328, height: 279)
+        let center = CLLocationCoordinate2D(latitude: 25.1, longitude: 102.7)
+        let small = try XCTUnwrap(FootprintCameraFraming.mapRect(
+            coordinates: [center], viewport: viewport, visibleRect: visible
+        ))
+        let large = try XCTUnwrap(FootprintCameraFraming.mapRect(
+            coordinates: [center, CLLocationCoordinate2D(latitude: 25.11, longitude: 102.71)],
+            viewport: viewport, visibleRect: visible
+        ))
+        XCTAssertGreaterThan(large.width, small.width * 5)
+        let point = MKMapPoint(center)
+        XCTAssertEqual((point.x - small.minX) / small.width * viewport.width, visible.midX, accuracy: 0.001)
+        XCTAssertEqual((point.y - small.minY) / small.height * viewport.height, visible.midY, accuracy: 0.001)
+    }
+
+    func testFootprintCameraRejectsMissingGeometryAndInvalidPoints() {
+        let coordinate = CLLocationCoordinate2D(latitude: 25, longitude: 102)
+        XCTAssertNil(FootprintCameraFraming.mapRect(coordinates: [coordinate], viewport: .zero, visibleRect: .zero))
+        XCTAssertNil(FootprintCameraFraming.mapRect(coordinates: [], viewport: CGSize(width: 390, height: 844),
+                                                 visibleRect: CGRect(x: 0, y: 0, width: 390, height: 400)))
+        XCTAssertNil(FootprintCameraFraming.mapRect(
+            coordinates: [CLLocationCoordinate2D(latitude: .nan, longitude: 102)],
+            viewport: CGSize(width: 390, height: 844),
+            visibleRect: CGRect(x: 0, y: 0, width: 390, height: 400)
+        ))
+    }
+
+    func testFootprintCameraKeepsDateLineClusterLocal() throws {
+        let rect = try XCTUnwrap(FootprintCameraFraming.mapRect(
+            coordinates: [CLLocationCoordinate2D(latitude: 25, longitude: 179.999),
+                          CLLocationCoordinate2D(latitude: 25, longitude: -179.999)],
+            viewport: CGSize(width: 390, height: 844),
+            visibleRect: CGRect(x: 31, y: 84, width: 328, height: 279)
+        ))
+        XCTAssertLessThan(rect.width, MKMapRect.world.width / 1000)
+    }
+
     func testWatchCurrentStayUsesLatestSegmentAfterMidnight() throws {
         let container = try makeContainer()
         let context = container.mainContext
@@ -98,6 +323,83 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
 
         XCTAssertEqual(selected?.footprintID, edited.footprintID)
         XCTAssertEqual(selected?.activityTypeValue, "food")
+    }
+
+    // Exact exported fixes around the October 9 morning offset, including
+    // two origin fixes and the return plus its independent confirmation.
+    private func morningOffsetPoints() -> [CLLocation] {
+        let samples: [(TimeInterval, Double, Double, Double, Double)] = [
+            (1791499086.873, 25.09985375, 102.73720423, 9.04, 3.35),
+            (1791499104.343, 25.09985898, 102.73720793, 8.98, 5.86),
+            (1791499117.018, 25.10208266, 102.73930454, 68.30, -1.00),
+            (1791499123.017, 25.10232427, 102.73883445, 50.77, -1.00),
+            (1791499129.017, 25.10280425, 102.73807717, 37.18, -1.00),
+            (1791499135.015, 25.10289682, 102.73804958, 23.37, -1.00),
+            (1791499141.016, 25.10290307, 102.73811296, 15.29, 2.09),
+            (1791499148.174, 25.10287402, 102.73816058, 13.11, -1.00),
+            (1791499154.013, 25.10287923, 102.73814212, 12.41, 3.13),
+            (1791499160.013, 25.10293784, 102.73803277, 11.05, 0.00),
+            (1791499167.748, 25.10291113, 102.73808125, 10.41, -1.00),
+            (1791499173.016, 25.10288476, 102.73816073, 8.55, -1.00),
+            (1791499201.377, 25.10290785, 102.73824227, 7.60, -1.00),
+            (1791499209.014, 25.10291660, 102.73825397, 7.60, 2.90),
+            (1791499218.774, 25.10292747, 102.73825489, 10.17, 2.28),
+            (1791499252.013, 25.09990453, 102.73722546, 11.36, -1.00),
+            (1791499371.399, 25.09986046, 102.73720672, 10.25, -1.00),
+        ]
+        return samples.map { time, latitude, longitude, accuracy, speed in
+            CLLocation(coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                       altitude: 0, horizontalAccuracy: accuracy, verticalAccuracy: 0,
+                       course: 0, speed: speed, timestamp: Date(timeIntervalSince1970: time))
+        }
+    }
+
+    func testMorningOffsetClusterIsDriftButOriginAndReturnArePreserved() {
+        let points = morningOffsetPoints()
+        let marked = RawLocationStore.markDriftPoints(points)
+        XCTAssertEqual(marked.filter(\.isDriftPoint).map(\.originalIndex), Array(2...14))
+        XCTAssertEqual(RawLocationStore.filterRidiculousSpikes(points).count, 4)
+    }
+
+    func testMorningOffsetRequiresReturn() {
+        let points = Array(morningOffsetPoints().dropLast(2))
+        XCTAssertFalse(RawLocationStore.markDriftPoints(points).contains(where: \.isDriftPoint))
+        let withReturn = Array(morningOffsetPoints().dropLast())
+        XCTAssertEqual(RawLocationStore.markDriftPoints(withReturn).filter(\.isDriftPoint).count, 13)
+    }
+
+    func testShortRoundTripWithMeasuredVehicleSpeedIsPreserved() {
+        let points = morningOffsetPoints().enumerated().map { index, point in
+            CLLocation(coordinate: point.coordinate, altitude: 0,
+                       horizontalAccuracy: point.horizontalAccuracy, verticalAccuracy: 0,
+                       course: 0, speed: index == 2 ? 25 : point.speed, timestamp: point.timestamp)
+        }
+        XCTAssertFalse(RawLocationStore.markDriftPoints(points).contains(where: \.isDriftPoint))
+    }
+
+    func testSlowShortRoundTripIsPreserved() {
+        let original = morningOffsetPoints()
+        let start = original[0].timestamp
+        let points = original.map { point in
+            CLLocation(coordinate: point.coordinate, altitude: 0,
+                       horizontalAccuracy: point.horizontalAccuracy, verticalAccuracy: 0,
+                       course: 0, speed: point.speed,
+                       timestamp: start.addingTimeInterval(point.timestamp.timeIntervalSince(start) * 3))
+        }
+        XCTAssertFalse(RawLocationStore.markDriftPoints(points).contains(where: \.isDriftPoint))
+    }
+
+    func testDenseMorningOffsetDoesNotHideReturn() {
+        let original = morningOffsetPoints()
+        var points: [CLLocation] = []
+        for point in original {
+            points.append(point)
+            points.append(CLLocation(coordinate: point.coordinate, altitude: 0,
+                                     horizontalAccuracy: point.horizontalAccuracy, verticalAccuracy: 0,
+                                     course: 0, speed: point.speed,
+                                     timestamp: point.timestamp.addingTimeInterval(0.1)))
+        }
+        XCTAssertEqual(RawLocationStore.markDriftPoints(points).filter(\.isDriftPoint).count, 26)
     }
 
     func testNormalSparseRoundTripIsNotMarkedAsDrift() {
@@ -437,6 +739,102 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
             isMovingBySensor: true,
             now: now
         ))
+    }
+
+    func testIndoorWalkingDoesNotCloseLongStayFromSingleShiftedFix() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let anchor = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737),
+            altitude: 0,
+            horizontalAccuracy: 10,
+            verticalAccuracy: 10,
+            timestamp: now.addingTimeInterval(-9 * 3600)
+        )
+        let shiftedFix = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 31.2320, longitude: 121.4737),
+            altitude: 0,
+            horizontalAccuracy: 20,
+            verticalAccuracy: 10,
+            course: -1,
+            speed: 0.2,
+            timestamp: now
+        )
+
+        XCTAssertFalse(LocationManager.hasConfirmedDeparture(
+            from: anchor,
+            to: shiftedFix,
+            isSamePlace: false,
+            isMovingBySensor: true,
+            now: now
+        ))
+    }
+
+    func testSustainedWalkingConfirmsDepartureFromLongStay() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let anchor = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737),
+            altitude: 0,
+            horizontalAccuracy: 10,
+            verticalAccuracy: 10,
+            timestamp: now.addingTimeInterval(-9 * 3600)
+        )
+        let firstOutsideFix = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 31.2320, longitude: 121.4737),
+            altitude: 0,
+            horizontalAccuracy: 15,
+            verticalAccuracy: 10,
+            course: 0,
+            speed: 1.2,
+            timestamp: now.addingTimeInterval(-20)
+        )
+        let continuedFix = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 31.23225, longitude: 121.4737),
+            altitude: 0,
+            horizontalAccuracy: 15,
+            verticalAccuracy: 10,
+            course: 0,
+            speed: 1.2,
+            timestamp: now
+        )
+
+        XCTAssertTrue(LocationManager.hasConfirmedDeparture(
+            from: anchor,
+            to: continuedFix,
+            isSamePlace: false,
+            isMovingBySensor: true,
+            previousCandidate: firstOutsideFix,
+            now: now
+        ))
+    }
+
+    func testCurrentStayKeepsEarlierOverlappingPersistedStart() {
+        let anchorStart = Date(timeIntervalSince1970: 1_800_034_200)
+        let persistedStart = Date(timeIntervalSince1970: 1_800_000_000)
+        let persistedEnd = Date(timeIntervalSince1970: 1_800_037_440)
+
+        XCTAssertEqual(
+            WatchSyncManager.continuousStayStart(
+                anchorStart: anchorStart,
+                persistedStart: persistedStart,
+                persistedEnd: persistedEnd
+            ),
+            persistedStart
+        )
+    }
+
+    func testCurrentStayDoesNotResumeFootprintThatEndedBeforeAnchor() {
+        let anchorStart = Date(timeIntervalSince1970: 1_800_034_200)
+        let persistedStart = Date(timeIntervalSince1970: 1_800_000_000)
+        let persistedEnd = anchorStart.addingTimeInterval(-1)
+
+        XCTAssertEqual(
+            WatchSyncManager.continuousStayStart(
+                anchorStart: anchorStart,
+                persistedStart: persistedStart,
+                persistedEnd: persistedEnd
+            ),
+            anchorStart
+        )
     }
 
     func testWatchShowsProvisionalMovingStateBeforeTransportIsPersisted() {
@@ -1011,6 +1409,169 @@ final class DuplicateTransportEndpointRegressionTests: XCTestCase {
         return TransportRecord(day: day, startTime: start, endTime: start.addingTimeInterval(duration),
                                typeRaw: "car", distance: 1400, averageSpeed: 1400 / duration,
                                pointsData: try JSONEncoder().encode(points))
+    }
+
+    // Actual October 9 fixes: one growing journey, followed by a delayed
+    // shorter snapshot. Both arrival orders must retain one stored identity.
+    func testOctober9LiveJourneyReusesRecordForPartialAndCompleteSnapshots() throws {
+        let samples: [(TimeInterval, Double, Double)] = [
+            (1791553440.000, 25.09551434, 102.72163432),
+            (1791553445.000, 25.09552245, 102.72161909),
+            (1791553450.001, 25.09560884, 102.72165988),
+            (1791553455.001, 25.09560787, 102.72167350),
+            (1791553460.001, 25.09558536, 102.72171958),
+            (1791553465.001, 25.09553130, 102.72182882),
+            (1791553470.001, 25.09548567, 102.72198890),
+            (1791553475.001, 25.09542951, 102.72212975),
+            (1791553481.000, 25.09534922, 102.72232600),
+            (1791553487.000, 25.09527722, 102.72261488),
+            (1791553493.000, 25.09523573, 102.72283748),
+            (1791553499.000, 25.09514079, 102.72299538),
+            (1791553505.000, 25.09507559, 102.72320877),
+            (1791553510.000, 25.09503839, 102.72338284),
+            (1791553515.000, 25.09498400, 102.72362954),
+            (1791553520.000, 25.09494062, 102.72381758),
+            (1791553525.000, 25.09501952, 102.72398845),
+            (1791553530.000, 25.09509092, 102.72404332),
+            (1791553535.000, 25.09507395, 102.72404633),
+            (1791553544.000, 25.09506430, 102.72404202),
+            (1791553549.000, 25.09505374, 102.72405196),
+            (1791553565.000, 25.09507410, 102.72410513),
+            (1791553570.000, 25.09507457, 102.72425275),
+            (1791553575.001, 25.09513754, 102.72438330),
+            (1791553580.001, 25.09528499, 102.72442050),
+            (1791553585.001, 25.09546587, 102.72450370),
+            (1791553590.001, 25.09567123, 102.72456775),
+            (1791553595.001, 25.09588521, 102.72464210),
+            (1791553600.001, 25.09609896, 102.72470002),
+            (1791553606.000, 25.09639604, 102.72480548),
+            (1791553612.000, 25.09668422, 102.72489868),
+            (1791553618.000, 25.09693490, 102.72498366),
+            (1791553624.000, 25.09719078, 102.72508938),
+            (1791553630.000, 25.09743934, 102.72515933),
+            (1791553635.000, 25.09761276, 102.72522626),
+            (1791553640.000, 25.09774126, 102.72527300),
+            (1791553645.000, 25.09781114, 102.72538449),
+            (1791553650.000, 25.09776781, 102.72570017),
+            (1791553655.000, 25.09766611, 102.72598402),
+            (1791553660.000, 25.09753825, 102.72626284),
+            (1791553665.000, 25.09742242, 102.72656791),
+            (1791553670.000, 25.09736969, 102.72689567),
+            (1791553675.000, 25.09727348, 102.72719616),
+            (1791553680.000, 25.09715264, 102.72750601),
+            (1791553685.000, 25.09706996, 102.72781537),
+            (1791553690.000, 25.09697047, 102.72810779),
+            (1791553695.000, 25.09684997, 102.72841804),
+            (1791553700.001, 25.09675586, 102.72872385),
+            (1791553705.001, 25.09664941, 102.72904722),
+            (1791553710.001, 25.09652806, 102.72937286),
+            (1791553715.001, 25.09644144, 102.72969991),
+            (1791553720.001, 25.09634185, 102.72999107),
+            (1791553725.001, 25.09623666, 102.73028446),
+            (1791553731.000, 25.09612678, 102.73060491),
+            (1791553737.000, 25.09604531, 102.73084238),
+            (1791553743.000, 25.09600364, 102.73097708),
+            (1791553749.000, 25.09600570, 102.73098959),
+            (1791553777.000, 25.09598552, 102.73105534),
+            (1791553784.000, 25.09598184, 102.73106721),
+            (1791553789.000, 25.09597863, 102.73124589),
+            (1791553794.000, 25.09629999, 102.73127095),
+            (1791553799.000, 25.09653771, 102.73134624),
+            (1791553804.000, 25.09676831, 102.73159116),
+            (1791553809.000, 25.09695680, 102.73168314),
+            (1791553814.000, 25.09720283, 102.73174178),
+            (1791553819.000, 25.09740378, 102.73178351),
+            (1791553824.000, 25.09769265, 102.73186211),
+            (1791553829.000, 25.09802813, 102.73196735),
+            (1791553834.000, 25.09836229, 102.73207805),
+            (1791553839.000, 25.09865149, 102.73218001),
+            (1791553844.000, 25.09889648, 102.73228231),
+            (1791553849.000, 25.09921601, 102.73227686),
+            (1791553855.000, 25.09957886, 102.73236495),
+            (1791553861.000, 25.09979862, 102.73243154),
+            (1791553867.000, 25.10001793, 102.73250836),
+            (1791553873.000, 25.10016861, 102.73255704),
+            (1791553879.000, 25.10015320, 102.73286711),
+            (1791553885.000, 25.10006845, 102.73315621),
+            (1791553891.000, 25.09996634, 102.73350157),
+            (1791553896.000, 25.09993363, 102.73372469),
+            (1791553901.000, 25.09998223, 102.73397085),
+            (1791553906.000, 25.10012215, 102.73421757),
+            (1791553911.000, 25.10022785, 102.73446562),
+            (1791553916.000, 25.10030404, 102.73475650),
+            (1791553921.000, 25.10026166, 102.73494267),
+            (1791553926.000, 25.10018729, 102.73517025),
+            (1791553931.000, 25.10013733, 102.73539455),
+            (1791553936.000, 25.10001203, 102.73553364),
+            (1791553941.000, 25.09985214, 102.73561622),
+            (1791553946.000, 25.09974504, 102.73569299),
+            (1791553951.000, 25.09971084, 102.73570776),
+            (1791553956.000, 25.09968639, 102.73573941),
+            (1791553961.000, 25.09981141, 102.73602973),
+            (1791553966.000, 25.09966062, 102.73640319),
+            (1791553971.000, 25.09973719, 102.73653743),
+            (1791553976.000, 25.09978258, 102.73658544),
+            (1791553982.000, 25.09970667, 102.73671349),
+            (1791553988.000, 25.09961213, 102.73680722),
+            (1791553994.000, 25.09963241, 102.73680749),
+            (1791554000.000, 25.09953402, 102.73683010),
+            (1791554005.000, 25.09950701, 102.73684686),
+            (1791554010.000, 25.09961605, 102.73680123),
+            (1791554015.000, 25.09962945, 102.73679443),
+            (1791554027.549, 25.09975317, 102.73709478),
+            (1791554033.547, 25.09975120, 102.73702950),
+            (1791554039.974, 25.09977966, 102.73710397),
+            (1791554045.544, 25.09985059, 102.73705328),
+            (1791554069.553, 25.09966158, 102.73703390),
+            (1791554075.000, 25.09964465, 102.73704962),
+            (1791554080.000, 25.09960305, 102.73703348),
+            (1791554085.000, 25.09960832, 102.73712398),
+            (1791554090.000, 25.09960754, 102.73715534),
+            (1791554096.000, 25.09960182, 102.73716637),
+            (1791554101.000, 25.09965983, 102.73714588),
+            (1791554107.000, 25.09972963, 102.73718599),
+            (1791554126.602, 25.09985059, 102.73705328),
+        ]
+        let complete = samples.map { timestamp, latitude, longitude in
+            CodableCoordinate(lat: latitude, lon: longitude,
+                              timestamp: Date(timeIntervalSince1970: timestamp))
+        }
+        let partial = Array(complete.prefix(62))
+        let date = Calendar.current.startOfDay(for: complete[0].timestamp!)
+        for partialFirst in [true, false] {
+            let schema = Schema([TransportRecord.self])
+            let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            func candidate(_ points: [CodableCoordinate]) throws -> TransportRecord {
+                let start = points.first!.timestamp!
+                let end = points.last!.timestamp!
+                let distance = TimelineBuilder.calculatePathDistance(points)
+                return TransportRecord(day: date, startTime: start, endTime: end,
+                                       typeRaw: TransportType.ebike.rawValue, distance: distance,
+                                       averageSpeed: distance / end.timeIntervalSince(start),
+                                       pointsData: try JSONEncoder().encode(points))
+            }
+            let first = try candidate(partialFirst ? partial : complete)
+            let second = try candidate(partialFirst ? complete : partial)
+            PersistentTimelineBuilder.insertAutomaticallyDetectedTransport(first, startOfDay: date, context: context)
+            XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<TransportRecord>()).isEmpty)
+            PersistentTimelineBuilder.insertAutomaticallyDetectedTransport(second, startOfDay: date, context: context)
+            XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<TransportRecord>()).isEmpty)
+            let records = try context.fetch(FetchDescriptor<TransportRecord>())
+            XCTAssertEqual(records.count, 1)
+            let stored = try XCTUnwrap(records.first)
+            XCTAssertEqual(stored.recordID, first.recordID)
+            XCTAssertEqual(stored.startTime, complete.first!.timestamp!)
+            XCTAssertEqual(stored.endTime, complete.last!.timestamp!)
+            XCTAssertEqual(stored.distance, TimelineBuilder.calculatePathDistance(complete), accuracy: 0.001)
+            XCTAssertEqual(try JSONDecoder().decode([CodableCoordinate].self, from: stored.pointsData).count, complete.count)
+            try context.save()
+            let published = try ModelContext(container).fetch(FetchDescriptor<TransportRecord>())
+            XCTAssertEqual(published.count, 1)
+            XCTAssertEqual(published.first?.recordID, first.recordID)
+        }
     }
 
     func testSyntheticBridgeAndObservedRoadRouteAreOneTrip() throws {

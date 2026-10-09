@@ -312,7 +312,7 @@ struct CurrentTrackingLiveActivityWidget: Widget {
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     HStack(spacing: 6) {
-                        Image(systemName: context.state.icon)
+                        Image(systemName: currentTrackingIcon(context.state))
                             .foregroundStyle(currentTrackingAccent(context.state))
                         Text(context.state.title)
                             .font(.subheadline.bold())
@@ -331,20 +331,80 @@ struct CurrentTrackingLiveActivityWidget: Widget {
                     CurrentTrackingIslandBottomContent(context: context)
                 }
             } compactLeading: {
-                Image(systemName: context.state.icon)
+                Image(systemName: currentTrackingIcon(context.state))
                     .foregroundStyle(currentTrackingAccent(context.state))
             } compactTrailing: {
                 CurrentActivityDuration(startedAt: context.state.startedAt, compact: true)
                     .monospacedDigit()
                     .foregroundStyle(.white)
             } minimal: {
-                Image(systemName: context.state.icon)
-                    .foregroundStyle(currentTrackingAccent(context.state))
+                CurrentTrackingMinimalIslandIcon(state: context.state)
             }
             .keylineTint(currentTrackingAccent(context.state))
             .widgetURL(currentActivityDetailURL(for: context.state))
         }
     }
+}
+
+@available(iOS 16.1, *)
+private struct CurrentTrackingMinimalIslandIcon: View {
+    let state: CurrentTrackingActivityAttributes.ContentState
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Image(systemName: currentTrackingIcon(state))
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(currentTrackingAccent(state))
+                .offset(y: -3)
+
+            CurrentActivityDurationBadge(startedAt: state.startedAt, color: currentTrackingAccent(state))
+                .offset(y: -1)
+        }
+        .frame(width: 36, height: 36)
+    }
+}
+
+/// The compact number/unit badge mirrors the duration tag on map footprint pins.
+private struct CurrentActivityDurationBadge: View {
+    let startedAt: Date
+    let color: Color
+
+    var body: some View {
+        TimelineView(.periodic(from: nextMinuteBoundary, by: 60)) { context in
+            let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
+            let (number, unit) = mapFootprintDurationParts(elapsed)
+            HStack(alignment: .lastTextBaseline, spacing: 0) {
+                Text(number)
+                    .font(.system(size: 7, weight: .bold, design: .rounded))
+                Text(unit)
+                    .font(.system(size: 5, weight: .bold, design: .rounded))
+            }
+            .lineLimit(1)
+            .fixedSize()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 2)
+            .padding(.vertical, 1)
+            .background(RoundedRectangle(cornerRadius: 3).fill(.black))
+            .overlay(RoundedRectangle(cornerRadius: 3).stroke(color, lineWidth: 0.5))
+        }
+    }
+
+    private var nextMinuteBoundary: Date {
+        let elapsed = max(0, Date().timeIntervalSince(startedAt))
+        let completedMinutes = floor(elapsed / 60)
+        return startedAt.addingTimeInterval((completedMinutes + 1) * 60)
+    }
+}
+
+private func mapFootprintDurationParts(_ elapsed: Int) -> (String, String) {
+    let totalMinutes = elapsed / 60
+    guard totalMinutes >= 60 else { return ("\(max(1, totalMinutes))", "分钟") }
+
+    let hours = Double(totalMinutes) / 60
+    if hours >= 10 {
+        return ("\(Int(hours.rounded()))", "小时")
+    }
+    return (String(format: "%g", (hours * 10).rounded() / 10), "小时")
 }
 
 @available(iOS 16.1, *)
@@ -384,6 +444,7 @@ private struct CurrentTrackingLockScreenContent: View {
                     Image(systemName: state.icon)
                         .foregroundStyle(accent)
                         .font(.headline)
+                        .frame(width: 22, alignment: .leading)
                     Text(state.title)
                         .font(.subheadline.bold())
                         .lineLimit(1)
@@ -417,10 +478,11 @@ private struct CurrentTrackingLockScreenContent: View {
                     }
                 } else {
                     HStack(alignment: .center, spacing: 12) {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 7) {
                             Image(systemName: "mappin.and.ellipse")
                                 .font(.headline)
                                 .foregroundStyle(secondaryForeground)
+                                .frame(width: 22, alignment: .leading)
                             Text(state.placeName)
                                 .font(.title3.bold())
                                 .lineLimit(1)
@@ -870,9 +932,16 @@ private func currentTrackingAccent(
     _ state: CurrentTrackingActivityAttributes.ContentState
 ) -> Color {
     if state.kind == .footprint, state.colorHex == nil {
-        return .secondary.opacity(0.4)
+        return .gray
     }
     return currentActivityColor(state.colorHex)
+}
+
+private func currentTrackingIcon(
+    _ state: CurrentTrackingActivityAttributes.ContentState
+) -> String {
+    guard state.kind == .footprint, state.colorHex == nil else { return state.icon }
+    return "questionmark.circle.dashed"
 }
 
 private func formatCurrentDistance(_ distance: Double?) -> String {

@@ -824,57 +824,40 @@ final class RawLocationStore {
             }
         }
         
-        // --- Pass 4: 使用现有的跳变集群逻辑标记（对应 filterRidiculousSpikes 的大跳变检测）---
-        var cleanedIndex = 0 // 跟踪已接受的最后一个点的索引
+        // --- Pass 4: 多点跳变集群回弹检测 ---
+        var cleanedIndex = 0
         for i in 1..<points.count {
             if driftFlags[i] { continue }
-            
+
             let prev = points[cleanedIndex]
             let current = points[i]
             let dist = current.distance(from: prev)
             let time = max(current.timestamp.timeIntervalSince(prev.timestamp), 0.1)
-            let speed = dist / time
-            
-            // Distance alone is not evidence of drift after a sparse location
-            // interval. A real drive can be several kilometres from the last
-            // stationary heartbeat and later return to the same place. Only
-            // search for a rebound when the entry jump itself is abnormally
-            // fast, then require the return to happen within a short window.
-            if speed > 60 || (dist > 800 && speed > 20) {
-                var foundReturn = false
-                let searchLimit = min(i + 15, points.count)
-                for j in (i + 1)..<searchLimit {
+            // Judge the entry by speed beyond the reported position uncertainty,
+            // not an 800 m distance floor. A shorter jump can be just as abrupt.
+            let uncertainty = max(0, max(prev.horizontalAccuracy, current.horizontalAccuracy))
+            let entrySpeed = max(0, dist - uncertainty) / time
+            if entrySpeed > max(20, current.speed) {
+                // Search by elapsed time, not sample count: dense fixes must not
+                // hide the return, and a long real round trip is not a rebound.
+                for j in (i + 1)..<points.count {
                     let next = points[j]
-                    let excursionDuration = next.timestamp.timeIntervalSince(current.timestamp)
-                    if excursionDuration > 5 * 60 { break }
-                    let tPrevToNext = max(next.timestamp.timeIntervalSince(prev.timestamp), 0.1)
-                    let dPrevToNext = next.distance(from: prev)
-                    let avgSpeed = dPrevToNext / tPrevToNext
-                    
-                    // 只有 next 确实回到 prev 附近，才是“从 A 突跳到 B 又回 A”的漂移。
-                    // 不能仅凭 current 与 next 相距较远判定：地铁等稀疏定位会连续跨越
-                    // 多个站点，前后点都相距很远但轨迹完全正常。
-                    let returnedNearPrevious = dPrevToNext <= max(100, dist * 0.5)
-                    if avgSpeed < 42 && dist > 800 && returnedNearPrevious {
-                        // 标记 i 到 j-1 所有点为漂移
-                        for k in i..<j {
-                            driftFlags[k] = true
-                        }
-                        foundReturn = true
+                    if next.timestamp.timeIntervalSince(prev.timestamp) > 5 * 60 { break }
+                    if driftFlags[j] { continue }
+                    if next.distance(from: prev) < 100 {
+                        for k in i..<j { driftFlags[k] = true }
                         break
                     }
                 }
-                
-                if !foundReturn && current.horizontalAccuracy > 1500 && dist > 2000 {
-                    driftFlags[i] = true
-                }
             }
-            
-            if !driftFlags[i] {
-                cleanedIndex = i
+
+            // Preserve the existing isolated, extremely inaccurate jump filter.
+            if !driftFlags[i] && current.horizontalAccuracy > 1500 && dist > 2000 {
+                driftFlags[i] = true
             }
+            if !driftFlags[i] { cleanedIndex = i }
         }
-        
+
         return points.enumerated().map { index, location in
             RawPointEntry(location: location, isDriftPoint: driftFlags[index], originalIndex: index)
         }
@@ -1073,19 +1056,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var isCurrentlyMoving: Bool {
         isTracking && uiIsMoving && potentialStopStartLocation == nil
     }
-    /// Motion has been observed, but the last location is too old to decide
-    /// whether the device actually left the current stay. This is intentionally
-    /// a third UI state: neither a confirmed departure nor confirmed stillness.
-    var isAwaitingDepartureLocationConfirmation: Bool {
-        guard isTracking,
-              uiIsMoving,
-              potentialStopStartLocation != nil else { return false }
-        guard let lastLocation else { return true }
-        return abs(Date().timeIntervalSince(lastLocation.timestamp))
-            >= AppConfig.shared.currentLocationFreshnessThreshold
-    }
     private var lastMovingEvidenceTime: Date = .distantPast
     private(set) var uiMovingStartedAt: Date?
+    /// The first plausible fix outside a long-running stay. Core Motion wakes
+    /// GPS immediately, but a second outward-moving fix is required before the
+    /// stay is closed so indoor walking plus one shifted fix cannot become a trip.
+    private var pendingDepartureLocation: CLLocation?
 
     var trackingPoints: [CLLocation] = [] // 用于足迹识别的内存滑动窗口
     private var allTodayCoordinatesUpdateTask: Task<Void, Never>?
@@ -1311,6 +1287,22 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
             .store(in: &cancellables)
 
+        // `isMoving` is a debounced boolean and may already be true because of
+        // a prior pedometer pulse.  The transition that matters for recording
+        // is the Core Motion classification itself: when it reports a real
+        // trip, leave the stationary watch immediately instead of waiting for
+        // the next low-power GPS callback.
+        HealthManager.shared.$currentMotionType
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] motion in
+                guard motion == .walking || motion == .running
+                    || motion == .cycling || motion == .automotive,
+                      self?.isUsingAutomaticStationaryLowPower == true else { return }
+                self?.forceHighAccuracyBoost()
+            }
+            .store(in: &cancellables)
+
         // 核心修复：在 init() 里就启动运动传感器 + 健康授权
         // 这样即使 App 从后台被系统唤醒（不走 startTracking），运动状态变化也能触发 boost
         if UserDefaults.standard.bool(forKey: "hasRequestedHealthAuth") {
@@ -1361,6 +1353,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 ongoingTitle = nil
                 saveOngoingTitle()
                 savePotentialStop()
+                reconcileContinuousStayStart()
             }
             checkLiveActivity(forceContentUpdate: true)
             Task {
@@ -1378,6 +1371,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // Every footprint creation path converges on this notification.
                 // Keep the current Live Activity synchronized even when the
                 // footprint was produced by a background timeline rebuild.
+                self?.reconcileContinuousStayStart()
                 self?.checkLiveActivity(forceContentUpdate: true)
             }
             .store(in: &cancellables)
@@ -1829,7 +1823,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // user's "重新生成本日数据" action.  The light first pass can create or
             // merge an intermediate segment, and only the consolidation follow-up
             // exposes the remaining gap as the final footprint/transport pair.
-            await PersistentTimelineBuilder.syncDay(date: Date(), in: context)
+            guard await PersistentTimelineBuilder.syncDay(date: Date(), in: context) else { return }
             print("[TimelineAuto] finished automatic sync for today")
             NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
             // syncDay may have just persisted transport records. Refresh after the
@@ -2015,6 +2009,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     func clearOngoingStayState() {
         potentialStopStartLocation = nil
+        pendingDepartureLocation = nil
         ongoingTitle = nil
         clearOngoingPlaceOverride()
         UserDefaults.standard.removeObject(forKey: "pending_lat")
@@ -2153,6 +2148,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         lastRawLocationSaveTimestamp = .distantPast
         // 清理当前可能的停留状态
         potentialStopStartLocation = nil
+        pendingDepartureLocation = nil
         ongoingTitle = nil
         UserDefaults.standard.removeObject(forKey: "pending_lat")
         UserDefaults.standard.removeObject(forKey: "pending_lng")
@@ -2212,7 +2208,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 seen.insert(key)
             }
         }
-        try? context.save()
 
         // ── 第二步：重新 fetch 清理后的记录，做合并 ──
         guard let cleaned = try? context.fetch(descriptor) else { return }
@@ -2255,8 +2250,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
 
                 // 硬规则：若两段停留之间存在交通记录，则禁止合并，避免“出门回来仍是一条长足迹”。
-                let bEnd = base.endTime
-                let nStart = next.startTime
+                let mergedStart = min(base.startTime, next.startTime)
+                let mergedEnd = max(base.endTime, next.endTime)
 
                 let calendar = Calendar.current
                 let baseIsSameDay = calendar.isDate(base.startTime, inSameDayAs: base.endTime.addingTimeInterval(-0.001))
@@ -2268,7 +2263,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 // 核心修复：避免 SwiftData #Predicate 在 Date 比较时的隐式失败，改为内存中匹配
                 let hasTransportBetween = allDayTransports.contains { t in
-                    return t.endTime > bEnd && t.startTime < nStart
+                    return t.endTime > mergedStart && t.startTime < mergedEnd
                 }
                 
                 if hasTransportBetween {
@@ -2321,7 +2316,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
 
-        try? context.save()
     }
 
     /// 针对已经合并成一整个 Footprint 的轨迹，尝试进行聚类拆分
@@ -2399,7 +2393,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
                 
                 // 进行逻辑拆分
-                var splitFootprints: [Footprint] = []
                 for (idx, segment) in splitRanges.enumerated() {
                     if idx == 0 {
                         fp.footprintLocations = segment.coords
@@ -2409,7 +2402,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                         fp.duration = segment.duration
                         fp.duration = segment.duration
                         fp.locationHash = "SPLIT_FIXED"
-                        splitFootprints.append(fp)
                     } else {
                         let newFp = Footprint(
                             date: Calendar.current.startOfDay(for: segment.start),
@@ -2424,17 +2416,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                         newFp.placeID = fp.placeID
                         newFp.address = fp.address
                         context.insert(newFp)
-                        splitFootprints.append(newFp)
                     }
                 }
                 
-                // 先统一保存以生成永久 ID
-                try? context.save()
-                
-                // 再执行分析
-                for splitFp in splitFootprints {
-                    self.analyzeFootprint(splitFp, context: context)
-                }
+                // The synchronization owner commits these records first;
+                // autoFillMissingActivityTypes then queues their analysis.
             }
         }
     }
@@ -2772,8 +2758,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                         .first
                     
                     if let name, !name.isEmpty {
-                        DispatchQueue.main.async {
-                            self?.currentAddress = name
+                        Task { @MainActor [weak self] in
+                            self?.applyCurrentAddress(name, for: location)
                         }
                         return
                     }
@@ -2782,7 +2768,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 Task { @MainActor [weak self] in
                     let fallback = await OpenStreetMapGeocoder.shared.lookup(coordinate: location.coordinate)
                     guard let name = fallback?.placeName, !name.isEmpty else { return }
-                    self?.currentAddress = name
+                    self?.applyCurrentAddress(name, for: location)
                 }
             }
         }
@@ -2883,18 +2869,44 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // A: 如果有匹配地点，且地点 ID 变了，判定为离开
                 // B: 如果没有匹配地点，且位移超过 150m，且精度尚可，判定为离开（放宽到 150m 减少因室内飘移导致的停留时刻重置）
                 let isSamePlace = (startPlace != nil && startPlace?.placeID == currentPlace?.placeID)
-                if Self.hasConfirmedDeparture(from: startLoc, to: location, isSamePlace: isSamePlace, isMovingBySensor: isMovingBySensor) {
+                if Self.hasConfirmedDeparture(
+                    from: startLoc,
+                    to: location,
+                    isSamePlace: isSamePlace,
+                    isMovingBySensor: isMovingBySensor,
+                    previousCandidate: pendingDepartureLocation
+                ) {
                     transitionToMovingAfterConfirmedDeparture(source: "location")
+                } else if Self.isPlausibleDepartureCandidate(
+                    from: startLoc,
+                    to: location,
+                    isSamePlace: isSamePlace
+                ) {
+                    let candidateAge = pendingDepartureLocation.map {
+                        location.timestamp.timeIntervalSince($0.timestamp)
+                    }
+                    if candidateAge.map({
+                        $0 >= 0 && $0 <= AppConfig.shared.departureConfirmationMaxInterval
+                    }) != true {
+                        pendingDepartureLocation = location
+                    }
+                } else if isSamePlace
+                            || location.distance(from: startLoc) <= AppConfig.shared.departureDistanceThreshold {
+                    // A return to the stay cancels a shifted indoor fix. Poorly
+                    // accurate fixes are ignored without discarding valid progress.
+                    pendingDepartureLocation = nil
                 }
             } else {
                 // 目前没有记录停留起点（正在移动中）
                 // 只有当确定没有明显移动证据时（uiIsMoving = false），才将其设为新的停留起点
                 if !uiIsMoving {
                     potentialStopStartLocation = location
+                    pendingDepartureLocation = nil
                     clearOngoingPlaceOverride()
                     savePotentialStop()
                     ongoingTitle = nil
                     saveOngoingTitle()
+                    reconcileContinuousStayStart()
                 }
             }
             
@@ -2938,6 +2950,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             checkDailyPastMemories()
 #if canImport(ActivityKit)
             if #available(iOS 16.1, *) {
+                print("[CurrentLiveActivity] location callback processed: fresh=\(isFreshLocation), moving=\(isCurrentlyMoving), hasStayAnchor=\(potentialStopStartLocation != nil)")
                 CurrentLiveActivityManager.shared.updateLiveActivity(location: location, modelContext: modelContext)
             }
 #endif
@@ -2950,6 +2963,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         to location: CLLocation,
         isSamePlace: Bool,
         isMovingBySensor: Bool,
+        previousCandidate: CLLocation? = nil,
         now: Date = Date()
     ) -> Bool {
         let distance = location.distance(from: startLoc)
@@ -2960,23 +2974,86 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             return true
         }
 
-        guard !isSamePlace else { return false }
-        guard location.horizontalAccuracy >= 0
-            && location.horizontalAccuracy < AppConfig.shared.departureAccuracyThreshold else { return false }
-        guard distance > AppConfig.shared.departureDistanceThreshold else { return false }
+        guard isPlausibleDepartureCandidate(
+            from: startLoc,
+            to: location,
+            isSamePlace: isSamePlace
+        ) else { return false }
 
-        // 长时间宅家/办公后，启动时常会先收到一个单点 GPS 漂移。没有运动证据时不要仅凭
-        // 单点位移清空当前停留，否则首页会短暂或持续显示“正在移动”。
+        // 长时间宅家/办公后，即使 Core Motion 检测到在走路，也不能让一个室内漂移点
+        // 清空停留。运动传感器只负责唤醒 GPS；普通速度的离开必须有第二个持续向外的点。
         let stayDuration = now.timeIntervalSince(startLoc.timestamp)
-        if stayDuration > AppConfig.shared.departureLongStayDuration && !isMovingBySensor {
+        if stayDuration > AppConfig.shared.departureLongStayDuration {
             let driftResistantThreshold = max(
                 AppConfig.shared.departureDriftResistantFloor,
                 location.horizontalAccuracy * AppConfig.shared.departureDriftResistantRatio
             )
-            return distance > driftResistantThreshold
+            if distance > driftResistantThreshold {
+                return true
+            }
+
+            guard isMovingBySensor, let previousCandidate else { return false }
+            let interval = location.timestamp.timeIntervalSince(previousCandidate.timestamp)
+            guard interval >= AppConfig.shared.departureConfirmationMinInterval,
+                  interval <= AppConfig.shared.departureConfirmationMaxInterval else { return false }
+
+            let previousDistance = previousCandidate.distance(from: startLoc)
+            let outwardProgress = distance - previousDistance
+            let travelledDistance = location.distance(from: previousCandidate)
+            let averageSpeed = travelledDistance / interval
+            return outwardProgress >= AppConfig.shared.departureConfirmationMinProgress
+                && travelledDistance >= AppConfig.shared.departureConfirmationMinProgress
+                && averageSpeed >= AppConfig.shared.departureConfirmationMinAverageSpeed
         }
 
         return true
+    }
+
+    static func isPlausibleDepartureCandidate(
+        from startLoc: CLLocation,
+        to location: CLLocation,
+        isSamePlace: Bool
+    ) -> Bool {
+        guard !isSamePlace else { return false }
+        guard location.horizontalAccuracy >= 0,
+              location.horizontalAccuracy < AppConfig.shared.departureAccuracyThreshold else { return false }
+        return location.distance(from: startLoc) > AppConfig.shared.departureDistanceThreshold
+    }
+
+    /// Reuse an overlapping persisted stay after a provisional anchor was
+    /// recreated. Correct the shared source state so all surfaces keep the
+    /// original duration instead of only changing one label.
+    private func reconcileContinuousStayStart() {
+        guard let anchor = potentialStopStartLocation,
+              !isCurrentlyMoving,
+              let context = modelContext,
+              let footprint = WatchSyncManager.currentStayFootprint(
+                in: context,
+                anchor: anchor,
+                placeID: matchedPlace?.placeID,
+                now: Date(),
+                distanceThreshold: AppConfig.shared.stayDistanceThreshold
+              ) else { return }
+
+        let resolvedStart = WatchSyncManager.continuousStayStart(
+            anchorStart: anchor.timestamp,
+            persistedStart: footprint.startTime,
+            persistedEnd: footprint.endTime,
+            interruptionEnd: WatchSyncManager.latestStayInterruptionEnd(in: context, after: anchor.timestamp, now: Date())
+        )
+        guard resolvedStart != anchor.timestamp else { return }
+
+        potentialStopStartLocation = CLLocation(
+            coordinate: anchor.coordinate,
+            altitude: anchor.altitude,
+            horizontalAccuracy: anchor.horizontalAccuracy,
+            verticalAccuracy: anchor.verticalAccuracy,
+            course: anchor.course,
+            speed: anchor.speed,
+            timestamp: resolvedStart
+        )
+        savePotentialStop()
+        WatchSyncManager.shared.syncSnapshot()
     }
 
     /// Close the current stay through one path so the app row and Live Activity
@@ -2984,6 +3061,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private func transitionToMovingAfterConfirmedDeparture(source: String) {
         guard potentialStopStartLocation != nil else { return }
         potentialStopStartLocation = nil
+        pendingDepartureLocation = nil
         clearOngoingPlaceOverride()
         savePotentialStop()
         ongoingTitle = nil
@@ -2996,6 +3074,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // to fire here. The cleared stay anchor changes the shared state itself.
         checkLiveActivity(forceContentUpdate: true)
         WatchSyncManager.shared.syncSnapshot()
+    }
+
+    /// Publish a reverse-geocoded place as soon as it arrives. The initial
+    /// ActivityKit update runs synchronously with the location callback, before
+    /// geocoding finishes; without this second pass a stationary device can
+    /// keep showing the previous place until another fix or app launch.
+    @MainActor
+    private func applyCurrentAddress(_ address: String, for geocodedLocation: CLLocation) {
+        guard lastGeocodedLocation?.timestamp == geocodedLocation.timestamp,
+              currentAddress != address else { return }
+        currentAddress = address
+        checkLiveActivity(forceContentUpdate: true)
     }
     
     private func checkDailyPastMemories() {
@@ -3700,10 +3790,24 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             trackingPoints.removeAll { $0.timestamp < threeDaysAgo }
             self.lastProcessedTimestamp = candidate.endTime
             
-            // 核心修复：一旦生成了新的足迹（无论是交通还是地址），说明之前的状态已断档重新开始
-            // 我们将当前的停留起点强制对齐到最新足迹的结束时刻。
+            // A newly finalized stay is the authoritative current state while
+            // the latest observation remains inside it. Previously this only
+            // restored the stay anchor, leaving uiIsMoving and the previous
+            // transport speed alive; the timeline could already show "家" while
+            // the current card still said "正在移动". A later home fix is still
+            // a stay; only a point outside the stay may keep movement alive.
             if let lastLoc = candidate.rawLocations.last {
                 self.potentialStopStartLocation = lastLoc
+                let latestStillAtCompletedStay = lastLocation.map {
+                    $0.distance(from: lastLoc) <= AppConfig.shared.stayDistanceThreshold
+                } ?? false
+                if latestStillAtCompletedStay {
+                    uiIsMoving = false
+                    uiMovingStartedAt = nil
+                    lastMovingEvidenceTime = .distantPast
+                    pendingDepartureLocation = nil
+                    checkLiveActivity(forceContentUpdate: true)
+                }
                 savePotentialStop()
                 clearOngoingPlaceOverride()
             }
@@ -3718,9 +3822,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
 
         if !isHistorical {
-            let syncDate = Calendar.current.startOfDay(for: candidate.startTime)
             Task { @MainActor in
-                await PersistentTimelineBuilder.syncDay(date: syncDate, in: context)
+                // RawLocationStore.saveLocation also schedules a sift after the
+                // write completes. Join that existing coalescing path instead
+                // of starting a second syncDay against a stale raw-point
+                // snapshot; otherwise the second request is discarded by the
+                // per-day lock and the stay only appears after manual rebuild.
+                await self.triggerTimelineSift(requiresFreshRun: true)
                 NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
                 self.triggerNotificationSummaryRefresh()
             }
@@ -5557,6 +5665,7 @@ final class CurrentLiveActivityManager {
         if let activity = existingActivity {
             currentActivity = activity
             if forceContentUpdate || state != previousState {
+                print("[CurrentLiveActivity] publishing update: kind=\(state.kind.rawValue), forced=\(forceContentUpdate), changed=\(state != previousState)")
                 await activity.update(immediateContent)
             }
         } else {
@@ -5636,7 +5745,7 @@ final class CurrentLiveActivityManager {
         context: ModelContext
     ) -> (
         state: CurrentTrackingActivityAttributes.ContentState,
-        route: [CLLocationCoordinate2D],
+        route: [CodableCoordinate],
         photoAssetIDs: [String]
     )? {
         let manager = LocationManager.shared
@@ -5665,8 +5774,7 @@ final class CurrentLiveActivityManager {
                 provisionalTransportStartLocation = transport.startLocation
             }
             let type = TransportType(rawValue: transport.manualTypeRaw ?? transport.typeRaw) ?? .slow
-            let route = ((try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData)) ?? [])
-                .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+            let route = (try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData)) ?? []
             let averageSpeed = WatchSyncManager.currentMovementAverageSpeed(
                 persistedAverageSpeed: transport.averageSpeed,
                 locations: manager.allTodayPoints,
@@ -5703,7 +5811,6 @@ final class CurrentLiveActivityManager {
         guard let stayAnchor = manager.potentialStopStartLocation else { return nil }
         provisionalTransportStartedAt = nil
         provisionalTransportStartLocation = nil
-        let stayStart = stayAnchor.timestamp
         let activePlaceID = manager.matchedPlace?.placeID
         let footprint = WatchSyncManager.currentStayFootprint(
             in: context,
@@ -5711,6 +5818,12 @@ final class CurrentLiveActivityManager {
             placeID: activePlaceID,
             now: now,
             distanceThreshold: AppConfig.shared.stayDistanceThreshold
+        )
+        let stayStart = WatchSyncManager.continuousStayStart(
+            anchorStart: stayAnchor.timestamp,
+            persistedStart: footprint?.startTime,
+            persistedEnd: footprint?.endTime,
+            interruptionEnd: WatchSyncManager.latestStayInterruptionEnd(in: context, after: stayAnchor.timestamp, now: now)
         )
         let activities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
         let activity = footprint?.getActivityType(from: activities)
@@ -5723,7 +5836,6 @@ final class CurrentLiveActivityManager {
             ?? normalizedPlaceName(manager.currentAddress, fallback: "正在停留")
         let currentAddress = normalizedPlaceName(manager.currentAddress, fallback: "")
         let address = currentAddress.isEmpty || currentAddress == placeName ? nil : currentAddress
-        let isAwaitingLocation = manager.isAwaitingDepartureLocationConfirmation
         if footprint == nil {
             todaySummary.placeKeys.insert(
                 placeSummaryKey(
@@ -5739,11 +5851,11 @@ final class CurrentLiveActivityManager {
                 recordID: footprint?.footprintID.uuidString
                     ?? "ongoing-\(Int(stayStart.timeIntervalSince1970))",
                 startedAt: stayStart,
-                title: isAwaitingLocation ? "活动待确认" : (activity?.name ?? "停留"),
-                icon: isAwaitingLocation ? "location.slash.fill" : (activity?.icon ?? FootprintIconDefaults.card),
+                title: activity?.name ?? "停留",
+                icon: activity?.icon ?? FootprintIconDefaults.card,
                 colorHex: activity?.colorHex,
-                placeName: isAwaitingLocation ? "等待定位信号" : placeName,
-                address: isAwaitingLocation ? nil : address,
+                placeName: placeName,
+                address: address,
                 startLocation: nil,
                 distance: nil,
                 averageSpeed: nil,
@@ -5765,7 +5877,7 @@ final class CurrentLiveActivityManager {
         todaySummary: TodaySummary
     ) -> (
         state: CurrentTrackingActivityAttributes.ContentState,
-        route: [CLLocationCoordinate2D],
+        route: [CodableCoordinate],
         photoAssetIDs: [String]
     ) {
         let now = Date()
@@ -5820,7 +5932,13 @@ final class CurrentLiveActivityManager {
                 todayPlaceCount: todaySummary.placeKeys.count,
                 todayDistance: todaySummary.distance + distance
             ),
-            routePoints.map(\.coordinate),
+            routePoints.map {
+                CodableCoordinate(
+                    lat: $0.coordinate.latitude,
+                    lon: $0.coordinate.longitude,
+                    timestamp: $0.timestamp
+                )
+            },
             []
         )
     }

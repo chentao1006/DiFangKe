@@ -252,6 +252,9 @@ struct TransportModalView: View {
                                     HStack(spacing: 4) {
                                         Image(systemName: "figure.walk")
                                         Text("\(steps) 步")
+                                        Text("· 来自 Apple 健康")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.secondary)
                                     }
                                     .font(.system(size: 13, weight: .bold))
                                     .foregroundColor(.orange)

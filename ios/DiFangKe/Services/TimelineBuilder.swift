@@ -1369,27 +1369,19 @@ struct CodableCoordinate: Codable {
 }
 
 /// Splits an existing stored route without re-selecting either outer endpoint.
-/// The only coordinate this helper may create is the shared cut point between
-/// the two resulting routes.
+/// This helper is used by the timeline editor; it does not participate in
+/// automatic stay/transport generation.
 enum TransportSplitRouteBuilder {
     static func segments(
-        points: [CodableCoordinate],
-        startTime: Date,
-        splitTime: Date,
-        endTime: Date
+        points: [CodableCoordinate], startTime: Date, splitTime: Date, endTime: Date
     ) -> (first: [CodableCoordinate], second: [CodableCoordinate]) {
         guard !points.isEmpty else { return ([], []) }
         guard points.count > 1 else { return (points, points) }
-
         let duration = max(1, endTime.timeIntervalSince(startTime))
         let splitRatio = min(1, max(0, splitTime.timeIntervalSince(startTime) / duration))
         if let exactIndex = points.firstIndex(where: { $0.timestamp == splitTime }) {
-            return (
-                Array(points[...exactIndex]),
-                Array(points[exactIndex...])
-            )
+            return (Array(points[...exactIndex]), Array(points[exactIndex...]))
         }
-
         let previousIndex = points.indices.last(where: {
             guard let timestamp = points[$0].timestamp else { return false }
             return timestamp < splitTime
@@ -1410,30 +1402,20 @@ enum TransportSplitRouteBuilder {
                 timestamp: splitTime,
                 isSyntheticPadding: true
             )
-            let insertionIndex = min(
-                nextIndex,
-                max(previousIndex + 1, previousIndex + Int((Double(nextIndex - previousIndex) * ratio).rounded()))
-            )
-            return (
-                Array(points[..<insertionIndex]) + [cut],
-                [cut] + Array(points[insertionIndex...])
-            )
+            let insertionIndex = min(nextIndex, max(previousIndex + 1,
+                previousIndex + Int((Double(nextIndex - previousIndex) * ratio).rounded())))
+            return (Array(points[..<insertionIndex]) + [cut], [cut] + Array(points[insertionIndex...]))
         }
-
-        let cutIndex = min(
-            max(0, Int((Double(points.count - 1) * splitRatio).rounded())),
-            points.count - 1
-        )
-        return (
-            Array(points[...cutIndex]),
-            Array(points[cutIndex...])
-        )
+        let cutIndex = min(max(0, Int((Double(points.count - 1) * splitRatio).rounded())), points.count - 1)
+        return (Array(points[...cutIndex]), Array(points[cutIndex...]))
     }
 }
 
 class PersistentTimelineBuilder {
     @MainActor
     private static var syncingDates: Set<Date> = []
+    private static var pendingSyncDates: Set<Date> = []
+    private static var pendingConsolidationDates: Set<Date> = []
 
     /// 根据同一地点已有足迹的活动类型历史进行推断：优先同一时间窗，其次总出现次数。
     /// 不根据地点名称作任何特殊或确定性判断。
@@ -1557,12 +1539,11 @@ class PersistentTimelineBuilder {
         return TransportType.allCases.first { counts[$0] == highestCount }
     }
 
-    /// 修正历史上已经落库、但当前距离/时长已使原类型在物理上不可能的自动交通记录。
-    /// 合并、补洞和边界修复都会改变平均速度，不能只修复“步行”而放任一条
-    /// 596km/h 的记录继续保留早期暂定的“汽车”类型。
+    /// 修正历史上已经落库、但物理上不可能是步行的自动交通记录。
     /// 手动选择过的记录属于用户事实，绝不能被自动纠正覆盖。
-    static func repairImpossibleAutomaticTransportTypes(
+    private static func repairImpossibleAutomaticTransportTypes(
         _ transports: [TransportRecord],
+        in context: ModelContext,
         preferredAuto: TransportType,
         preferredCycling: TransportType,
         preferredTransport: TransportType?
@@ -1570,55 +1551,32 @@ class PersistentTimelineBuilder {
         var changed = false
         for transport in transports {
             guard transport.manualTypeRaw == nil,
-                  transport.statusRaw != "ignored",
-                  let storedType = TransportType(rawValue: transport.typeRaw) else { continue }
+                  transport.typeRaw == TransportType.slow.rawValue || transport.typeRaw == TransportType.running.rawValue else {
+                continue
+            }
 
             // Nearby trips with similar distances may be a real walking
             // connection. Type repair must never delete their observations;
             // duplicate removal is owned by the shared route-aware cleanup.
             let duration = transport.endTime.timeIntervalSince(transport.startTime)
-            guard duration > 0,
-                  transport.distance >= AppConfig.shared.walkingSanityMinDistance else { continue }
-            let kmh = Measurement(
-                value: transport.distance / duration,
-                unit: UnitSpeed.metersPerSecond
-            ).converted(to: .kilometersPerHour).value
+            guard duration > 0, transport.distance >= 1_000 else { continue }
+            let kmh = transport.distance / duration * 3.6
             let stepCount = transport.stepCount ?? 0
-            let minutes = Measurement(value: duration, unit: UnitDuration.seconds)
-                .converted(to: .minutes)
-                .value
+            let minutes = duration / 60
             let stepsPerMinute = minutes > 0 ? Double(stepCount) / minutes : 0
-            // 普通城市电动车行程可能被红灯/拥堵拉低，物理速度上界
+            // 普通城市电动车行程常年被红灯/拥堵拉到 15km/h 以下，物理速度上界
             // 抓不住它们。这里额外用步数兜底：真实步行的步频远高于电动车骑行，
             // 步数明显低于正常步行水平时，即使均速不算"不可能"也当作误判处理。
-            let hasImpossibleWalkingSpeed = kmh >= AppConfig.shared.walkingImpossibleSpeed
-            let hasImplausiblyFewSteps = transport.stepCount != nil
-                && stepsPerMinute < AppConfig.shared.walkingMinStepsPerMinute
-                && stepCount < AppConfig.shared.walkingMinStepCount
-            let needsFootRepair =
-                (storedType == .slow || storedType == .running) &&
-                (hasImpossibleWalkingSpeed
-                    || (hasImplausiblyFewSteps && kmh >= AppConfig.shared.walkingSuspiciousSpeed))
-            // Lower-than-usual averages can be congestion or waiting time, so
-            // only enforce the physical upper bound for an existing vehicle.
-            let exceedsStoredTypeMaximum = storedType.automaticSpeedRange.map {
-                kmh > $0.upperBound
-            } ?? false
-            guard needsFootRepair || exceedsStoredTypeMaximum else { continue }
-
-            let decodedPoints = (try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData)) ?? []
-            let observedPointCount = decodedPoints.filter { $0.isSyntheticPadding != true }.count
+            let hasImpossibleWalkingSpeed = kmh >= 15
+            let hasImplausiblyFewSteps = transport.stepCount != nil && stepsPerMinute < 12 && stepCount < 40
+            guard hasImpossibleWalkingSpeed || (hasImplausiblyFewSteps && kmh >= 3) else { continue }
 
             let inferred = TransportType.from(
                 speed: transport.distance / duration,
                 stepCount: stepCount,
                 duration: duration,
                 distanceMeters: transport.distance,
-                pointCount: max(
-                    decodedPoints.count,
-                    AppConfig.shared.transportRepairFallbackPointCount
-                ),
-                observedPointCount: decodedPoints.isEmpty ? nil : observedPointCount,
+                pointCount: 2,
                 preferredAutomotive: preferredAuto,
                 preferredCycling: preferredCycling,
                 preferredTransport: preferredTransport
@@ -1630,28 +1588,8 @@ class PersistentTimelineBuilder {
                 corrected = inferred
             }
             guard corrected != .slow, corrected != .running else { continue }
-
-            var recordChanged = false
-            if corrected != storedType {
-                transport.typeRaw = corrected.rawValue
-                recordChanged = true
-            }
-
-            // Sparse GPS can provide a full endpoint-to-endpoint distance but
-            // only a clipped observation interval.  That quotient is not an
-            // observed speed: 124.7 km divided by 12m32s produced 596.8 km/h
-            // for a real high-speed-rail trip.  Keep the route and inferred
-            // type, but persist zero as the existing "unavailable" sentinel
-            // instead of presenting an impossible number as measured fact.
-            let remainsPhysicallyImpossible = corrected.automaticSpeedRange.map {
-                kmh > $0.upperBound
-            } ?? false
-            if remainsPhysicallyImpossible && transport.averageSpeed != 0 {
-                transport.averageSpeed = 0
-                recordChanged = true
-            }
-
-            changed = recordChanged || changed
+            transport.typeRaw = corrected.rawValue
+            changed = true
         }
         return changed
     }
@@ -1669,7 +1607,7 @@ class PersistentTimelineBuilder {
                   let points = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
                   points.count >= 2 else { continue }
             let observedCount = points.filter { $0.isSyntheticPadding != true }.count
-            guard observedCount <= 4 else { continue }
+            guard observedCount <= 2 else { continue }
             let duration = transport.endTime.timeIntervalSince(transport.startTime)
             guard duration > 0 else { continue }
             let inferred = TransportType.from(
@@ -1760,12 +1698,9 @@ class PersistentTimelineBuilder {
         }
     }
 
-    // 返回值表示这次调用是否真的执行了同步（而不是被重入锁跳过）。调用方如果
-    // 需要确保这一天"确实同步完成"（例如重新生成时要靠这个结果决定何时收起
-    // loading 提示），必须检查这个返回值——同一天可能同时有多处触发 syncDay
-    // （实时定位处理、午夜跨天刷新等），后触发的一方会在这里被直接跳过，如果
-    // 调用方误以为 await 结束就等于同步完成，会把提示提前收起，而真正的重建
-    // 其实发生在没被等待的另一个并发调用里。
+    // The public entry owns the day's lock for the complete synchronization,
+    // including consolidation, its second pass, and address resolution.
+    // Concurrent requests are coalesced into the existing pending rerun.
     @discardableResult
     @MainActor
     static func syncDay(date: Date, in context: ModelContext, runConsolidation: Bool = true) async -> Bool {
@@ -1774,11 +1709,55 @@ class PersistentTimelineBuilder {
 
         // 防止重入
         guard !syncingDates.contains(startOfDay) else {
+            pendingSyncDates.insert(startOfDay)
+            if runConsolidation { pendingConsolidationDates.insert(startOfDay) }
             print("[TimelineAuto] skip \(startOfDay): sync already in progress")
             return false
         }
         syncingDates.insert(startOfDay)
-        defer { syncingDates.remove(startOfDay) }
+        defer {
+            syncingDates.remove(startOfDay)
+            if pendingSyncDates.remove(startOfDay) != nil {
+                let rerunWithConsolidation = pendingConsolidationDates.remove(startOfDay) != nil
+                Task { @MainActor in
+                    _ = await syncDay(date: startOfDay, in: context, runConsolidation: rerunWithConsolidation)
+                }
+            }
+        }
+
+        // Keep uncommitted generated records out of the UI's context and the
+        // persistent store while HealthKit/geocoding suspends this operation.
+        // Pending inserts remain visible to fetches in this working context.
+        let workingContext = ModelContext(context.container)
+        workingContext.autosaveEnabled = false
+        do {
+            if context.hasChanges { try context.save() }
+            guard await syncDayContents(date: date, in: workingContext, runConsolidation: runConsolidation),
+                  !Task.isCancelled else {
+                workingContext.rollback()
+                return false
+            }
+            try workingContext.save()
+        } catch {
+            workingContext.rollback()
+            print("[TimelineAuto] failed to commit synchronized day: \(error)")
+            return false
+        }
+#if !WIDGET_EXTENSION
+        if runConsolidation {
+            LocationManager.shared.autoFillMissingActivityTypes(for: date)
+        }
+#endif
+        startControlledAddressResolution(in: context)
+        return true
+    }
+
+    /// Only the lock-owning syncDay entry may start this work. The consolidation
+    /// pass reuses it without releasing or reacquiring the day's write lock.
+    @MainActor
+    private static func syncDayContents(date: Date, in context: ModelContext, runConsolidation: Bool) async -> Bool {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
 
         let preferredAuto = getPreferredAutomotiveType(in: context, excluding: date)
         let preferredCycling = getPreferredCyclingType(in: context, excluding: date)
@@ -1790,9 +1769,7 @@ class PersistentTimelineBuilder {
         let intersectingFpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
             $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusValue != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
-        if normalizeCrossDayFootprints((try? context.fetch(intersectingFpDesc)) ?? [], calendar: calendar, context: context) {
-            try? context.save()
-        }
+        _ = normalizeCrossDayFootprints((try? context.fetch(intersectingFpDesc)) ?? [], calendar: calendar, context: context)
 
         // 1. 获取当天所有的真实记录并排序（包括自动填充的记录，以防止无限循环）
         let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
@@ -1802,7 +1779,6 @@ class PersistentTimelineBuilder {
         let removed = Footprint.removeAutomaticFootprintsOwnedByManual(allFps, context: context)
         if !removed.isEmpty {
             allFps.removeAll { removed.contains($0.footprintID) }
-            try? context.save()
         }
         
         let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
@@ -1816,22 +1792,20 @@ class PersistentTimelineBuilder {
         }
         if !confined.isEmpty {
             for record in confined { context.delete(record) }
-            try? context.save()
             allTps = (try? context.fetch(tpDesc)) ?? []
         }
 
         if Footprint.absorbAdjacentAutomaticContinuations(allFps, transports: allTps, context: context) {
-            try? context.save()
             allFps = (try? context.fetch(fpDesc)) ?? []
         }
 
         if repairImpossibleAutomaticTransportTypes(
             allTps,
+            in: context,
             preferredAuto: preferredAuto,
             preferredCycling: preferredCycling,
             preferredTransport: preferredRoadTransport
         ) {
-            try? context.save()
             allTps = (try? context.fetch(tpDesc)) ?? []
         }
 
@@ -1853,7 +1827,6 @@ class PersistentTimelineBuilder {
             transports: allTps, footprints: allFps,
             rawPoints: allRawPoints, context: context
         ) {
-            try? context.save()
             allFps = (try? context.fetch(fpDesc)) ?? []
             allTps = (try? context.fetch(tpDesc)) ?? []
         }
@@ -1879,7 +1852,6 @@ class PersistentTimelineBuilder {
             rebuiltDormantGapTrip = true
         }
         if rebuiltDormantGapTrip {
-            try? context.save()
             allFps = (try? context.fetch(fpDesc)) ?? []
             allTps = (try? context.fetch(tpDesc)) ?? []
         }
@@ -1892,15 +1864,23 @@ class PersistentTimelineBuilder {
             preferredCycling: preferredCycling,
             preferredTransport: preferredRoadTransport
         ) {
-            try? context.save()
             allTps = (try? context.fetch(tpDesc)) ?? []
         }
 
         if repairSparseUrbanRailTypes(allTps) {
-            try? context.save()
             allTps = (try? context.fetch(tpDesc)) ?? []
         }
         
+        // Repair before calculating covered intervals: a trip made entirely
+        // from drift must stop covering this interval in the same sync pass.
+        if repairRoutesContainingDrift(allTps, validPoints: allRawPoints, driftTimestamps: driftTimestamps, date: date) {
+            let invalid = allTps.filter {
+                $0.manualTypeRaw == nil && !hasMinimumAutomaticTransportSpan($0)
+            }
+            for record in invalid { context.delete(record) }
+            allTps = (try? context.fetch(tpDesc)) ?? []
+        }
+
         // 合并并排序所有记录的时间区间
         struct TimeRange { let start: Date; let end: Date }
         var sortedRanges: [TimeRange] = []
@@ -1908,10 +1888,6 @@ class PersistentTimelineBuilder {
         for tp in allTps { sortedRanges.append(TimeRange(start: tp.startTime, end: tp.endTime)) }
         sortedRanges.sort { $0.start < $1.start }
         
-        // 2. 用已加载的原始点修复漂移路线
-        if repairRoutesContainingDrift(allTps, validPoints: allRawPoints, driftTimestamps: driftTimestamps, date: date) {
-            try? context.save()
-        }
 #if !WIDGET_EXTENSION
         if isToday,
            let anchor = LocationManager.shared.potentialStopStartLocation,
@@ -1930,7 +1906,6 @@ class PersistentTimelineBuilder {
                rawPoints: allRawPoints, context: context,
                holdingStationaryStay: LocationManager.shared.isHoldingStationaryStay
            ) {
-            try? context.save()
             allFps = (try? context.fetch(fpDesc)) ?? []
             sortedRanges = allFps.map { TimeRange(start: $0.startTime, end: $0.endTime) } +
                 allTps.map { TimeRange(start: $0.startTime, end: $0.endTime) }
@@ -2055,7 +2030,6 @@ class PersistentTimelineBuilder {
             }
         }
         
-        try? context.save()
         
         // 5. 后置清理：合并可能因分片产生的小碎块，补齐微小缝隙
         await splitFootprintsByTransports(for: date, in: context)
@@ -2065,61 +2039,35 @@ class PersistentTimelineBuilder {
         await removeDuplicateRouteTransports(for: date, in: context)
         await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredRoadTransport)
         await fillGapsBetweenItems(for: date, in: context, allRawPoints: allRawPoints, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredRoadTransport)
-        // Gap filling is also a transport writer. It can append a continuation
-        // immediately after the trip that was already merged above, so clean
-        // up again after the new records exist. Without this second merge a
-        // single continuous journey is displayed as two adjacent transports.
-        await removeDuplicateRouteTransports(for: date, in: context)
-        await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredRoadTransport)
         await removeDuplicateRouteTransports(for: date, in: context)
         await snapTransportsToFootprints(for: date, in: context, allRawPoints: allRawPoints)
-        // Every writer above can change distance or time. Re-run the same
-        // physical-limit repair in this sync so a provisional road type cannot
-        // survive until the next launch after becoming a rail/air-speed record.
-        let finalAutomaticTransports = (try? context.fetch(tpDesc)) ?? []
-        if repairImpossibleAutomaticTransportTypes(
-            finalAutomaticTransports,
-            preferredAuto: preferredAuto,
-            preferredCycling: preferredCycling,
-            preferredTransport: preferredRoadTransport
-        ) {
-            try? context.save()
-        }
-        try? context.save()
         // ----------------------------------------------------
         
-        try? context.save()
         
         
         // 按用户要求：在此处（重置最后）调用合并逻辑
         if runConsolidation {
 #if !WIDGET_EXTENSION
             await LocationManager.shared.consolidateFootprints(in: context, targetDate: date)
-            try? context.save()
             
             // 核心修复：合并或删除了足迹后，会产生新的缺口。
             // 之前尝试手动调用 fillGapsBetweenItems，但无法处理所有边界情况（如末尾缺口、需 processPoints 处理的复杂缺口）。
             // 最完美的方案是：直接模拟一次“下拉刷新”（即再跑一次 runConsolidation: false 的 syncDay），
             // 这保证了重新生成的结果与下拉刷新后完全一致！
-            syncingDates.remove(startOfDay) // 暂时解除防重入锁
-            await syncDay(date: date, in: context, runConsolidation: false)
-            // 内层 syncDay 结束后会从 syncingDates 中移除 startOfDay，外层的 defer 也会尝试移除，这是安全的。
+            _ = await syncDayContents(date: date, in: context, runConsolidation: false)
             
-            // 重新生成后，自动补全缺失的活动类型
-            LocationManager.shared.autoFillMissingActivityTypes(for: date)
 #endif
         }
         
         // 优先同步解析当天的地点，这样 indicator 结束时地点都已经解析完了
         await resolveAddresses(for: date, in: context)
 
-        startControlledAddressResolution(in: context)
         return true
     }
 
 
     @MainActor
-    static func mergeConsecutiveTransports(for date: Date, in context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle, preferredTransport: TransportType? = nil) async {
+    private static func mergeConsecutiveTransports(for date: Date, in context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle, preferredTransport: TransportType? = nil) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
@@ -2177,19 +2125,16 @@ class PersistentTimelineBuilder {
             // 遇红灯，均速被拖到步行区间）。这种情况下放行合并，交给下面
             // 1937-1951行的重新分类逻辑按合并后的整段速度重判类型，而不是让
             // "类别必须相同"卡住合并，把一趟连续行程硬生生拆成步行+电动车。
-            let adjacencyTolerance = AppConfig.shared.transportAdjacencyTolerance
-            let isImmediatelyAdjacent = gap >= -adjacencyTolerance && gap <= adjacencyTolerance
+            let isImmediatelyAdjacent = gap >= -60 && gap <= 60
             let isCompatible = getCategory(currentType) == getCategory(nextType) || (isImmediatelyAdjacent && !hasFpBetween)
 
-            // Merge only within the configured gap and never across a real stay.
+            // If they are less than 15 minutes apart and no footprint in between, merge them!
             let crossesDeletedTransport = overlapsDeletedTransportOverride(
                 start: min(current.startTime, next.startTime),
                 end: max(current.endTime, next.endTime),
                 deletedRanges: deletedTransportRanges
             )
-            if gap >= -adjacencyTolerance
-                && gap <= AppConfig.shared.transportMergeGapTolerance
-                && !hasFpBetween && isCompatible && !crossesDeletedTransport {
+            if gap >= -60 && gap <= 900 && !hasFpBetween && isCompatible && !crossesDeletedTransport {
                 current.endTime = max(current.endTime, next.endTime)
                 current.distance += next.distance
                 let duration = current.endTime.timeIntervalSince(current.startTime)
@@ -2248,7 +2193,6 @@ class PersistentTimelineBuilder {
                 
                 context.delete(next)
                 // 移除此处 save，统一在 syncDay 末尾 save，大幅减少 UI 抖动
-                // try? context.save()
                 
                 // 递归调用时必须透传偏好参数，否则会使用默认值导致类型“乱掉”
                 await mergeConsecutiveTransports(for: date, in: context, preferredAuto: preferredAuto, preferredCycling: preferredCycling, preferredTransport: preferredTransport)
@@ -2616,7 +2560,6 @@ class PersistentTimelineBuilder {
                 }
             }
         }
-        try? context.save()
     }
     
     @MainActor
@@ -2625,6 +2568,7 @@ class PersistentTimelineBuilder {
             RawLocationStore.shared.loadAllDevicesLocations(for: date)
         }.value
         await snapTransportsToFootprints(for: date, in: context, allRawPoints: allRawPoints)
+        try? context.save()
     }
     
     @MainActor
@@ -2748,7 +2692,6 @@ class PersistentTimelineBuilder {
                 }
             }
         }
-        try? context.save()
     }
     
     private static func repairedTransportRoute(from rawPoints: [CLLocation], start: Date, end: Date, previousFootprint: Footprint?) -> [CLLocation] {
@@ -2882,7 +2825,6 @@ class PersistentTimelineBuilder {
         guard !transports.isEmpty else { return }
 
         let minSegment: TimeInterval = 60 // 允许短暂的足迹被保留，只要它们是被交通切割的
-        var hasChanges = false
 
         for fp in fps {
             // A manually chosen activity or time range must not be deleted or
@@ -2931,8 +2873,7 @@ class PersistentTimelineBuilder {
 
                 if isFullyCovered && !hasUserEdits {
                     context.delete(fp)
-                    hasChanges = true
-                }
+                        }
                 continue
             }
 
@@ -2943,8 +2884,7 @@ class PersistentTimelineBuilder {
                 fp.date = calendar.startOfDay(for: seg.start)
                 fp.duration = seg.end.timeIntervalSince(seg.start)
                 fp.locationHash = "SPLIT_BY_TRANSPORT"
-                hasChanges = true
-                continue
+                    continue
             }
 
             let baseCoords = fp.footprintLocations.isEmpty
@@ -2987,12 +2927,8 @@ class PersistentTimelineBuilder {
                 context.insert(newFp)
             }
 
-            hasChanges = true
         }
 
-        if hasChanges {
-            try? context.save()
-        }
     }
 
 
@@ -3026,7 +2962,7 @@ class PersistentTimelineBuilder {
             // 手动分割会把两段都标记为 manual。它们定义了用户明确指定的
             // 时间线边界，自动同步/冷启动重建绝不能再把它们合回去。
             // `.confirmed` 是自动识别足迹的正常状态，不能把它当作手动边界。
-            guard (current.status != .manual || current.allowsAutomaticDurationExtension),
+            guard current.status != .manual,
                   next.status != .manual else {
                 i += 1
                 continue
@@ -3041,9 +2977,7 @@ class PersistentTimelineBuilder {
             let isSameLogicalPlace = (current.placeID != nil && current.placeID == next.placeID)
             // 如果两个足迹距离小于阈值，且间隔小于配置的合并时长，则视作同一地点
             let mergeThreshold = isSameLogicalPlace ? max(threshold, AppConfig.shared.samePlaceMergeBonusThreshold) : threshold
-            let mergeGapLimit = isSameLogicalPlace
-                ? endOfDay.timeIntervalSince(startOfDay)
-                : AppConfig.shared.stayMergeGapThreshold
+            let mergeGapLimit = isSameLogicalPlace ? 3600.0 : AppConfig.shared.stayMergeGapThreshold
 
             // 硬规则：只要两个足迹之间存在有效交通记录，就绝不能合并。
             let cEnd = current.endTime
@@ -3122,7 +3056,6 @@ class PersistentTimelineBuilder {
                 // 标记下一个为忽略 (逻辑上合并了)
                 context.delete(next)
                 
-                try? context.save()
                 // 递归处理，直到没有可合并的
                 await mergeConsecutiveFootprints(for: date, in: context, allRawPoints: allRawPoints, threshold: threshold)
                 return
@@ -3885,9 +3818,8 @@ class PersistentTimelineBuilder {
         )
     }
 
-    /// Both automatic builders can propose the same route during one sync.
-    /// Saving the accepted record here makes it visible to the next proposal;
-    /// a later end-of-sync cleanup is only a repair for records from old builds.
+    /// Both automatic builders reuse pending records in their shared working
+    /// context. The sync owner persists the completed timeline in one save.
     @MainActor
     static func insertAutomaticallyDetectedTransport(
         _ candidate: TransportRecord,
@@ -3940,16 +3872,9 @@ class PersistentTimelineBuilder {
             )
             let duration = existing.endTime.timeIntervalSince(existing.startTime)
             existing.averageSpeed = duration > 0 ? existing.distance / duration : 0
-            try? context.save()
             return
         }
         context.insert(candidate)
-        do {
-            try context.save()
-        } catch {
-            context.delete(candidate)
-            print("[TimelineAuto] failed to persist automatic transport: \(error)")
-        }
     }
 
     /// Preserve an evidence-backed departure when automatic merging widens bounds.
@@ -4061,8 +3986,7 @@ class PersistentTimelineBuilder {
                 second.endTime.timeIntervalSince(second.startTime)
             )
         }
-        if shorterDuration > 0
-            && overlap / shorterDuration >= AppConfig.shared.transportOverlapRatioThreshold {
+        if shorterDuration > 0 && overlap / shorterDuration >= 0.8 {
             return true
         }
         // Manual intervals are boundaries, even if a neighboring automatic
@@ -4079,8 +4003,7 @@ class PersistentTimelineBuilder {
         } else {
             intervalGap = 0
         }
-        guard startDiff <= AppConfig.shared.transportMatchTimeTolerance,
-              endDiff <= AppConfig.shared.transportMatchTimeTolerance,
+        guard startDiff <= 20 * 60, endDiff <= 20 * 60,
               first.distance > 0, second.distance > 0,
               let firstPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: first.pointsData),
               let secondPoints = try? JSONDecoder().decode([CodableCoordinate].self, from: second.pointsData),
@@ -4118,13 +4041,13 @@ class PersistentTimelineBuilder {
         // cannot identify this case. Require matching directed endpoints and
         // a meaningful displacement, so B -> A returns and local loops remain
         // distinct. Do not treat merely nearby time windows as equivalent.
-        if intervalGap <= AppConfig.shared.roundTripIntervalGap,
+        if intervalGap <= 120,
            let firstStart = firstRoute.first, let firstEnd = firstRoute.last,
            let secondStart = secondRoute.first, let secondEnd = secondRoute.last,
-           firstStart.distance(from: firstEnd) >= AppConfig.shared.roundTripMinLegLength,
-           secondStart.distance(from: secondEnd) >= AppConfig.shared.roundTripMinLegLength,
-           firstStart.distance(from: secondStart) <= AppConfig.shared.roundTripEndpointTolerance,
-           firstEnd.distance(from: secondEnd) <= AppConfig.shared.roundTripEndpointTolerance {
+           firstStart.distance(from: firstEnd) >= 300,
+           secondStart.distance(from: secondEnd) >= 300,
+           firstStart.distance(from: secondStart) <= 150,
+           firstEnd.distance(from: secondEnd) <= 150 {
             return true
         }
 
@@ -4455,7 +4378,6 @@ class PersistentTimelineBuilder {
             }
         }
         
-        try? context.save()
     }
 
     private static func resolveSingleAddress(coordinate: CLLocationCoordinate2D) async -> String {
@@ -4561,6 +4483,7 @@ extension PersistentTimelineBuilder {
         var fps = (try? context.fetch(fpDescriptor)) ?? []
 
         if normalizeCrossDayFootprints(fps, calendar: calendar, context: context) {
+            try? context.save()
             fps = (try? context.fetch(fpDescriptor)) ?? []
         }
         
@@ -4649,10 +4572,6 @@ extension PersistentTimelineBuilder {
 
             splitCrossDayFootprint(footprint, calendar: calendar, context: context)
             didChange = true
-        }
-
-        if didChange {
-            try? context.save()
         }
 
         return didChange

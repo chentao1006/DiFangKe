@@ -370,7 +370,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         // A recently persisted transport may still end within the five-minute
         // lookup window after the user has explicitly arrived. Live stay state
         // is authoritative for whether Watch should continue showing "moving".
-        let liveStayStart = LocationManager.shared.potentialStopStartLocation?.timestamp
+        let liveStayAnchor = LocationManager.shared.potentialStopStartLocation
         let movingStartedAt = LocationManager.shared.uiMovingStartedAt
         let currentTransport = Self.currentTransportRecord(
             in: context,
@@ -561,7 +561,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         } else {
             statistics = WatchStatisticsSnapshot(summaries: statisticsSummaries, availableYears: statisticsYears)
         }
-        let liveFootprint = LocationManager.shared.potentialStopStartLocation.flatMap { anchor in
+        let liveFootprint = liveStayAnchor.flatMap { anchor in
             Self.currentStayFootprint(
                 in: context,
                 anchor: anchor,
@@ -570,12 +570,17 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
                 distanceThreshold: AppConfig.shared.stayDistanceThreshold
             )
         }
+        let liveStayStart = liveStayAnchor.map {
+            Self.continuousStayStart(
+                anchorStart: $0.timestamp,
+                persistedStart: liveFootprint?.startTime,
+                persistedEnd: liveFootprint?.endTime,
+                interruptionEnd: Self.latestStayInterruptionEnd(in: context, after: $0.timestamp, now: now)
+            )
+        }
         let currentFootprint = liveStayStart == nil ? latest : liveFootprint
         let livePlaceName: String? = {
             guard liveStayStart != nil else { return nil }
-            if LocationManager.shared.isAwaitingDepartureLocationConfirmation {
-                return "检测到活动，等待定位"
-            }
             if let place = LocationManager.shared.matchedPlace, !place.isIgnored { return place.name }
             if let title = LocationManager.shared.ongoingTitle,
                !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
@@ -587,7 +592,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         return WatchSnapshot(
             currentFootprintID: currentFootprint?.footprintID.uuidString,
             placeName: livePlaceName ?? (latest?.address?.isEmpty == false ? latest!.address! : "正在定位"),
-            address: LocationManager.shared.isAwaitingDepartureLocationConfirmation ? nil : currentFootprint?.reason,
+            address: currentFootprint?.reason,
             startedAt: liveStayStart ?? latest?.startTime,
             isTracking: LocationManager.shared.isTracking,
             currentActivityID: currentFootprint?.activityTypeValue.flatMap {
@@ -684,6 +689,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         continuationTolerance: TimeInterval = AppConfig.shared.activityContinuationTolerance
     ) -> Footprint? {
         let stayStart = anchor.timestamp
+        let interruptionEnd = latestStayInterruptionEnd(in: context, after: stayStart, now: now)
         let lookupStart = stayStart.addingTimeInterval(-continuationTolerance)
         // A continuing stay can be split at midnight; select its latest segment.
         let descriptor = FetchDescriptor<Footprint>(
@@ -693,6 +699,9 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             sortBy: [SortDescriptor(\.endTime, order: .reverse), SortDescriptor(\.startTime, order: .reverse)]
         )
         let matches = ((try? context.fetch(descriptor)) ?? []).filter { candidate in
+            // A return to the same place is a new visit. An old live anchor
+            // must not select an earlier edited stay across a recorded trip.
+            if let interruptionEnd, candidate.startTime < interruptionEnd { return false }
             if let placeID, candidate.placeID == placeID { return true }
             return CLLocation(latitude: candidate.latitude, longitude: candidate.longitude)
                 .distance(from: anchor) < distanceThreshold
@@ -709,6 +718,32 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             return editedContinuation
         }
         return matches.first(where: { $0.endTime >= stayStart })
+    }
+
+    static func latestStayInterruptionEnd(in context: ModelContext, after start: Date, now: Date) -> Date? {
+        var descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.statusRaw != "ignored" && $0.startTime >= start && $0.endTime > start && $0.endTime <= now
+        }, sortBy: [SortDescriptor(\.endTime, order: .reverse)])
+        descriptor.fetchLimit = 1
+        return (try? context.fetch(descriptor).first)?.endTime
+    }
+
+    /// A persisted footprint that overlaps the provisional anchor is the same
+    /// ongoing stay. Prefer its earlier start so an in-memory anchor recovery
+    /// cannot reset the duration shown by iPhone, Watch, or Live Activity.
+    static func continuousStayStart(
+        anchorStart: Date,
+        persistedStart: Date?,
+        persistedEnd: Date?,
+        interruptionEnd: Date? = nil
+    ) -> Date {
+        if let interruptionEnd, interruptionEnd > anchorStart {
+            return max(interruptionEnd, persistedStart ?? interruptionEnd)
+        }
+        guard let persistedStart,
+              let persistedEnd,
+              persistedEnd >= anchorStart else { return anchorStart }
+        return min(anchorStart, persistedStart)
     }
 
     func applyActivityChange(footprintID: String, activityID: String?) {

@@ -112,7 +112,7 @@ final class WidgetDataSyncManager {
         revision: Int,
         kind: CurrentTrackingActivityKind,
         coordinate: CLLocationCoordinate2D,
-        routeCoordinates: [CLLocationCoordinate2D]
+        routeCoordinates: [CodableCoordinate]
     ) async -> Bool {
         guard CLLocationCoordinate2DIsValid(coordinate),
               let containerURL = FileManager.default.containerURL(
@@ -279,12 +279,18 @@ final class WidgetDataSyncManager {
     private func makeCurrentActivityMapSnapshot(
         kind: CurrentTrackingActivityKind,
         coordinate: CLLocationCoordinate2D,
-        routeCoordinates: [CLLocationCoordinate2D],
+        routeCoordinates: [CodableCoordinate],
         style: UIUserInterfaceStyle,
         todayOverlays: CurrentActivityMapOverlays
     ) async -> UIImage? {
-        let validRoute = routeCoordinates.filter(CLLocationCoordinate2DIsValid)
-        let coordinates = validRoute.isEmpty ? [coordinate] : validRoute + [coordinate]
+        let validRoute = routeCoordinates.filter {
+            $0.lat.isFinite && $0.lon.isFinite &&
+            CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon))
+        }
+        let routeSegments = kind == .transport ? currentActivityRouteSegments(from: validRoute) : []
+        let coordinates = validRoute.isEmpty
+            ? [coordinate]
+            : validRoute.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) } + [coordinate]
         let minLat = coordinates.map(\.latitude).min() ?? coordinate.latitude
         let maxLat = coordinates.map(\.latitude).max() ?? coordinate.latitude
         let minLon = coordinates.map(\.longitude).min() ?? coordinate.longitude
@@ -338,16 +344,22 @@ final class WidgetDataSyncManager {
                 routeColor: routeColor
             )
 
-            if kind == .transport, validRoute.count >= 2 {
-                let points = validRoute.map(snapshot.point(for:))
-                cg.beginPath()
-                cg.move(to: points[0])
-                points.dropFirst().forEach { cg.addLine(to: $0) }
-                cg.setLineCap(.round)
-                cg.setLineJoin(.round)
-                cg.setLineWidth(6)
-                cg.setStrokeColor(routeColor.withAlphaComponent(0.9).cgColor)
-                cg.strokePath()
+            if kind == .transport {
+                // Match the app's Transport.lineSegments rendering: observed
+                // samples stay solid, while gaps and synthetic connections
+                // remain dashed instead of being bridged by one solid stroke.
+                for segment in routeSegments {
+                    let points = segment.coordinates.map(snapshot.point(for:))
+                    guard points.count >= 2 else { continue }
+                    cg.beginPath()
+                    cg.move(to: points[0])
+                    points.dropFirst().forEach { cg.addLine(to: $0) }
+                    cg.setStrokeColor(routeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.7).cgColor)
+                    cg.setLineWidth(segment.isDashed ? 1.4 : 3)
+                    cg.setLineDash(phase: 0, lengths: segment.isDashed ? [8, 8] : [])
+                    cg.strokePath()
+                }
+                cg.setLineDash(phase: 0, lengths: [])
             }
 
             // The snapshot is later center-cropped to several Live Activity
@@ -364,6 +376,37 @@ final class WidgetDataSyncManager {
             cg.setFillColor(UIColor.systemBlue.cgColor)
             cg.fillEllipse(in: innerRect)
 
+        }
+    }
+
+    /// Build the Live Activity route through the same model implementation
+    /// used by DFKMapView, so sampling gaps, synthetic points, and smoothing
+    /// cannot drift between the app map and its snapshot.
+    private func currentActivityRouteSegments(
+        from decoded: [CodableCoordinate]
+    ) -> [WidgetTransportLineSegment] {
+        let pathPoints = decoded.map {
+            TransportPathPoint(
+                coordinate: CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon),
+                timestamp: $0.timestamp,
+                isSyntheticPadding: $0.isSyntheticPadding == true
+            )
+        }
+        guard pathPoints.count >= 2 else { return [] }
+
+        let route = Transport(
+            startTime: pathPoints[0].timestamp ?? .distantPast,
+            endTime: pathPoints[pathPoints.count - 1].timestamp ?? Date(),
+            startLocation: "",
+            endLocation: "",
+            type: .slow,
+            distance: 0,
+            averageSpeed: 0,
+            points: pathPoints.map(\.coordinate),
+            pathPoints: pathPoints
+        )
+        return route.lineSegments.map {
+            WidgetTransportLineSegment(coordinates: $0.coordinates, isDashed: $0.isDashed)
         }
     }
 

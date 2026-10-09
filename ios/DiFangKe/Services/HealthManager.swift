@@ -11,6 +11,7 @@ class HealthManager: ObservableObject {
     private let activityManager = CMMotionActivityManager()
     
     @Published var isAuthorized = false
+    @Published private(set) var authorizationRequestStatus: HKAuthorizationRequestStatus = .unknown
     @Published var currentActivity: String = "未知"
     @Published var isMoving = false
     @Published var currentMotionType: MotionType = .stationary
@@ -26,6 +27,12 @@ class HealthManager: ObservableObject {
             || currentMotionType == .cycling || currentMotionType == .automotive
     }
 
+    private let typesToRead: Set<HKObjectType> = [
+        HKObjectType.quantityType(forIdentifier: .stepCount)!,
+        HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning)!,
+        HKObjectType.quantityType(forIdentifier: .flightsClimbed)!
+    ]
+
     private init() {
     }
     
@@ -36,13 +43,6 @@ class HealthManager: ObservableObject {
         }
         
         // Request Motion authorization implicitly by starting updates or checking availability
-        // For HealthKit:
-        let typesToRead: Set<HKObjectType> = [
-            HKObjectType.quantityType(forIdentifier: .stepCount)!,
-            HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning)!,
-            HKObjectType.quantityType(forIdentifier: .flightsClimbed)!
-        ]
-        
         healthStore.requestAuthorization(toShare: nil, read: typesToRead) { success, error in
             // Trigger a dummy activity update to prompt for motion permission if not already granted
             if CMMotionActivityManager.isActivityAvailable() {
@@ -53,7 +53,18 @@ class HealthManager: ObservableObject {
                 self.isAuthorized = success
                 UserDefaults.standard.set(true, forKey: "hasRequestedHealthAuth")
                 self.startActivityTracking()
+                self.refreshAuthorizationRequestStatus()
                 completion(success)
+            }
+        }
+    }
+
+    /// HealthKit 不暴露读权限是否被拒，只能得知授权框是否已弹出过。
+    func refreshAuthorizationRequestStatus() {
+        guard HKHealthStore.isHealthDataAvailable() else { return }
+        healthStore.getRequestStatusForAuthorization(toShare: [], read: typesToRead) { status, _ in
+            DispatchQueue.main.async {
+                self.authorizationRequestStatus = status
             }
         }
     }

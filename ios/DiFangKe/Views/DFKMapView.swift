@@ -198,6 +198,7 @@ struct DFKMapView: View {
     var prefersActivityIcons: Bool = false
     var isMiniTimelineMode: Bool = false
     var selectedFootprintID: UUID? = nil
+    var selectedFootprintCoordinate: CLLocationCoordinate2D? = nil
     var selectedTimeCoordinate: CLLocationCoordinate2D? = nil
     var timelineUpdateIdentifier: Int? = nil
     var onMapInteraction: ((MapInteractionType) -> Void)? = nil
@@ -258,6 +259,7 @@ struct DFKMapView: View {
         prefersActivityIcons: Bool = false,
         isMiniTimelineMode: Bool = false,
         selectedFootprintID: UUID? = nil,
+        selectedFootprintCoordinate: CLLocationCoordinate2D? = nil,
         selectedTimeCoordinate: CLLocationCoordinate2D? = nil,
         timelineUpdateIdentifier: Int? = nil,
         onMapInteraction: ((MapInteractionType) -> Void)? = nil,
@@ -281,6 +283,7 @@ struct DFKMapView: View {
         self.prefersActivityIcons = prefersActivityIcons
         self.isMiniTimelineMode = isMiniTimelineMode
         self.selectedFootprintID = selectedFootprintID
+        self.selectedFootprintCoordinate = selectedFootprintCoordinate
         self.selectedTimeCoordinate = selectedTimeCoordinate
         self.timelineUpdateIdentifier = timelineUpdateIdentifier
         self.onMapInteraction = onMapInteraction
@@ -479,7 +482,11 @@ struct DFKMapView: View {
             } ?? bucket.representative
             return AggregatedFootprint(
                 id: key,
-                coordinate: CLLocationCoordinate2D(
+                // Detail selection represents this footprint, not the
+                // duration-weighted position of every visit at the same place.
+                coordinate: selectedFootprintID == representative.footprintID
+                    ? (selectedFootprintCoordinate ?? CLLocationCoordinate2D(latitude: representative.latitude, longitude: representative.longitude))
+                    : CLLocationCoordinate2D(
                     latitude: bucket.weightedLatitude / divisor,
                     longitude: bucket.weightedLongitude / divisor
                 ),
