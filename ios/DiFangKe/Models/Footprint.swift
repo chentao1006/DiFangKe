@@ -607,5 +607,9 @@ final class Footprint {
         self.activityTypeValue = newValue
         self.status = .manual
         self.allowsAutomaticDurationExtension = target.allowsAutomaticDurationExtension
+        NotificationCenter.default.post(
+            name: NSNotification.Name("FootprintDataChanged"), object: nil,
+            userInfo: ["date": Calendar.current.startOfDay(for: target.startTime)]
+        )
     }
 }

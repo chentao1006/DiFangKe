@@ -54,8 +54,6 @@ import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.PlaceEntity
-import com.ct106.difangke.data.prefs.AppPreferences
-import com.ct106.difangke.service.PhotoAutoLinker
 import com.ct106.difangke.ui.components.NearbyPlacePickerSheet
 import com.ct106.difangke.ui.components.addFootprintMarkers
 import com.ct106.difangke.ui.components.addImportantPlaceCircles
@@ -112,7 +110,6 @@ fun FootprintDetailContent(
     val suggested by viewModel.suggestedActivities.collectAsState()
     val mergePartner by viewModel.mergePartner.collectAsState()
     val isUpdatingAddress by viewModel.isUpdatingAddress.collectAsState()
-    val autoLinkEnabled by remember { AppPreferences(context).isAutoPhotoLinkEnabled }.collectAsState(initial = true)
 
     var showPlacePicker by remember { mutableStateOf(false) }
     var showActivityPicker by remember { mutableStateOf(false) }
@@ -128,13 +125,9 @@ fun FootprintDetailContent(
     var viewerIndex by remember { mutableStateOf<Int?>(null) }
     var shareRequest by remember { mutableStateOf<ShareCardRequest?>(null) }
     var showFullMap by remember { mutableStateOf(false) }
-    var hasGalleryAccess by remember { mutableStateOf(PhotoAutoLinker.hasGalleryAccess(context)) }
 
     LaunchedEffect(footprintId) { viewModel.loadFootprint(footprintId) }
     LaunchedEffect(isGone) { if (isGone && footprint != null) onDismiss() }
-    LaunchedEffect(footprint?.footprintID, autoLinkEnabled) {
-        if (footprint != null && autoLinkEnabled) viewModel.autoLinkPhotosIfEnabled()
-    }
 
     // ── Photo pickers ──
     val galleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -168,16 +161,6 @@ fun FootprintDetailContent(
             ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED
         ) writePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE) else launchCamera()
     }
-    val galleryPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        hasGalleryAccess = PhotoAutoLinker.hasGalleryAccess(context)
-        if (hasGalleryAccess) viewModel.autoLinkPhotosIfEnabled().also {
-            scope.launch {
-                footprint?.let { fp -> PhotoAutoLinker.linkPhotos(context, DiFangKeApp.instance.database, fp) }
-                viewModel.refresh()
-            }
-        }
-    }
-
     val fp = footprint
     Column(modifier) {
         // ── Toolbar (iOS: star leading; share + close trailing) ──
@@ -320,32 +303,16 @@ fun FootprintDetailContent(
                     }
                 }
                 if (photos.isEmpty()) {
-                    if (autoLinkEnabled && !hasGalleryAccess) {
-                        Column(
-                            Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Color(0xFF007AFF).copy(alpha = 0.06f))
-                                .clickable { galleryPermission.launch(PhotoAutoLinker.requiredPermissions()) }.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.PhotoLibrary, null, tint = Color(0xFF007AFF))
-                                Spacer(Modifier.width(8.dp))
-                                Text("开启自动关联照片", fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                                Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Text("授权相册后，地方客能自动识别并展示您在该时段和地点拍摄的照片。", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
-                        }
-                    } else {
-                        val outline = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f)
-                        Box(
-                            Modifier.fillMaxWidth().height(100.dp).clip(RoundedCornerShape(16.dp))
-                                .clickable { showAddPhotoDialog = true }
-                                .drawDashedBorder(outline),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Icon(Icons.Default.AddPhotoAlternate, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("拍摄或选择照片", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+                    val outline = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f)
+                    Box(
+                        Modifier.fillMaxWidth().height(100.dp).clip(RoundedCornerShape(16.dp))
+                            .clickable { showAddPhotoDialog = true }
+                            .drawDashedBorder(outline),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Default.AddPhotoAlternate, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("拍摄或选择照片", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 } else {

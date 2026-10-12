@@ -231,8 +231,8 @@ struct HistoryStatisticsView: View {
         .fullScreenCover(isPresented: $showingFullMap) {
             FullHeatmapView(heatmapPoints: heatmapPoints, initialPosition: mapPosition)
         }
-        .sheet(item: $sharePayload) { payload in
-            DFKShareCardPreviewView(payload: payload)
+        .sheet(item: $sharePayload) { _ in
+            DFKShareCardSheet(payload: $sharePayload)
         }
     }
 
@@ -264,6 +264,7 @@ struct HistoryStatisticsView: View {
             payload.contentMapImage = mapImages.light ?? mapImages.dark
             payload.contentMapLightImage = mapImages.light
             payload.contentMapDarkImage = mapImages.dark
+            guard sharePayload?.id == payloadID else { return }
             payload.id = payloadID
             sharePayload = payload
         }

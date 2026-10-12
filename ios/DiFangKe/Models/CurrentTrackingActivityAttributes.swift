@@ -2,6 +2,38 @@
 import ActivityKit
 import Foundation
 
+/// Cache lookup shared with the widget. A replacement activity can publish
+/// its state before its first map finishes; retain a readable map of the same
+/// appearance from the preceding session during that transition.
+enum CurrentActivityMapSnapshotCache {
+    static func imageURLs(
+        in container: URL,
+        sessionID: String,
+        revision: Int,
+        suffix: String
+    ) -> [URL] {
+        let prefix = "current_activity_\(sessionID)_"
+        let exactURL = container.appendingPathComponent("\(prefix)\(revision)_\(suffix).png")
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: container, includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? []
+        let candidates = files.filter {
+            $0.lastPathComponent.hasPrefix("current_activity_")
+                && $0.lastPathComponent.hasSuffix("_\(suffix).png")
+                && !$0.lastPathComponent.contains("_photo_")
+                && $0 != exactURL
+        }.sorted { left, right in
+            let leftIsCurrent = left.lastPathComponent.hasPrefix(prefix)
+            let rightIsCurrent = right.lastPathComponent.hasPrefix(prefix)
+            if leftIsCurrent != rightIsCurrent { return leftIsCurrent }
+            let leftDate = (try? left.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rightDate = (try? right.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return leftDate > rightDate
+        }
+        return (FileManager.default.fileExists(atPath: exactURL.path) ? [exactURL] : []) + candidates
+    }
+}
+
 public enum CurrentTrackingActivityKind: String, Codable, Hashable {
     case footprint
     case transport

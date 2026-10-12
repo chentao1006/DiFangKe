@@ -384,7 +384,7 @@ private struct HealthSettingsView: View {
 
     var body: some View {
         Form {
-            Section(footer: Text("地方客通过 HealthKit 从「健康」App 读取步数、步行距离和已爬楼层，用于区分步行与慢速交通，并在交通详情中显示步数，不会写入任何健康数据。可随时在系统设置中修改权限。")) {
+            Section(footer: Text("地方客通过 HealthKit 从「健康」App 读取步数、步行距离和已爬楼层，用于区分步行与慢速交通，并在交通详情中显示步数，不会写入任何健康数据。可在「健康」App 中找到地方客并管理数据访问权限。")) {
                 HStack {
                     Text("状态")
                     Spacer()
@@ -398,8 +398,8 @@ private struct HealthSettingsView: View {
                         healthManager.requestAuthorization { _ in }
                     }
                 case .unnecessary:
-                    Button("前往设置管理权限") {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                    Button("打开「健康」App 管理权限") {
+                        if let url = URL(string: "x-apple-health://") {
                             UIApplication.shared.open(url)
                         }
                     }

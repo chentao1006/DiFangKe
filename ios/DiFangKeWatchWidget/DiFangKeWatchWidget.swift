@@ -50,20 +50,10 @@ private struct ComplicationProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<ComplicationEntry>) -> Void) {
         let now = Date()
-        let snapshot = loadSnapshot()
-        // The compact label is not a system .timer, so provide minute-by-minute
-        // entries to keep it advancing even while the iPhone has no new data.
-        // Span only 15 minutes (not 60): a complication pinned to the active face
-        // gets up to 4 background refresh opportunities per hour from watchOS, so
-        // asking WidgetKit to re-check this provider on that same ~15-minute
-        // cadence lets a delivery that already landed in the shared UserDefaults
-        // reach the display much sooner, instead of sitting unread for up to an
-        // hour behind a self-imposed .atEnd expiry that was tighter than nothing
-        // in the OS actually required.
-        let entries = (0...15).map { offset in
-            ComplicationEntry(date: now.addingTimeInterval(TimeInterval(offset * 60)), snapshot: snapshot)
-        }
-        completion(Timeline(entries: entries, policy: .atEnd))
+        let entry = ComplicationEntry(date: now, snapshot: loadSnapshot())
+        // State changes explicitly reload this timeline from WatchStore. This
+        // hourly request is only a low-frequency fallback for missed delivery.
+        completion(Timeline(entries: [entry], policy: .after(now.addingTimeInterval(60 * 60))))
     }
 
     private func loadEntry() -> ComplicationEntry {
@@ -105,24 +95,6 @@ private struct WatchComplicationView: View {
     }
     private var icon: String { transport?.icon ?? activity?.icon ?? (entry.snapshot?.isTracking == true ? "location.fill" : "location.slash") }
     private var title: String { transport?.name ?? activity?.name ?? (entry.snapshot?.isTracking == true ? "记录中" : "未记录") }
-    private var duration: String {
-        guard let startedAt = entry.snapshot?.currentTransportStartedAt ?? entry.snapshot?.startedAt else { return "--" }
-        let minutes = max(0, Int(entry.date.timeIntervalSince(startedAt) / 60))
-        if minutes < 60 {
-            return "\(max(1, minutes))分钟"
-        }
-
-        let hours = Double(minutes) / 60
-        if hours >= 10 {
-            return "\(Int(hours.rounded()))小时"
-        }
-        return "\(String(format: "%g", (hours * 10).rounded() / 10))小时"
-    }
-
-    private var durationLabel: some View {
-        Text(duration)
-            .monospacedDigit()
-    }
     private var color: Color {
         if transport != nil { return Color.accentColor }
         guard let hex = activity?.colorHex else { return .blue }
@@ -147,26 +119,21 @@ private struct WatchComplicationView: View {
             case .accessoryCircular:
                 ZStack {
                     dayTimelineRing
-                    VStack(spacing: 0) {
-                        Image(systemName: icon)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(color)
-                        durationLabel
-                            .font(.system(size: 8, weight: .medium, design: .rounded))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                    }
+                    Image(systemName: icon)
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundStyle(color)
                 }
                 .padding(1)
                 .widgetLabel(title)
             case .accessoryRectangular:
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
-                        Image(systemName: icon).font(.title2).foregroundStyle(color).frame(width: 24)
+                        Image(systemName: icon)
+                            .font(.title2)
+                            .foregroundStyle(color)
+                            .frame(width: 24)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(title).font(.headline).lineLimit(1)
-                            HStack(spacing: 2) { Text("已持续"); durationLabel }
-                                .font(.caption2)
                             Text(todaySummary).font(.caption2).foregroundStyle(.secondary)
                         }
                     }
@@ -178,34 +145,23 @@ private struct WatchComplicationView: View {
                     .frame(height: 6)
                 }
             case .accessoryInline:
-                HStack(spacing: 3) {
-                    Image(systemName: icon)
-                        .foregroundStyle(color)
-                    Text(title)
-                    Text("·")
-                    durationLabel
-                }
+                Label(title, systemImage: icon)
+                    .foregroundStyle(color)
             case .accessoryCorner:
-                durationLabel.widgetLabel {
-                    Label {
-                        Text(title)
-                    } icon: {
-                        Image(systemName: icon)
-                            .foregroundStyle(color)
-                    }
-                }
+                Image(systemName: icon)
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(color)
+                    .widgetLabel(title)
             default:
-                VStack(alignment: .leading) {
-                    Label(title, systemImage: icon).foregroundStyle(color)
-                    Text(duration).font(.headline.monospacedDigit())
-                }
+                Label(title, systemImage: icon)
+                    .foregroundStyle(color)
             }
         }
     }
 
     /// watchOS may keep accessory artwork visible while privacy-redacting text.
-    /// Render a data-free view ourselves so the current place/activity, duration,
-    /// and day timeline cannot leak through the locked watch face.
+    /// Render a data-free view ourselves so the current activity/transport state
+    /// cannot leak through the locked watch face.
     @ViewBuilder
     private var privacyPlaceholder: some View {
         switch family {
@@ -240,6 +196,7 @@ private struct WatchComplicationView: View {
         guard let snapshot = entry.snapshot else { return "等待 iPhone 同步" }
         return "今日 \(snapshot.todayFootprintCount) 个足迹"
     }
+
 }
 
 /// A clock-face day: midnight is at 12 o'clock and each segment is clipped to
@@ -418,7 +375,7 @@ struct DiFangKeWatchComplication: Widget {
                 .widgetURL(URL(string: "difangke://watch/current"))
         }
         .configurationDisplayName("地方客此刻")
-        .description("显示当前活动或交通及持续时间。")
+        .description("显示当前活动或交通状态图标。")
         .supportedFamilies([.accessoryCircular, .accessoryRectangular, .accessoryInline, .accessoryCorner])
     }
 }

@@ -2091,8 +2091,8 @@ private struct ContinuousTimelineSheet: View {
                         }
                         .environment(locationManager)
                     }
-                    .sheet(item: $sharePayload) { payload in
-                        DFKShareCardPreviewView(payload: payload)
+                    .sheet(item: $sharePayload) { _ in
+                        DFKShareCardSheet(payload: $sharePayload)
                     }
                     .sheet(isPresented: $showingTimelineShareRangePicker) {
                         DFKTimelineShareRangePicker(initialDate: activeTimelineDate) { startDate, endDate in
@@ -2877,6 +2877,7 @@ private struct ContinuousTimelineSheet: View {
             payload.backgroundMapLightImage = media.backgroundLightMapImage
             payload.backgroundMapDarkImage = media.backgroundDarkMapImage
             payload.mapTransports = transports
+            guard sharePayload?.id == payloadID else { return }
             payload.id = payloadID
             sharePayload = payload
         }
@@ -2937,6 +2938,7 @@ private struct ContinuousTimelineSheet: View {
             payload.backgroundMapLightImage = media.backgroundLightMapImage
             payload.backgroundMapDarkImage = media.backgroundDarkMapImage
             payload.mapTransports = transports
+            guard sharePayload?.id == payloadID else { return }
             payload.id = payloadID
             sharePayload = payload
         }
@@ -5454,16 +5456,7 @@ private struct CurrentStayTimelineCard: View {
     }
 
     private var statusTimestamp: Date? {
-        guard locationManager.isTracking else { return nil }
-        if let start = locationManager.potentialStopStartLocation {
-            return start.timestamp
-        }
-        if locationManager.uiIsMoving {
-            return locationManager.lastLocation?.timestamp ?? Date()
-        }
-        // A tracking session always has a current state. A missing provisional
-        // stop must not make the entire current row disappear.
-        return locationManager.lastLocation?.timestamp ?? Date()
+        locationManager.currentStatusStartedAt
     }
 
     private var canSelectOngoingPlace: Bool {

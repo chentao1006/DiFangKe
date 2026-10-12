@@ -707,13 +707,8 @@ class OpenAIService {
         let type = transport.manualTypeRaw ?? transport.typeRaw
         let typeName = TransportType(rawValue: type)?.localizedName ?? "交通"
         
-        var parts: [String] = ["\(start)-\(end)", "移动（\(typeName)）"]
-        
-        if transport.startLocation != "起点" || transport.endLocation != "终点" {
-            parts.append("\(transport.startLocation) ➔ \(transport.endLocation)")
-        }
-        
-        return parts.joined(separator: "｜")
+        // 自动解析的路线端点地址不代表到访地点；地点事实只来自足迹。
+        return ["\(start)-\(end)", "移动（\(typeName)）", "里程：\(max(0, transport.distance))米"].joined(separator: "｜")
     }
 
     private func dailySummaryFallbackSummary(footprintCount: Int) -> String {
@@ -791,13 +786,13 @@ class OpenAIService {
         1. 只输出一句中文。
         2. 不要逐条复述，不要写时间线，不要把片段照搬成流水账。
         3. 只做归纳，不要输出标签名、编号、括号说明或字段名，也不要照搬片段里的表达。
-        4. 只写能从片段直接推出的客观内容，不要补写感受、氛围、节奏、心情或状态判断。
+        4. 只写能从片段直接推出的客观内容；到访地点只能引用足迹中的地点，不得从交通方式、活动、备注推测目的地，不得补写任何地点或地点类别、感受、氛围、节奏、心情或状态判断。
         5. 语气自然一点，像日常顺口说的话，但不要像通报、监控记录或工作汇报。
         6. 如果当天有多次交通出行但地点变化不大，可以概括为“出门走走”或“多次往返”。
         7. 如果信息零散，就总结整体状态，不要编造细节。
         8. 尽量控制在 15 字以内。
         9. 若片段体现明显的远距离或跨区域移动，结论应体现范围扩大与跨区域特征，避免收缩性描述。
-        10. 活动范围判断要以明确事实优先：地点词和交通方式 > 模糊描述；有冲突时按更强证据下结论。
+        10. 地点以足迹为准，移动以交通记录为准；交通记录只说明移动，不证明到访或抵达某个地点。
         11. 绝对不能在输出中包含“今天”二字，因为这是对往日的总结。
         12. 只在足迹、交通等信息都显示活动很少时，才可以写“基本在家”“没怎么出门”这类收缩性结论；只要有多次移动、骑行、电动车等交通方式，就必须体现出门或移动。
 

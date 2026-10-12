@@ -1056,6 +1056,44 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var isCurrentlyMoving: Bool {
         isTracking && uiIsMoving && potentialStopStartLocation == nil
     }
+    /// All current-state surfaces use the phone's live anchor, without deriving
+    /// another start time from historical records during presentation.
+    var currentStatusStartedAt: Date? {
+        guard isTracking else { return nil }
+        return potentialStopStartLocation?.timestamp ?? uiMovingStartedAt ?? lastLocation?.timestamp ?? Date()
+    }
+
+    func currentStayFootprint(in context: ModelContext, now: Date = Date()) -> Footprint? {
+        guard isTracking, !isCurrentlyMoving, let anchor = potentialStopStartLocation else { return nil }
+        return WatchSyncManager.currentStayFootprint(
+            in: context, anchor: anchor, placeID: matchedPlace?.placeID,
+            now: now, distanceThreshold: AppConfig.shared.stayDistanceThreshold
+        )
+    }
+
+    /// A user can label a stay before automatic detection has saved it. Feed that
+    /// explicit choice through the existing footprint writer and activity editor.
+    func updateCurrentStayActivity(to activityID: String?, expectedStart: Date, in context: ModelContext) {
+        guard isTracking, !isCurrentlyMoving,
+              let anchor = potentialStopStartLocation,
+              anchor.timestamp.timeIntervalSince1970 == expectedStart.timeIntervalSince1970 else { return }
+        let now = Date()
+        if currentStayFootprint(in: context, now: now) == nil {
+            let start = max(anchor.timestamp, Calendar.current.startOfDay(for: now))
+            guard now > start else { return }
+            handleNewCandidateFootprint(CandidateFootprint(
+                startTime: start, endTime: now, centerCoordinate: anchor.coordinate,
+                duration: now.timeIntervalSince(start), rawLocations: [anchor]
+            ), isHistorical: true, context: context)
+        }
+        guard let footprint = currentStayFootprint(in: context, now: now) else { return }
+        footprint.updateActivityType(to: activityID, in: context)
+        try? context.save()
+        checkLiveActivity(forceContentUpdate: true)
+        WatchSyncManager.shared.syncSnapshot()
+        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+    }
+
     private var lastMovingEvidenceTime: Date = .distantPast
     private(set) var uiMovingStartedAt: Date?
     /// The first plausible fix outside a long-running stay. Core Motion wakes
@@ -2858,7 +2896,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 self.handleNewCandidateFootprint(candidate)
             }
             self.trackingPoints.append(location)
-        
+        }
+
+        // Current-state recognition must consume every accepted forward fix.
+        // Raw-point deduplication is a storage decision, not evidence that the
+        // device is still at its previous stay.
+        if isPrimary, !isDelayedBatchSample {
             // 3. 更新当前停留状态用于 UI 显示
             if let startLoc = potentialStopStartLocation {
                 // 改进：增加地点粘性。如果当前位置依然匹配到与起始点相同的“重要地点”，则不应判定为离开并重置停留时间。
@@ -2909,7 +2952,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     reconcileContinuousStayStart()
                 }
             }
-            
+        }
+
+        if isPrimary, shouldSaveRawLocation, !isDelayedBatchSample {
             // The processor emits a candidate only on departure. Keep an
             // activity-edited current stay growing while we are still here.
             if !uiIsMoving, let ongoingStart = potentialStopStartLocation?.timestamp,
@@ -3039,7 +3084,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             anchorStart: anchor.timestamp,
             persistedStart: footprint.startTime,
             persistedEnd: footprint.endTime,
-            interruptionEnd: WatchSyncManager.latestStayInterruptionEnd(in: context, after: anchor.timestamp, now: Date())
+            interruptionEnd: WatchSyncManager.latestStayInterruptionEnd(in: context, after: anchor.timestamp, now: Date()),
+            continuationTolerance: footprint.status != .manual || footprint.allowsAutomaticDurationExtension
+                ? AppConfig.shared.activityContinuationTolerance : 0
         )
         guard resolvedStart != anchor.timestamp else { return }
 
@@ -3802,10 +3849,20 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     $0.distance(from: lastLoc) <= AppConfig.shared.stayDistanceThreshold
                 } ?? false
                 if latestStillAtCompletedStay {
+                    // Finalizing a snapshot does not begin a new visit. The
+                    // first stay time owns the live duration, not its last fix.
+                    potentialStopStartLocation = CLLocation(
+                        coordinate: lastLoc.coordinate, altitude: lastLoc.altitude,
+                        horizontalAccuracy: lastLoc.horizontalAccuracy,
+                        verticalAccuracy: lastLoc.verticalAccuracy,
+                        course: lastLoc.course, speed: lastLoc.speed,
+                        timestamp: candidate.startTime
+                    )
                     uiIsMoving = false
                     uiMovingStartedAt = nil
                     lastMovingEvidenceTime = .distantPast
                     pendingDepartureLocation = nil
+                    reconcileContinuousStayStart()
                     checkLiveActivity(forceContentUpdate: true)
                 }
                 savePotentialStop()
@@ -5490,6 +5547,11 @@ final class CurrentLiveActivityManager {
     private var isReconciling = false
     private var pendingUpdate: (location: CLLocation, modelContext: ModelContext?, forceContentUpdate: Bool)?
     private var lifecycleRevision = 0
+    private var assetUpdateTask: Task<Void, Never>?
+    private var assetBackgroundTask = UIBackgroundTaskIdentifier.invalid
+    private var assetUpdateKey: String?
+    private var assetUpdateGeneration = 0
+    private var completedAssets: (key: String, state: CurrentTrackingActivityAttributes.ContentState)?
     private var provisionalTransportStartedAt: Date?
     private var provisionalTransportStartLocation: String?
 
@@ -5622,6 +5684,10 @@ final class CurrentLiveActivityManager {
         // revisions instead of briefly replacing the visible map with revision 0.
         let previousState = lastState ?? existingActivity?.content.state
         var state = resolved.state
+        let assetKey = sessionID + "|" + state.recordID
+        if let assetUpdateKey, assetUpdateKey != assetKey {
+            cancelAssetUpdate()
+        }
         // Stationary coordinates, place text, and metrics can remain byte-for-byte
         // identical for hours. Make the state advance every five minutes so a
         // background Core Location callback cannot be discarded by the equality
@@ -5658,6 +5724,12 @@ final class CurrentLiveActivityManager {
         state.photoRevision = previousState?.photoRevision ?? photoRevision
         state.photoCount = previousState?.photoCount ?? resolved.photoAssetIDs.count
         state.photoThumbnailCount = previousState?.photoThumbnailCount ?? 0
+        if let completedAssets, completedAssets.key == assetKey {
+            state.mapRevision = completedAssets.state.mapRevision
+            state.photoRevision = completedAssets.state.photoRevision
+            state.photoCount = completedAssets.state.photoCount
+            state.photoThumbnailCount = completedAssets.state.photoThumbnailCount
+        }
         guard expectedLifecycleRevision == lifecycleRevision,
               isEnabled,
               LocationManager.shared.isTracking else { return }
@@ -5690,54 +5762,133 @@ final class CurrentLiveActivityManager {
             || previousState?.recordID != state.recordID
             || Date().timeIntervalSince(lastMapUpdate) >= 60
             || movedEnough
-        if needsMap {
-            mapRevision += 1
-            state.mapRevision = mapRevision
-            let didWriteMap = await WidgetDataSyncManager.shared.writeCurrentActivityMapSnapshots(
-                sessionID: sessionID,
-                revision: mapRevision,
-                kind: state.kind,
-                coordinate: location.coordinate,
-                routeCoordinates: resolved.route
-            )
-            if didWriteMap {
-                lastMapLocation = location
-                lastMapUpdate = Date()
-            } else {
-                // Keep the previous revision when available. With no previous map,
-                // the next location update retries immediately instead of waiting 60 seconds.
-                state.mapRevision = previousState?.mapRevision ?? 0
-            }
-        } else {
-            state.mapRevision = previousState?.mapRevision ?? mapRevision
-        }
 
         let photoSignature = ([state.kind.rawValue, state.recordID] + resolved.photoAssetIDs)
             .joined(separator: "|")
+        guard assetUpdateTask == nil,
+              needsMap || photoSignature != lastPhotoSignature else { return }
+        assetUpdateGeneration += 1
+        let generation = assetUpdateGeneration
+        assetUpdateKey = assetKey
+        // The state queue's background assertion ends after ActivityKit has
+        // received the text. Rendering needs its own lifetime, including when
+        // the user locks the phone immediately after this job starts.
+        assetBackgroundTask = UIApplication.shared.beginBackgroundTask(
+            withName: "CurrentLiveActivityAssets"
+        ) { [weak self] in
+            Task { @MainActor in
+                guard let self, generation == self.assetUpdateGeneration else { return }
+                self.cancelAssetUpdate()
+            }
+        }
+        // End the state-update queue here. MapKit/Photos can remain suspended
+        // during background execution and must never hold the next departure
+        // or arrival behind their continuations.
+        assetUpdateTask = Task { @MainActor [weak self] in
+            await self?.refreshAssets(
+                sessionID: sessionID,
+                assetKey: assetKey,
+                generation: generation,
+                state: state,
+                location: location,
+                route: resolved.route,
+                photoAssetIDs: resolved.photoAssetIDs,
+                photoSignature: photoSignature,
+                needsMap: needsMap
+            )
+        }
+    }
+
+    @MainActor
+    private func refreshAssets(
+        sessionID: String,
+        assetKey: String,
+        generation: Int,
+        state initialState: CurrentTrackingActivityAttributes.ContentState,
+        location: CLLocation,
+        route: [CodableCoordinate],
+        photoAssetIDs: [String],
+        photoSignature: String,
+        needsMap: Bool
+    ) async {
+        guard !Task.isCancelled, generation == assetUpdateGeneration else { return }
+        defer {
+            if generation == assetUpdateGeneration {
+                assetUpdateTask = nil
+                endAssetBackgroundTask()
+            }
+        }
+        var state = initialState
+        if needsMap {
+            mapRevision += 1
+            let revision = mapRevision
+            let didWriteMap = await WidgetDataSyncManager.shared.writeCurrentActivityMapSnapshots(
+                sessionID: sessionID,
+                revision: revision,
+                kind: state.kind,
+                coordinate: location.coordinate,
+                routeCoordinates: route,
+                retainingRevision: initialState.mapRevision
+            )
+            guard !Task.isCancelled, generation == assetUpdateGeneration else { return }
+            if didWriteMap {
+                state.mapRevision = revision
+                lastMapLocation = location
+                lastMapUpdate = Date()
+                // A slow Photos/iCloud request must not hold a finished map.
+                publishReadyAssets(state, sessionID: sessionID, assetKey: assetKey)
+            }
+        }
+
         if photoSignature != lastPhotoSignature {
             photoRevision += 1
             state.photoRevision = photoRevision
-            state.photoCount = resolved.photoAssetIDs.count
+            state.photoCount = photoAssetIDs.count
             state.photoThumbnailCount = await WidgetDataSyncManager.shared.writeCurrentActivityPhotoThumbnails(
                 sessionID: sessionID,
                 revision: photoRevision,
-                assetIDs: resolved.photoAssetIDs
+                assetIDs: photoAssetIDs
             )
+            guard !Task.isCancelled, generation == assetUpdateGeneration else { return }
             lastPhotoSignature = photoSignature
-        } else {
-            state.photoRevision = previousState?.photoRevision ?? photoRevision
-            state.photoCount = previousState?.photoCount ?? resolved.photoAssetIDs.count
-            state.photoThumbnailCount = previousState?.photoThumbnailCount ?? 0
         }
 
-        guard expectedLifecycleRevision == lifecycleRevision,
-              isEnabled,
-              LocationManager.shared.isTracking else { return }
-        if let activity = existingActivity, state != lastState {
-            currentActivity = activity
-            await activity.update(ActivityContent(state: state, staleDate: nil))
+        guard !Task.isCancelled, generation == assetUpdateGeneration else { return }
+        publishReadyAssets(state, sessionID: sessionID, assetKey: assetKey)
+    }
+
+    private func publishReadyAssets(
+        _ state: CurrentTrackingActivityAttributes.ContentState,
+        sessionID: String,
+        assetKey: String
+    ) {
+        guard
+              currentActivity?.attributes.sessionID == sessionID,
+              let latestState = lastState, latestState.recordID == state.recordID else { return }
+        completedAssets = (assetKey, state)
+        // Re-enter the same state queue with the current location and current
+        // recognition. Never publish the old state captured before rendering.
+        if state.mapRevision != latestState.mapRevision
+            || state.photoRevision != latestState.photoRevision
+            || state.photoCount != latestState.photoCount
+            || state.photoThumbnailCount != latestState.photoThumbnailCount {
+            LocationManager.shared.checkLiveActivity(forceContentUpdate: true)
         }
-        lastState = state
+    }
+
+    private func cancelAssetUpdate() {
+        assetUpdateGeneration += 1
+        assetUpdateTask?.cancel()
+        assetUpdateTask = nil
+        assetUpdateKey = nil
+        completedAssets = nil
+        endAssetBackgroundTask()
+    }
+
+    private func endAssetBackgroundTask() {
+        guard assetBackgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(assetBackgroundTask)
+        assetBackgroundTask = .invalid
     }
 
     private func resolveState(
@@ -5812,19 +5963,8 @@ final class CurrentLiveActivityManager {
         provisionalTransportStartedAt = nil
         provisionalTransportStartLocation = nil
         let activePlaceID = manager.matchedPlace?.placeID
-        let footprint = WatchSyncManager.currentStayFootprint(
-            in: context,
-            anchor: stayAnchor,
-            placeID: activePlaceID,
-            now: now,
-            distanceThreshold: AppConfig.shared.stayDistanceThreshold
-        )
-        let stayStart = WatchSyncManager.continuousStayStart(
-            anchorStart: stayAnchor.timestamp,
-            persistedStart: footprint?.startTime,
-            persistedEnd: footprint?.endTime,
-            interruptionEnd: WatchSyncManager.latestStayInterruptionEnd(in: context, after: stayAnchor.timestamp, now: now)
-        )
+        let footprint = manager.currentStayFootprint(in: context, now: now)
+        let stayStart = stayAnchor.timestamp
         let activities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
         let activity = footprint?.getActivityType(from: activities)
         let matchedPlaceName = manager.matchedPlace.flatMap { $0.isIgnored ? nil : $0.name }
@@ -5997,17 +6137,21 @@ final class CurrentLiveActivityManager {
 #if WIDGET_EXTENSION
         return false
 #else
-        let sceneStyle = UIApplication.shared.connectedScenes
+        let scenes = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows)
-            .first(where: \.isKeyWindow)?
-            .traitCollection.userInterfaceStyle
-        let style = sceneStyle ?? UITraitCollection.current.userInterfaceStyle
+        let scene = scenes.first(where: { $0.activationState == .foregroundActive })
+            ?? scenes.first
+        // A task's UITraitCollection.current and the lock-screen host's
+        // colorScheme are not the phone's system appearance. Scene/screen
+        // traits follow the system setting, independent of the widget host.
+        let style = scene?.traitCollection.userInterfaceStyle
+            ?? UIScreen.main.traitCollection.userInterfaceStyle
         return style == .dark
 #endif
     }
 
     private func endAll() async {
+        cancelAssetUpdate()
         let activities = Activity<CurrentTrackingActivityAttributes>.activities
         currentActivity = nil
         lastState = nil

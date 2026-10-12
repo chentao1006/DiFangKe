@@ -112,7 +112,8 @@ final class WidgetDataSyncManager {
         revision: Int,
         kind: CurrentTrackingActivityKind,
         coordinate: CLLocationCoordinate2D,
-        routeCoordinates: [CodableCoordinate]
+        routeCoordinates: [CodableCoordinate],
+        retainingRevision: Int? = nil
     ) async -> Bool {
         guard CLLocationCoordinate2DIsValid(coordinate),
               let containerURL = FileManager.default.containerURL(
@@ -125,6 +126,7 @@ final class WidgetDataSyncManager {
         return await withExclusiveMapSnapshotWork {
             var writtenStyleCount = 0
             for style in [UIUserInterfaceStyle.light, .dark] {
+                guard !Task.isCancelled else { return false }
                 guard let image = await self.makeCurrentActivityMapSnapshot(
                     kind: kind,
                     coordinate: coordinate,
@@ -132,6 +134,7 @@ final class WidgetDataSyncManager {
                     style: style,
                     todayOverlays: todayOverlays
                 ), let data = image.pngData() else { continue }
+                guard !Task.isCancelled else { return false }
 
                 let suffix = style == .dark ? "dark" : "light"
                 let fileURL = containerURL.appendingPathComponent(
@@ -151,7 +154,8 @@ final class WidgetDataSyncManager {
             }
 
             let prefix = "current_activity_\(sessionID)_"
-            let retainedRevisions = [revision, max(0, revision - 1)].map(String.init)
+            let retainedRevisions = [revision, max(0, revision - 1), retainingRevision]
+                .compactMap { $0 }.map(String.init)
             if let files = try? FileManager.default.contentsOfDirectory(
                 at: containerURL,
                 includingPropertiesForKeys: nil
@@ -314,14 +318,22 @@ final class WidgetDataSyncManager {
         options.traitCollection = UITraitCollection(userInterfaceStyle: style)
         var snapshot: MKMapSnapshotter.Snapshot?
         for attempt in 0..<3 {
+            guard !Task.isCancelled else { return nil }
             do {
-                let candidate = try await MKMapSnapshotter(options: options).start()
+                let snapshotter = MKMapSnapshotter(options: options)
+                let candidate = try await withTaskCancellationHandler {
+                    try await snapshotter.start()
+                } onCancel: {
+                    snapshotter.cancel()
+                }
+                guard !Task.isCancelled else { return nil }
                 if Self.hasVisibleMapDetail(candidate.image) {
                     snapshot = candidate
                     break
                 }
                 print("[CurrentLiveActivity] map snapshot contained no visible map detail (attempt \(attempt + 1))")
             } catch {
+                guard !Task.isCancelled else { return nil }
                 print("[CurrentLiveActivity] map snapshot failed (attempt \(attempt + 1)): \(error)")
             }
             if attempt < 2 {

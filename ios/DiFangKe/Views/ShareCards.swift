@@ -179,6 +179,18 @@ struct DFKShareRankingEntry: Identifiable {
     var color: Color
 }
 
+/// The sheet item identifies the presentation; the binding supplies subsequent
+/// asynchronous media updates for that same presentation.
+struct DFKShareCardSheet: View {
+    @Binding var payload: DFKShareCardPayload?
+
+    var body: some View {
+        if let payload {
+            DFKShareCardPreviewView(payload: payload)
+        }
+    }
+}
+
 struct DFKShareCardPreviewView: View {
     @Environment(\.dismiss) private var dismiss
     let payload: DFKShareCardPayload

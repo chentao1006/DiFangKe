@@ -11,8 +11,6 @@ class NotificationManager {
     // rebuilds, settings changes, and footprint edits, including after relaunch.
     private let dailySummaryAIRequestKey = "lastDailySummaryAIRequestTimestamp"
     private let legacyDailySummaryAIRequestKey = "lastDailySummaryAIRequestAt"
-    private let dailySummaryOverviewKey = "dailyNotificationOverviewSummary"
-    private let dailySummaryOverviewDateKey = "dailyNotificationOverviewSummaryDate"
     private let dailySummaryAIRequestLock = NSLock()
     
     private init() {}
@@ -151,16 +149,8 @@ class NotificationManager {
         let staticPreamble = "忙碌的一天结束了，快来看看你今天留下的足迹吧。"
         
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
-        let cachedOverview = cachedDailyOverviewSummary()
-        let newOverview = overviewSummary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let effectiveOverview = newOverview.isEmpty ? cachedOverview : newOverview
-
-        // A later location/settings refresh normally has no new AI result
-        // because it is intentionally rate-limited.  Do not let that refresh
-        // overwrite an already prepared notification with the static fallback.
-        if !newOverview.isEmpty {
-            cacheDailyOverviewSummary(newOverview)
-        }
+        // 调用方已按足迹和交通的数据指纹校验汇总；不再使用仅按日期缓存的旧文案。
+        let effectiveOverview = overviewSummary?.trimmingCharacters(in: .whitespacesAndNewlines)
         
         let saysStayedHome = effectiveOverview?.contains("宅在家") == true || effectiveOverview?.contains("没出门") == true || effectiveOverview?.contains("在家休息") == true
         // Never let a stale/model-generated "stayed home" sentence contradict
@@ -171,23 +161,6 @@ class NotificationManager {
         } else {
             self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: "每日足迹汇总", body: "\(staticPreamble)\n\(statsInfo)")
         }
-    }
-
-    private func cachedDailyOverviewSummary() -> String? {
-        let defaults = UserDefaults.standard
-        guard let date = defaults.object(forKey: dailySummaryOverviewDateKey) as? Date,
-              Calendar.current.isDateInToday(date),
-              let summary = defaults.string(forKey: dailySummaryOverviewKey)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !summary.isEmpty else {
-            return nil
-        }
-        return summary
-    }
-
-    private func cacheDailyOverviewSummary(_ summary: String) {
-        let defaults = UserDefaults.standard
-        defaults.set(summary, forKey: dailySummaryOverviewKey)
-        defaults.set(Date(), forKey: dailySummaryOverviewDateKey)
     }
 
     func sendPastMemoriesNotification(title: String, body: String, footprintID: UUID? = nil, date: Date) {

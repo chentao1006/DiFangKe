@@ -201,6 +201,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 struct DiFangKeApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
     @State private var locationManager = LocationManager.shared
     @AppStorage("isFirstLaunch") private var isFirstLaunch = true
     @State private var showSplash = true
@@ -290,6 +291,9 @@ struct DiFangKeApp: App {
                 }
             }
             .animation(.easeInOut(duration: 0.8), value: showSplash)
+            .onChange(of: colorScheme) { _, _ in
+                locationManager.checkLiveActivity(forceContentUpdate: true)
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
                     locationManager.refreshAuthorizationStatus()

@@ -40,7 +40,6 @@ fun SettingsScreen(
     val notificationMinute by viewModel.notificationMinute.collectAsState()
     val isHighlightNotificationEnabled by viewModel.isHighlightNotificationEnabled.collectAsState()
     val isPastMemoriesNotificationEnabled by viewModel.isPastMemoriesNotificationEnabled.collectAsState()
-    val isAutoPhotoLinkEnabled by viewModel.isAutoPhotoLinkEnabled.collectAsState()
     val isLiveNotificationEnabled by viewModel.isLiveNotificationEnabled.collectAsState()
     
     val importantPlacesCount by viewModel.importantPlacesCount.collectAsState()
@@ -156,14 +155,6 @@ fun SettingsScreen(
                         }
                     },
                     colors = ListItemDefaults.colors(containerColor = Color.Transparent)
-                )
-            }
-            item {
-                SettingsToggleItem(
-                    title = "自动关联照片到足迹",
-                    subtitle = "查看足迹时自动关联停留期间拍摄的照片",
-                    checked = isAutoPhotoLinkEnabled,
-                    onCheckedChange = { viewModel.setAutoPhotoLinkEnabled(it) }
                 )
             }
             item {

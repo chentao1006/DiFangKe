@@ -43,9 +43,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val isPastMemoriesNotificationEnabled: StateFlow<Boolean> = prefs.isPastMemoriesNotificationEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
-    val isAutoPhotoLinkEnabled: StateFlow<Boolean> = prefs.isAutoPhotoLinkEnabled
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
-
     val isLiveNotificationEnabled: StateFlow<Boolean> = prefs.isLiveNotificationEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
@@ -114,12 +111,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             prefs.setPastMemoriesNotificationEnabled(enabled)
             updateNotificationSchedule()
-        }
-    }
-
-    fun setAutoPhotoLinkEnabled(enabled: Boolean) {
-        viewModelScope.launch {
-            prefs.setAutoPhotoLinkEnabled(enabled)
         }
     }
 

@@ -822,6 +822,22 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
         )
     }
 
+    func testCurrentStayKeepsStartAcrossConfiguredSamplingSeam() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let tolerance = AppConfig.shared.activityContinuationTolerance
+        let end = start.addingTimeInterval(4 * 60)
+        let anchor = end.addingTimeInterval(tolerance * 0.8)
+        XCTAssertEqual(WatchSyncManager.continuousStayStart(
+            anchorStart: anchor, persistedStart: start, persistedEnd: end,
+            continuationTolerance: tolerance
+        ), start)
+        XCTAssertEqual(WatchSyncManager.continuousStayStart(
+            anchorStart: end.addingTimeInterval(tolerance + 1),
+            persistedStart: start, persistedEnd: end,
+            continuationTolerance: tolerance
+        ), end.addingTimeInterval(tolerance + 1))
+    }
+
     func testCurrentStayDoesNotResumeFootprintThatEndedBeforeAnchor() {
         let anchorStart = Date(timeIntervalSince1970: 1_800_034_200)
         let persistedStart = Date(timeIntervalSince1970: 1_800_000_000)

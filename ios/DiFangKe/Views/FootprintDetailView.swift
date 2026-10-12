@@ -222,8 +222,8 @@ struct FootprintModalView: View {
             .sheet(isPresented: $showingActivityTypeEditor) {
                 ActivityTypeEditorView()
             }
-            .sheet(item: $sharePayload) { payload in
-                DFKShareCardPreviewView(payload: payload)
+            .sheet(item: $sharePayload) { _ in
+                DFKShareCardSheet(payload: $sharePayload)
             }
             .sheet(isPresented: $showingTimeAdjustment) {
                 FootprintTimeAdjustmentView(footprint: footprint) {
@@ -441,6 +441,7 @@ extension FootprintModalView {
             payload.backgroundMapImage = media.backgroundMapImage
             payload.backgroundMapLightImage = media.backgroundLightMapImage
             payload.backgroundMapDarkImage = media.backgroundDarkMapImage
+            guard sharePayload?.id == payloadID else { return }
             payload.id = payloadID
             sharePayload = payload
         }

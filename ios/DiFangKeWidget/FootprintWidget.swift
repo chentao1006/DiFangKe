@@ -370,7 +370,7 @@ private struct CurrentActivityDurationBadge: View {
     let color: Color
 
     var body: some View {
-        TimelineView(.periodic(from: nextMinuteBoundary, by: 60)) { context in
+        TimelineView(.periodic(from: startedAt, by: 60)) { context in
             let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
             let (number, unit) = mapFootprintDurationParts(elapsed)
             HStack(alignment: .lastTextBaseline, spacing: 0) {
@@ -389,11 +389,6 @@ private struct CurrentActivityDurationBadge: View {
         }
     }
 
-    private var nextMinuteBoundary: Date {
-        let elapsed = max(0, Date().timeIntervalSince(startedAt))
-        let completedMinutes = floor(elapsed / 60)
-        return startedAt.addingTimeInterval((completedMinutes + 1) * 60)
-    }
 }
 
 private func mapFootprintDurationParts(_ elapsed: Int) -> (String, String) {
@@ -409,11 +404,14 @@ private func mapFootprintDurationParts(_ elapsed: Int) -> (String, String) {
 
 @available(iOS 16.1, *)
 private struct CurrentTrackingLockScreenContent: View {
+    @Environment(\.colorScheme) private var colorScheme
     let context: ActivityViewContext<CurrentTrackingActivityAttributes>
 
     private var state: CurrentTrackingActivityAttributes.ContentState { context.state }
     private var accent: Color { currentTrackingAccent(state) }
-    private var usesDarkMap: Bool { state.prefersDarkMap ?? false }
+    // Use the presentation's appearance for both assets and text so theme
+    // changes do not depend on the containing app publishing new content.
+    private var usesDarkMap: Bool { colorScheme == .dark }
     private var primaryForeground: Color { usesDarkMap ? .white : .black }
     private var secondaryForeground: Color { primaryForeground.opacity(0.72) }
     private var contentHeight: CGFloat { state.kind == .footprint ? 160 : 140 }
@@ -424,7 +422,7 @@ private struct CurrentTrackingLockScreenContent: View {
                 CurrentActivityMapImage(
                     sessionID: context.attributes.sessionID,
                     revision: state.mapRevision,
-                    prefersDarkMap: state.prefersDarkMap ?? false
+                    prefersDarkMap: usesDarkMap
                 )
                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
                 .clipped()
@@ -458,6 +456,7 @@ private struct CurrentTrackingLockScreenContent: View {
                 if state.kind == .transport {
                     CurrentTransportProgress(
                         start: state.startLocation ?? "起点",
+                        icon: state.icon,
                         accent: accent,
                         onDarkMap: usesDarkMap,
                         compact: true
@@ -583,6 +582,7 @@ private struct CurrentTrackingIslandBottomContent: View {
                 if state.kind == .transport {
                     CurrentTransportProgress(
                         start: state.startLocation ?? "起点",
+                        icon: state.icon,
                         accent: accent,
                         onDarkMap: true
                     )
@@ -722,6 +722,7 @@ private struct CurrentActivityPhotoStack: View {
 @available(iOS 16.1, *)
 private struct CurrentTransportProgress: View {
     let start: String
+    let icon: String
     let accent: Color
     let onDarkMap: Bool
     var compact = false
@@ -736,23 +737,31 @@ private struct CurrentTransportProgress: View {
                 let trailingX = proxy.size.width - 7
                 ZStack(alignment: .leading) {
                     Path { path in
-                        path.move(to: CGPoint(x: leadingX, y: 8))
-                        path.addLine(to: CGPoint(x: trailingX, y: 8))
+                        path.move(to: CGPoint(x: leadingX, y: 12))
+                        path.addLine(to: CGPoint(x: trailingX, y: 12))
                     }
                     .stroke(foreground.opacity(0.34), style: StrokeStyle(lineWidth: 3, lineCap: .round))
                     Path { path in
-                        path.move(to: CGPoint(x: leadingX, y: 8))
-                        path.addLine(to: CGPoint(x: currentX, y: 8))
+                        path.move(to: CGPoint(x: leadingX, y: 12))
+                        path.addLine(to: CGPoint(x: currentX, y: 12))
                     }
                     .stroke(accent, style: StrokeStyle(lineWidth: 4, lineCap: .round))
-                    Circle().fill(accent).frame(width: 12, height: 12).position(x: leadingX, y: 8)
-                    Circle().fill(accent).overlay(Circle().stroke(foreground, lineWidth: 2))
-                        .frame(width: 16, height: 16).position(x: currentX, y: 8)
-                    Circle().fill(foreground.opacity(0.18)).overlay(Circle().stroke(foreground.opacity(0.75), lineWidth: 2))
-                        .frame(width: 12, height: 12).position(x: trailingX, y: 8)
+                    Circle().fill(accent).frame(width: 12, height: 12).position(x: leadingX, y: 12)
+                    Circle().fill(onDarkMap ? Color.black : Color.white)
+                        .overlay(Circle().stroke(accent, lineWidth: 1.2))
+                        .overlay {
+                            Image(systemName: icon)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 13, height: 13)
+                                .foregroundStyle(accent)
+                        }
+                        .frame(width: 24, height: 24).position(x: currentX, y: 12)
+                    Circle().fill(foreground.opacity(0.34))
+                        .frame(width: 12, height: 12).position(x: trailingX, y: 12)
                 }
             }
-            .frame(height: 16)
+            .frame(height: 24)
 
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 1) {
@@ -789,7 +798,7 @@ private struct CurrentActivityDuration: View {
     let compact: Bool
 
     var body: some View {
-        TimelineView(.periodic(from: nextMinuteBoundary, by: 60)) { context in
+        TimelineView(.periodic(from: startedAt, by: 60)) { context in
             let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
             Text(compact
                  ? currentActivityCompactDurationText(elapsed)
@@ -797,11 +806,6 @@ private struct CurrentActivityDuration: View {
         }
     }
 
-    private var nextMinuteBoundary: Date {
-        let elapsed = max(0, Date().timeIntervalSince(startedAt))
-        let completedMinutes = floor(elapsed / 60)
-        return startedAt.addingTimeInterval((completedMinutes + 1) * 60)
-    }
 }
 
 /// Matches the duration shown inside the Watch circular complication.
@@ -842,61 +846,29 @@ private struct CurrentActivityMapImage: View {
         if let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: "group.com.ct106.difangke"
         ) {
-            let preferredSuffixes = prefersDarkMap
-                ? ["dark", "light"]
-                : ["light", "dark"]
-            if let url = preferredSuffixes.lazy.compactMap({ suffix in
-                currentActivityMapURL(
-                    container: container,
+            // Text and map use the same theme. Falling back to the opposite
+            // appearance can put white text on a light map while the dark
+            // snapshot is still being rendered in the background.
+            let suffix = prefersDarkMap ? "dark" : "light"
+            let urls = CurrentActivityMapSnapshotCache.imageURLs(
+                    in: container,
                     sessionID: sessionID,
                     revision: revision,
                     suffix: suffix
                 )
-            }).first,
-               let data = try? Data(contentsOf: url), let image = UIImage(data: data) {
+            if let image = urls.lazy.compactMap({ url -> UIImage? in
+                guard let data = try? Data(contentsOf: url) else { return nil }
+                return UIImage(data: data)
+            }).first {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
             } else {
-                Color.clear
+                prefersDarkMap ? Color.black : Color.white
             }
         } else {
-            Color.clear
+            prefersDarkMap ? Color.black : Color.white
         }
-    }
-}
-
-private func currentActivityMapURL(
-    container: URL,
-    sessionID: String,
-    revision: Int,
-    suffix: String
-) -> URL? {
-    let exactURL = container.appendingPathComponent(
-        "current_activity_\(sessionID)_\(revision)_\(suffix).png"
-    )
-    if FileManager.default.fileExists(atPath: exactURL.path) {
-        return exactURL
-    }
-
-    // A process restart can briefly restore an Activity state before the host
-    // restores its in-memory revision. Reuse the newest snapshot for this same
-    // Activity session instead of showing an empty background.
-    let prefix = "current_activity_\(sessionID)_"
-    let ending = "_\(suffix).png"
-    return (try? FileManager.default.contentsOfDirectory(
-        at: container,
-        includingPropertiesForKeys: [.contentModificationDateKey]
-    ))?
-    .filter {
-        $0.lastPathComponent.hasPrefix(prefix)
-            && $0.lastPathComponent.hasSuffix(ending)
-            && !$0.lastPathComponent.contains("_photo_")
-    }
-    .max {
-        let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-        let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-        return left < right
     }
 }
 

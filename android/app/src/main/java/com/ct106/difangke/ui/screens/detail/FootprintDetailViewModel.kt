@@ -8,10 +8,8 @@ import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.PlaceEntity
-import com.ct106.difangke.data.prefs.AppPreferences
 import com.ct106.difangke.service.ActivitySuggestion
 import com.ct106.difangke.service.GeocodeService
-import com.ct106.difangke.service.PhotoAutoLinker
 import com.ct106.difangke.ui.shared.TimelineEditActions
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -24,7 +22,6 @@ import java.util.Date
  */
 class FootprintDetailViewModel(application: Application) : AndroidViewModel(application) {
     private val db = DiFangKeApp.instance.database
-    private val prefs = AppPreferences(application)
 
     private val _footprint = MutableStateFlow<FootprintEntity?>(null)
     val footprint: StateFlow<FootprintEntity?> = _footprint.asStateFlow()
@@ -61,12 +58,9 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
     val isUpdatingAddress: StateFlow<Boolean> = _isUpdatingAddress.asStateFlow()
 
     private var loadedId: String? = null
-    private var didAutoLink = false
-
     fun loadFootprint(id: String) {
         if (loadedId == id && _footprint.value != null) return
         loadedId = id
-        didAutoLink = false
         _isGone.value = false
         viewModelScope.launch { reload(id) }
     }
@@ -109,17 +103,6 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
                 db.footprintDao().update(updated)
                 _footprint.value = updated
             }
-        }
-    }
-
-    /** iOS onAppear: `if isAutoPhotoLinkEnabled { locationManager.linkPhotos(...) }`. */
-    fun autoLinkPhotosIfEnabled() {
-        val fp = _footprint.value ?: return
-        if (didAutoLink) return
-        didAutoLink = true
-        viewModelScope.launch {
-            if (!prefs.isAutoPhotoLinkEnabled.first()) return@launch
-            PhotoAutoLinker.linkPhotos(getApplication(), db, fp)?.let { _footprint.value = it }
         }
     }
 
