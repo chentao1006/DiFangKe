@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B941AA120000000000000001 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA120000000000000002 /* Views/MainTabView.swift */; };
 		06A904412C0FBE70CFD67936 /* HistoryListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C2C5158B30717A490546E3 /* HistoryListView.swift */; };
 		134DBA94706ABB8ACD8C6EF5 /* ExportManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FAF51D5207C3CFEFBEB0667 /* ExportManager.swift */; };
 		167F3466A9C607E0782581EB /* DiFangKeWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */; };
@@ -162,6 +163,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B941AA120000000000000002 /* Views/MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MainTabView.swift; sourceTree = "<group>"; };
 		0109B5C3A46C595F984A0148 /* 地方客.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "地方客.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		0DA88C94F7EAC66D28F00A84 /* FootprintDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FootprintDetailView.swift; sourceTree = "<group>"; };
 		0F466FD610098E71DB17C54D /* LocationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationManager.swift; sourceTree = "<group>"; };
@@ -339,6 +341,7 @@
 				C6FC95002F9A67B2004E1FE6 /* AppIcon.icon */,
 				8406ACF5012D1DB8F428AB9C /* Config.plist */,
 				A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */,
+				B941AA120000000000000002 /* Views/MainTabView.swift */,
 				2C84EEA3EDC02DA770FA555B /* DiFangKeApp.swift */,
 				45BAB919B70A00C9D4126C30 /* Info.plist */,
 				A0CC0B6B3717D956A36B0F02 /* Models */,
@@ -701,6 +704,7 @@
 				8F4D2CA46A1B43D0A6C7E2B1 /* ShareCards.swift in Sources */,
 				C67848582FA3A082002DF823 /* WidgetDataSyncManager.swift in Sources */,
 				AC19D6437C18A309FE001E29 /* Views/TimelineView.swift in Sources */,
+				B941AA120000000000000001 /* MainTabView.swift in Sources */,
 				7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */,
 				8EDC80C32DCF8D059D548DB7 /* DiFangKeApp.swift in Sources */,
 				C68544332F84E84200C605E9 /* TimelineComponents.swift in Sources */,
@@ -869,7 +873,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -890,7 +894,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.6.6;
+				MARKETING_VERSION = 1.6.7;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1006,7 +1010,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -1021,7 +1025,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.6.6;
+				MARKETING_VERSION = 1.6.7;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

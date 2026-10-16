@@ -330,9 +330,10 @@ struct DFKShareCardPreviewView: View {
                         renderAndShare()
                     } label: {
                         Label(isRendering ? "生成中..." : "分享给朋友", systemImage: "square.and.arrow.up")
+                            .font(.headline)
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .dfkPrimaryActionButtonStyle()
                     .disabled(isRendering || editablePayload.isLoading)
 
                 }

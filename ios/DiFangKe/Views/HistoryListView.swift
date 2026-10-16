@@ -150,25 +150,13 @@ struct HistoryListView: View {
     @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
     
     let initialDate: Date
-    let showImportOnAppear: Bool
+    let calendarOnly: Bool
     @State private var viewMode: ViewMode = .month
     @State private var selectedDate: Date
     @State private var showingDate: IdentifiableDate? = nil
-    @State private var showingPhotoImportRange = false
+    @State private var isPhotoImportRequested = false
     @State private var showingRawPointsDate: IdentifiableDate? = nil
-    @State private var isScanning = false
-    @State private var isImporting = false
-    @State private var scannedResults: [Footprint] = []
-    @State private var isShowingResults = false
-    @State private var showingNoResultsAlert = false
-    @State private var showingImportSuccessAlert = false
-    @State private var successCount = 0
-    @State private var showingPermissionAlert = false
-    @State private var scanProgress = 0
-    @State private var scanTotal = 0
-    @ObservedObject private var photoService = PhotoService.shared
 
-    @Query(sort: \Place.name) private var allPlacesForScan: [Place]
     
     enum ViewMode: String, CaseIterable {
         case month = "历史"
@@ -189,10 +177,11 @@ struct HistoryListView: View {
     var onFootprintPresentationChanged: ((Footprint?) -> Void)? = nil
     var onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil
 
-    init(initialDate: Date = Date(), showImportOnAppear: Bool = false, onDateSelected: ((Date) -> Void)? = nil, onFootprintPresentationChanged: ((Footprint?) -> Void)? = nil, onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil) {
+    init(initialDate: Date = Date(), calendarOnly: Bool = false, onDateSelected: ((Date) -> Void)? = nil, onFootprintPresentationChanged: ((Footprint?) -> Void)? = nil, onStatisticsVisibilityChanged: ((Bool) -> Void)? = nil) {
         let normalizedDate = Calendar.current.startOfDay(for: initialDate)
         self.initialDate = normalizedDate
-        self.showImportOnAppear = showImportOnAppear
+        self.calendarOnly = calendarOnly
+        _viewMode = State(initialValue: calendarOnly ? .month : .statistics)
         self.onDateSelected = onDateSelected
         self.onFootprintPresentationChanged = onFootprintPresentationChanged
         self.onStatisticsVisibilityChanged = onStatisticsVisibilityChanged
@@ -201,9 +190,9 @@ struct HistoryListView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            pickerSection
+            if !calendarOnly { pickerSection }
             ZStack {
-                if isCalendarIndexReady {
+                if !calendarOnly || isCalendarIndexReady {
                     contentArea
                         .overlay(alignment: .topTrailing) {
                             yearJumpOverlay
@@ -211,27 +200,25 @@ struct HistoryListView: View {
                         // Keep the calendar in the hierarchy so its lazy stack
                         // can lay out and perform the initial scroll, but never
                         // expose the top-of-list intermediate frame.
-                        .opacity(isCalendarInitialPositioned ? 1 : 0)
-                        .allowsHitTesting(isCalendarInitialPositioned)
-                        .accessibilityHidden(!isCalendarInitialPositioned)
+                        .opacity(!calendarOnly || isCalendarInitialPositioned ? 1 : 0)
+                        .allowsHitTesting(!calendarOnly || isCalendarInitialPositioned)
+                        .accessibilityHidden(calendarOnly && !isCalendarInitialPositioned)
                 }
 
-                if !isCalendarInitialPositioned {
+                if calendarOnly && !isCalendarInitialPositioned {
                     ProgressView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .accessibilityLabel("正在加载历史")
                 }
             }
         }
-        .navigationTitle("往昔足迹")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationTitle(calendarOnly ? "选择日期" : "回顾")
+        .navigationBarTitleDisplayMode(calendarOnly ? .inline : .large)
         .background(Color.dfkBackground)
         .onAppear {
-            prepareCalendarIndex()
+            if calendarOnly { prepareCalendarIndex() }
+            else { activateTabIfNeeded(viewMode) }
             onStatisticsVisibilityChanged?(viewMode == .statistics)
-            if showImportOnAppear {
-                checkPhotoPermission()
-            }
         }
         .onChange(of: viewMode) { _, mode in
             onStatisticsVisibilityChanged?(mode == .statistics)
@@ -245,7 +232,7 @@ struct HistoryListView: View {
         .onChange(of: allFootprints) { scheduleCalendarIndexRefresh() }
         .onChange(of: allTransportRecords) { scheduleCalendarIndexRefresh() }
         .sheet(item: $showingDate) { item in
-            TimelineView(initialDate: item.date)
+            MainTabView(initialDate: item.date)
                 .environment(locationManager)
                 .onDisappear { rebuildIndex() }
         }
@@ -254,53 +241,13 @@ struct HistoryListView: View {
                 .environment(locationManager)
                 .onDisappear { rebuildIndex() }
         }
-        .modifier(ImportSheetsModifier(
-            showingPhotoImportRange: $showingPhotoImportRange,
-            isShowingResults: $isShowingResults,
-            scannedResults: $scannedResults,
-            onStartScan: startScanning,
-            onConfirmImport: { selectedFootprints in
-                isImporting = true
-                isShowingResults = false
-                
-                // 为了避免主线程卡顿，我们将保存和后续处理移入异步任务
-                // 虽然 Footprint 已在 MainActor 创建，但 yield 允许 UI 保持响应
-                Task {
-                    for fp in selectedFootprints {
-                        modelContext.insert(fp)
-                    }
-                    
-                    // 尝试在后台进行保存（SwiftData 支持在异步上下文中调用 save）
-                    try? modelContext.save()
-                    
-                    await MainActor.run {
-                        scannedResults = []
-                        rebuildIndex()
-                        self.successCount = selectedFootprints.count
-                        self.isImporting = false
-                        self.showingImportSuccessAlert = true
-                        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
-                    }
-                }
-            }
-        ))
-        .modifier(ImportOverlaysModifier(
-            isScanning: isScanning,
-            isImporting: isImporting,
-            scanProgress: scanProgress,
-            scanTotal: scanTotal,
-            showingNoResultsAlert: $showingNoResultsAlert,
-            showingImportSuccessAlert: $showingImportSuccessAlert,
-            showingPermissionAlert: $showingPermissionAlert,
-            successCount: successCount,
-            onCancelScan: { stopScanning() }
-        ))
-        .modifier(ImportToolbarModifier(onTapAction: checkPhotoPermission))
+        .photoImportFlow(isRequested: $isPhotoImportRequested, onImported: rebuildIndex)
+        .modifier(ImportToolbarModifier(onTapAction: { isPhotoImportRequested = true }))
     }
     
     private var pickerSection: some View {
         Picker("视图", selection: $viewMode) {
-            ForEach(ViewMode.allCases, id: \.self) { mode in
+            ForEach([ViewMode.statistics, .favorites], id: \.self) { mode in
                 Text(mode.rawValue).tag(mode)
             }
         }
@@ -332,28 +279,30 @@ struct HistoryListView: View {
     
     private var contentArea: some View {
         ZStack {
-            HistoryMonthView(
-                footprintsByDay: footprintsByDay,
-                transportsByDay: transportsByDay,
-                allActivityTypes: allActivityTypes,
-                targetDate: selectedDate,
-                earliestDate: earliestHistoryDate,
-                latestDate: latestHistoryDate,
-                hasScrolled: $hasScrolledMonth,
-                showingRawPointsDate: $showingRawPointsDate,
-                onInitialPositioned: {
-                    isCalendarInitialPositioned = true
+            if calendarOnly {
+                HistoryMonthView(
+                    footprintsByDay: footprintsByDay,
+                    transportsByDay: transportsByDay,
+                    allActivityTypes: allActivityTypes,
+                    targetDate: selectedDate,
+                    earliestDate: earliestHistoryDate,
+                    latestDate: latestHistoryDate,
+                    hasScrolled: $hasScrolledMonth,
+                    showingRawPointsDate: $showingRawPointsDate,
+                    onInitialPositioned: {
+                        isCalendarInitialPositioned = true
+                    }
+                ) { date in
+                    if let onDateSelected {
+                        onDateSelected(date)
+                    } else {
+                        showingDate = IdentifiableDate(date: date)
+                    }
                 }
-            ) { date in
-                if let onDateSelected {
-                    onDateSelected(date)
-                } else {
-                    showingDate = IdentifiableDate(date: date)
-                }
+                .opacity(viewMode == .month ? 1 : 0)
+                .allowsHitTesting(viewMode == .month)
+                .accessibilityHidden(viewMode != .month)
             }
-            .opacity(viewMode == .month ? 1 : 0)
-            .allowsHitTesting(viewMode == .month)
-            .accessibilityHidden(viewMode != .month)
 
             // These views are created lazily on their first selection, then kept
             // alive. That avoids initial history-page work while preserving the
@@ -504,6 +453,7 @@ struct HistoryListView: View {
     }
 
     private func rebuildIndex() {
+        guard calendarOnly else { return }
         let source = calendarIndexSource
         if let cached = HistoryCalendarIndexCache.shared.index(matching: source) {
             applyCalendarIndex(cached)
@@ -552,6 +502,7 @@ struct HistoryListView: View {
     }
 
     private func scheduleCalendarIndexRefresh() {
+        guard calendarOnly else { return }
         calendarIndexRefreshTask?.cancel()
         calendarIndexRefreshTask = Task { @MainActor in
             // @Query updates each collection independently. Coalesce their first
@@ -565,51 +516,6 @@ struct HistoryListView: View {
         }
     }
     
-    private func checkPhotoPermission() {
-        let status = photoService.authorizationStatus
-        if status == .notDetermined {
-            photoService.requestPermission { granted in
-                if granted { showingPhotoImportRange = true }
-            }
-        } else if status == .authorized || status == .limited {
-            showingPhotoImportRange = true
-        } else {
-            showingPermissionAlert = true
-        }
-    }
-    
-    private func startScanning(start: Date, end: Date) {
-        self.scanProgress = 0
-        self.scanTotal = 0
-        photoService.isScanCancelled = false
-        isScanning = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            let finalEnd = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: end) ?? end
-            let activeFootprints = self.allFootprints.filter { $0.status != .ignored }
-            let existingIDs = Set(activeFootprints.flatMap { $0.photoAssetIDs })
-            let liteHistory = activeFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
-            let litePlaces = allPlacesForScan.map { $0.convertToLite() }
-            let liteActivities = allActivityTypes.map { $0.convertToLite() }
-            
-            PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: litePlaces, allActivities: liteActivities, excludedAssetIDs: existingIDs, history: liteHistory, onProgress: { current, total in
-                self.scanProgress = current
-                self.scanTotal = total
-            }) { results in
-                self.isScanning = false
-                if !results.isEmpty {
-                    self.scannedResults = results
-                    self.isShowingResults = true
-                } else {
-                    self.showingNoResultsAlert = true
-                }
-            }
-        }
-    }
-    
-    private func stopScanning() {
-        photoService.isScanCancelled = true
-        isScanning = false
-    }
 }
 
 
@@ -1103,9 +1009,7 @@ struct MonthDayCell: View {
         let hasData = !footprints.isEmpty || !transports.isEmpty
         let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
         let isTarget = Calendar.current.isDate(date, inSameDayAs: targetDate)
-        // 没数据的格子仍然要能点进去：否则一旦某天的数据被清空（例如 bug 或用户手动
-        // 重置），用户永远没法翻回那天调出"重新生成"菜单。
-        let isSelectable = hasData || Calendar.current.startOfDay(for: date) <= Calendar.current.startOfDay(for: Date())
+        let isSelectable = hasData && Calendar.current.startOfDay(for: date) <= Calendar.current.startOfDay(for: Date())
 
         VStack(spacing: 4) {
             ZStack {
@@ -1156,6 +1060,8 @@ struct MonthDayCell: View {
             }
         )
         .onTapGesture { if isSelectable { onTap() } }
+        .allowsHitTesting(isSelectable)
+        .accessibilityAddTraits(isSelectable ? .isButton : [])
     }
 
     private var usesCompactTwoLineLocationLabel: Bool {
@@ -1317,6 +1223,132 @@ struct ImportSheetsModifier: ViewModifier {
     }
 }
 
+/// The whole photo import flow (permission, year picker, scan, review,
+/// save). Shared by Review and the timeline so either starts it in place.
+struct PhotoImportFlowModifier: ViewModifier {
+    @Environment(\.modelContext) private var modelContext
+    @Binding var isRequested: Bool
+    let onImported: () -> Void
+    @State private var showingPhotoImportRange = false
+    @State private var isScanning = false
+    @State private var isImporting = false
+    @State private var scannedResults: [Footprint] = []
+    @State private var isShowingResults = false
+    @State private var showingNoResultsAlert = false
+    @State private var showingImportSuccessAlert = false
+    @State private var successCount = 0
+    @State private var showingPermissionAlert = false
+    @State private var scanProgress = 0
+    @State private var scanTotal = 0
+    @ObservedObject private var photoService = PhotoService.shared
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: isRequested, initial: true) { _, requested in
+                guard requested else { return }
+                isRequested = false
+                checkPhotoPermission()
+            }
+            .modifier(ImportSheetsModifier(
+                showingPhotoImportRange: $showingPhotoImportRange,
+                isShowingResults: $isShowingResults,
+                scannedResults: $scannedResults,
+                onStartScan: startScanning,
+                onConfirmImport: { selectedFootprints in
+                    isImporting = true
+                    isShowingResults = false
+
+                    // 为了避免主线程卡顿，我们将保存和后续处理移入异步任务
+                    // 虽然 Footprint 已在 MainActor 创建，但 yield 允许 UI 保持响应
+                    Task {
+                        for fp in selectedFootprints {
+                            modelContext.insert(fp)
+                        }
+
+                        // 尝试在后台进行保存（SwiftData 支持在异步上下文中调用 save）
+                        try? modelContext.save()
+
+                        await MainActor.run {
+                            scannedResults = []
+                            onImported()
+                            self.successCount = selectedFootprints.count
+                            self.isImporting = false
+                            self.showingImportSuccessAlert = true
+                            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                        }
+                    }
+                }
+            ))
+            .modifier(ImportOverlaysModifier(
+                isScanning: isScanning,
+                isImporting: isImporting,
+                scanProgress: scanProgress,
+                scanTotal: scanTotal,
+                showingNoResultsAlert: $showingNoResultsAlert,
+                showingImportSuccessAlert: $showingImportSuccessAlert,
+                showingPermissionAlert: $showingPermissionAlert,
+                successCount: successCount,
+                onCancelScan: { stopScanning() }
+            ))
+    }
+
+    private func checkPhotoPermission() {
+        let status = photoService.authorizationStatus
+        if status == .notDetermined {
+            photoService.requestPermission { granted in
+                if granted { showingPhotoImportRange = true }
+            }
+        } else if status == .authorized || status == .limited {
+            showingPhotoImportRange = true
+        } else {
+            showingPermissionAlert = true
+        }
+    }
+
+    private func startScanning(start: Date, end: Date) {
+        self.scanProgress = 0
+        self.scanTotal = 0
+        photoService.isScanCancelled = false
+        isScanning = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let finalEnd = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: end) ?? end
+            // Fetched when a scan starts, so hosts don't observe every footprint.
+            let allFootprints = (try? modelContext.fetch(FetchDescriptor<Footprint>())) ?? []
+            let allPlaces = (try? modelContext.fetch(FetchDescriptor<Place>(sortBy: [SortDescriptor(\.name)]))) ?? []
+            let allActivityTypes = (try? modelContext.fetch(FetchDescriptor<ActivityType>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? []
+            let activeFootprints = allFootprints.filter { $0.status != .ignored }
+            let existingIDs = Set(activeFootprints.flatMap { $0.photoAssetIDs })
+            let liteHistory = activeFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
+            let litePlaces = allPlaces.map { $0.convertToLite() }
+            let liteActivities = allActivityTypes.map { $0.convertToLite() }
+
+            PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: litePlaces, allActivities: liteActivities, excludedAssetIDs: existingIDs, history: liteHistory, onProgress: { current, total in
+                self.scanProgress = current
+                self.scanTotal = total
+            }) { results in
+                self.isScanning = false
+                if !results.isEmpty {
+                    self.scannedResults = results
+                    self.isShowingResults = true
+                } else {
+                    self.showingNoResultsAlert = true
+                }
+            }
+        }
+    }
+
+    private func stopScanning() {
+        photoService.isScanCancelled = true
+        isScanning = false
+    }
+}
+
+extension View {
+    func photoImportFlow(isRequested: Binding<Bool>, onImported: @escaping () -> Void = {}) -> some View {
+        modifier(PhotoImportFlowModifier(isRequested: isRequested, onImported: onImported))
+    }
+}
+
 struct ImportOverlaysModifier: ViewModifier {
     let isScanning: Bool; let isImporting: Bool
     let scanProgress: Int; let scanTotal: Int
@@ -1400,12 +1432,17 @@ struct PhotoImportRangePicker: View {
                 Picker("年份", selection: $selectedYear) {
                     ForEach((min(earliestYear, selectedYear)...Calendar.current.component(.year, from: Date())), id: \.self) { Text("\(String(format: "%d", $0))年").tag($0) }
                 }.pickerStyle(.wheel)
-                Button("开始导入") {
+                Button {
                     let s = Calendar.current.date(from: DateComponents(year: selectedYear, month: 1, day: 1))!
                     let e = Calendar.current.date(from: DateComponents(year: selectedYear, month: 12, day: 31, hour: 23, minute: 59))!
                     onSelect(s, e)
+                } label: {
+                    Text("开始导入")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
                 }
-                .historyActionButtonStyle()
+                .dfkPrimaryActionButtonStyle()
+                .padding(.horizontal, 16)
             }
             .navigationTitle("寻回那年的记忆")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() } } }

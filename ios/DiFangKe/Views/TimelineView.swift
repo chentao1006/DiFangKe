@@ -5,8 +5,6 @@ import Photos
 import UIKit
 import Aptabase
 
-private let collapsedTimelineDetentHeight: CGFloat = 76
-
 /// Fits only a selected footprint into the unobscured part of the map.
 /// Map points use the same Mercator projection on both axes, so fitting does
 /// not depend on latitude/longitude spans having different physical scales.
@@ -63,16 +61,8 @@ private struct ImportantPlaceDraft: Identifiable {
     var name: String?
 }
 
-struct TimelineView: View {
-    var initialDate: Date?
-
-    var body: some View {
-        ContinuousTimelineView(initialDate: initialDate)
-    }
-}
-
 #Preview {
-    TimelineView()
+    MainTabView()
 }
 
 extension CodableCoordinate: @unchecked Sendable {}
@@ -177,23 +167,32 @@ private final class ContinuousTimelineCache {
     }
 }
 
-private struct ContinuousTimelineView: View {
+/// Owns record data and map coordination. The app shell chooses where its
+/// map and record surfaces are hosted; this feature does not own app navigation.
+struct TimelineScene<Content: View>: View {
     var initialDate: Date?
+    let isActive: Bool
+    let isSideBySide: Bool
+    @Binding var activeTimelineDate: Date
+    @Binding var timelineDetent: PresentationDetent
+    /// Owned by the app shell: its map-backed detail must not get the
+    /// under-tab-bar background used for full-height sheets.
+    @Binding var selectedTransport: Transport?
+    @Binding var destination: TimelineDestination?
+    let onRequestRecords: () -> Void
+    @ViewBuilder let content: (AnyView, AnyView) -> Content
 
-    nonisolated private static let initialTimelineVisibleDateBatchSize = 30
-    nonisolated private static let timelineVisibleDateBatchSize = 30
-    nonisolated private static let gapLoadDateBatchSize = 30
-    nonisolated private static let timelineCommitChunkSize = 24
+    nonisolated private static var initialTimelineVisibleDateBatchSize: Int { 30 }
+    nonisolated private static var timelineVisibleDateBatchSize: Int { 30 }
+    nonisolated private static var gapLoadDateBatchSize: Int { 30 }
+    nonisolated private static var timelineCommitChunkSize: Int { 24 }
 
     @Environment(\.modelContext) private var modelContext
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.scenePhase) private var scenePhase
     @Environment(LocationManager.self) private var locationManager
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @State private var cameraPosition: MapCameraPosition = .automatic
-    @State private var isTimelinePresented = true
     @State private var showLocationSettingsAlert = false
     @State private var showingArrivalConfirmation = false
     @State private var loadedDates: [Date] = []
@@ -201,9 +200,7 @@ private struct ContinuousTimelineView: View {
     @State private var isLoadingEarlierDates = false
     @State private var todayScrollRequest = 0
     @State private var targetScrollDate: Date? = nil
-    @State private var activeTimelineDate = Calendar.current.startOfDay(for: Date())
     @State private var layoutViewportState = ContinuousTimelineLayoutViewportState()
-    @State private var timelineDetent: PresentationDetent = .medium
     @State private var visibleTimelineItems: [TimelineItem] = []
     @State private var visibleTimelineDates = Set<Date>()
     @State private var visibleTimelineItemIDs = Set<String>()
@@ -220,7 +217,6 @@ private struct ContinuousTimelineView: View {
     @State private var deferredVisibleTimelineDates: Set<Date>?
     @State private var deferredTimelineWorkCount = 0
     @State private var mapViewportSize: CGSize = .zero
-    @State private var isShowingSettings = false
     @State private var didRequestInitialTimeline = false
     @State private var hasCompletedInitialTimelineLoad = false
     @State private var allowsMapInteractionCollapse = false
@@ -235,7 +231,7 @@ private struct ContinuousTimelineView: View {
     @State private var selectedFootprint: Footprint?
     @State private var loadedFootprintCameraKey: FootprintCameraSourceKey?
     @State private var loadedFootprintCameraCoordinates: [CLLocationCoordinate2D] = []
-    @State private var selectedTransport: Transport?
+    @State private var selectedFootprintGroup: DFKMapView.AggregatedFootprint?
     @State private var selectedMapPhotoAssetID: String? = nil
     @State private var isFollowingUserLocation = false
 
@@ -285,12 +281,17 @@ private struct ContinuousTimelineView: View {
             selectedFootprintCoordinate: selectedFootprintMapCoordinate,
             onMapInteraction: handleMapInteraction,
             onTimelineItemTap: { item in
+                onRequestRecords()
                 withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
                     switch item {
                     case .footprint(let footprint): selectedFootprint = storedFootprint(matching: footprint)
                     case .transport(let transport): selectedTransport = transport
                     }
                 }
+            },
+            onAggregatedFootprintTap: { aggregated in
+                onRequestRecords()
+                selectedFootprintGroup = aggregated
             },
             onPhotoTap: { asset in
                 selectedMapPhotoAssetID = asset.localIdentifier
@@ -305,25 +306,10 @@ private struct ContinuousTimelineView: View {
         moveMapCamera(to: region, animated: true)
     }
 
-    private var isSideBySide: Bool {
-        horizontalSizeClass == .regular || verticalSizeClass == .compact
-    }
-
-    private func sheetHeight(in mapHeight: CGFloat) -> CGFloat {
-        if isSideBySide { return 0 }
-        if timelineDetent == .height(collapsedTimelineDetentHeight) { return collapsedTimelineDetentHeight }
-        if timelineDetent == .medium { return mapHeight * 0.5 }
-        return mapHeight
-    }
-
-    private func mapLocationButton(mapHeight: CGFloat) -> some View {
-        let desiredPadding: CGFloat
-        if isSideBySide || timelineDetent != .large {
-            desiredPadding = 48 + sheetHeight(in: mapHeight)
-        } else {
-            desiredPadding = 16
-        }
-        return Button(action: focusMapOnCurrentLocation) {
+    /// Top trailing, below the status bar: clear of every sheet detent, so
+    /// its position never depends on the record sheet's height.
+    private var mapLocationButton: some View {
+        Button(action: focusMapOnCurrentLocation) {
             Image(systemName: isFollowingUserLocation ? "location.fill" : "location")
                 .font(.system(size: 16, weight: .semibold))
                 .frame(width: 32, height: 32)
@@ -332,7 +318,7 @@ private struct ContinuousTimelineView: View {
         .controlSize(.small)
         .accessibilityLabel("定位到当前位置")
         .padding(.trailing, 16)
-        .padding(.bottom, desiredPadding)
+        .padding(.top, 8)
     }
 
     private func handleMapInteraction(_ interactionType: DFKMapView.MapInteractionType) {
@@ -342,7 +328,7 @@ private struct ContinuousTimelineView: View {
         
         renderedMapRegion = nil
         displayedMapRegion = nil
-        guard allowsMapInteractionCollapse else { return }
+        guard allowsMapInteractionCollapse, isActive else { return }
         guard !isSideBySide else { return }
 
         lockVisibleTimelineMapForInteraction()
@@ -354,8 +340,8 @@ private struct ContinuousTimelineView: View {
     }
 
     @ViewBuilder
-    private var timelineSidebarContent: some View {
-        ContinuousTimelineSheet(
+    private var timelineNavigationContent: some View {
+        TimelineView(
             dates: timelineDates,
             timelinesByDate: timelinesByDate,
             initialTimelineLoadCompleted: hasCompletedInitialTimelineLoad,
@@ -370,6 +356,7 @@ private struct ContinuousTimelineView: View {
             isSideBySide: isSideBySide,
             selectedFootprint: $selectedFootprint,
             selectedTransport: $selectedTransport,
+            selectedFootprintGroup: $selectedFootprintGroup,
             loadEarlierDates: loadEarlierTimeline,
             loadLaterDates: loadLaterTimeline,
             loadLaterDatesAfter: { date in await loadLaterTimeline(from: date) },
@@ -379,36 +366,20 @@ private struct ContinuousTimelineView: View {
             availableDates: loadableTimelineDateSet,
             visibleDatesChanged: updateVisibleTimelineDates,
             visibleItemIDsChanged: updateVisibleTimelineItemIDs,
-            isShowingSettings: $isShowingSettings,
+            isActive: isActive,
             selectedMapPhotoAssetID: $selectedMapPhotoAssetID
         )
-        // This content is the iPhone bottom timeline sheet and the iPad sidebar.
+        // The same native sheet hosts navigation on both iPhone and iPad.
         // It is therefore the common presenter for a persisted denied location
         // permission on every layout.
         .modifier(LocationSettingsAlertModifier(isPresented: $showLocationSettingsAlert))
         .onAppear(perform: handleTimelinePermissionPresenterAppear)
     }
 
-    private var timelineSheet: some View {
-        timelineSidebarContent
-            .presentationDetents([.height(collapsedTimelineDetentHeight), .medium, .large], selection: $timelineDetent)
-            .presentationBackground(.clear)
-            .presentationDragIndicator(.visible)
-            // A selected footprint presents an editor above this sheet. Let its
-            // scroll view keep its touches instead of turning them into a resize
-            // gesture on the underlying timeline sheet.
-            .presentationContentInteraction(.scrolls)
-            .interactiveDismissDisabled()
-            .presentationBackgroundInteraction(.enabled(upThrough: .medium))
-    }
-
     @ViewBuilder
     private var timelineMainContent: some View {
         GeometryReader { geometry in
-            ZStack(alignment: .bottomTrailing) {
-                mapContent
-                mapLocationButton(mapHeight: geometry.size.height)
-            }
+            mapContent
             .onAppear {
                 updateMapViewportSize(geometry.size)
             }
@@ -417,57 +388,20 @@ private struct ContinuousTimelineView: View {
             }
         }
         .ignoresSafeArea(edges: isSideBySide ? [.top, .bottom, .trailing] : .all)
-    }
-
-    private var sidebarNavigationTitle: String {
-        if selectedFootprint != nil { return "足迹详情" }
-        return "地方客"
-    }
-
-    @ViewBuilder
-    private var responsiveTimelineLayout: some View {
-        Group {
-            if horizontalSizeClass == .regular {
-                NavigationSplitView {
-                    timelineSidebarContent
-                        .navigationTitle(sidebarNavigationTitle)
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar(removing: .sidebarToggle)
-                        .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 360)
-                } detail: {
-                    timelineMainContent
-                        .toolbar(.hidden, for: .navigationBar)
-                }
-                .toolbar(removing: .sidebarToggle)
-            } else if verticalSizeClass == .compact {
-                HStack(spacing: 0) {
-                    NavigationStack {
-                        timelineSidebarContent
-                            .navigationTitle(sidebarNavigationTitle)
-                            .navigationBarTitleDisplayMode(.inline)
-                    }
-                    .frame(width: 340)
-
-                    Divider()
-
-                    timelineMainContent
-                }
-            } else {
-                NavigationStack {
-                    timelineMainContent
-                        .toolbar(.hidden, for: .navigationBar)
-                        .sheet(isPresented: $isTimelinePresented) {
-                            timelineSheet
-                        }
-
-                }
-            }
-        }
+        // Outside the safe-area expansion, so it sits below the status bar.
+        .overlay(alignment: .topTrailing) { mapLocationButton }
     }
 
     var body: some View {
-        responsiveTimelineLayout
-        .onAppear(perform: handleTimelineAppear)
+        content(AnyView(timelineMainContent), AnyView(timelineNavigationContent))
+        .onChange(of: destination?.id) { _, _ in consumeDestination() }
+        .onChange(of: hasCompletedInitialTimelineLoad) { _, ready in
+            if ready { consumeDestination() }
+        }
+        .onAppear {
+            handleTimelineAppear()
+            consumeDestination()
+        }
         .onDisappear(perform: handleTimelineDisappear)
         .task { await loadInitialTimeline() }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged")), perform: handleFootprintDataChanged)
@@ -534,8 +468,15 @@ private struct ContinuousTimelineView: View {
         }
     }
 
+    private func consumeDestination() {
+        guard hasCompletedInitialTimelineLoad, let requested = destination else { return }
+        destination = nil
+        openDate(requested.date, footprintID: requested.footprintID)
+    }
+
     private func handleDeepLinkURL(_ url: URL) {
         guard url.scheme == "difangke" else { return }
+        onRequestRecords()
 
         if url.host == "timeline" {
             openTimelineDeepLink(url)
@@ -842,41 +783,38 @@ private struct ContinuousTimelineView: View {
     }
 
     private func handleDeepLink(userInfo: [AnyHashable: Any]?) {
-        guard let userInfo = userInfo else { return }
-        
-        if let type = userInfo["type"] as? String {
-            if type == "highlight_footprint",
-                      let date = userInfo["date"] as? Date {
-                
-                let footprintID = userInfo["footprintID"] as? UUID
-                let dayStart = Calendar.current.startOfDay(for: date)
-                // A live receiver has consumed the cold-launch fallback too.
-                if locationManager.deepLinkDate == dayStart {
-                    locationManager.deepLinkDate = nil
-                    locationManager.deepLinkFootprintID = nil
-                }
-                
-                Task {
-                    activeTimelineDate = dayStart
-                    updateVisibleTimelineDates([dayStart])
-                    _ = await refreshAvailableTimelineDateCache()
-                    _ = await loadTimelineDate(dayStart)
-                    // `todayScrollRequest` drives the sheet's generic scroll handler.
-                    // Supply the notification's day so it does not fall back to today.
-                    targetScrollDate = dayStart
-                    todayScrollRequest += 1
-                    
-                    if let fid = footprintID {
-                        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == fid })
-                        if let fetched = try? modelContext.fetch(descriptor).first {
-                            selectedFootprint = fetched
-                        }
-                    }
+        guard let userInfo,
+              userInfo["type"] as? String == "highlight_footprint",
+              let date = userInfo["date"] as? Date else { return }
+        openDate(date, footprintID: userInfo["footprintID"] as? UUID)
+    }
+
+    /// Shared by parent navigation and notification deep links.
+    private func openDate(_ date: Date, footprintID: UUID?) {
+        onRequestRecords()
+        let dayStart = Calendar.current.startOfDay(for: date)
+        if locationManager.deepLinkDate == dayStart {
+            locationManager.deepLinkDate = nil
+            locationManager.deepLinkFootprintID = nil
+        }
+
+        Task { @MainActor in
+            activeTimelineDate = dayStart
+            updateVisibleTimelineDates([dayStart])
+            _ = await refreshAvailableTimelineDateCache()
+            _ = await loadTimelineDate(dayStart)
+            targetScrollDate = dayStart
+            todayScrollRequest += 1
+
+            if let footprintID {
+                let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+                if let fetched = try? modelContext.fetch(descriptor).first {
+                    selectedFootprint = fetched
                 }
             }
         }
     }
-    
+
     private func handleColdLaunchDeepLink() {
         if let date = locationManager.deepLinkDate {
             locationManager.deepLinkDate = nil
@@ -1458,6 +1396,9 @@ private struct ContinuousTimelineView: View {
     /// Falls back to the unfiltered list when nothing overlaps yet (e.g. right
     /// after a day loads, before its rows have published frames).
     private func filteredForVisibleItems(_ items: [TimelineItem]) -> [TimelineItem] {
+        // A collapsed card has no visible rows. Fit the entire selected day,
+        // rather than retaining the last expanded viewport's subset.
+        guard isSideBySide || timelineDetent != .height(collapsedTimelineDetentHeight) else { return items }
         guard !visibleTimelineItemIDs.isEmpty else { return items }
         let filtered = items.filter { visibleTimelineItemIDs.contains($0.id) }
         return filtered.isEmpty ? items : filtered
@@ -1726,6 +1667,9 @@ private struct ContinuousTimelineView: View {
                 case .footprint(let footprint):
                     return [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
                 case .transport(let transport):
+                    if !isSideBySide && timelineDetent == .height(collapsedTimelineDetentHeight) {
+                        return transport.points
+                    }
                     return sampledCoordinates(from: transport.points, maximumCount: 24)
                 }
             }
@@ -1761,15 +1705,15 @@ private struct ContinuousTimelineView: View {
         return coordinates
     }
 
-    private func aggregatedFootprintCameraCoordinates(for items: [TimelineItem]) -> [CLLocationCoordinate2D] {
-        struct Bucket {
-            var weightedLatitude: Double
-            var weightedLongitude: Double
-            var totalWeight: TimeInterval
-            var totalDuration: TimeInterval
-        }
+    private struct FootprintCameraBucket {
+        var weightedLatitude: Double
+        var weightedLongitude: Double
+        var totalWeight: TimeInterval
+        var totalDuration: TimeInterval
+    }
 
-        var buckets: [String: Bucket] = [:]
+    private func aggregatedFootprintCameraCoordinates(for items: [TimelineItem]) -> [CLLocationCoordinate2D] {
+        var buckets: [String: FootprintCameraBucket] = [:]
         var orderedKeys: [String] = []
 
         for item in items {
@@ -1795,7 +1739,7 @@ private struct ContinuousTimelineView: View {
                 buckets[key] = bucket
             } else {
                 orderedKeys.append(key)
-                buckets[key] = Bucket(
+                buckets[key] = FootprintCameraBucket(
                     weightedLatitude: footprint.latitude * durationWeight,
                     weightedLongitude: footprint.longitude * durationWeight,
                     totalWeight: durationWeight,
@@ -1879,11 +1823,12 @@ private struct ContinuousTimelineView: View {
 }
 
 
-private struct ContinuousTimelineSheet: View {
+private struct TimelineView: View {
     private enum ScrollTarget: Hashable {
         case date(Date)
         case now
         case todayBottom
+        case dateLine(Date)
     }
 
     @Environment(\.modelContext) private var modelContext
@@ -1891,17 +1836,6 @@ private struct ContinuousTimelineSheet: View {
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var activityTypes: [ActivityType]
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @State private var isShowingCalendar = false
-    @State private var isShowingHistory = false
-    @State private var isHistoryContentReady = false
-    @State private var historyContentPreparationTask: Task<Void, Never>?
-    @State private var isHistoryStatisticsActive = false
-    @State private var isHistoryMinimized = false
-    @State private var historyPresentationDetent: PresentationDetent = .large
-    @State private var historyFootprintMapTask: Task<Void, Never>?
-    @State private var pendingHistoryDateSelection: Date?
-    /// A footprint opened from History; its sheet is presented from the root
-    /// of the History sheet, mirroring how the timeline presents one.
-    @State private var historyDetailFootprint: Footprint?
     @State private var scrollRestorer = ContinuousTimelineScrollRestorer()
     @State private var headerVisibleDates: [Date] = []
     @State private var freezesViewportDrivenUpdatesUntil: Date? = Date.distantFuture
@@ -1915,11 +1849,15 @@ private struct ContinuousTimelineSheet: View {
     @State private var rawDateFrames = ContinuousTimelineRawDateFrames()
     @State private var calendarScrollLockTarget: Date?
     @State private var calendarScrollRetryTask: Task<Void, Never>?
+    @State private var calendarScrollAlignsTargetToTop = false
     @State private var latestDateFrames: [Date: CGRect] = [:]
     @State private var latestViewportHeight: CGFloat = 0
     @State private var dateFrameUpdateCoalescer = ContinuousTimelineDateFrameUpdateCoalescer()
     @State private var itemFrameUpdateCoalescer = ContinuousTimelineDateFrameUpdateCoalescer()
     @State private var latestVisibleItemIDs = Set<String>()
+    /// The map fits the active day as a whole until the user scrolls the
+    /// timeline by hand; only then does it follow the visible rows.
+    @State private var mapFollowsVisibleContent = false
     @State private var initialTodayScrollTask: Task<Void, Never>?
     @State private var initialLoadingFallbackTask: Task<Void, Never>?
     @State private var allowsInitialLoadingFallback = false
@@ -1942,7 +1880,6 @@ private struct ContinuousTimelineSheet: View {
     @State private var pendingMergeCandidate: ContinuousAdjacentFootprintMergeCandidate?
     @State private var pendingTransportMergeCandidate: ContinuousAdjacentTransportMergeCandidate?
     @State private var hasCompletedInitialTimelinePositioning = false
-    @State private var requestedHistoryImport = false
     @State private var importantPlaceDraft: ImportantPlaceDraft?
     @State private var sharePayload: DFKShareCardPayload?
     @State private var showingTimelineShareRangePicker = false
@@ -1962,6 +1899,10 @@ private struct ContinuousTimelineSheet: View {
     let isSideBySide: Bool
     @Binding var selectedFootprint: Footprint?
     @Binding var selectedTransport: Transport?
+    /// Presented here rather than by the map: the map lives in the app
+    /// window, beneath the records window that hosts every sheet.
+    @Binding var selectedFootprintGroup: DFKMapView.AggregatedFootprint?
+    @State private var footprintSelectedFromGroup: Footprint?
     let loadEarlierDates: () async -> Bool
     let loadLaterDates: () async -> Bool
     let loadLaterDatesAfter: (Date) async -> Bool
@@ -1971,7 +1912,9 @@ private struct ContinuousTimelineSheet: View {
     let availableDates: Set<Date>
     let visibleDatesChanged: (Set<Date>) -> Void
     let visibleItemIDsChanged: (Set<String>) -> Void
-    @Binding var isShowingSettings: Bool
+    let isActive: Bool
+    /// Starts the shared photo import flow here, without leaving Records.
+    @State private var isPhotoImportRequested = false
     @Binding var selectedMapPhotoAssetID: String?
 
     private var isCollapsed: Bool {
@@ -2000,7 +1943,7 @@ private struct ContinuousTimelineSheet: View {
     private var isPreservingPhysicalViewport: Bool {
         isPreservingViewportForEarlierLoad || scenePhase != .active ||
         viewportAnchorBeforeBackground != nil || isReloadingTimelineExternally ||
-        scrollRestorer.isRestoring
+        scrollRestorer.isRestoring || calendarScrollLockTarget != nil
     }
 
     private var isShowingFootprintDeletionAlert: Binding<Bool> {
@@ -2068,17 +2011,27 @@ private struct ContinuousTimelineSheet: View {
     private var currentDates: [Date] { rawDateFrames.dates }
 
     var body: some View {
-        // Reference box: refreshed on every body pass without invalidating it.
         let _ = { rawDateFrames.dates = dates }()
+        ScrollViewReader { proxy in
+            recordsPage(proxy: proxy)
+                .onChange(of: todayScrollRequest) { _, _ in
+                    requestScrollToToday(using: proxy)
+                }
+        }
+    }
+
+    private func recordsPage(proxy: ScrollViewProxy) -> some View {
         ZStack {
             NavigationStack {
-                ScrollViewReader { proxy in
                     GeometryReader { viewport in
                         // Keep the scroll view mounted while collapsed so its
                         // current offset survives re-expansion. Rendering it
                         // transparent prevents its first row from peeking
                         // below the title bar in the collapsed detent.
                         mainScrollView(proxy: proxy, viewport: viewport)
+                            // The reader's frame ends at the title bar; rows
+                            // never draw over the sheet's top band.
+                            .clipped()
                             .opacity(isCollapsed ? 0 : 1)
                             .allowsHitTesting(!isCollapsed)
                     .sheet(item: $footprintPendingSplit, onDismiss: handleFootprintSplitDismissal) { footprint in
@@ -2102,141 +2055,6 @@ private struct ContinuousTimelineSheet: View {
                     .sheet(isPresented: $showingTimelineShareRangePicker) {
                         DFKTimelineShareRangePicker(initialDate: activeTimelineDate) { startDate, endDate in
                             prepareTimelineShare(startDate: startDate, endDate: endDate)
-                        }
-                    }
-                    .sheet(isPresented: $isShowingSettings) {
-                        NavigationStack {
-                            SettingsView()
-                                .toolbar {
-                                    ToolbarItem(placement: .topBarTrailing) {
-                                        Button {
-                                            isShowingSettings = false
-                                        } label: {
-                                            Image(systemName: "xmark").dfkToolbarDismissIcon()
-                                        }
-                                    }
-                                }
-                        }
-                    }
-                    .sheet(isPresented: $isShowingHistory, onDismiss: {
-                        guard let selectedDate = pendingHistoryDateSelection else { return }
-                        pendingHistoryDateSelection = nil
-                        scrollToDate(selectedDate, using: proxy)
-                    }) {
-                        NavigationStack {
-                            Group {
-                                if isHistoryContentReady {
-                                    HistoryListView(
-                                        initialDate: activeTimelineDate,
-                                        showImportOnAppear: requestedHistoryImport,
-                                        onDateSelected: { selectedDate in
-                                            pendingHistoryDateSelection = selectedDate
-                                            isShowingHistory = false
-                                        },
-                                        onFootprintPresentationChanged: { footprint in
-                                            handleHistoryFootprintPresentation(footprint, using: proxy)
-                                        },
-                                        onStatisticsVisibilityChanged: { isActive in
-                                            isHistoryStatisticsActive = isActive
-                                        }
-                                    )
-                                    .onDisappear {
-                                        requestedHistoryImport = false
-                                    }
-                                } else {
-                                    ProgressView()
-                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                        .background(Color.dfkBackground)
-                                        .accessibilityLabel("正在打开历史")
-                                }
-                            }
-                            .toolbar {
-                                ToolbarItem(placement: .topBarTrailing) {
-                                    HStack(spacing: 18) {
-                                        if isHistoryStatisticsActive {
-                                            Button {
-                                                NotificationCenter.default.post(name: .dfkShareHistoryStatistics, object: nil)
-                                            } label: {
-                                                Image(systemName: "square.and.arrow.up")
-                                            }
-                                            .accessibilityLabel("分享统计")
-                                        }
-
-                                        Button {
-                                            isShowingHistory = false
-                                        } label: {
-                                            Image(systemName: "xmark").dfkToolbarDismissIcon()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .sheet(item: Binding(
-                            get: { historyDetailFootprint },
-                            set: { footprint in
-                                historyDetailFootprint = footprint
-                                // Restore History as the detail starts closing.
-                                if footprint == nil {
-                                    handleHistoryFootprintPresentation(nil, using: proxy)
-                                }
-                            }
-                        )) { footprint in
-                            FootprintModalView(
-                                footprint: footprint,
-                                autoFocus: false,
-                                onRequestClose: {
-                                    // Mirror opening: start expanding History
-                                    // first, dismiss one main-queue turn later.
-                                    // Dismissing first made UIKit expand
-                                    // History only after the dismissal ended.
-                                    handleHistoryFootprintPresentation(nil, using: proxy)
-                                    DispatchQueue.main.async {
-                                        historyDetailFootprint = nil
-                                    }
-                                }
-                            )
-                            .environment(locationManager)
-                        }
-                        // No collapsed detent: swiping down from half height
-                        // closes History instead of parking it at the bottom.
-                        .presentationDetents(
-                            [.medium, .large],
-                            selection: $historyPresentationDetent
-                        )
-                        // Half height while a footprint opened from History
-                        // shows its map focus, so the map stays interactive.
-                        .presentationBackgroundInteraction(.enabled(upThrough: .medium))
-                    }
-                    .onChange(of: isShowingHistory) { _, isPresented in
-                        historyContentPreparationTask?.cancel()
-
-                        guard isPresented else {
-                            historyFootprintMapTask?.cancel()
-                            historyFootprintMapTask = nil
-                            if isHistoryMinimized {
-                                // Swiped History away with a footprint open:
-                                // clear it too, so the timeline's own footprint
-                                // sheet does not present during the dismissal.
-                                historyDetailFootprint = nil
-                                selectedFootprint = nil
-                            }
-                            isHistoryContentReady = false
-                            isHistoryStatisticsActive = false
-                            isHistoryMinimized = false
-                            historyPresentationDetent = .large
-                            requestedHistoryImport = false
-                            return
-                        }
-
-                        // Yield one event-loop turn so the sheet can begin its
-                        // transition, then mount HistoryListView. The history
-                        // view itself waits for its index before mounting the
-                        // month grid, avoiding an empty-ring first frame.
-                        isHistoryContentReady = false
-                        historyContentPreparationTask = Task { @MainActor in
-                            await Task.yield()
-                            guard !Task.isCancelled, isShowingHistory else { return }
-                            isHistoryContentReady = true
                         }
                     }
                     .sheet(item: $importantPlaceDraft) { draft in
@@ -2333,7 +2151,6 @@ private struct ContinuousTimelineSheet: View {
                     .toolbar { headerToolbar(proxy: proxy) }
                     .navigationBarTitleDisplayMode(.inline)
                     } // GeometryReader
-                } // ScrollViewReader
             } // NavigationStack
             if isInitialTimelineLoading {
                 // This is outside the scroll view so its material reaches the
@@ -2351,6 +2168,9 @@ private struct ContinuousTimelineSheet: View {
             }
             resettingIndicator
         } // ZStack
+        // The imported footprints reach the timeline through the existing
+        // FootprintDataChanged reload that the flow posts.
+        .photoImportFlow(isRequested: $isPhotoImportRequested)
         .fullScreenCover(item: Binding(
             get: { selectedMapPhotoAssetID.map { IdentifiableString(value: $0) } },
             set: { selectedMapPhotoAssetID = $0?.value }
@@ -2360,10 +2180,23 @@ private struct ContinuousTimelineSheet: View {
             PhotoFullscreenView(assetIDs: assetIDs, currentIndex: currentIndex)
         }
         .sheet(item: Binding(
-            get: { isHistoryMinimized ? nil : selectedFootprint },
+            get: { isActive ? selectedFootprint : nil },
             set: { selectedFootprint = $0 }
         )) { footprint in
             buildFootprintModalView(for: footprint)
+        }
+        .sheet(item: Binding(
+            get: { isActive ? selectedFootprintGroup : nil },
+            set: { selectedFootprintGroup = $0 }
+        ), onDismiss: {
+            guard let footprint = footprintSelectedFromGroup else { return }
+            footprintSelectedFromGroup = nil
+            selectedFootprint = storedFootprint(matching: footprint)
+        }) { aggregated in
+            FootprintGroupSheet(aggregated: aggregated, allPlaces: allPlaces) { footprint in
+                footprintSelectedFromGroup = footprint
+                selectedFootprintGroup = nil
+            }
         }
     } // body
     
@@ -2392,8 +2225,7 @@ private struct ContinuousTimelineSheet: View {
                                         title: "从照片导入足迹",
                                         isLoading: false,
                                         action: {
-                                            requestedHistoryImport = true
-                                            isShowingHistory = true
+                                            isPhotoImportRequested = true
                                         }
                                     )
                                     .opacity(initialTimelineLoadCompleted ? 1 : 0)
@@ -2429,6 +2261,9 @@ private struct ContinuousTimelineSheet: View {
                                         }
 
                                         timelineDay(for: date)
+                                            // The section ID also covers gap
+                                            // controls; this one starts at the date line.
+                                            .id(ScrollTarget.dateLine(date))
                                             .background {
                                                 GeometryReader { geometry in
                                                     Color.clear.preference(
@@ -2451,16 +2286,17 @@ private struct ContinuousTimelineSheet: View {
                             }
                             .padding(.top, 30)
                             .padding(.horizontal, 16)
-                            .padding(.bottom, 128)
                             .scrollTargetLayout()
                         }
                         .scrollPosition(id: timelineScrollPositionBinding, anchor: .bottom)
                         .scrollDisabled(isCollapsed || isPreservingViewportForEarlierLoad)
+                        .timelineHiddenScrollEdges()
                         .coordinateSpace(name: "continuousTimelineScroll")
                         .onChange(of: viewport.size) { oldSize, newSize in
                             restoreTimelineDateAfterRotation(from: oldSize, to: newSize, using: proxy)
                         }
                         .onPreferenceChange(ContinuousTimelineDateFramePreferenceKey.self) { frames in
+                            guard isActive else { return }
                             let viewportHeight = viewport.size.height
                             rawDateFrames.frames = frames
                             rawDateFrames.viewportHeight = viewportHeight
@@ -2477,6 +2313,7 @@ private struct ContinuousTimelineSheet: View {
                             }
                         }
                         .onPreferenceChange(ContinuousTimelineItemFramePreferenceKey.self) { frames in
+                            guard isActive else { return }
                             let viewportHeight = viewport.size.height
                             itemFrameUpdateCoalescer.schedule {
                                 applyItemFrameUpdate(frames, viewportHeight: viewportHeight)
@@ -2489,23 +2326,27 @@ private struct ContinuousTimelineSheet: View {
                                 Button {
                                     requestScrollToToday(using: proxy)
                                 } label: {
-                                    Label("回到当下", systemImage: "location.fill")
+                                    Label("回到当下", systemImage: "arrow.down.to.line")
                                 }
                                 .returnToTodayButtonStyle()
                                 .accessibilityLabel("回到当下")
                             }
                     }
                     .onAppear {
-                        scheduleInitialScrollToTodayIfNeeded(using: proxy)
+                        if targetScrollDate != nil {
+                            requestScrollToToday(using: proxy)
+                        } else if hasCompletedInitialTimelinePositioning,
+                                  let anchor = layoutViewportState.anchor {
+                            restoreDateAnchorAfterExternalReload(anchor, using: proxy)
+                        } else {
+                            scheduleInitialScrollToTodayIfNeeded(using: proxy)
+                        }
                         scheduleInitialLoadingFallback()
                     }
                     .onChange(of: initialTimelineLoadCompleted) { _, _ in
                         guard calendarScrollLockTarget == nil,
-                              pendingHistoryDateSelection == nil else { return }
+                              isActive else { return }
                         scheduleInitialScrollToTodayIfNeeded(using: proxy)
-                    }
-                    .onChange(of: todayScrollRequest) { _, _ in
-                        requestScrollToToday(using: proxy)
                     }
                     .onChange(of: isReloadingTimelineExternally) { _, isReloading in
                         // A reload triggered outside this view (e.g. CloudKit changes syncing in
@@ -2609,11 +2450,29 @@ private struct ContinuousTimelineSheet: View {
                         }
                     }
                     .onDisappear {
+                        if let destination = calendarScrollLockTarget {
+                            // The retry task is cancelled below, so its lock must
+                            // not outlive it (a disappear can also come from a
+                            // stacked sheet, e.g. the calendar, while this tab
+                            // stays active). Resume the jump on reappearance.
+                            targetScrollDate = targetScrollDate ?? destination
+                            scrollNavigationGeneration = UUID()
+                            calendarScrollLockTarget = nil
+                            isCalendarScrollLocked = false
+                        } else if !isActive, let anchor = currentDateAnchor() {
+                            layoutViewportState.anchor = anchor
+                        }
                         returnToTodayTask?.cancel()
                         scrollRestorer.cancelRestoration()
                         initialTodayScrollTask?.cancel()
+                        initialTodayScrollTask = nil
                         initialLoadingFallbackTask?.cancel()
+                        initialLoadingFallbackTask = nil
+                        if !hasCompletedInitialTimelinePositioning, targetScrollDate == nil {
+                            didScheduleInitialScrollToToday = false
+                        }
                         calendarScrollRetryTask?.cancel()
+                        calendarScrollRetryTask = nil
                         externalReloadDateRestoreTask?.cancel()
                         dateFrameUpdateCoalescer.cancel()
                     }
@@ -2684,63 +2543,15 @@ private struct ContinuousTimelineSheet: View {
         .transition(.move(edge: .bottom))
     }
 
-    private func handleHistoryFootprintPresentation(_ footprint: Footprint?, using proxy: ScrollViewProxy) {
-        historyFootprintMapTask?.cancel()
-        historyFootprintMapTask = nil
-
-        guard let footprint else {
-            selectedFootprint = nil
-            withAnimation(.smooth(duration: 0.32)) {
-                isHistoryMinimized = false
-                historyPresentationDetent = .large
-            }
-            return
-        }
-
-        // Shrink History to half height so the map above can show the
-        // footprint. `isHistoryMinimized` keeps the timeline's own footprint
-        // sheet from also presenting for `selectedFootprint`.
-        withAnimation(.smooth(duration: 0.28)) {
-            isHistoryMinimized = true
-            historyPresentationDetent = .medium
-        }
-        // Present the detail one main-queue turn later. Set in the same update,
-        // UIKit runs the presentation first and only then applies History's
-        // detent change, so the two animations played one after the other.
-        // Starting the detent change first lets them overlap.
-        DispatchQueue.main.async {
-            guard isHistoryMinimized else { return }
-            historyDetailFootprint = footprint
-        }
-
-        let footprintDate = Calendar.current.startOfDay(for: footprint.startTime)
-        historyFootprintMapTask = Task(priority: .userInitiated) { @MainActor in
-            // Let sheet/detail presentation win the current frame. Timeline
-            // loading and map updates begin only after that UI transition has
-            // had time to settle.
-            try? await Task.sleep(nanoseconds: 280_000_000)
-            guard !Task.isCancelled, isHistoryMinimized else { return }
-
-            _ = await loadDate(footprintDate, true)
-            guard !Task.isCancelled, isHistoryMinimized else { return }
-
-            // Keep the covered timeline physically aligned with the same
-            // historical day. Otherwise, dismissing History exposes its old
-            // (usually today) scroll position, whose viewport update would
-            // immediately pull the map back to the present.
-            scrollToDate(footprintDate, using: proxy)
-            selectedFootprint = footprint
-        }
-    }
-
     @ToolbarContentBuilder
     private func headerToolbar(proxy: ScrollViewProxy) -> some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
             Button {
-                isShowingHistory = true
+                navigateRecordedDay(forward: false, using: proxy)
             } label: {
-                Image(systemName: "calendar.badge.clock")
+                Label("上一天", systemImage: "chevron.left")
             }
+            .disabled(adjacentRecordedDate(forward: false) == nil)
         }
 
         ToolbarItem(placement: .principal) {
@@ -2771,24 +2582,32 @@ private struct ContinuousTimelineSheet: View {
                     handleDateHeaderTap()
                 }
             )
-            .popover(isPresented: $isShowingCalendar) {
-                let today = Calendar.current.startOfDay(for: Date())
-                let activeDates = Set(availableDates.filter { $0 <= today })
-
-                MiniCalendarView(
-                    selectedDate: Binding(
-                        get: { activeTimelineDate },
-                        set: { _ in }
-                    ),
-                    availableDates: activeDates
-                ) { date in
-                    isShowingCalendar = false
-                    let normalizedDate = Calendar.current.startOfDay(for: date)
-                    scrollToDate(normalizedDate, using: proxy)
+            .sheet(isPresented: $isShowingCalendar) {
+                NavigationStack {
+                    HistoryListView(initialDate: activeTimelineDate, calendarOnly: true, onDateSelected: { date in
+                        isShowingCalendar = false
+                        scrollToDate(Calendar.current.startOfDay(for: date), using: proxy)
+                    })
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("完成") { isShowingCalendar = false }
+                        }
+                    }
                 }
-                .presentationCompactAdaptation(.popover)
+                .presentationDetents([.large])
             }
             .contextMenu {
+                Button {
+                    prepareTimelineShare()
+                } label: {
+                    Label("分享当前日期足迹", systemImage: "square.and.arrow.up")
+                }
+                Button {
+                    showingTimelineShareRangePicker = true
+                } label: {
+                    Label("选择日期范围分享", systemImage: "calendar.badge.plus")
+                }
+                Divider()
                 Button {
                     showingRawPointsDate = IdentifiableDate(date: activeTimelineDate)
                 } label: {
@@ -2806,30 +2625,28 @@ private struct ContinuousTimelineSheet: View {
         }
 
         ToolbarItem(placement: .topBarTrailing) {
-            HStack(spacing: 8) {
-                Menu {
-                    Button {
-                        prepareTimelineShare()
-                    } label: {
-                        Label("分享当前日期足迹", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
-                    }
-                    Button {
-                        showingTimelineShareRangePicker = true
-                    } label: {
-                        Label("选择日期范围分享", systemImage: "calendar.badge.plus")
-                    }
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
-                }
-                .accessibilityLabel("分享")
-
-                Button {
-                    isShowingSettings = true
-                } label: {
-                    Image(systemName: "gearshape")
-                }
+            Button {
+                navigateRecordedDay(forward: true, using: proxy)
+            } label: {
+                Label("下一天", systemImage: "chevron.right")
             }
+            .disabled(adjacentRecordedDate(forward: true) == nil)
         }
+    }
+
+    private func adjacentRecordedDate(forward: Bool) -> Date? {
+        let calendar = Calendar.current
+        let base = calendar.startOfDay(for: calendarScrollLockTarget ?? activeTimelineDate)
+        let today = calendar.startOfDay(for: Date())
+        let candidates = availableDates.filter { date in
+            date <= today && (forward ? date > base : date < base)
+        }
+        return forward ? candidates.min() : candidates.max()
+    }
+
+    private func navigateRecordedDay(forward: Bool, using proxy: ScrollViewProxy) {
+        guard let date = adjacentRecordedDate(forward: forward) else { return }
+        scrollToDate(date, using: proxy, alignToTop: true)
     }
 
     private func prepareTimelineShare() {
@@ -3130,7 +2947,9 @@ private struct ContinuousTimelineSheet: View {
     }
 
     private func applyDateFrameUpdate(_ frames: [Date: CGRect], viewportHeight: CGFloat) {
+        let startedFollowingVisibleContent = beginFollowingVisibleContentIfNeeded()
         if calendarScrollLockTarget == nil,
+           !startedFollowingVisibleContent,
            !shouldProcessDateFrameUpdate(frames, viewportHeight: viewportHeight) {
             return
         }
@@ -3170,8 +2989,21 @@ private struct ContinuousTimelineSheet: View {
         return visibleDates
     }
 
+    /// Returns true only for the update in which a manual scroll starts.
+    private func beginFollowingVisibleContentIfNeeded() -> Bool {
+        guard !mapFollowsVisibleContent,
+              calendarScrollLockTarget == nil,
+              scrollRestorer.isUserInteracting else { return false }
+        mapFollowsVisibleContent = true
+        return true
+    }
+
     private func applyItemFrameUpdate(_ frames: [String: CGRect], viewportHeight: CGFloat) {
-        let itemIDs = significantVisibleItemIDs(in: frames, viewportHeight: viewportHeight)
+        _ = beginFollowingVisibleContentIfNeeded()
+        // No visible-item subset means the map fits the whole active day.
+        let itemIDs = mapFollowsVisibleContent
+            ? significantVisibleItemIDs(in: frames, viewportHeight: viewportHeight)
+            : []
         guard itemIDs != latestVisibleItemIDs else { return }
         latestVisibleItemIDs = itemIDs
         visibleItemIDsChanged(itemIDs)
@@ -3252,8 +3084,9 @@ private struct ContinuousTimelineSheet: View {
         }
         // Keep the visible-range map behavior, but always include the date
         // currently represented by the title.
-        mapDates.insert(Calendar.current.startOfDay(for: activeTimelineDate))
-        visibleDatesChanged(mapDates)
+        let activeDate = Calendar.current.startOfDay(for: activeTimelineDate)
+        mapDates.insert(activeDate)
+        visibleDatesChanged(mapFollowsVisibleContent ? mapDates : [activeDate])
     }
 
     private func shouldProcessDateFrameUpdate(_ frames: [Date: CGRect], viewportHeight: CGFloat) -> Bool {
@@ -3324,7 +3157,7 @@ private struct ContinuousTimelineSheet: View {
 
             ZStack(alignment: .leading) {
                 DottedTimelineSeparator()
-                    .offset(y: -12)
+                    .offset(y: ContinuousTimelineLayout.dateSeparatorOffset)
                 Rectangle()
                     .fill(ContinuousTimelineLayout.lineColor)
                     .frame(width: 2, height: 30)
@@ -3439,6 +3272,9 @@ private struct ContinuousTimelineSheet: View {
     /// Data loads may finish, but their old anchors must never win afterward.
     private func beginExplicitTimelineNavigation() {
         layoutViewportState.anchor = nil
+        mapFollowsVisibleContent = false
+        latestVisibleItemIDs = []
+        visibleItemIDsChanged([])
         scrollNavigationGeneration = UUID()
         isCalendarScrollLocked = true
         // From this point onward the first-launch positioning pass must never
@@ -3537,7 +3373,7 @@ private struct ContinuousTimelineSheet: View {
         guard initialTimelineLoadCompleted,
               !didScheduleInitialScrollToToday,
               calendarScrollLockTarget == nil,
-              pendingHistoryDateSelection == nil else { return }
+              isActive else { return }
         didScheduleInitialScrollToToday = true
         
         if let target = targetScrollDate {
@@ -3576,10 +3412,11 @@ private struct ContinuousTimelineSheet: View {
         transportPendingSplit = nil
     }
 
-    private func scrollToDate(_ date: Date, using proxy: ScrollViewProxy) {
+    private func scrollToDate(_ date: Date, using proxy: ScrollViewProxy, alignToTop: Bool = true) {
         beginExplicitTimelineNavigation()
         let generation = scrollNavigationGeneration
         let normalizedDate = Calendar.current.startOfDay(for: date)
+        calendarScrollAlignsTargetToTop = alignToTop
         layoutViewportState.anchor = ContinuousTimelineDateAnchor(date: normalizedDate, bottomOffset: 0)
 
         // Lock viewport-driven date updates while the destination is loaded.
@@ -3686,6 +3523,7 @@ private struct ContinuousTimelineSheet: View {
         guard calendarScrollRetryTask == nil else { return }
 
         let generation = scrollNavigationGeneration
+        let alignsToTop = calendarScrollAlignsTargetToTop
         calendarScrollRetryTask = Task { @MainActor in
             defer {
                 if generation == scrollNavigationGeneration { calendarScrollRetryTask = nil }
@@ -3710,18 +3548,29 @@ private struct ContinuousTimelineSheet: View {
             // the target row's real frame, directly on the UIScrollView.
             let startsMounted = rawDateFrames.frames[target] != nil
             if startsMounted {
-                // Already measured and nearby: the animation is reliable.
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    proxy.scrollTo(ScrollTarget.date(target), anchor: .bottom)
+                if alignsToTop {
+                    // Start at the date line itself; the section ID also
+                    // covers gap controls above it.
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        proxy.scrollTo(ScrollTarget.dateLine(target), anchor: .top)
+                    }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                } else {
+                    // Bottom-aligned restoration retains its existing motion.
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        proxy.scrollTo(ScrollTarget.date(target), anchor: .bottom)
+                    }
+                    try? await Task.sleep(nanoseconds: 420_000_000)
                 }
-                try? await Task.sleep(nanoseconds: 420_000_000)
             } else {
                 // Animating across unmeasured rows is what drifted. Jump
                 // directly; the correction below then aligns real geometry.
                 var transaction = Transaction()
                 transaction.disablesAnimations = true
                 withTransaction(transaction) {
-                    proxy.scrollTo(ScrollTarget.date(target), anchor: .bottom)
+                    proxy.scrollTo(ScrollTarget.date(target), anchor: alignsToTop ? .top : .bottom)
                 }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
@@ -3733,6 +3582,11 @@ private struct ContinuousTimelineSheet: View {
             // geometry instead: step toward the target using the real height
             // of the mounted rows, re-measure, and align precisely once the
             // target row itself is mounted.
+            var stableAlignmentPasses = 0
+            // Where SwiftUI's own `.top` alignment puts a row, measured in the
+            // row coordinate space. UIKit insets do not share that space.
+            var visibleTop: CGFloat?
+            var isMeasuringVisibleTop = startsMounted && alignsToTop
             for _ in 0..<40 {
                 guard !Task.isCancelled,
                       generation == scrollNavigationGeneration,
@@ -3747,24 +3601,57 @@ private struct ContinuousTimelineSheet: View {
                     continue
                 }
                 let offsetBefore = scrollRestorer.currentMetrics?.contentOffsetY
+                var attemptedOffset = false
 
-                if let frame = frames[target] {
-                    let bottomInset = scrollRestorer.currentMetrics?.adjustedBottomInset ?? 0
-                    let delta = frame.maxY - (viewportHeight - bottomInset)
-                    if abs(delta) <= 2 { break }
-                    scrollRestorer.offset(by: delta)
-                } else if let step = calendarSeekStep(toward: target, mountedFrames: frames, viewportHeight: viewportHeight) {
-                    scrollRestorer.offset(by: step)
-                } else {
+                if alignsToTop, frames[target] != nil, visibleTop == nil, !isMeasuringVisibleTop {
+                    stableAlignmentPasses = 0
+                    isMeasuringVisibleTop = true
                     var transaction = Transaction()
                     transaction.disablesAnimations = true
                     withTransaction(transaction) {
-                        proxy.scrollTo(ScrollTarget.date(target), anchor: .bottom)
+                        proxy.scrollTo(ScrollTarget.dateLine(target), anchor: .top)
+                    }
+                } else if let frame = frames[target] {
+                    if alignsToTop, isMeasuringVisibleTop {
+                        visibleTop = frame.minY
+                        isMeasuringVisibleTop = false
+                    }
+                    let delta: CGFloat
+                    if alignsToTop, let visibleTop {
+                        // The date line is drawn inside the row's top edge;
+                        // keep the row where SwiftUI's `.top` alignment put it
+                        // while rows above it finish measuring.
+                        delta = frame.minY - visibleTop
+                    } else {
+                        let bottomInset = scrollRestorer.currentMetrics?.adjustedBottomInset ?? 0
+                        delta = frame.maxY - (viewportHeight - bottomInset)
+                    }
+                    if abs(delta) <= 2 {
+                        stableAlignmentPasses += 1
+                        if stableAlignmentPasses >= 6 { break }
+                    } else {
+                        stableAlignmentPasses = 0
+                        attemptedOffset = true
+                        scrollRestorer.offset(by: delta)
+                    }
+                } else if let step = calendarSeekStep(toward: target, mountedFrames: frames, viewportHeight: viewportHeight) {
+                    stableAlignmentPasses = 0
+                    attemptedOffset = true
+                    scrollRestorer.offset(by: step)
+                } else {
+                    stableAlignmentPasses = 0
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        proxy.scrollTo(ScrollTarget.date(target), anchor: alignsToTop ? .top : .bottom)
                     }
                 }
 
                 // Clamped at a content edge: as close as the list allows.
-                if let offsetBefore, offsetBefore == scrollRestorer.currentMetrics?.contentOffsetY, frames[target] != nil {
+                if attemptedOffset,
+                   let offsetBefore,
+                   offsetBefore == scrollRestorer.currentMetrics?.contentOffsetY,
+                   frames[target] != nil {
                     break
                 }
                 // Let rows at the new offset mount and report real frames.
@@ -3776,9 +3663,9 @@ private struct ContinuousTimelineSheet: View {
 
             hasCompletedInitialTimelinePositioning = true
             let settledTarget = target
+            timelineScrollPosition = nil
             calendarScrollLockTarget = nil
             isCalendarScrollLocked = false
-            timelineScrollPosition = nil
             freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.25)
             visibleDatesChanged([settledTarget])
         }
@@ -4481,7 +4368,7 @@ private final class ContinuousTimelineLayoutViewportState {
 private final class ContinuousTimelineRawDateFrames {
     var frames: [Date: CGRect] = [:]
     var viewportHeight: CGFloat = 0
-    /// Latest rendered date list; see `ContinuousTimelineSheet.currentDates`.
+    /// Latest rendered date list; see `TimelineView.currentDates`.
     var dates: [Date] = []
 }
 
@@ -4662,6 +4549,13 @@ private final class ContinuousTimelineScrollRestorer {
 
     func applyPendingBottomDistanceIfNeeded() {
         guard isRestoring else { return }
+        // Scrolling changes `bounds`, which re-enters here. A restoration left
+        // running (e.g. one begun on leaving the foreground) must never pin the
+        // viewport against the user's finger; their scroll supersedes it.
+        if isUserInteracting {
+            cancelRestoration()
+            return
+        }
         if let pendingAnchor {
             apply(anchor: pendingAnchor)
         } else if let pendingFallbackBottomDistance {
@@ -4731,6 +4625,7 @@ enum ContinuousTimelineLayout {
     static let minItemSpacing: CGFloat = 12
     static let maxItemSpacing: CGFloat = 160
     static let photoThumbnailSize: CGFloat = 58
+    static let dateSeparatorOffset: CGFloat = -12
     static let lineColor = Color.secondary.opacity(0.35)
 }
 
@@ -4845,6 +4740,7 @@ private struct TimelineVerticalDashedLine: View {
 private struct ContinuousTimelineRow: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.modelContext) private var modelContext
+    @Environment(LocationManager.self) private var locationManager
 
     let item: TimelineItem
     let nextStartTime: Date?
@@ -4957,9 +4853,9 @@ private struct ContinuousTimelineRow: View {
 
                 Spacer(minLength: 0)
 
-                if let photoAssetID {
+                if !photoAssetIDs.isEmpty {
                     ZStack(alignment: .topTrailing) {
-                        ContinuousTimelinePhotoThumbnail(assetID: photoAssetID)
+                        ContinuousTimelinePhotoThumbnail(assetIDs: photoAssetIDs)
                             .frame(width: ContinuousTimelineLayout.photoThumbnailSize, height: ContinuousTimelineLayout.photoThumbnailSize)
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                             .overlay(
@@ -4986,6 +4882,14 @@ private struct ContinuousTimelineRow: View {
         .onTapGesture(perform: onTap)
         .task(id: unresolvedFootprintID) {
             await retryUnknownFootprintLocationIfNeeded()
+        }
+        .onAppear {
+            // Same as FootprintCardView: associate photos taken (or synced)
+            // after the footprint was saved, so rows show them and photo
+            // import excludes them, without opening the detail first.
+            if case .footprint(let footprint) = item {
+                locationManager.linkPhotos(to: footprint, context: modelContext)
+            }
         }
         .onChange(of: isResolvingUnknownPlace) { _, isResolving in
             guard isResolving else {
@@ -5207,9 +5111,9 @@ private struct ContinuousTimelineRow: View {
         return ContinuousTimelineLayout.minItemSpacing + (ContinuousTimelineLayout.maxItemSpacing - ContinuousTimelineLayout.minItemSpacing) * progress
     }
 
-    private var photoAssetID: String? {
-        guard case .footprint(let footprint) = item else { return nil }
-        return footprint.photoAssetIDs.first
+    private var photoAssetIDs: [String] {
+        guard case .footprint(let footprint) = item else { return [] }
+        return footprint.photoAssetIDs
     }
 
     private var photoCount: Int {
@@ -5285,7 +5189,8 @@ private struct ContinuousTimelineRow: View {
 }
 
 private struct ContinuousTimelinePhotoThumbnail: View {
-    let assetID: String
+    /// All of the footprint's photos; the thumbnail shows the latest taken.
+    let assetIDs: [String]
     @State private var image: UIImage?
     @State private var requestID: PHImageRequestID?
 
@@ -5304,7 +5209,7 @@ private struct ContinuousTimelinePhotoThumbnail: View {
             }
         }
         .clipped()
-        .task(id: assetID) {
+        .task(id: assetIDs) {
             requestThumbnail()
         }
         .onDisappear {
@@ -5319,8 +5224,7 @@ private struct ContinuousTimelinePhotoThumbnail: View {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return }
 
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
-        guard let asset = assets.firstObject else { return }
+        guard let asset = PhotoService.shared.latestAsset(among: assetIDs) else { return }
 
         let scale = UIScreen.main.scale
         let side = ContinuousTimelineLayout.photoThumbnailSize * scale
@@ -5569,6 +5473,19 @@ private extension View {
             self.buttonStyle(.glass)
         } else {
             self.buttonStyle(.bordered)
+        }
+    }
+
+    /// Any top edge effect (hard or soft) paints the title band at full
+    /// strength and covers the sheet's glass rim; rows are clipped below the
+    /// title bar instead. The bottom effect is drawn by the app's tab bar,
+    /// washing the map around it, while the sheet ends above that bar.
+    @ViewBuilder
+    func timelineHiddenScrollEdges() -> some View {
+        if #available(iOS 26.0, *) {
+            self.scrollEdgeEffectHidden(true, for: [.top, .bottom])
+        } else {
+            self
         }
     }
 

@@ -337,7 +337,7 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("设置")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
         .tint(.dfkAccent)
         .onAppear {
             NotificationManager.shared.getAuthorizationStatus { status in

@@ -224,7 +224,7 @@ struct DFKMapView: View {
         }
     }
 
-    fileprivate struct AggregatedFootprint: Identifiable {
+    struct AggregatedFootprint: Identifiable {
         let id: String
         let coordinate: CLLocationCoordinate2D
         let totalDuration: TimeInterval
@@ -237,6 +237,9 @@ struct DFKMapView: View {
     var heatmapPoints: [HeatmapPoint] = []
 
     var onTimelineItemTap: ((TimelineItem) -> Void)? = nil
+    /// Hosts that present sheets from another window (Records) present the
+    /// footprint group themselves; otherwise this map presents it.
+    var onAggregatedFootprintTap: ((AggregatedFootprint) -> Void)? = nil
     var onPhotoTap: ((PHAsset) -> Void)? = nil
     var onUserLocationTap: (() -> Void)? = nil
 
@@ -265,6 +268,7 @@ struct DFKMapView: View {
         onMapInteraction: ((MapInteractionType) -> Void)? = nil,
         showsMapControls: Bool = true,
         onTimelineItemTap: ((TimelineItem) -> Void)? = nil,
+        onAggregatedFootprintTap: ((AggregatedFootprint) -> Void)? = nil,
         onPhotoTap: ((PHAsset) -> Void)? = nil,
         onUserLocationTap: (() -> Void)? = nil
     ) {
@@ -289,6 +293,7 @@ struct DFKMapView: View {
         self.onMapInteraction = onMapInteraction
         self.showsMapControls = showsMapControls
         self.onTimelineItemTap = onTimelineItemTap
+        self.onAggregatedFootprintTap = onAggregatedFootprintTap
         self.onPhotoTap = onPhotoTap
         self.onUserLocationTap = onUserLocationTap
     }
@@ -301,6 +306,7 @@ struct DFKMapView: View {
     @State private var lastSnapshotCacheKey: String? = nil
 
     @State private var selectedAggregatedFootprint: AggregatedFootprint?
+    @State private var footprintSelectedFromGroup: Footprint?
     @State private var interactiveMapReady = false
     @State private var interactiveActivationTask: Task<Void, Never>?
     @State private var liveMapPhotoImages: [String: UIImage] = [:]
@@ -603,10 +609,15 @@ struct DFKMapView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-
-                if let aggregated = selectedAggregatedFootprint {
-                    aggregatedModal(for: aggregated)
-                        .transition(.opacity)
+            }
+            .sheet(item: $selectedAggregatedFootprint, onDismiss: {
+                guard let footprint = footprintSelectedFromGroup else { return }
+                footprintSelectedFromGroup = nil
+                onTimelineItemTap?(.footprint(footprint))
+            }) { aggregated in
+                FootprintGroupSheet(aggregated: aggregated, allPlaces: allPlaces) { footprint in
+                    footprintSelectedFromGroup = footprint
+                    selectedAggregatedFootprint = nil
                 }
             }
             .onAppear {
@@ -638,7 +649,9 @@ struct DFKMapView: View {
 
     private func handleFootprintTap(for aggregated: AggregatedFootprint) {
         if aggregated.footprints.count > 1 {
-            withAnimation(.easeInOut(duration: 0.18)) {
+            if let onAggregatedFootprintTap {
+                onAggregatedFootprintTap(aggregated)
+            } else {
                 selectedAggregatedFootprint = aggregated
             }
             return
@@ -646,41 +659,6 @@ struct DFKMapView: View {
 
         guard let footprint = aggregated.footprints.first else { return }
         onTimelineItemTap?(.footprint(footprint))
-    }
-
-    @ViewBuilder
-    private func aggregatedModal(for aggregated: AggregatedFootprint) -> some View {
-        ZStack(alignment: .bottom) {
-            Color.black.opacity(0.22)
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        selectedAggregatedFootprint = nil
-                    }
-                }
-
-            AggregatedFootprintListView(
-                aggregated: aggregated,
-                allPlaces: allPlaces,
-                onClose: {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        selectedAggregatedFootprint = nil
-                    }
-                },
-                onFootprintSelected: { footprint in
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        selectedAggregatedFootprint = nil
-                    }
-                    DispatchQueue.main.async {
-                        onTimelineItemTap?(.footprint(footprint))
-                    }
-                }
-            )
-            .padding(.horizontal, 12)
-            .padding(.bottom, 12)
-        }
-        .zIndex(10)
     }
 
     @ViewBuilder
@@ -1518,11 +1496,13 @@ struct DFKMapView: View {
 
 }
 
-private struct AggregatedFootprintListView: View {
+/// Footprints at one place, as a native sheet. The caller dismisses it and
+/// opens the selected footprint once the dismissal finishes.
+struct FootprintGroupSheet: View {
     let aggregated: DFKMapView.AggregatedFootprint
     let allPlaces: [Place]
-    let onClose: () -> Void
     let onFootprintSelected: (Footprint) -> Void
+    @Environment(\.dismiss) private var dismiss
 
     private var title: String {
         let representative = aggregated.representative
@@ -1536,37 +1516,7 @@ private struct AggregatedFootprintListView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Capsule()
-                .fill(Color.secondary.opacity(0.35))
-                .frame(width: 36, height: 5)
-                .padding(.top, 10)
-                .padding(.bottom, 10)
-
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Color.dfkMainText)
-                        .lineLimit(1)
-                    Text("共 \(aggregated.footprints.count) 条足迹")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
-                        .background(Color(uiColor: .tertiarySystemFill))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 8)
-
+        NavigationStack {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(aggregated.footprints) { footprint in
@@ -1581,17 +1531,31 @@ private struct AggregatedFootprintListView: View {
                     }
                 }
                 .padding(.horizontal, 16)
-                .padding(.top, 12)
                 .padding(.bottom, 20)
             }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    VStack(spacing: 2) {
+                        Text(title)
+                            .font(.headline)
+                            .lineLimit(1)
+                        Text("共 \(aggregated.footprints.count) 条足迹")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
+                    }
+                }
+            }
         }
-        .frame(maxWidth: 560)
-        .frame(maxHeight: 420)
-        .background(
-            RoundedRectangle(cornerRadius: 24)
-                .fill(Color(uiColor: .systemBackground))
-                .shadow(color: .black.opacity(0.16), radius: 20, x: 0, y: 12)
-        )
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 

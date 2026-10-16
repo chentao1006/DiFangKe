@@ -3972,9 +3972,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
         
-        // 核心修复：必须有 context 才能访问 persistentModelID 并在主线程恢复，否则说明是 UI Lite 对象
-        guard footprint.modelContext != nil else { return }
-        
+        // 时间线行是根据存储记录生成的 UI 副本（未入库）。这里只读取它的值，
+        // 读写都按 footprintID 回查存储记录，因此副本同样可以触发关联；
+        // 找不到对应存储记录时不会写入。
         let id = footprint.footprintID
         let startTime = footprint.startTime
         let endTime = footprint.endTime
@@ -4103,6 +4103,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                             fp.photoMetadata = workingMetadata
                             try? context.save()
                             print("[\(Date())] PhotoLinker: Finished CloudID sync and auto-link for \(id)")
+                            // 时间线显示的是存储记录的副本，需重建才能显示新关联的照片。
+                            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
                         }
                     }
                 }

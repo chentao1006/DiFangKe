@@ -184,8 +184,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
 
         let options = PHFetchOptions()
-        let bufferStart = startTime.addingTimeInterval(-60)
-        let bufferEnd = endTime.addingTimeInterval(60)
+        let bufferStart = startTime.addingTimeInterval(-Self.linkingTimeBuffer)
+        let bufferEnd = endTime.addingTimeInterval(Self.linkingTimeBuffer)
         options.predicate = NSPredicate(format: "creationDate > %@ AND creationDate < %@", bufferStart as NSDate, bufferEnd as NSDate)
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         
@@ -193,16 +193,42 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         DispatchQueue.global(qos: .userInitiated).async {
             var assets: [PHAsset] = []
             result.enumerateObjects { asset, _, _ in
-                if let nearLocation = location, let assetLocation = asset.location {
-                    let dist = CLLocation(latitude: nearLocation.latitude, longitude: nearLocation.longitude)
-                        .distance(from: assetLocation)
-                    if dist <= maxDistance { assets.append(asset) }
-                } else {
+                if Self.asset(asset, belongsToStayFrom: startTime, to: endTime, near: location, maxDistance: maxDistance) {
                     assets.append(asset)
                 }
             }
             DispatchQueue.main.async { completion(assets) }
         }
+    }
+
+    /// A footprint's representative photo: the most recently taken one.
+    /// `photoAssetIDs` is in insertion order (auto-linking appends oldest
+    /// first, manual additions go last), so it can't be read off either end.
+    func latestAsset(among assetIDs: [String]) -> PHAsset? {
+        guard !assetIDs.isEmpty else { return nil }
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.fetchLimit = 1
+        return PHAsset.fetchAssets(withLocalIdentifiers: assetIDs, options: options).firstObject
+    }
+
+    /// Photos taken this long before/after a stay still belong to it.
+    private static let linkingTimeBuffer: TimeInterval = 60
+
+    /// The single rule for whether a photo belongs to a stay: used to link
+    /// photos to footprints and to keep such photos out of photo import.
+    /// Screenshots and photos without a location were not taken there, so
+    /// they are never matched automatically (users can still add them).
+    static func asset(_ asset: PHAsset, belongsToStayFrom startTime: Date, to endTime: Date, near location: CLLocationCoordinate2D?, maxDistance: CLLocationDistance) -> Bool {
+        guard !asset.mediaSubtypes.contains(.photoScreenshot),
+              let assetLocation = asset.location,
+              let creationDate = asset.creationDate,
+              creationDate > startTime.addingTimeInterval(-linkingTimeBuffer),
+              creationDate < endTime.addingTimeInterval(linkingTimeBuffer) else { return false }
+        guard let location else { return true }
+        let distance = CLLocation(latitude: location.latitude, longitude: location.longitude)
+            .distance(from: assetLocation)
+        return distance <= maxDistance
     }
 
     /// 获取本地 ID 对应的云端 ID 映射（异步后台执行）
@@ -296,8 +322,21 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         
         let result = PHAsset.fetchAssets(with: .image, options: options)
         var assetsWithLocation: [PHAsset] = []
+        let linkingMaxDistance = AppConfig.shared.photoLinkingMaxDistance
         result.enumerateObjects { asset, _, _ in
-            if asset.location != nil && !excludedAssetIDs.contains(asset.localIdentifier) {
+            guard asset.location != nil, !excludedAssetIDs.contains(asset.localIdentifier) else { return }
+            // A photo the linker would attach to an existing footprint already
+            // has one, even if that footprint hasn't been linked yet.
+            let belongsToExistingFootprint = history.contains { footprint in
+                Self.asset(
+                    asset,
+                    belongsToStayFrom: footprint.startTime,
+                    to: footprint.endTime,
+                    near: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude),
+                    maxDistance: linkingMaxDistance
+                )
+            }
+            if !belongsToExistingFootprint {
                 assetsWithLocation.append(asset)
             }
         }

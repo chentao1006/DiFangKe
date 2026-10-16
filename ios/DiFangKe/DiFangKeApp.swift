@@ -8,6 +8,21 @@ import WidgetKit
 import Aptabase
 
 
+extension View {
+    /// The one style for a screen's main action (start import, share, ...):
+    /// large and prominent. Put `.frame(maxWidth: .infinity)` in the label.
+    @ViewBuilder
+    func dfkPrimaryActionButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(.glassProminent)
+                .controlSize(.large)
+        } else {
+            self.buttonStyle(.borderedProminent)
+                .controlSize(.large)
+        }
+    }
+}
+
 // Brand toolbar icon styles
 extension Image {
     func dfkToolbarDismissIcon() -> some View {
@@ -232,7 +247,7 @@ struct DiFangKeApp: App {
                             }
                                 .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
                         } else {
-                            TimelineView()
+                            MainTabView()
                                 .environment(locationManager)
                                 .onAppear {
                                     CloudSettingsManager.shared.startSyncing()
@@ -718,16 +733,10 @@ struct OnboardingView: View {
             Button(action: action) {
                 Text(buttonText)
                     .font(.headline)
-                    .foregroundColor(.white)
                     .frame(maxWidth: UIDevice.current.userInterfaceIdiom == .pad ? 350 : .infinity)
-                    .padding()
-                    .background(
-                        RoundedRectangle(cornerRadius: 14)
-                            .fill(color.opacity(0.8))
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                    )
-                    .shadow(color: color.opacity(0.3), radius: 10, x: 0, y: 5)
             }
+            .dfkPrimaryActionButtonStyle()
+            .tint(color)
         }
     }
 }
