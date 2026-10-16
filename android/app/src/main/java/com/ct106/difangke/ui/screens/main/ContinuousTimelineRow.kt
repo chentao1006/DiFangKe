@@ -187,6 +187,11 @@ internal fun ContinuousTimelineRow(
                 } else if (footprint != null) {
                     FootprintRowText(footprint, activityTypes, isResolving, Modifier.weight(1f))
                     val photos = remember(footprint.photoAssetIDsJson) { footprintPhotos(footprint) }
+                    // iOS ContinuousTimelinePhotoThumbnail: show the latest taken.
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    val latestPhoto by produceState(photos.firstOrNull(), photos) {
+                        value = com.ct106.difangke.service.PhotoService.getInstance(context).latestPhotoUri(photos)
+                    }
                     if (photos.isNotEmpty()) {
                         Spacer(Modifier.width(12.dp))
                         Box(
@@ -196,7 +201,7 @@ internal fun ContinuousTimelineRow(
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .border(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
                         ) {
-                            FootprintPhotoThumbnail(photos.first(), Modifier.fillMaxSize(), "足迹照片")
+                            latestPhoto?.let { FootprintPhotoThumbnail(it, Modifier.fillMaxSize(), "足迹照片") }
                             if (photos.size > 1) {
                                 Text(
                                     "${photos.size}",

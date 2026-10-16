@@ -63,7 +63,6 @@ internal fun TimelineMapPane(
     viewModel: MainViewModel,
     activityTypes: List<ActivityTypeEntity>,
     allPlaces: List<PlaceEntity>,
-    sheetHeight: Dp,
     bottomPaddingPx: Int,
     onUserPan: () -> Unit,
     onSelect: (TimelineSelection) -> Unit
@@ -191,16 +190,18 @@ internal fun TimelineMapPane(
         )
 
         if (userLocation != null) {
-            // Locate-me sits just above the sheet: filled while following,
-            // outlined once the user pans away (iOS user-tracking button).
+            // Locate-me sits top trailing, below the status bar: clear of
+            // every sheet detent, so its position never depends on the sheet's
+            // height. Filled while following, outlined once the user pans away.
             IconButton(
                 onClick = {
                     isFollowingUser = true
                     followUserRequest += 1
                 },
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = sheetHeight + 12.dp)
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(end = 16.dp, top = 8.dp)
                     .size(40.dp)
                     .shadow(4.dp, CircleShape)
                     .clip(CircleShape)

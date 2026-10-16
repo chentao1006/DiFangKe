@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Log
+import com.ct106.difangke.AppConfig
 import androidx.exifinterface.media.ExifInterface
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import org.json.JSONArray
@@ -42,11 +43,15 @@ class PhotoService private constructor(private val context: Context) {
      */
     suspend fun scanFootprintCandidates(
         photoUris: List<Uri>,
-        excludedPhotoUris: Set<String> = emptySet()
+        excludedPhotoUris: Set<String> = emptySet(),
+        history: List<FootprintEntity> = emptyList()
     ): List<FootprintEntity> {
         val photos = photosFromUris(photoUris)
             .filter { photo ->
-                photo.latitude != null && photo.longitude != null && photo.uri !in excludedPhotoUris
+                photo.latitude != null && photo.longitude != null && photo.uri !in excludedPhotoUris &&
+                    // A photo taken during an existing stay already has a
+                    // footprint, even if it hasn't been attached to it yet.
+                    history.none { footprint -> photoBelongsToStay(photo, footprint) }
             }
             .sortedBy { it.dateTaken }
         if (photos.isEmpty()) return emptyList()
@@ -85,6 +90,45 @@ class PhotoService private constructor(private val context: Context) {
             )
         }
     }
+
+    /**
+     * iOS PhotoService.asset(_:belongsToStayFrom:to:near:maxDistance:): the
+     * single rule for whether a photo belongs to a stay. Photos without a
+     * location were not taken there, so they never match automatically.
+     */
+    fun photoBelongsToStay(photo: PhotoInfo, footprint: FootprintEntity): Boolean {
+        val latitude = photo.latitude ?: return false
+        val longitude = photo.longitude ?: return false
+        val bufferMillis = (AppConfig.PHOTO_LINKING_TIME_BUFFER * 1000).toLong()
+        if (photo.dateTaken.time <= footprint.startTime.time - bufferMillis ||
+            photo.dateTaken.time >= footprint.endTime.time + bufferMillis
+        ) return false
+        val latitudes = jsonDoubles(footprint.latitudeJson)
+        val longitudes = jsonDoubles(footprint.longitudeJson)
+        if (latitudes.isEmpty() || longitudes.isEmpty()) return true
+        return distanceMeters(latitudes.average(), longitudes.average(), latitude, longitude) <=
+            AppConfig.PHOTO_LINKING_MAX_DISTANCE
+    }
+
+    /**
+     * iOS PhotoService.latestAsset(among:): a footprint's representative photo
+     * is the most recently taken one. The stored list is in insertion order
+     * (import appends oldest first, manual additions go last), so it can't be
+     * read off either end.
+     */
+    suspend fun latestPhotoUri(uris: List<String>): String? = withContext(Dispatchers.IO) {
+        if (uris.size <= 1) return@withContext uris.firstOrNull()
+        uris.maxByOrNull { uri -> readDateTaken(uri)?.time ?: Long.MIN_VALUE }
+    }
+
+    private fun readDateTaken(uri: String): Date? = runCatching {
+        context.contentResolver.openInputStream(Uri.parse(uri))?.use { parseExifDate(ExifInterface(it)) }
+    }.getOrNull()
+
+    private fun jsonDoubles(json: String): List<Double> = runCatching {
+        val array = JSONArray(json)
+        List(array.length()) { array.getDouble(it) }
+    }.getOrDefault(emptyList())
 
     private fun startOfDay(date: Date): Date = java.util.Calendar.getInstance().run {
         time = date

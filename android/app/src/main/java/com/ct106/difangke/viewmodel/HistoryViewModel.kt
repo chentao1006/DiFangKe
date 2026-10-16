@@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 import com.ct106.difangke.data.model.DaySummary
+import com.ct106.difangke.data.model.FootprintStatus
 import com.ct106.difangke.data.model.TimelineItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -193,7 +194,8 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     fun scanPhotos(photoUris: List<android.net.Uri>) {
         viewModelScope.launch {
             _isScanningPhotos.value = true
-            val existingPhotoUris = db.footprintDao().getAll()
+            val activeFootprints = db.footprintDao().getAll().filter { it.status != FootprintStatus.IGNORED }
+            val existingPhotoUris = activeFootprints
                 .flatMap { footprint ->
                     runCatching {
                         val ids = org.json.JSONArray(footprint.photoAssetIDsJson)
@@ -202,7 +204,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                 }
                 .toSet()
             val rawCandidates = PhotoService.getInstance(getApplication())
-                .scanFootprintCandidates(photoUris, existingPhotoUris)
+                .scanFootprintCandidates(photoUris, existingPhotoUris, activeFootprints)
             val places = db.placeDao().getAll()
             _photoCandidates.value = withContext(Dispatchers.IO) {
                 rawCandidates.mapNotNull { candidate ->

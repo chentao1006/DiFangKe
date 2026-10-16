@@ -8,12 +8,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.ct106.difangke.ui.screens.history.HistoryScreen
-import com.ct106.difangke.ui.screens.main.MainScreen
+import com.ct106.difangke.ui.screens.main.MainTabScreen
 import com.ct106.difangke.ui.screens.onboarding.OnboardingScreen
-import com.ct106.difangke.ui.screens.settings.SettingsScreen
 import com.ct106.difangke.ui.screens.map.DFKMapScreen
-import com.ct106.difangke.ui.screens.statistics.StatisticsScreen
 import com.ct106.difangke.ui.screens.detail.FootprintDetailScreen
 import com.ct106.difangke.data.prefs.AppPreferences
 import kotlinx.coroutines.flow.first
@@ -22,10 +19,7 @@ import kotlinx.coroutines.runBlocking
 object NavRoutes {
     const val ONBOARDING = "onboarding"
     const val MAIN = "main?date={date}"
-    const val HISTORY = "history?date={date}"
-    const val SETTINGS = "settings"
     const val MAP = "map?date={date}"
-    const val STATISTICS = "statistics"
     const val FOOTPRINT_DETAIL = "footprint_detail/{id}"
     const val TRANSPORT_DETAIL = "transport_detail/{id}"
     const val PLACES_MANAGER = "settings/places"
@@ -122,66 +116,13 @@ fun NavGraph(
             val initialDateStr = backStackEntry.arguments?.getString("date")
             val initialDate = initialDateStr?.toLongOrNull()?.let { java.util.Date(it) }
             
-            MainScreen(
+            MainTabScreen(
                 initialDate = initialDate,
-                onNavigateToHistory = { date -> navController.navigate("history?date=${date.time}") },
-                onNavigateToStatistics = { navController.navigate(NavRoutes.STATISTICS) },
-                onNavigateToSettings = { navController.navigate(NavRoutes.SETTINGS) },
-                onNavigateToMap = { date -> 
-                    val route = if (date != null) "map?date=${date.time}" else "map"
-                    navController.navigate(route)
-                },
-                onNavigateToDetail = { id -> 
-                    if (id.startsWith("t_")) {
-                        navController.navigate("transport_detail/${id.substring(2)}") 
-                    } else if (id.startsWith("f_")) {
-                        navController.navigate("footprint_detail/${id.substring(2)}")
-                    } else {
-                        // For backwards compatibility or direct UUIDs
-                        navController.navigate("footprint_detail/$id")
-                    }
-                },
+                onNavigate = { route -> navController.navigate(route) },
                 onNavigateToRawPoints = { date ->
                     navController.navigate("raw_points?date=${date.time}")
                 },
                 onNavigateToPlaces = { navController.navigate(NavRoutes.PLACES_MANAGER) }
-            )
-        }
-        composable(NavRoutes.HISTORY) { backStackEntry ->
-            val initialDate = backStackEntry.arguments?.getString("date")
-                ?.toLongOrNull()
-                ?.let { timestamp -> java.util.Date(timestamp) }
-                ?: java.util.Date()
-            HistoryScreen(
-                initialDate = initialDate,
-                onBack = { navController.popBackStack() },
-                onNavigateToDetail = { id -> 
-                    if (id.startsWith("t_")) {
-                        navController.navigate("transport_detail/${id.substring(2)}") 
-                    } else if (id.startsWith("f_")) {
-                        navController.navigate("footprint_detail/${id.substring(2)}")
-                    } else {
-                        navController.navigate("footprint_detail/$id")
-                    }
-                },
-                // iOS HistoryListView.onDateSelected: close History and scroll
-                // the continuous timeline to that day.
-                onDateSelected = { date ->
-                    navController.navigate("main?date=${date.time}") {
-                        popUpTo(NavRoutes.MAIN) { inclusive = true }
-                        launchSingleTop = true
-                    }
-                },
-                onNavigateToStatistics = { navController.navigate(NavRoutes.STATISTICS) },
-                onNavigateToRawPoints = { date ->
-                    navController.navigate("raw_points?date=${date.time}")
-                }
-            )
-        }
-        composable(NavRoutes.SETTINGS) {
-            SettingsScreen(
-                onBack = { navController.popBackStack() },
-                onNavigate = { route -> navController.navigate(route) }
             )
         }
         composable(NavRoutes.PLACES_MANAGER) {
@@ -219,9 +160,6 @@ fun NavGraph(
                 },
                 dateTimestamp = dateTimestamp
             )
-        }
-        composable(NavRoutes.STATISTICS) {
-            StatisticsScreen(onBack = { navController.popBackStack() })
         }
         composable(NavRoutes.FOOTPRINT_DETAIL) { backStackEntry ->
             val id = backStackEntry.arguments?.getString("id") ?: ""

@@ -11,7 +11,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -23,7 +22,6 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,10 +34,14 @@ import com.ct106.difangke.ui.components.addImportantPlaceCircles
 import java.text.SimpleDateFormat
 import java.util.*
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+/**
+ * iOS Review → 统计: hosted by the Review tab, which owns the title bar and
+ * its share action ([shareStatistics]).
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun StatisticsScreen(
-    onBack: () -> Unit,
+fun StatisticsContent(
+    modifier: Modifier = Modifier,
     viewModel: StatisticsViewModel = viewModel()
 ) {
     val selectedRange by viewModel.selectedRange.collectAsState()
@@ -53,99 +55,79 @@ fun StatisticsScreen(
     val trendSegments by viewModel.trendSegments.collectAsState()
     val aiSummary by viewModel.aiSummary.collectAsState()
     val isGeneratingSummary by viewModel.isGeneratingSummary.collectAsState()
-    val context = LocalContext.current
-    fun shareStatistics() {
-        context.startActivity(
-            android.content.Intent.createChooser(
-                android.content.Intent(android.content.Intent.ACTION_SEND)
-                    .setType("text/plain")
-                    .putExtra(
-                        android.content.Intent.EXTRA_TEXT,
-                        statisticsShareText(selectedRange, frequentPlaces, activityRank, aiSummary)
-                    ),
-                "分享统计洞察"
-            )
-        )
-    }
 
     val isDark = isSystemInDarkTheme()
     val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
 
-    Scaffold(
-        containerColor = bgColor,
-        topBar = {
-            TopAppBar(
-                title = { Text("统计洞察", fontWeight = FontWeight.ExtraBold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                actions = {
-                    IconButton(onClick = ::shareStatistics) {
-                        Icon(Icons.Default.Share, contentDescription = "分享统计")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = bgColor,
-                    scrolledContainerColor = bgColor
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 40.dp)
+    ) {
+        // 1. Sticky Range Picker
+        stickyHeader {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(bgColor.copy(alpha = 0.95f))
+                    .padding(vertical = 12.dp, horizontal = 20.dp)
+            ) {
+                RangePickerRow(
+                    selectedRange = selectedRange,
+                    onRangeSelected = { viewModel.setRange(it) }
                 )
-            )
-        }
-    ) { paddingValues ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues),
-            contentPadding = PaddingValues(bottom = 40.dp)
-        ) {
-            // 1. Sticky Range Picker
-            stickyHeader {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(bgColor.copy(alpha = 0.95f))
-                        .padding(vertical = 12.dp, horizontal = 20.dp)
-                ) {
-                    RangePickerRow(
-                        selectedRange = selectedRange,
-                        onRangeSelected = { viewModel.setRange(it) }
-                    )
-                }
             }
+        }
 
-            // 2. Content
-            item {
-                Column(
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                    verticalArrangement = Arrangement.spacedBy(24.dp)
-                ) {
-                    // AI Summary (iOS Style: Clean text, no card)
-                    AiSummarySection(summary = aiSummary, isGenerating = isGeneratingSummary)
+        // 2. Content
+        item {
+            Column(
+                modifier = Modifier.padding(horizontal = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp)
+            ) {
+                // AI Summary (iOS Style: Clean text, no card)
+                AiSummarySection(summary = aiSummary, isGenerating = isGeneratingSummary)
 
-                    // Heatmap (Keep as card but matching iOS border radius)
-                    HeatmapSection(points = heatmapPoints, allPlaces = allPlaces)
+                // Heatmap (Keep as card but matching iOS border radius)
+                HeatmapSection(points = heatmapPoints, allPlaces = allPlaces)
 
-                    // Frequent places (same threshold and duration-first ranking as iOS)
-                    FrequentPlacesSection(
-                        items = frequentPlaces,
-                        scope = frequentPlaceRankScope,
-                        onScopeSelected = viewModel::setFrequentPlaceRankScope
-                    )
+                // Frequent places (same threshold and duration-first ranking as iOS)
+                FrequentPlacesSection(
+                    items = frequentPlaces,
+                    scope = frequentPlaceRankScope,
+                    onScopeSelected = viewModel::setFrequentPlaceRankScope
+                )
 
-                    // Activity Rank (iOS Style: Progress bars)
-                    ActivityRankSection(
-                        items = activityRank,
-                        scope = activityRankScope,
-                        onScopeSelected = viewModel::setActivityRankScope
-                    )
+                // Activity Rank (iOS Style: Progress bars)
+                ActivityRankSection(
+                    items = activityRank,
+                    scope = activityRankScope,
+                    onScopeSelected = viewModel::setActivityRankScope
+                )
 
-                    // Trend Chart (iOS Style: Area/Line chart)
-                    TrendSection(points = trendData, segments = trendSegments, range = selectedRange)
-                }
+                // Trend Chart (iOS Style: Area/Line chart)
+                TrendSection(points = trendData, segments = trendSegments, range = selectedRange)
             }
         }
     }
+}
+
+fun shareStatistics(context: android.content.Context, viewModel: StatisticsViewModel) {
+    context.startActivity(
+        android.content.Intent.createChooser(
+            android.content.Intent(android.content.Intent.ACTION_SEND)
+                .setType("text/plain")
+                .putExtra(
+                    android.content.Intent.EXTRA_TEXT,
+                    statisticsShareText(
+                        viewModel.selectedRange.value,
+                        viewModel.frequentPlaces.value,
+                        viewModel.activityRank.value,
+                        viewModel.aiSummary.value
+                    )
+                ),
+            "分享统计洞察"
+        )
+    )
 }
 
 private fun statisticsShareText(

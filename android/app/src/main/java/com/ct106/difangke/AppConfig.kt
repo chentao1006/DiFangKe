@@ -174,6 +174,8 @@ object AppConfig {
     const val PEDOMETER_MIN_MOVING_STEP_DELTA = 3
     const val PEDOMETER_STARTUP_LOOKBACK = 30.0
     const val PHOTO_LINKING_MAX_DISTANCE = 1500.0
+    /** 停留前后这段时间内（秒）拍摄的照片仍属于该停留 */
+    const val PHOTO_LINKING_TIME_BUFFER = 60.0
     const val PLACE_MATCH_DISTANCE_THRESHOLD = 200.0
     const val RAW_STATIONARY_DUPLICATE_DISTANCE = 5.0
     const val RAW_STATIONARY_EXACT_DUPLICATE_DISTANCE = 1.0

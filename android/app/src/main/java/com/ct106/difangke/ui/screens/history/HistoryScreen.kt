@@ -1,10 +1,5 @@
 package com.ct106.difangke.ui.screens.history
 
-import android.Manifest
-import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -21,7 +16,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -44,8 +38,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.platform.LocalContext
-import androidx.core.content.ContextCompat
-import android.content.pm.PackageManager
 import com.ct106.difangke.data.model.DaySummary
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
@@ -53,76 +45,34 @@ import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.viewmodel.HistoryViewModel
 import com.ct106.difangke.ui.components.FootprintCardView
 import com.ct106.difangke.ui.components.getIconForName
+import com.ct106.difangke.ui.screens.statistics.StatisticsContent
+import com.ct106.difangke.ui.screens.statistics.StatisticsViewModel
+import com.ct106.difangke.ui.screens.statistics.shareStatistics
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.launch
 
+/**
+ * iOS MainTabView → 回顾 (HistoryListView): statistics and favorites. Days
+ * are picked from the timeline's own calendar ([HistoryCalendarSheet]).
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HistoryScreen(
-    onBack: () -> Unit,
-    onNavigateToDetail: (String) -> Unit,
-    onDateSelected: (Date) -> Unit, // 跳向主页特定日期
-    onNavigateToRawPoints: (Date) -> Unit,
-    onNavigateToStatistics: () -> Unit = {},
-    initialDate: Date = Date(),
+fun ReviewScreen(
+    onFootprintSelected: (FootprintEntity) -> Unit,
     viewModel: HistoryViewModel = viewModel()
 ) {
-    val summaries by viewModel.summaries.collectAsState()
     val favoriteFootprints by viewModel.favoriteFootprints.collectAsState()
     val activityTypes by viewModel.activityTypes.collectAsState()
     val allPlaces by viewModel.allPlaces.collectAsState()
-    val photoCandidates by viewModel.photoCandidates.collectAsState()
-    val isScanningPhotos by viewModel.isScanningPhotos.collectAsState()
     val context = LocalContext.current
-    var showPhotoResults by remember { mutableStateOf(false) }
-    var showNoPhotoResults by remember { mutableStateOf(false) }
-    var wasScanningPhotos by remember { mutableStateOf(false) }
+    val statisticsViewModel: StatisticsViewModel = viewModel()
+    val startPhotoImport = rememberPhotoImportFlow(viewModel)
 
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickMultipleVisualMedia()
-    ) { uris ->
-        if (uris.isNotEmpty()) {
-            uris.forEach { uri ->
-                runCatching {
-                    context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
-                }
-            }
-            viewModel.scanPhotos(uris)
-        }
-    }
-    // 读取所选照片的拍摄地点需要此权限（读取 EXIF 中的 GPS 信息）；
-    // 用户在选完照片后立刻看到用途，拒绝也不影响照片选择本身。
-    val mediaLocationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) {
-        photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-    }
-    fun launchPhotoImport() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED
-        ) {
-            mediaLocationPermissionLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION)
-        } else {
-            photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-        }
-    }
-
-    LaunchedEffect(isScanningPhotos) {
-        if (wasScanningPhotos && !isScanningPhotos) {
-            if (photoCandidates.isNotEmpty()) showPhotoResults = true
-            else showNoPhotoResults = true
-        }
-        wasScanningPhotos = isScanningPhotos
-    }
-    
     val scope = rememberCoroutineScope()
     val pagerState = rememberPagerState(pageCount = { 2 })
-    
-    val tabs = listOf("月", "收藏")
+    val tabs = listOf("统计", "收藏")
+    val isStatisticsActive = pagerState.currentPage == 0
 
     val isDark = isSystemInDarkTheme()
     val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
@@ -130,30 +80,23 @@ fun HistoryScreen(
     Scaffold(
         containerColor = bgColor,
         topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text("往昔足迹", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
+            TopAppBar(
+                title = { Text("回顾", fontWeight = FontWeight.Bold) },
                 actions = {
-                    // iOS History hosts the statistics view.
-                    IconButton(onClick = onNavigateToStatistics) {
-                        Icon(Icons.Default.BarChart, contentDescription = "统计洞察")
+                    if (isStatisticsActive) {
+                        IconButton(onClick = { shareStatistics(context, statisticsViewModel) }) {
+                            Icon(Icons.Default.Share, contentDescription = "分享统计")
+                        }
                     }
-                    IconButton(onClick = { launchPhotoImport() }) {
+                    IconButton(onClick = startPhotoImport) {
                         Icon(Icons.Default.AddPhotoAlternate, contentDescription = "从照片导入足迹")
                     }
                 },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
-                )
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = bgColor)
             )
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            // Tab Picker (Android 原生风格)
             PrimaryTabRow(
                 selectedTabIndex = pagerState.currentPage,
                 containerColor = Color.Transparent,
@@ -189,84 +132,60 @@ fun HistoryScreen(
                 verticalAlignment = Alignment.Top
             ) { page ->
                 when (page) {
-                    0 -> HistoryMonthView(summaries, initialDate, onDateSelected, { viewModel.rebuildTimeline(it) }, onNavigateToRawPoints)
+                    0 -> StatisticsContent(viewModel = statisticsViewModel)
                     1 -> HistoryFavoritesView(
                         favorites = favoriteFootprints,
                         activityTypes = activityTypes,
                         allPlaces = allPlaces,
-                        onNavigateToDetail = { onNavigateToDetail("f_$it") }
+                        onNavigateToDetail = { id ->
+                            favoriteFootprints.firstOrNull { it.footprintID == id }?.let(onFootprintSelected)
+                        }
                     )
                 }
             }
         }
     }
-
-    if (isScanningPhotos) {
-        AlertDialog(
-            onDismissRequest = {},
-            title = { Text("正在扫描照片") },
-            text = { Text("正在按拍摄地点和时间整理可导入的足迹…") },
-            confirmButton = {}
-        )
-    }
-    if (showNoPhotoResults) {
-        AlertDialog(
-            onDismissRequest = { showNoPhotoResults = false },
-            title = { Text("未发现足迹") },
-            text = { Text("所选范围内没有包含位置信息的照片。") },
-            confirmButton = { TextButton(onClick = { showNoPhotoResults = false }) { Text("好") } }
-        )
-    }
-    if (showPhotoResults) {
-        PhotoImportCandidatesDialog(
-            candidates = photoCandidates,
-            onDismiss = { showPhotoResults = false },
-            onImport = {
-                viewModel.importPhotoCandidates(it)
-                showPhotoResults = false
-            }
-        )
-    }
 }
 
+/**
+ * iOS HistoryListView(calendarOnly: true): the month calendar opened from the
+ * timeline's date title. Only days with records can be picked.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PhotoImportCandidatesDialog(
-    candidates: List<FootprintEntity>,
+fun HistoryCalendarSheet(
+    initialDate: Date,
+    onDateSelected: (Date) -> Unit,
+    onViewRawPoints: (Date) -> Unit,
     onDismiss: () -> Unit,
-    onImport: (List<FootprintEntity>) -> Unit
+    viewModel: HistoryViewModel = viewModel()
 ) {
-    var selectedIDs by remember(candidates) { mutableStateOf(candidates.map { it.footprintID }.toSet()) }
-    AlertDialog(
+    val summaries by viewModel.summaries.collectAsState()
+    val startPhotoImport = rememberPhotoImportFlow(viewModel)
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text("从照片找回足迹") },
-        text = {
-            LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                item {
-                    Text("已按地点和时间整理出 ${candidates.size} 个候选足迹；确认后才会写入时间线。", style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(12.dp))
-                }
-                items(candidates, key = { it.footprintID }) { candidate ->
-                    val count = try { org.json.JSONArray(candidate.photoAssetIDsJson).length() } catch (_: Exception) { 0 }
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clickable {
-                            selectedIDs = if (candidate.footprintID in selectedIDs) selectedIDs - candidate.footprintID else selectedIDs + candidate.footprintID
-                        }.padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Checkbox(candidate.footprintID in selectedIDs, onCheckedChange = null)
-                        Column(Modifier.padding(start = 8.dp)) {
-                            Text(SimpleDateFormat("yyyy年M月d日 HH:mm", Locale.CHINA).format(candidate.startTime), fontWeight = FontWeight.Medium)
-                            Text("$count 张带地点的照片", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ) {
+        Box(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            IconButton(onClick = startPhotoImport, modifier = Modifier.align(Alignment.CenterStart)) {
+                Icon(Icons.Default.AddPhotoAlternate, contentDescription = "从照片导入足迹")
             }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-        confirmButton = {
-            TextButton(onClick = { onImport(candidates.filter { it.footprintID in selectedIDs }) }, enabled = selectedIDs.isNotEmpty()) { Text("导入") }
+            Text(
+                "选择日期",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.align(Alignment.Center)
+            )
+            TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.CenterEnd)) { Text("完成") }
         }
-    )
+        HistoryMonthView(
+            summaries = summaries,
+            targetDate = initialDate,
+            onDateSelected = onDateSelected,
+            onRebuild = { viewModel.rebuildTimeline(it) },
+            onViewRawPoints = onViewRawPoints
+        )
+    }
 }
 
 @Composable
@@ -572,7 +491,8 @@ fun MonthDayCell(
             .clip(RoundedCornerShape(8.dp))
             .background(if (isToday) MaterialTheme.colorScheme.primary.copy(alpha = 0.1f) else Color.Transparent)
             .combinedClickable(
-                enabled = hasData || isToday,
+                // iOS MonthDayCell.isSelectable: only past days with records.
+                enabled = hasData && !date.after(Date()),
                 onClick = onClick,
                 onLongClick = { if (hasData) showMenu = true }
             ),

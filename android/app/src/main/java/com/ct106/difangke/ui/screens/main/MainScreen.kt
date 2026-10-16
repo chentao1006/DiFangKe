@@ -17,9 +17,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,7 +31,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -68,6 +68,8 @@ import com.ct106.difangke.ui.screens.detail.TransportSplitSheet
 import com.ct106.difangke.ui.share.ShareCardPreviewDialog
 import com.ct106.difangke.ui.share.ShareCardRequest
 import com.ct106.difangke.ui.share.ShareRangePickerDialog
+import com.ct106.difangke.ui.screens.history.HistoryCalendarSheet
+import com.ct106.difangke.ui.screens.history.rememberPhotoImportFlow
 import com.ct106.difangke.ui.shared.TimelineEditActions
 import com.ct106.difangke.ui.theme.DfkAccent
 import com.ct106.difangke.viewmodel.MainViewModel
@@ -98,11 +100,10 @@ private enum class SheetDetent { COLLAPSED, MEDIUM, LARGE }
 fun MainScreen(
     viewModel: MainViewModel = androidx.lifecycle.viewmodel.compose.viewModel(),
     initialDate: Date? = null,
-    onNavigateToHistory: (Date) -> Unit,
-    onNavigateToStatistics: () -> Unit,
-    onNavigateToSettings: () -> Unit,
-    onNavigateToMap: (Date?) -> Unit,
-    onNavigateToDetail: (String) -> Unit,
+    /** False while another tab covers Records; its sheets must not show. */
+    isActive: Boolean = true,
+    destination: TimelineDestination? = null,
+    onDestinationConsumed: () -> Unit = {},
     onNavigateToRawPoints: (Date) -> Unit,
     onNavigateToPlaces: () -> Unit
 ) {
@@ -179,8 +180,9 @@ fun MainScreen(
     ContinuousTimelineScreen(
         viewModel = viewModel,
         initialDate = initialDate,
-        onNavigateToHistory = onNavigateToHistory,
-        onNavigateToSettings = onNavigateToSettings,
+        isActive = isActive,
+        destination = destination,
+        onDestinationConsumed = onDestinationConsumed,
         onNavigateToRawPoints = onNavigateToRawPoints,
         onNavigateToPlaces = onNavigateToPlaces
     )
@@ -244,8 +246,9 @@ private sealed class EditSheet {
 private fun ContinuousTimelineScreen(
     viewModel: MainViewModel,
     initialDate: Date?,
-    onNavigateToHistory: (Date) -> Unit,
-    onNavigateToSettings: () -> Unit,
+    isActive: Boolean,
+    destination: TimelineDestination?,
+    onDestinationConsumed: () -> Unit,
     onNavigateToRawPoints: (Date) -> Unit,
     onNavigateToPlaces: () -> Unit
 ) {
@@ -266,6 +269,11 @@ private fun ContinuousTimelineScreen(
     var loadedDateCount by remember { mutableIntStateOf(TIMELINE_DATE_BATCH_SIZE) }
     var scrollTarget by remember { mutableStateOf<Date?>(null) }
     var scrollRequest by remember { mutableIntStateOf(0) }
+    var scrollAlignsTop by remember { mutableStateOf(false) }
+    // iOS mapFollowsVisibleContent: the map fits the active day as a whole
+    // until the user scrolls the timeline by hand; only then does it follow
+    // the visible days.
+    var mapFollowsVisibleContent by remember { mutableStateOf(false) }
 
     var selection by remember { mutableStateOf<TimelineSelection?>(null) }
     var pendingAction by remember { mutableStateOf<PendingAction?>(null) }
@@ -291,7 +299,8 @@ private fun ContinuousTimelineScreen(
     val timelineDates = remember(allTimelineDates, loadedDateCount) { allTimelineDates.takeLast(loadedDateCount) }
     val canLoadEarlier = allTimelineDates.size > timelineDates.size
 
-    fun scrollToDate(date: Date) {
+    /** [alignToTop] puts the day's date line at the top (calendar, previous/next day). */
+    fun scrollToDate(date: Date, alignToTop: Boolean = true) {
         val target = normalizeTimelineDate(date)
         val index = allTimelineDates.indexOfFirst { it.time == target.time }
         if (index >= 0) {
@@ -304,12 +313,37 @@ private fun ContinuousTimelineScreen(
         headerDates = listOf(target)
         visibleDates = setOf(target)
         scrollTarget = target
+        scrollAlignsTop = alignToTop
+        mapFollowsVisibleContent = false
         scrollRequest += 1
     }
 
-    LaunchedEffect(initialDate, initialLoadCompleted) {
-        if (initialDate != null && initialLoadCompleted) scrollToDate(initialDate)
+    /** iOS adjacentRecordedDate(forward:): the nearest recorded day around the active one. */
+    fun adjacentRecordedDate(forward: Boolean): Date? {
+        val candidates = availableDates.map(::normalizeTimelineDate).filter { date ->
+            !date.after(today) && if (forward) date.after(activeDate) else date.before(activeDate)
+        }
+        return if (forward) candidates.minByOrNull { it.time } else candidates.maxByOrNull { it.time }
     }
+
+    LaunchedEffect(initialDate, initialLoadCompleted) {
+        if (initialDate != null && initialLoadCompleted) scrollToDate(initialDate, alignToTop = false)
+    }
+
+    // iOS TimelineScene.consumeDestination: Review asks Records to open a day
+    // (and optionally one of its footprints).
+    LaunchedEffect(destination, initialLoadCompleted) {
+        val requested = destination ?: return@LaunchedEffect
+        if (!initialLoadCompleted) return@LaunchedEffect
+        onDestinationConsumed()
+        scrollToDate(requested.date, alignToTop = false)
+        requested.footprintID?.let { selection = TimelineSelection.Footprint(it) }
+    }
+
+    // Starts the shared photo import flow here, without leaving Records.
+    val startPhotoImport = rememberPhotoImportFlow(
+        androidx.lifecycle.viewmodel.compose.viewModel(key = "timelinePhotoImport")
+    )
 
     // iOS scheduleMidnightTimelineRefresh: today changes at midnight.
     LaunchedEffect(today.time) {
@@ -406,13 +440,11 @@ private fun ContinuousTimelineScreen(
         TimelineMapPane(
             modifier = Modifier.fillMaxSize(),
             selectedDate = activeDate,
-            visibleDates = visibleDates,
+            visibleDates = if (mapFollowsVisibleContent) visibleDates else setOf(activeDate),
             selection = selection,
             viewModel = viewModel,
             activityTypes = activityTypes,
             allPlaces = allPlaces,
-            // iOS: the locate button rides 48pt above the sheet until large.
-            sheetHeight = if (detent == SheetDetent.LARGE) 4.dp else sheetHeight + 36.dp,
             bottomPaddingPx = sheetHeightPx.toInt(),
             onUserPan = {
                 // iOS handleMapInteraction: touching the map minimizes the timeline.
@@ -444,16 +476,18 @@ private fun ContinuousTimelineScreen(
                             dragHeightPx = null
                         }
                     )
+                    val previousDate = adjacentRecordedDate(forward = false)
+                    val nextDate = adjacentRecordedDate(forward = true)
                     TimelineSheetHeader(
                         headerDates = headerDates,
                         viewModel = viewModel,
-                        onShowHistory = { onNavigateToHistory(activeDate) },
+                        onPreviousDay = previousDate?.let { { scrollToDate(it) } },
+                        onNextDay = nextDate?.let { { scrollToDate(it) } },
                         onShowCalendar = { showCalendar = true },
                         onViewRawPoints = { onNavigateToRawPoints(activeDate) },
                         onRebuild = { showRebuildAlert = true },
                         onShareCurrentDate = { shareRequest = ShareCardRequest.Timeline(activeDate, activeDate) },
-                        onShareRange = { showShareRangePicker = true },
-                        onShowSettings = onNavigateToSettings
+                        onShareRange = { showShareRangePicker = true }
                     )
                     // iOS keeps the scroll view mounted while collapsed so its
                     // offset survives re-expansion, but renders it transparent.
@@ -474,10 +508,12 @@ private fun ContinuousTimelineScreen(
                             allPlaces = allPlaces,
                             scrollTarget = scrollTarget,
                             scrollRequest = scrollRequest,
+                            scrollAlignsTop = scrollAlignsTop,
                             interactive = !isCollapsed,
                             showsImportantPlaceGuide = !isImportantPlaceGuideDismissed && allPlaces.none { it.isUserDefined },
                             onLoadEarlier = { loadedDateCount += TIMELINE_DATE_BATCH_SIZE },
-                            onImportPhotos = { onNavigateToHistory(today) },
+                            onImportPhotos = startPhotoImport,
+                            onUserScroll = { mapFollowsVisibleContent = true },
                             onViewportChanged = { visible, header, bottom ->
                                 if (visible.isNotEmpty()) visibleDates = visible
                                 if (header.isNotEmpty()) headerDates = header
@@ -494,7 +530,7 @@ private fun ContinuousTimelineScreen(
                         if (!isCollapsed && activeDate.before(today)) {
                             ReturnToTodayButton(
                                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp),
-                                onClick = { scrollToDate(today) }
+                                onClick = { scrollToDate(today, alignToTop = false) }
                             )
                         }
                     }
@@ -507,7 +543,7 @@ private fun ContinuousTimelineScreen(
     }
 
     // ── Selected item detail (iOS FootprintModalView / TransportModalView) ──
-    selection?.let { current ->
+    selection?.takeIf { isActive }?.let { current ->
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
         ModalBottomSheet(
             onDismissRequest = { selection = null },
@@ -576,13 +612,13 @@ private fun ContinuousTimelineScreen(
     }
 
     if (showCalendar) {
-        CalendarSelectionDialog(
-            selectedDate = activeDate,
-            availableDates = allTimelineDates,
+        HistoryCalendarSheet(
+            initialDate = activeDate,
             onDateSelected = { date ->
                 showCalendar = false
                 scrollToDate(date)
             },
+            onViewRawPoints = onNavigateToRawPoints,
             onDismiss = { showCalendar = false }
         )
     }
@@ -685,22 +721,26 @@ private fun SheetDragHandle(onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
     }
 }
 
-/** iOS headerToolbar: history · date title (calendar / context menu) · share · settings. */
+/**
+ * iOS headerToolbar: previous recorded day · date title (calendar on tap,
+ * share / raw points / rebuild on long press) · next recorded day.
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TimelineSheetHeader(
     headerDates: List<Date>,
     viewModel: MainViewModel,
-    onShowHistory: () -> Unit,
+    /** Null when there is no earlier recorded day. */
+    onPreviousDay: (() -> Unit)?,
+    /** Null when there is no later recorded day. */
+    onNextDay: (() -> Unit)?,
     onShowCalendar: () -> Unit,
     onViewRawPoints: () -> Unit,
     onRebuild: () -> Unit,
     onShareCurrentDate: () -> Unit,
-    onShareRange: () -> Unit,
-    onShowSettings: () -> Unit
+    onShareRange: () -> Unit
 ) {
     var showDateMenu by remember { mutableStateOf(false) }
-    var showShareMenu by remember { mutableStateOf(false) }
     val displayDates = headerDates.sortedBy { it.time }
     val first = displayDates.first()
     val last = displayDates.last()
@@ -727,8 +767,8 @@ private fun TimelineSheetHeader(
             .padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = onShowHistory) {
-            Icon(Icons.Default.EventRepeat, contentDescription = "往昔足迹")
+        IconButton(onClick = { onPreviousDay?.invoke() }, enabled = onPreviousDay != null) {
+            Icon(Icons.Default.ChevronLeft, contentDescription = "上一天")
         }
         Spacer(Modifier.weight(1f))
         Box {
@@ -759,6 +799,17 @@ private fun TimelineSheetHeader(
             }
             DropdownMenu(expanded = showDateMenu, onDismissRequest = { showDateMenu = false }) {
                 DropdownMenuItem(
+                    text = { Text("分享当前日期足迹") },
+                    leadingIcon = { Icon(Icons.Default.IosShare, null) },
+                    onClick = { showDateMenu = false; onShareCurrentDate() }
+                )
+                DropdownMenuItem(
+                    text = { Text("选择日期范围分享") },
+                    leadingIcon = { Icon(Icons.Default.DateRange, null) },
+                    onClick = { showDateMenu = false; onShareRange() }
+                )
+                HorizontalDivider()
+                DropdownMenuItem(
                     text = { Text("查看所有轨迹点") },
                     leadingIcon = { Icon(Icons.Default.Sensors, null) },
                     onClick = { showDateMenu = false; onViewRawPoints() }
@@ -772,25 +823,8 @@ private fun TimelineSheetHeader(
             }
         }
         Spacer(Modifier.weight(1f))
-        Box {
-            IconButton(onClick = { showShareMenu = true }) {
-                Icon(Icons.Default.IosShare, contentDescription = "分享")
-            }
-            DropdownMenu(expanded = showShareMenu, onDismissRequest = { showShareMenu = false }) {
-                DropdownMenuItem(
-                    text = { Text("分享当前日期足迹") },
-                    leadingIcon = { Icon(Icons.Default.Route, null) },
-                    onClick = { showShareMenu = false; onShareCurrentDate() }
-                )
-                DropdownMenuItem(
-                    text = { Text("选择日期范围分享") },
-                    leadingIcon = { Icon(Icons.Default.DateRange, null) },
-                    onClick = { showShareMenu = false; onShareRange() }
-                )
-            }
-        }
-        IconButton(onClick = onShowSettings) {
-            Icon(Icons.Outlined.Settings, contentDescription = "设置")
+        IconButton(onClick = { onNextDay?.invoke() }, enabled = onNextDay != null) {
+            Icon(Icons.Default.ChevronRight, contentDescription = "下一天")
         }
     }
 }
@@ -814,10 +848,13 @@ private fun ContinuousTimelineList(
     allPlaces: List<PlaceEntity>,
     scrollTarget: Date?,
     scrollRequest: Int,
+    scrollAlignsTop: Boolean,
     interactive: Boolean,
     showsImportantPlaceGuide: Boolean,
     onLoadEarlier: () -> Unit,
     onImportPhotos: () -> Unit,
+    /** The user started scrolling the timeline by hand. */
+    onUserScroll: () -> Unit,
     onViewportChanged: (visible: Set<Date>, header: List<Date>, bottom: Date?) -> Unit,
     rowActions: (TimelineItem) -> RowActions,
     onRequestArrival: () -> Unit,
@@ -828,6 +865,9 @@ private fun ContinuousTimelineList(
     val newestFirst = remember(timelineDates) { timelineDates.reversed() }
     val currentNewestFirst by rememberUpdatedState(newestFirst)
     var isProgrammaticScroll by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
+    val isDragged by listState.interactionSource.collectIsDraggedAsState()
+    LaunchedEffect(isDragged) { if (isDragged) onUserScroll() }
 
     LaunchedEffect(scrollRequest) {
         val target = scrollTarget ?: return@LaunchedEffect
@@ -837,10 +877,25 @@ private fun ContinuousTimelineList(
         } ?: return@LaunchedEffect
         isProgrammaticScroll = true
         try {
-            // Reversed layout: scrolling to the item rests the day's bottom
-            // on the viewport bottom (iOS proxy.scrollTo(.date, anchor: .bottom)).
-            if (kotlin.math.abs(listState.firstVisibleItemIndex - index) > 6) listState.scrollToItem(index)
-            else listState.animateScrollToItem(index)
+            if (scrollAlignsTop) {
+                // iOS scrollTo(.dateLine, anchor: .top): jump, then align the
+                // date line (below the day's gap connector) to the top edge.
+                listState.scrollToItem(index)
+                val info = listState.layoutInfo
+                val item = info.visibleItemsInfo.firstOrNull { it.index == index }
+                if (item != null) {
+                    val olderDate = currentNewestFirst.getOrNull(index + 1)
+                    val gapHeight = olderDate?.let { timelineDateGapHeight(currentNewestFirst[index], it) } ?: 0.dp
+                    val dateLineTop = item.offset + item.size - with(density) { gapHeight.toPx() }
+                    listState.scrollBy(dateLineTop - info.viewportEndOffset)
+                }
+            } else if (kotlin.math.abs(listState.firstVisibleItemIndex - index) > 6) {
+                // Reversed layout: scrolling to the item rests the day's bottom
+                // on the viewport bottom (iOS proxy.scrollTo(.date, anchor: .bottom)).
+                listState.scrollToItem(index)
+            } else {
+                listState.animateScrollToItem(index)
+            }
         } finally {
             isProgrammaticScroll = false
         }
@@ -859,15 +914,15 @@ private fun ContinuousTimelineList(
         reverseLayout = true,
         userScrollEnabled = interactive,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(top = 30.dp, bottom = 128.dp)
+        contentPadding = PaddingValues(top = 30.dp)
     ) {
         items(newestFirst.size, key = { dayKey(newestFirst[it]) }) { index ->
             val date = newestFirst[index]
             val olderDate = newestFirst.getOrNull(index + 1)
             Column(Modifier.fillMaxWidth()) {
                 if (olderDate != null) {
-                    val gapDays = ((date.time - olderDate.time) / 86_400_000L).toInt()
-                    if (gapDays > 1) TimelineDateGapConnector(skippedDays = gapDays - 1)
+                    val gapHeight = timelineDateGapHeight(date, olderDate)
+                    if (gapHeight > 0.dp) TimelineDateGapConnector(gapHeight)
                 }
                 TimelineDaySection(
                     date = date,
@@ -1104,10 +1159,15 @@ private fun TimelineDateHeader(date: Date) {
     }
 }
 
+/** Height of the connector above [date] for the empty days since [olderDate]; 0 when adjacent. */
+private fun timelineDateGapHeight(date: Date, olderDate: Date): Dp {
+    val skippedDays = ((date.time - olderDate.time) / 86_400_000L).toInt() - 1
+    return if (skippedDays > 0) minOf(120, 32 + skippedDays * 14).dp else 0.dp
+}
+
 /** iOS TimelineDateGapConnector: dashed line for skipped empty days. */
 @Composable
-private fun TimelineDateGapConnector(skippedDays: Int) {
-    val height = minOf(120, 32 + skippedDays * 14).dp
+private fun TimelineDateGapConnector(height: Dp) {
     val color = timelineLineColor()
     Canvas(Modifier.fillMaxWidth().height(height)) {
         val x = (16.dp + TimelineLayout.markerCenterX).toPx()
@@ -1200,7 +1260,7 @@ private fun ReturnToTodayButton(modifier: Modifier, onClick: () -> Unit) {
             Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.NearMe, null, modifier = Modifier.size(16.dp))
+            Icon(Icons.Default.VerticalAlignBottom, null, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(6.dp))
             Text("回到当下", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
         }
@@ -1298,177 +1358,4 @@ fun TimelinePage(
             )
         }
     }
-}
-
-// ── Calendar (iOS MiniCalendarView popover) ────────────────────────────
-
-@Composable
-fun CalendarSelectionDialog(
-    selectedDate: Date,
-    availableDates: List<Date>,
-    onDateSelected: (Date) -> Unit,
-    onDismiss: () -> Unit
-) {
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            MiniCalendarView(
-                selectedDate = selectedDate,
-                availableDates = availableDates.toSet(),
-                onDateSelected = onDateSelected
-            )
-        }
-    }
-}
-
-@Composable
-fun MiniCalendarView(
-    selectedDate: Date,
-    availableDates: Set<Date>,
-    onDateSelected: (Date) -> Unit
-) {
-    var currentMonth by remember {
-        mutableStateOf(Calendar.getInstance().apply {
-            time = selectedDate
-            set(Calendar.DAY_OF_MONTH, 1)
-        }.time)
-    }
-    val weekDays = listOf("日", "一", "二", "三", "四", "五", "六")
-    val isDark = isSystemInDarkTheme()
-    val primaryColor = DfkAccent
-    val surfaceColor = if (isDark) Color(0xFF1C1C1E) else Color.White
-    val titleColor = MaterialTheme.colorScheme.onSurface
-    val secondaryTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-    val disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f)
-    val subtleTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.48f)
-    val dataTextColor = MaterialTheme.colorScheme.onSurface
-    fun changeMonth(delta: Int) {
-        currentMonth = Calendar.getInstance().apply { time = currentMonth; add(Calendar.MONTH, delta) }.time
-    }
-    var dragOffset by remember { mutableFloatStateOf(0f) }
-
-    Column(
-        modifier = Modifier
-            .width(320.dp)
-            .clip(RoundedCornerShape(28.dp))
-            .background(surfaceColor)
-            .pointerInput(currentMonth) {
-                detectHorizontalDragGestures(
-                    onDragStart = { dragOffset = 0f },
-                    onHorizontalDrag = { _, dragAmount -> dragOffset += dragAmount },
-                    onDragEnd = {
-                        when {
-                            dragOffset > 56f -> changeMonth(-1)
-                            dragOffset < -56f -> changeMonth(1)
-                        }
-                        dragOffset = 0f
-                    },
-                    onDragCancel = { dragOffset = 0f }
-                )
-            }
-            .padding(20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(
-                onClick = { changeMonth(-1) },
-                modifier = Modifier.size(32.dp).background(Color.Gray.copy(alpha = 0.1f), CircleShape)
-            ) {
-                Icon(Icons.Default.ChevronLeft, null, modifier = Modifier.size(16.dp), tint = secondaryTextColor)
-            }
-            Text(
-                SimpleDateFormat("yyyy年M月", Locale.CHINA).format(currentMonth),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = titleColor
-            )
-            IconButton(
-                onClick = { changeMonth(1) },
-                modifier = Modifier.size(32.dp).background(Color.Gray.copy(alpha = 0.1f), CircleShape)
-            ) {
-                Icon(Icons.Default.ChevronRight, null, modifier = Modifier.size(16.dp), tint = secondaryTextColor)
-            }
-        }
-        Spacer(Modifier.height(16.dp))
-        Row(Modifier.fillMaxWidth()) {
-            weekDays.forEach { day ->
-                Text(
-                    day,
-                    modifier = Modifier.weight(1f),
-                    textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = secondaryTextColor,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-        val days = remember(currentMonth) { getDaysInMonth(currentMonth) }
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            days.chunked(7).forEach { row ->
-                Row(Modifier.fillMaxWidth()) {
-                    row.forEach { date ->
-                        if (date == null) {
-                            Spacer(Modifier.weight(1f))
-                        } else {
-                            val isSelected = isSameDay(date, selectedDate)
-                            val isToday = isSameDay(date, Date())
-                            val hasData = availableDates.any { isSameDay(it, date) }
-                            val isFuture = date.time > System.currentTimeMillis() + 60_000
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .aspectRatio(1f)
-                                    .clip(CircleShape)
-                                    .background(if (isSelected) primaryColor else Color.Transparent)
-                                    .clickable(enabled = (hasData || isToday) && !isFuture) { onDateSelected(date) },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    Calendar.getInstance().apply { time = date }.get(Calendar.DAY_OF_MONTH).toString(),
-                                    color = when {
-                                        isSelected -> Color.White
-                                        isFuture -> disabledTextColor
-                                        isToday -> primaryColor
-                                        hasData -> dataTextColor
-                                        else -> subtleTextColor
-                                    },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.Medium
-                                )
-                                if (hasData && !isSelected) {
-                                    Box(
-                                        Modifier
-                                            .align(Alignment.BottomCenter)
-                                            .padding(bottom = 4.dp)
-                                            .size(3.dp)
-                                            .background(if (isToday) primaryColor else secondaryTextColor, CircleShape)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-private fun getDaysInMonth(monthDate: Date): List<Date?> {
-    val calendar = Calendar.getInstance().apply {
-        time = monthDate
-        set(Calendar.DAY_OF_MONTH, 1)
-    }
-    val daysInMonth = calendar.getActualMaximum(Calendar.DAY_OF_MONTH)
-    val firstDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK) - 1
-    val result = MutableList<Date?>(firstDayOfWeek) { null }
-    repeat(daysInMonth) {
-        result.add(calendar.time)
-        calendar.add(Calendar.DAY_OF_MONTH, 1)
-    }
-    while (result.size < 42) result.add(null)
-    return result
 }

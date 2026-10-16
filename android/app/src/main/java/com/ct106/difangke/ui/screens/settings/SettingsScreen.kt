@@ -27,7 +27,8 @@ import com.ct106.difangke.ui.components.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    onBack: () -> Unit,
+    /** Null when Settings is a root tab (iOS MainTabView → 设置). */
+    onBack: (() -> Unit)? = null,
     onNavigate: (String) -> Unit,
     viewModel: SettingsViewModel = viewModel()
 ) {
@@ -114,8 +115,10 @@ fun SettingsScreen(
             TopAppBar(
                 title = { Text("设置", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        }
                     }
                 }
             )
