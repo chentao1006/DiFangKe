@@ -90,6 +90,7 @@
 		E5CF6588D5181064FB5CB42D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 76746EBFA55AE24E965803B1 /* Assets.xcassets */; };
 		F00DBA5E0000000000000003 /* ManualFootprintBoundaryRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000002 /* ManualFootprintBoundaryRegressionTests.swift */; };
 		F00DBA5E0000000000000010 /* CurrentActivityMapCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000011 /* CurrentActivityMapCacheTests.swift */; };
+		F00DBA5E0000000000000020 /* CurrentStayActivityMatchingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000021 /* CurrentStayActivityMatchingTests.swift */; };
 		FE83FA99A0DCD7ACEF34A49F /* DiFangKeWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */; };
 /* End PBXBuildFile section */
 
@@ -234,6 +235,7 @@
 		F00DBA5E0000000000000002 /* ManualFootprintBoundaryRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualFootprintBoundaryRegressionTests.swift; sourceTree = "<group>"; };
 		F00DBA5E0000000000000004 /* DiFangKeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DiFangKeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F00DBA5E0000000000000011 /* CurrentActivityMapCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentActivityMapCacheTests.swift; sourceTree = "<group>"; };
+		F00DBA5E0000000000000021 /* CurrentStayActivityMatchingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentStayActivityMatchingTests.swift; sourceTree = "<group>"; };
 		F44E7F2A482D33533D342882 /* PlacePickerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacePickerViewModel.swift; sourceTree = "<group>"; };
 		FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -484,6 +486,7 @@
 			children = (
 				F00DBA5E0000000000000002 /* ManualFootprintBoundaryRegressionTests.swift */,
 				F00DBA5E0000000000000011 /* CurrentActivityMapCacheTests.swift */,
+				F00DBA5E0000000000000021 /* CurrentStayActivityMatchingTests.swift */,
 			);
 			path = DiFangKeTests;
 			sourceTree = "<group>";
@@ -775,6 +778,7 @@
 			files = (
 				F00DBA5E0000000000000003 /* ManualFootprintBoundaryRegressionTests.swift in Sources */,
 				F00DBA5E0000000000000010 /* CurrentActivityMapCacheTests.swift in Sources */,
+				F00DBA5E0000000000000020 /* CurrentStayActivityMatchingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -865,7 +869,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -886,7 +890,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.6.3;
+				MARKETING_VERSION = 1.6.6;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1002,7 +1006,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -1017,7 +1021,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.6.3;
+				MARKETING_VERSION = 1.6.6;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

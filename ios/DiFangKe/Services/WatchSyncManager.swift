@@ -12,6 +12,8 @@ struct WatchActivityOption: Codable, Hashable {
 
 struct WatchSnapshot: Codable {
     let currentFootprintID: String?
+    let currentLatitude: Double?
+    let currentLongitude: Double?
     let placeName: String
     let address: String?
     let startedAt: Date?
@@ -88,6 +90,8 @@ struct WatchStatisticsRankItem: Codable {
 /// WatchConnectivity's transfer limit. The complication only renders these fields.
 private struct WatchComplicationSnapshot: Codable {
     let currentFootprintID: String?
+    let currentLatitude: Double?
+    let currentLongitude: Double?
     let placeName: String
     let address: String?
     let startedAt: Date?
@@ -103,6 +107,8 @@ private struct WatchComplicationSnapshot: Codable {
 
     init(snapshot: WatchSnapshot) {
         currentFootprintID = snapshot.currentFootprintID
+        currentLatitude = snapshot.currentLatitude
+        currentLongitude = snapshot.currentLongitude
         placeName = snapshot.placeName
         address = snapshot.address
         startedAt = snapshot.startedAt
@@ -172,6 +178,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     private var modelContext: ModelContext?
     private let pendingActivityFootprintKey = "pendingWatchActivityFootprintID"
     private let pendingActivityIDKey = "pendingWatchActivityID"
+    private let pendingActivityStayStartKey = "pendingWatchActivityStayStartedAt"
     private let lastHourlySyncKey = "lastWatchHourlySyncTimestamp"
     private let complicationFingerprintKey = "lastWatchComplicationStatusFingerprint"
     private var footprintDataChangedObserver: NSObjectProtocol?
@@ -220,18 +227,20 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         }
     }
 
-    func syncSnapshot() {
+    /// Returns the compact current-state payload that was published, if any.
+    @discardableResult
+    func syncSnapshot(forceCurrentStateDelivery: Bool = false) -> [String: Any]? {
         guard let context = modelContext,
               WCSession.isSupported(),
               WCSession.default.activationState == .activated,
-              WCSession.default.isWatchAppInstalled else { return }
+              WCSession.default.isWatchAppInstalled else { return nil }
         let snapshot = makeSnapshot(context: context)
         if snapshot.currentTransportType != nil, snapshot.currentAverageSpeed != nil {
             lastMovingAverageSpeedSyncAt = Date()
         }
         let complicationSnapshot = WatchComplicationSnapshot(snapshot: snapshot)
-        guard let complicationData = try? JSONEncoder().encode(complicationSnapshot) else { return }
-        guard let fingerprint = try? JSONEncoder().encode(ComplicationBudgetFingerprint(complicationSnapshot)) else { return }
+        guard let complicationData = try? JSONEncoder().encode(complicationSnapshot) else { return nil }
+        guard let fingerprint = try? JSONEncoder().encode(ComplicationBudgetFingerprint(complicationSnapshot)) else { return nil }
         let stateChanged = fingerprint != lastComplicationFingerprint
         let generatedAt = Date().timeIntervalSince1970
         let complicationPayload: [String: Any] = ["complicationSnapshot": complicationData, "generatedAt": generatedAt]
@@ -240,7 +249,10 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         // fast path: it only succeeds while the watch app is reachable, but when it does,
         // the complication updates instantly instead of waiting for the next wake.
         let session = WCSession.default
-        if stateChanged, session.isReachable {
+        // A Watch-initiated refresh must receive the current value even when it
+        // matches the phone's last-sent fingerprint. The previous state may
+        // have changed while the Watch was unreachable and never arrived.
+        if (stateChanged || forceCurrentStateDelivery), session.isReachable {
             session.sendMessage(complicationPayload, replyHandler: nil, errorHandler: nil)
         }
 
@@ -257,20 +269,14 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         // channel below, and also the only channel that reliably wakes a suspended
         // Watch app: unlike application context, user-info transfers remain queued
         // for background delivery via WKWatchConnectivityRefreshBackgroundTask.
-        // The full snapshot rides in the same transfer as the compact complication
-        // data so one wake/task/delegate cycle updates both — splitting them into
-        // two independent transfers risked WatchAppDelegate completing the shared
-        // background task after only one of the two had actually been delivered,
-        // letting the system suspend the process before the other one arrived.
+        // Keep this wake-up payload compact. The complete snapshot contains routes
+        // and history and can exceed WatchConnectivity's payload limit; attaching
+        // it here can prevent the current state from being delivered at all.
         // Keep at most one snapshot in the queue: the Watch only needs the newest
         // state, and an old footprint must never arrive after a newer transport.
         if stateChanged {
-            var backgroundPayload = complicationPayload
-            if let fullData {
-                backgroundPayload["snapshot"] = fullData
-            }
             pendingBackgroundSnapshotTransfer?.cancel()
-            pendingBackgroundSnapshotTransfer = session.transferUserInfo(backgroundPayload)
+            pendingBackgroundSnapshotTransfer = session.transferUserInfo(complicationPayload)
         }
 
         // Application context is deliberately a latest-value cache and will not
@@ -283,17 +289,20 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         // exhausting it hours into the day, after which updates silently fell back
         // to the slow queue until the phone app was next opened.
         if stateChanged,
-           session.isComplicationEnabled,
            session.remainingComplicationUserInfoTransfers > 0 {
-            // Apple requires an active clock-face complication for this API. The
-            // compact regular user-info transfer above remains the reliable
-            // fallback for Smart Stack and any inactive complication placement.
+            // `isComplicationEnabled` is not a reliable gate for WidgetKit
+            // accessories. It can remain false even while this complication is
+            // present, which previously skipped the only priority wake-up and
+            // then persisted the fingerprint as though delivery had happened.
+            // Let WatchConnectivity decide eligibility when enqueueing instead;
+            // the compact regular user-info transfer above remains the fallback.
             session.transferCurrentComplicationUserInfo(complicationPayload)
         }
         // Every state transition has now been placed on the durable user-info
         // queue even when the separate high-priority complication budget is empty.
         lastComplicationFingerprint = fingerprint
         UserDefaults.standard.set(fingerprint, forKey: complicationFingerprintKey)
+        return complicationPayload
     }
 
     /// While the Watch app is open, publish the same route-average speed used by
@@ -420,7 +429,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
                     startTime: footprint.startTime,
                     endTime: footprint.endTime,
                     title: footprint.address?.isEmpty == false ? footprint.address! : "未知地点",
-                    icon: activity?.icon ?? "mappin.and.ellipse",
+                    icon: activity?.icon ?? FootprintIconDefaults.card,
                     colorHex: activity?.colorHex,
                     isTransport: false,
                     latitude: footprint.latitude,
@@ -553,6 +562,8 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             statistics = WatchStatisticsSnapshot(summaries: statisticsSummaries, availableYears: statisticsYears)
         }
         let currentFootprint = LocationManager.shared.currentStayFootprint(in: context, now: now)
+        let currentLocation = LocationManager.shared.lastLocation
+            ?? LocationManager.shared.potentialStopStartLocation
         let liveStayStart = LocationManager.shared.isCurrentlyMoving ? nil : LocationManager.shared.currentStatusStartedAt
         let livePlaceName: String? = {
             guard liveStayStart != nil else { return nil }
@@ -567,6 +578,8 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         return WatchSnapshot(
             currentFootprintID: currentFootprint?.footprintID.uuidString
                 ?? (LocationManager.shared.isTracking ? liveStayAnchor.map { "ongoing-\($0.timestamp.timeIntervalSince1970)" } : nil),
+            currentLatitude: currentLocation?.coordinate.latitude,
+            currentLongitude: currentLocation?.coordinate.longitude,
             placeName: livePlaceName ?? "正在定位",
             address: currentFootprint?.reason,
             startedAt: liveStayStart,
@@ -675,7 +688,14 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         let matches = ((try? context.fetch(descriptor)) ?? []).filter { candidate in
             // A return to the same place is a new visit. An old live anchor
             // must not select an earlier edited stay across a recorded trip.
-            if let interruptionEnd, candidate.startTime < interruptionEnd { return false }
+            if let interruptionEnd, candidate.startTime < interruptionEnd {
+                // Arrival fixes can belong to both the transport's tail and
+                // the new stay. Allow that existing sampling seam, but never
+                // revive a visit which ended before the return trip completed.
+                guard candidate.endTime > interruptionEnd,
+                      candidate.startTime >= interruptionEnd.addingTimeInterval(-continuationTolerance)
+                else { return false }
+            }
             if let placeID, candidate.placeID == placeID { return true }
             return CLLocation(latitude: candidate.latitude, longitude: candidate.longitude)
                 .distance(from: anchor) < distanceThreshold
@@ -723,10 +743,31 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         return min(anchorStart, persistedStart)
     }
 
-    func applyActivityChange(footprintID: String, activityID: String?) {
+    func applyActivityChange(footprintID: String, activityID: String?, stayStartedAt: Date? = nil) {
         guard let context = modelContext else {
             UserDefaults.standard.set(footprintID, forKey: pendingActivityFootprintKey)
             UserDefaults.standard.set(activityID ?? "", forKey: pendingActivityIDKey)
+            if let stayStartedAt {
+                UserDefaults.standard.set(stayStartedAt.timeIntervalSince1970, forKey: pendingActivityStayStartKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: pendingActivityStayStartKey)
+            }
+            return
+        }
+
+        // The Watch snapshot ID can be stale for the same visit: an `ongoing-*`
+        // placeholder may have become a persisted Footprint, or a timeline
+        // rebuild may have replaced the record. The stay start the Watch saw is
+        // validated against the live anchor by `updateCurrentStayActivity`, so a
+        // delayed request from an earlier visit can never relabel the current one.
+        if let stayStartedAt,
+           let anchor = LocationManager.shared.potentialStopStartLocation,
+           LocationManager.shared.isTracking,
+           !LocationManager.shared.isCurrentlyMoving,
+           anchor.timestamp.timeIntervalSince1970 == stayStartedAt.timeIntervalSince1970 {
+            LocationManager.shared.updateCurrentStayActivity(
+                to: activityID, expectedStart: stayStartedAt, in: context
+            )
             return
         }
         if footprintID.hasPrefix("ongoing-"),
@@ -765,9 +806,15 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     private func applyPendingActivityChangeIfNeeded() {
         guard let footprintID = UserDefaults.standard.string(forKey: pendingActivityFootprintKey),
               let activityID = UserDefaults.standard.string(forKey: pendingActivityIDKey) else { return }
+        let stayStartedAt = UserDefaults.standard.object(forKey: pendingActivityStayStartKey) as? Double
         UserDefaults.standard.removeObject(forKey: pendingActivityFootprintKey)
         UserDefaults.standard.removeObject(forKey: pendingActivityIDKey)
-        applyActivityChange(footprintID: footprintID, activityID: activityID.isEmpty ? nil : activityID)
+        UserDefaults.standard.removeObject(forKey: pendingActivityStayStartKey)
+        applyActivityChange(
+            footprintID: footprintID,
+            activityID: activityID.isEmpty ? nil : activityID,
+            stayStartedAt: stayStartedAt.map(Date.init(timeIntervalSince1970:))
+        )
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
@@ -779,7 +826,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
         if message["requestSnapshot"] as? Bool == true {
-            DispatchQueue.main.async { self.syncSnapshot() }
+            DispatchQueue.main.async { self.syncSnapshot(forceCurrentStateDelivery: true) }
             return
         }
         if message["confirmArrival"] as? Bool == true {
@@ -792,10 +839,24 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         }
         guard let footprintID = message["footprintID"] as? String else { return }
         let activityID = (message["activityID"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        DispatchQueue.main.async { self.applyActivityChange(footprintID: footprintID, activityID: activityID) }
+        let stayStartedAt = (message["stayStartedAt"] as? Double).map(Date.init(timeIntervalSince1970:))
+        DispatchQueue.main.async {
+            self.applyActivityChange(footprintID: footprintID, activityID: activityID, stayStartedAt: stayStartedAt)
+        }
     }
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
+        if message["requestSnapshot"] as? Bool == true {
+            DispatchQueue.main.async {
+                // Return the compact current state on the request's own reply
+                // channel so opening the Watch app always has a direct payload
+                // to persist and reload the complication. The complete snapshot
+                // can exceed the message size limit; it still arrives through
+                // the application context updated by the same call.
+                replyHandler(self.syncSnapshot() ?? [:])
+            }
+            return
+        }
         if message["confirmArrival"] as? Bool == true {
             DispatchQueue.main.async {
                 Task { @MainActor in

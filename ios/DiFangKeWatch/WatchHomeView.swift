@@ -57,7 +57,10 @@ struct WatchHomeView: View {
                 }
             }
             .navigationDestination(isPresented: $showingMap) {
-                WatchMapView(day: selectedDaySnapshot)
+                WatchMapView(
+                    day: selectedDaySnapshot,
+                    focusCoordinate: selectedPage == "current" ? store.snapshot.currentCoordinate : nil
+                )
             }
             .navigationDestination(isPresented: $showingStatistics) {
                 WatchStatisticsView()
@@ -134,8 +137,8 @@ private struct CurrentPlaceView: View {
                 Image(systemName: currentTransportIcon)
                     .foregroundStyle(Color.accentColor)
             } else if store.hasReceivedSnapshot {
-                Image(systemName: "location.fill")
-                    .foregroundStyle(.blue)
+                Image(systemName: store.currentActivity?.icon ?? "questionmark.circle.dashed")
+                    .foregroundStyle(activityColor(store.currentActivity?.colorHex))
             } else {
                 Image("AppIconGlyph")
                     .resizable()
@@ -181,7 +184,10 @@ private struct CurrentPlaceView: View {
                 Button {
                     showingActivityPicker = true
                 } label: {
-                    Label(store.currentActivity?.name ?? "选择活动", systemImage: store.currentActivity?.icon ?? "figure.walk")
+                    Label(
+                        store.currentActivity?.name ?? "选择活动",
+                        systemImage: store.currentActivity?.icon ?? "questionmark.circle.dashed"
+                    )
                 }
                 .tint(activityColor(store.currentActivity?.colorHex))
             }
@@ -209,9 +215,9 @@ private struct CurrentPlaceView: View {
 }
 
 func activityColor(_ hex: String?) -> Color {
-    guard let hex else { return .blue }
+    guard let hex else { return .secondary.opacity(0.4) }
     let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-    guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .blue }
+    guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .secondary.opacity(0.4) }
     return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
 }
 

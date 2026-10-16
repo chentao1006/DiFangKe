@@ -93,13 +93,16 @@ private struct WatchComplicationView: View {
         default: return nil
         }
     }
-    private var icon: String { transport?.icon ?? activity?.icon ?? (entry.snapshot?.isTracking == true ? "location.fill" : "location.slash") }
+    private var icon: String {
+        transport?.icon ?? activity?.icon
+            ?? (entry.snapshot?.isTracking == true ? "questionmark.circle.dashed" : "location.slash")
+    }
     private var title: String { transport?.name ?? activity?.name ?? (entry.snapshot?.isTracking == true ? "记录中" : "未记录") }
     private var color: Color {
         if transport != nil { return Color.accentColor }
-        guard let hex = activity?.colorHex else { return .blue }
+        guard let hex = activity?.colorHex else { return .secondary.opacity(0.4) }
         let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .blue }
+        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .secondary.opacity(0.4) }
         return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
     }
 
@@ -112,14 +115,16 @@ private struct WatchComplicationView: View {
 
     @ViewBuilder
     var body: some View {
-        if redactionReasons.contains(.privacy) {
+        if redactionReasons.contains(.privacy) || redactionReasons.contains(.placeholder) {
             privacyPlaceholder
+                .unredacted()
         } else {
             switch family {
             case .accessoryCircular:
                 ZStack {
                     dayTimelineRing
                     Image(systemName: icon)
+                        .preservingTransportAccentColor(transport != nil)
                         .font(.system(size: 19, weight: .semibold))
                         .foregroundStyle(color)
                 }
@@ -127,11 +132,12 @@ private struct WatchComplicationView: View {
                 .widgetLabel(title)
             case .accessoryRectangular:
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 5) {
                         Image(systemName: icon)
-                            .font(.title2)
+                            .preservingTransportAccentColor(transport != nil)
+                            .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(color)
-                            .frame(width: 24)
+                            .frame(width: 16)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(title).font(.headline).lineLimit(1)
                             Text(todaySummary).font(.caption2).foregroundStyle(.secondary)
@@ -145,16 +151,25 @@ private struct WatchComplicationView: View {
                     .frame(height: 6)
                 }
             case .accessoryInline:
-                Label(title, systemImage: icon)
-                    .foregroundStyle(color)
+                HStack(spacing: 3) {
+                    Image(systemName: icon)
+                        .preservingTransportAccentColor(transport != nil)
+                        .foregroundStyle(color)
+                    Text(title)
+                }
             case .accessoryCorner:
                 Image(systemName: icon)
+                    .preservingTransportAccentColor(transport != nil)
                     .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(color)
                     .widgetLabel(title)
             default:
-                Label(title, systemImage: icon)
-                    .foregroundStyle(color)
+                HStack(spacing: 3) {
+                    Image(systemName: icon)
+                        .preservingTransportAccentColor(transport != nil)
+                        .foregroundStyle(color)
+                    Text(title)
+                }
             }
         }
     }
@@ -199,6 +214,25 @@ private struct WatchComplicationView: View {
 
 }
 
+private extension Image {
+    /// `widgetAccentable` assigns content to the watch face's accent group; it
+    /// does not preserve this extension's own AccentColor and can still render
+    /// an SF Symbol white. Full-colour image rendering keeps the explicit
+    /// `Color.accentColor` foreground style used by transport icons.
+    @ViewBuilder
+    func preservingTransportAccentColor(_ preserve: Bool) -> some View {
+        if preserve {
+            if #available(watchOS 11.0, *) {
+                widgetAccentedRenderingMode(.fullColor)
+            } else {
+                self
+            }
+        } else {
+            self
+        }
+    }
+}
+
 /// A clock-face day: midnight is at 12 o'clock and each segment is clipped to
 /// the displayed calendar day.  Footprints sit above transport so an activity
 /// remains legible when records overlap.
@@ -215,55 +249,54 @@ private struct DayTimelineRing: View {
     private let maxLineWidth: CGFloat = 4.0
 
     var body: some View {
-        ZStack {
-            Circle()
-                .stroke(.gray.opacity(0.16), lineWidth: 3.8)
-            Circle()
-                .trim(from: 0, to: elapsedDayFraction)
-                .stroke(.gray.opacity(0.42), lineWidth: 3.8)
+        GeometryReader { geometry in
+            let circumference = max(1, min(geometry.size.width, geometry.size.height)) * .pi
+            ZStack {
+                Circle()
+                    .stroke(.gray.opacity(0.16), lineWidth: 3.8)
+                Circle()
+                    .trim(from: 0, to: elapsedDayFraction)
+                    .stroke(.gray.opacity(0.42), lineWidth: 3.8)
 
-            ForEach(items.filter { $0.isTransport == true }, id: \.id) { item in
-                transportSegment(for: item)
-            }
-            ForEach(items.filter { $0.isTransport != true }, id: \.id) { item in
-                segment(
-                    for: item,
-                    color: color(from: item.colorHex),
-                    lineWidth: 4.0
-                )
+                // Transport uses the watch face's complication accent colour as a
+                // solid segment. A hollow white center made short periods white.
+                ForEach(items.filter { $0.isTransport == true }, id: \.id) { item in
+                    segment(for: item, color: Color.accentColor, lineWidth: 3.6, circumference: circumference)
+                        .widgetAccentable()
+                }
+                ForEach(items.filter { $0.isTransport != true }, id: \.id) { item in
+                    segment(
+                        for: item,
+                        color: color(from: item.colorHex),
+                        lineWidth: 4.0,
+                        circumference: circumference
+                    )
+                }
             }
         }
         .padding(maxLineWidth / 2)
         .rotationEffect(.degrees(-90))
     }
 
+    /// Round caps extend half a line width past each trim end. Inset by that
+    /// overhang plus a hairline so adjacent periods stay separate; a period too
+    /// short for the inset is still drawn as a single cap-sized dot.
     @ViewBuilder
-    private func segment(for item: ComplicationTimelineItem, color: Color, lineWidth: CGFloat) -> some View {
+    private func segment(
+        for item: ComplicationTimelineItem,
+        color: Color,
+        lineWidth: CGFloat,
+        circumference: CGFloat
+    ) -> some View {
         let range = clippedFractionRange(for: item)
-        // Rounded caps otherwise close a tiny trim gap on the compact dial.
-        let gap = min(0.030, range.length * 0.18)
-        if range.length > gap * 2 {
+        let inset = (lineWidth / 2 + 0.5) / circumference
+        if range.length > 0 {
+            let middle = range.start + range.length / 2
+            let start = range.length > inset * 2 ? range.start + inset : middle
+            let end = range.length > inset * 2 ? range.start + range.length - inset : middle + 0.0001
             Circle()
-                .trim(from: range.start + gap, to: range.start + range.length - gap)
+                .trim(from: start, to: end)
                 .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-        }
-    }
-
-    /// Transport is intentionally hollow so it reads as movement rather than
-    /// a stay: white center, thin theme-colour outline.
-    @ViewBuilder
-    private func transportSegment(for item: ComplicationTimelineItem) -> some View {
-        let range = clippedFractionRange(for: item)
-        let gap = min(0.030, range.length * 0.18)
-        if range.length > gap * 2 {
-            let start = range.start + gap
-            let end = range.start + range.length - gap
-            Circle()
-                .trim(from: start, to: end)
-                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3.6, lineCap: .round))
-            Circle()
-                .trim(from: start, to: end)
-                .stroke(.white, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
         }
     }
 
@@ -287,9 +320,11 @@ private struct DayTimelineRing: View {
     }
 
     private func color(from hex: String?) -> Color {
-        guard let hex = hex else { return Color.accentColor }
+        // Unlabelled stays sit on the gray elapsed-time baseline; a translucent
+        // gray would be indistinguishable from time without any footprint.
+        guard let hex = hex else { return .secondary }
         let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return Color.accentColor }
+        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .secondary }
         return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
     }
 }
@@ -313,14 +348,15 @@ private struct DayTimelineBar: View {
                     .frame(width: geometry.size.width * elapsedDayFraction)
 
                 ForEach(items.filter { $0.isTransport == true }, id: \.id) { item in
-                    segment(for: item, in: geometry.size, color: Color.accentColor, height: 2)
+                    segment(for: item, in: geometry.size, color: Color.accentColor, height: 3, isAccent: true)
                 }
                 ForEach(items.filter { $0.isTransport != true }, id: \.id) { item in
                     segment(
                         for: item,
                         in: geometry.size,
                         color: color(from: item.colorHex),
-                        height: item.id == currentFootprintID ? 6 : 4
+                        height: item.id == currentFootprintID ? 6 : 4,
+                        isAccent: false
                     )
                 }
             }
@@ -328,13 +364,23 @@ private struct DayTimelineBar: View {
     }
 
     @ViewBuilder
-    private func segment(for item: ComplicationTimelineItem, in size: CGSize, color: Color, height: CGFloat) -> some View {
+    private func segment(
+        for item: ComplicationTimelineItem,
+        in size: CGSize,
+        color: Color,
+        height: CGFloat,
+        isAccent: Bool
+    ) -> some View {
         let range = clippedFractionRange(for: item)
+        let fullWidth = size.width * range.length
+        let gap: CGFloat = min(1.25, fullWidth * 0.12)
         if range.length > 0 {
             Capsule()
                 .fill(color)
-                .frame(width: max(1.5, size.width * range.length), height: height)
-                .offset(x: size.width * range.start)
+                // Keep a just-started period visible on the compact bar.
+                .frame(width: max(1.5, fullWidth - gap * 2), height: height)
+                .offset(x: size.width * range.start + gap)
+                .widgetAccentable(isAccent)
         }
     }
 
@@ -358,9 +404,11 @@ private struct DayTimelineBar: View {
     }
 
     private func color(from hex: String?) -> Color {
-        guard let hex = hex else { return Color.accentColor }
+        // Unlabelled stays sit on the gray elapsed-time baseline; a translucent
+        // gray would be indistinguishable from time without any footprint.
+        guard let hex = hex else { return .secondary }
         let value = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return Color.accentColor }
+        guard value.count == 6, let rgb = UInt64(value, radix: 16) else { return .secondary }
         return Color(red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255, blue: Double(rgb & 0xFF) / 255)
     }
 }

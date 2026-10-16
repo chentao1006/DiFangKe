@@ -62,6 +62,8 @@ struct WatchStatisticsRankItem: Codable, Hashable, Identifiable {
 
 struct WatchSnapshot: Codable, Hashable {
     let currentFootprintID: String?
+    let currentLatitude: Double?
+    let currentLongitude: Double?
     let placeName: String
     let address: String?
     let startedAt: Date?
@@ -77,7 +79,12 @@ struct WatchSnapshot: Codable, Hashable {
     let recentDays: [WatchDaySnapshot]?
     let statistics: WatchStatisticsSnapshot?
 
-    static let placeholder = WatchSnapshot(currentFootprintID: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, currentTransportType: nil, currentTransportStartedAt: nil, currentAverageSpeed: nil, todayFootprintCount: 0, todayDistance: 0, activities: [], todayTimeline: [], recentDays: [], statistics: nil)
+    static let placeholder = WatchSnapshot(currentFootprintID: nil, currentLatitude: nil, currentLongitude: nil, placeName: "请先打开 iPhone 上的地方客", address: "首次同步完成后，手表可显示最近的数据。", startedAt: nil, isTracking: false, currentActivityID: nil, currentTransportType: nil, currentTransportStartedAt: nil, currentAverageSpeed: nil, todayFootprintCount: 0, todayDistance: 0, activities: [], todayTimeline: [], recentDays: [], statistics: nil)
+
+    var currentCoordinate: WatchCoordinate? {
+        guard let currentLatitude, let currentLongitude else { return nil }
+        return WatchCoordinate(lat: currentLatitude, lon: currentLongitude)
+    }
 }
 
 /// The compact payload the phone sends over the fast/high-priority channels
@@ -86,6 +93,8 @@ struct WatchSnapshot: Codable, Hashable {
 /// field. It carries "current state" but not history/statistics/routes.
 private struct WatchCompactSnapshot: Codable {
     let currentFootprintID: String?
+    let currentLatitude: Double?
+    let currentLongitude: Double?
     let placeName: String
     let address: String?
     let startedAt: Date?
@@ -148,7 +157,12 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
         }
         apply(session.receivedApplicationContext)
         guard session.isReachable else { return }
-        session.sendMessage(["requestSnapshot": true], replyHandler: nil, errorHandler: nil)
+        session.sendMessage(["requestSnapshot": true]) { [weak self] response in
+            // Apply the freshly generated phone snapshot from this same request.
+            // Do not depend solely on a second best-effort phone-to-Watch message:
+            // reachability can change as the user immediately leaves the Watch app.
+            self?.apply(response)
+        } errorHandler: { _ in }
     }
 
     var currentActivity: WatchActivityOption? {
@@ -161,7 +175,11 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
 
     func selectActivity(_ activity: WatchActivityOption?) {
         guard let footprintID = snapshot.currentFootprintID else { return }
-        let payload: [String: Any] = ["footprintID": footprintID, "activityID": activity?.id ?? ""]
+        var payload: [String: Any] = ["footprintID": footprintID, "activityID": activity?.id ?? ""]
+        // The phone uses this to resolve a stale ID for the same visit only.
+        if let startedAt = snapshot.startedAt {
+            payload["stayStartedAt"] = startedAt.timeIntervalSince1970
+        }
         let session = WCSession.default
         if session.isReachable {
             session.sendMessage(payload, replyHandler: nil) { _ in session.transferUserInfo(payload) }
@@ -263,6 +281,8 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     private func mergeCurrentState(_ compact: WatchCompactSnapshot) {
         snapshot = WatchSnapshot(
             currentFootprintID: compact.currentFootprintID,
+            currentLatitude: compact.currentLatitude,
+            currentLongitude: compact.currentLongitude,
             placeName: compact.placeName,
             address: compact.address,
             startedAt: compact.startedAt,

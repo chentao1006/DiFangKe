@@ -221,8 +221,8 @@ class NotificationManager {
         let content = UNMutableNotificationContent()
         content.title = isMoving ? "检测到正在移动" : "检测到正在停留"
         content.body = isMoving
-            ? "点击查看当前行程。"
-            : "点击查看当前足迹。"
+            ? "点此查看当前行程，开启实时活动，持续追踪行程变化。"
+            : "点此查看当前足迹，开启实时活动，持续追踪停留与出行。"
         content.sound = .default
         content.userInfo = ["type": "resume_current_live_activity"]
 

@@ -14,6 +14,10 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
         // WindowGroup is created. Install the WCSession delegate here instead
         // of waiting for SwiftUI to build WatchHomeView's state object.
         WatchStore.shared.activateSession()
+        // WidgetKit can retain the previous extension's rendered timeline across
+        // an app update. Rebuild it as soon as the updated Watch app launches so
+        // removed fields such as the duration do not remain on the watch face.
+        WidgetCenter.shared.reloadTimelines(ofKind: "DiFangKeWatchComplication")
         Self.scheduleNextBackgroundRefresh()
     }
 

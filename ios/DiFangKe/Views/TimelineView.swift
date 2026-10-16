@@ -1853,7 +1853,9 @@ private struct ContinuousTimelineView: View {
         let targetBottomFraction = 0.435
         let north = region.center.latitude + region.span.latitudeDelta / 2
         let south = region.center.latitude - region.span.latitudeDelta / 2
-        let longitudeDelta = region.span.longitudeDelta * 1.5
+        // boundingRegion already includes the content padding. Adding another
+        // horizontal multiplier zooms wide routes out unnecessarily.
+        let longitudeDelta = region.span.longitudeDelta
         let fullMapAspectRatio = mapViewportSize.height > 1 && mapViewportSize.width > 1 ? mapViewportSize.height / mapViewportSize.width : 2.15
         let longitudeDrivenLatitudeDelta = longitudeDelta * cos(region.center.latitude * .pi / 180) * fullMapAspectRatio
         let desiredLatitudeDelta = max(
@@ -1863,7 +1865,10 @@ private struct ContinuousTimelineView: View {
         )
         // Keep the medium-sheet offset valid even when content spans a continent.
         let latitudeDelta = min(desiredLatitudeDelta, 170)
-        let centerLatitude = north - (0.5 - targetTopFraction) * latitudeDelta
+        // When width determines the scale, the content is shorter than the
+        // available band. Center it in that band instead of pinning it north.
+        let targetCenterFraction = (targetTopFraction + targetBottomFraction) / 2
+        let centerLatitude = region.center.latitude - (0.5 - targetCenterFraction) * latitudeDelta
 
         return MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: centerLatitude, longitude: region.center.longitude),
@@ -5460,7 +5465,7 @@ private struct CurrentStayTimelineCard: View {
     }
 
     private var canSelectOngoingPlace: Bool {
-        locationManager.potentialStopStartLocation != nil
+        !isCurrentlyMoving && locationManager.potentialStopStartLocation != nil
     }
 
     private var isCurrentlyMoving: Bool {
@@ -5505,7 +5510,7 @@ private struct CurrentStayTimelineCard: View {
     }
 
     private func detailText(for timestamp: Date, now: Date) -> String {
-        if locationManager.potentialStopStartLocation != nil || !locationManager.uiIsMoving {
+        if !isCurrentlyMoving {
             return "已 \(now.timeIntervalSince(timestamp).formattedTimelineDuration)"
         }
 

@@ -3,12 +3,14 @@ import MapKit
 
 struct WatchMapView: View {
     let day: WatchDaySnapshot?
+    let focusCoordinate: WatchCoordinate?
 
     @State private var cameraPosition: MapCameraPosition
 
-    init(day: WatchDaySnapshot?) {
+    init(day: WatchDaySnapshot?, focusCoordinate: WatchCoordinate? = nil) {
         self.day = day
-        _cameraPosition = State(initialValue: Self.initialCameraPosition(for: day))
+        self.focusCoordinate = focusCoordinate
+        _cameraPosition = State(initialValue: Self.initialCameraPosition(for: day, focusCoordinate: focusCoordinate))
     }
 
     private var footprintItems: [WatchTimelineItem] {
@@ -61,7 +63,16 @@ struct WatchMapView: View {
         item.isTransport == true ? Color.accentColor : activityColor(item.colorHex)
     }
 
-    private static func initialCameraPosition(for day: WatchDaySnapshot?) -> MapCameraPosition {
+    /// Closest zoom used for both a single point and the current location.
+    private static let minimumSpanDelta: CLLocationDegrees = 0.01
+
+    private static func initialCameraPosition(for day: WatchDaySnapshot?, focusCoordinate: WatchCoordinate?) -> MapCameraPosition {
+        if let focusCoordinate {
+            return .region(MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: focusCoordinate.lat, longitude: focusCoordinate.lon),
+                span: MKCoordinateSpan(latitudeDelta: minimumSpanDelta, longitudeDelta: minimumSpanDelta)
+            ))
+        }
         guard let region = boundingRegion(for: day) else { return .automatic }
         return .region(region)
     }
@@ -84,8 +95,8 @@ struct WatchMapView: View {
         let minLon = longitudes.min()!, maxLon = longitudes.max()!
         let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2)
         let span = MKCoordinateSpan(
-            latitudeDelta: max((maxLat - minLat) * 1.4, 0.01),
-            longitudeDelta: max((maxLon - minLon) * 1.4, 0.01)
+            latitudeDelta: max((maxLat - minLat) * 1.4, minimumSpanDelta),
+            longitudeDelta: max((maxLon - minLon) * 1.4, minimumSpanDelta)
         )
         return MKCoordinateRegion(center: center, span: span)
     }

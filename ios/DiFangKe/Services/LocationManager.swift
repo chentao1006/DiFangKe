@@ -1054,6 +1054,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var uiIsMoving: Bool = false
     /// 首页“正在移动”和实时活动交通态共用的唯一状态。
     var isCurrentlyMoving: Bool {
+        // Motion evidence wakes GPS; only a confirmed departure closes the
+        // stay anchor and changes the state presented by every surface.
         isTracking && uiIsMoving && potentialStopStartLocation == nil
     }
     /// All current-state surfaces use the phone's live anchor, without deriving
@@ -1096,6 +1098,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     private var lastMovingEvidenceTime: Date = .distantPast
     private(set) var uiMovingStartedAt: Date?
+    private var uiMovementSettleTask: Task<Void, Never>?
     /// The first plausible fix outside a long-running stay. Core Motion wakes
     /// GPS immediately, but a second outward-moving fix is required before the
     /// stay is closed so indoor walking plus one shifted fix cannot become a trip.
@@ -1352,6 +1355,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private func updateUIMovementState(isMovingEvidence: Bool, source: String) {
         let now = Date()
         if isMovingEvidence {
+            uiMovementSettleTask?.cancel()
+            uiMovementSettleTask = nil
             lastMovingEvidenceTime = now
             if !uiIsMoving {
                 uiIsMoving = true
@@ -1367,7 +1372,31 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         // 无移动证据：必须连续一段时间都没有证据，才允许切回“停留”，避免抖动
         let holdSeconds = AppConfig.shared.uiMovingHoldDuration
-        if uiIsMoving, now.timeIntervalSince(lastMovingEvidenceTime) > holdSeconds {
+        guard uiIsMoving else {
+            uiMovementSettleTask?.cancel()
+            uiMovementSettleTask = nil
+            return
+        }
+
+        let elapsed = now.timeIntervalSince(lastMovingEvidenceTime)
+        if elapsed <= holdSeconds {
+            // Core Motion commonly publishes `false` only once. Re-evaluate at
+            // the configured hysteresis boundary instead of requiring another
+            // sensor/location callback to happen at exactly the right time.
+            let remaining = max(0, holdSeconds - elapsed)
+            uiMovementSettleTask?.cancel()
+            uiMovementSettleTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64((remaining + 0.1) * 1_000_000_000))
+                guard !Task.isCancelled, let self,
+                      !HealthManager.shared.isMoving else { return }
+                self.updateUIMovementState(isMovingEvidence: false, source: "motion:settled")
+            }
+            return
+        }
+
+        uiMovementSettleTask?.cancel()
+        uiMovementSettleTask = nil
+        if uiIsMoving {
             // Once GPS has confirmed a departure, a later signal gap is not
             // evidence of arrival. Smooth train/aircraft motion may also be
             // classified as stationary, so preserve the confirmed moving state
@@ -1376,6 +1405,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                let lastLocation,
                abs(now.timeIntervalSince(lastLocation.timestamp))
                 >= AppConfig.shared.currentLocationFreshnessThreshold {
+                // The hysteresis expired without a fresh fix. Keep the existing
+                // protection against false arrival on smooth transport, but
+                // resume the user's configured location session so the next
+                // coordinate can complete this same transition.
+                if isTracking {
+                    applyLocationAccuracyMode()
+                    locationManager.startUpdatingLocation()
+                }
                 return
             }
             uiIsMoving = false
@@ -1394,6 +1431,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 reconcileContinuousStayStart()
             }
             checkLiveActivity(forceContentUpdate: true)
+            // Clear the Watch transport state at the same transition point as
+            // the phone UI, even before the rebuilt timeline is persisted.
+            WatchSyncManager.shared.syncSnapshot()
             Task {
                 await triggerTimelineSift()
             }
@@ -2177,6 +2217,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
         }
         isTracking = false
+        // No current state exists after an explicit stop; a pending motion
+        // settle must not later resume location updates.
+        uiMovementSettleTask?.cancel()
+        uiMovementSettleTask = nil
+        uiIsMoving = false
+        uiMovingStartedAt = nil
         // A later manual restart must begin with a fresh high-accuracy fix.
         // Do not carry an old stationary decision across an explicit stop.
         isUsingAutomaticStationaryLowPower = false

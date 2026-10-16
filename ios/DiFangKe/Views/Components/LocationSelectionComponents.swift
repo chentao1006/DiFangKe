@@ -172,68 +172,111 @@ struct SuggestionsMenu<Label: View>: View {
     var onSelectionApplied: (() -> Void)? = nil
     @ViewBuilder var label: () -> Label
     
-    @State private var suggestions: [LocationSuggestion] = []
-    // Starts true: loading begins only once the menu opens.
-    @State private var isLoading = true
+    @State private var presentation: LocationSuggestionsPresentation?
 
-    private var coordinateKey: String {
-        guard let coordinate else { return "none" }
-        return "\(coordinate.latitude),\(coordinate.longitude)"
-    }
-    
     var body: some View {
-        Menu {
-            Button {
-                onSearchRequested()
-            } label: {
-                Text("搜索其他地点...")
-            }
-            
-            Divider()
-
-            suggestionItems
-                // Menu content only exists while the menu is open. Loading
-                // here (not on the Menu itself) keeps every timeline row that
-                // merely shows this button from firing a batch of MapKit
-                // searches, which exceeded Apple's 50-per-minute limit.
-                .task(id: coordinateKey) {
-                    suggestions = []
-                    guard let coordinate else { isLoading = false; return }
-                    isLoading = true
-                    let results = await locationManager.fetchNearbySuggestions(at: coordinate)
-                    guard !Task.isCancelled else { return }
-                    suggestions = results
-                    isLoading = false
+        Button {
+            // Capture the editing anchor and selection target once per opening.
+            // Live location updates must not restart or reorder an open picker.
+            presentation = LocationSuggestionsPresentation(
+                coordinate: coordinate,
+                onSearchRequested: onSearchRequested,
+                onSelect: { suggestion in
+                    if let customSelected = onCustomSelection {
+                        customSelected(suggestion.name)
+                    } else {
+                        locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint, isDraft: isDraft)
+                    }
+                    onSelectionApplied?()
                 }
+            )
         } label: {
             label()
         }
+        .popover(item: $presentation) { presentation in
+            LocationSuggestionsPopover(locationManager: locationManager, presentation: presentation)
+        }
     }
+}
 
-    @ViewBuilder
-    private var suggestionItems: some View {
-        Group {
-            if isLoading {
-                Text("正在寻找附近地点...")
-            } else if suggestions.isEmpty {
-                Text("未发现附近建议")
-            } else {
-                ForEach(suggestions) { suggestion in
-                    Button {
-                        if let customSelected = onCustomSelection {
-                            customSelected(suggestion.name)
-                        } else {
-                            locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint, isDraft: isDraft)
-                        }
-                        onSelectionApplied?()
-                    } label: {
-                        HStack {
-                            Text(suggestion.name)
+private struct LocationSuggestionsPresentation: Identifiable {
+    let id = UUID()
+    let coordinate: CLLocationCoordinate2D?
+    let onSearchRequested: () -> Void
+    let onSelect: (LocationSuggestion) -> Void
+}
+
+private struct LocationSuggestionsPopover: View {
+    @Environment(\.dismiss) private var dismiss
+    let locationManager: LocationManager
+    let presentation: LocationSuggestionsPresentation
+
+    // Owned by this presentation, independent of the timeline's live state.
+    @State private var suggestions: [LocationSuggestion] = []
+    @State private var hasLoaded = false
+    @State private var requestsSearch = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Button {
+                    // Present search only after this popover has fully left the
+                    // hierarchy; a sheet requested mid-dismissal can be dropped.
+                    requestsSearch = true
+                    dismiss()
+                } label: {
+                    row("搜索其他地点...")
+                }
+                Divider().padding(.vertical, 4)
+
+                if !hasLoaded {
+                    row("正在寻找附近地点...")
+                        .foregroundStyle(.secondary)
+                } else if suggestions.isEmpty {
+                    row("未发现附近建议")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(suggestions) { suggestion in
+                        Button {
+                            presentation.onSelect(suggestion)
+                            dismiss()
+                        } label: {
+                            row(suggestion.name)
                         }
                     }
                 }
             }
+            .padding(.vertical, 8)
         }
+        .buttonStyle(.plain)
+        .frame(width: 300, height: min(480, CGFloat(max(1, suggestions.count) + 1) * 56 + 24))
+        .presentationCompactAdaptation(.popover)
+        .onDisappear {
+            if requestsSearch {
+                presentation.onSearchRequested()
+            }
+        }
+        .task {
+            // Empty results are also final for this opening. Never clear a
+            // loaded list or reload it when the parent receives new coordinates.
+            guard !hasLoaded else { return }
+            guard let coordinate = presentation.coordinate else {
+                hasLoaded = true
+                return
+            }
+            let results = await locationManager.fetchNearbySuggestions(at: coordinate)
+            guard !Task.isCancelled else { return }
+            suggestions = results
+            hasLoaded = true
+        }
+    }
+
+    private func row(_ title: String) -> some View {
+        Text(title)
+            .font(.body)
+            .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+            .padding(.horizontal, 16)
+            .contentShape(Rectangle())
     }
 }
 
