@@ -179,13 +179,18 @@ struct TimelineScene<Content: View>: View {
     /// under-tab-bar background used for full-height sheets.
     @Binding var selectedTransport: Transport?
     @Binding var destination: TimelineDestination?
+    let returnToNowRequest: Int
     let onRequestRecords: () -> Void
     @ViewBuilder let content: (AnyView, AnyView) -> Content
 
     nonisolated private static var initialTimelineVisibleDateBatchSize: Int { 30 }
     nonisolated private static var timelineVisibleDateBatchSize: Int { 30 }
     nonisolated private static var gapLoadDateBatchSize: Int { 30 }
-    nonisolated private static var timelineCommitChunkSize: Int { 24 }
+    // Historical days can contain very long routes. Yield between every day
+    // while materializing UI models so one "load earlier" batch never owns
+    // the main actor for the whole batch.
+    nonisolated private static var timelineCommitChunkSize: Int { 1 }
+    nonisolated private static var timelineCoordinateConversionChunkSize: Int { 2_048 }
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
@@ -217,10 +222,10 @@ struct TimelineScene<Content: View>: View {
     @State private var deferredVisibleTimelineDates: Set<Date>?
     @State private var deferredTimelineWorkCount = 0
     @State private var mapViewportSize: CGSize = .zero
+    @State private var mapViewportRevision = 0
     @State private var didRequestInitialTimeline = false
     @State private var hasCompletedInitialTimelineLoad = false
     @State private var allowsMapInteractionCollapse = false
-    @State private var skipsNextMapExpansionCameraReset = false
     @State private var timelineCache = ContinuousTimelineCache()
     @State private var availableTimelineDateSet = Set<Date>()
     @State private var hiddenTimelineDateSet = Set<Date>()
@@ -229,11 +234,12 @@ struct TimelineScene<Content: View>: View {
     @State private var isReloadingTimelineExternally = false
     @State private var mapInteractionEnableTask: Task<Void, Never>?
     @State private var selectedFootprint: Footprint?
+    @State private var timelineDetentBeforeFootprintDetail: PresentationDetent?
+    @State private var mapTapDetentBeforeCollapse: PresentationDetent?
     @State private var loadedFootprintCameraKey: FootprintCameraSourceKey?
     @State private var loadedFootprintCameraCoordinates: [CLLocationCoordinate2D] = []
     @State private var selectedFootprintGroup: DFKMapView.AggregatedFootprint?
     @State private var selectedMapPhotoAssetID: String? = nil
-    @State private var isFollowingUserLocation = false
 
 
     private var timelineDates: [Date] {
@@ -267,6 +273,9 @@ struct TimelineScene<Content: View>: View {
     }
     
 
+    // Shared by timeline framing and native user-location tracking.
+    private var mediumMapVisibleVerticalRange: ClosedRange<CGFloat> { 0.075...0.435 }
+
     private var mapContent: some View {
         DFKMapView(
             cameraPosition: $cameraPosition,
@@ -279,18 +288,31 @@ struct TimelineScene<Content: View>: View {
             prefersActivityIcons: mapPrefersActivityIcons,
             selectedFootprintID: selectedFootprint?.footprintID,
             selectedFootprintCoordinate: selectedFootprintMapCoordinate,
+            timelineUpdateIdentifier: mapViewportRevision,
             onMapInteraction: handleMapInteraction,
             onTimelineItemTap: { item in
                 onRequestRecords()
                 withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
                     switch item {
-                    case .footprint(let footprint): selectedFootprint = storedFootprint(matching: footprint)
-                    case .transport(let transport): selectedTransport = transport
+                    case .footprint(let footprint):
+                        if timelineDetentBeforeFootprintDetail == nil {
+                            timelineDetentBeforeFootprintDetail = mapTapDetentBeforeCollapse ?? timelineDetent
+                        }
+                        mapTapDetentBeforeCollapse = nil
+                        selectedFootprint = storedFootprint(matching: footprint)
+                    case .transport(let transport):
+                        mapTapDetentBeforeCollapse = nil
+                        selectedTransport = transport
                     }
                 }
             },
             onAggregatedFootprintTap: { aggregated in
                 onRequestRecords()
+                if timelineDetentBeforeFootprintDetail == nil {
+                    timelineDetentBeforeFootprintDetail = mapTapDetentBeforeCollapse ?? timelineDetent
+                }
+                mapTapDetentBeforeCollapse = nil
+                timelineDetent = .medium
                 selectedFootprintGroup = aggregated
             },
             onPhotoTap: { asset in
@@ -302,38 +324,32 @@ struct TimelineScene<Content: View>: View {
 
     private func focusMapOnCurrentLocation() {
         guard let region = currentLocationMapRegion() else { return }
-        isFollowingUserLocation = true
         moveMapCamera(to: region, animated: true)
     }
 
-    /// Top trailing, below the status bar: clear of every sheet detent, so
-    /// its position never depends on the record sheet's height.
-    private var mapLocationButton: some View {
-        Button(action: focusMapOnCurrentLocation) {
-            Image(systemName: isFollowingUserLocation ? "location.fill" : "location")
-                .font(.system(size: 16, weight: .semibold))
-                .frame(width: 32, height: 32)
-        }
-        .mapLocationButtonStyle()
-        .controlSize(.small)
-        .accessibilityLabel("定位到当前位置")
-        .padding(.trailing, 16)
-        .padding(.top, 8)
-    }
-
-    private func handleMapInteraction(_ interactionType: DFKMapView.MapInteractionType) {
-        if interactionType == .pan {
-            isFollowingUserLocation = false
-        }
-        
+    private func handleMapInteraction(_ interaction: DFKMapView.MapInteractionType) {
+        mapCameraTransitionTask?.cancel()
         renderedMapRegion = nil
         displayedMapRegion = nil
         guard allowsMapInteractionCollapse, isActive else { return }
         guard !isSideBySide else { return }
 
+        if case .tap = interaction {
+            mapTapDetentBeforeCollapse = timelineDetent
+            Task { @MainActor in
+                await Task.yield()
+                guard selectedFootprint == nil, selectedFootprintGroup == nil else { return }
+                mapTapDetentBeforeCollapse = nil
+            }
+        }
+
+        // Annotation taps can reach this callback before or after their own
+        // selection callback. Once selection won the race, do not collapse the
+        // timeline underneath the detail.
+        guard selectedFootprint == nil, selectedFootprintGroup == nil else { return }
+
         lockVisibleTimelineMapForInteraction()
         guard timelineDetent != .height(collapsedTimelineDetentHeight) else { return }
-        skipsNextMapExpansionCameraReset = interactionType != .tap
         withAnimation(.easeOut(duration: 0.2)) {
             timelineDetent = .height(collapsedTimelineDetentHeight)
         }
@@ -350,6 +366,7 @@ struct TimelineScene<Content: View>: View {
             locationManager: locationManager,
             activeTimelineDate: $activeTimelineDate,
             todayScrollRequest: $todayScrollRequest,
+            returnToNowRequest: returnToNowRequest,
             targetScrollDate: $targetScrollDate,
             timelineDetent: $timelineDetent,
             isCalendarScrollLocked: $isCalendarScrollLocked,
@@ -357,6 +374,7 @@ struct TimelineScene<Content: View>: View {
             selectedFootprint: $selectedFootprint,
             selectedTransport: $selectedTransport,
             selectedFootprintGroup: $selectedFootprintGroup,
+            onFootprintGroupCancelled: restoreTimelineDetentAfterFootprintDetail,
             loadEarlierDates: loadEarlierTimeline,
             loadLaterDates: loadLaterTimeline,
             loadLaterDatesAfter: { date in await loadLaterTimeline(from: date) },
@@ -388,13 +406,12 @@ struct TimelineScene<Content: View>: View {
             }
         }
         .ignoresSafeArea(edges: isSideBySide ? [.top, .bottom, .trailing] : .all)
-        // Outside the safe-area expansion, so it sits below the status bar.
-        .overlay(alignment: .topTrailing) { mapLocationButton }
     }
 
     var body: some View {
         content(AnyView(timelineMainContent), AnyView(timelineNavigationContent))
         .onChange(of: destination?.id) { _, _ in consumeDestination() }
+        .onChange(of: returnToNowRequest) { _, _ in returnToNow() }
         .onChange(of: hasCompletedInitialTimelineLoad) { _, ready in
             if ready { consumeDestination() }
         }
@@ -424,22 +441,30 @@ struct TimelineScene<Content: View>: View {
         .onChange(of: isCalendarScrollLocked) { _, isLocked in
             if isLocked {
                 visibleMapUpdateTask?.cancel()
-                // Opening a footprint (e.g. from History) starts its camera
-                // flight in the same update that locks the timeline for the
-                // jump to its day. That flight is the explicit destination;
-                // only a day-fit flight should yield to the timeline jump.
                 if selectedFootprint == nil {
                     mapCameraTransitionTask?.cancel()
-                    // moveMapCamera records its target up front. After an
-                    // interrupted flight, record where the camera actually
-                    // stopped so the post-jump refresh still moves it.
                     if let displayedMapRegion {
                         renderedMapRegion = displayedMapRegion
                     }
                 }
                 return
             }
-            refreshVisibleTimelineMap(for: visibleTimelineDates, delayNanoseconds: 120_000_000)
+            // An explicit date jump has already finished positioning the
+            // timeline. Start its camera animation in the same run-loop turn;
+            // manual scrolling still uses the geometry coalescer below.
+            refreshVisibleTimelineMap(for: visibleTimelineDates, delayNanoseconds: 0)
+        }
+        .onChange(of: cameraPosition.followsUserLocation) { _, isFollowing in
+            guard isFollowing else { return }
+            // A pending timeline fit must not overwrite an explicit locate request.
+            visibleMapUpdateTask?.cancel()
+            mapCameraTransitionTask?.cancel()
+            if !isSideBySide, timelineDetent == .medium {
+                focusMapOnCurrentLocation()
+            } else {
+                renderedMapRegion = nil
+                displayedMapRegion = nil
+            }
         }
         .onChange(of: locationManager.lastLocation?.timestamp) { _, _ in
             guard visibleTimelineItems.isEmpty else { return }
@@ -472,6 +497,13 @@ struct TimelineScene<Content: View>: View {
         guard hasCompletedInitialTimelineLoad, let requested = destination else { return }
         destination = nil
         openDate(requested.date, footprintID: requested.footprintID)
+    }
+
+    private func returnToNow() {
+        selectedFootprint = nil
+        selectedFootprintGroup = nil
+        selectedTransport = nil
+        targetScrollDate = nil
     }
 
     private func handleDeepLinkURL(_ url: URL) {
@@ -567,11 +599,14 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func openTimelineDeepLink(_ url: URL) {
-        guard let offsetString = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "offset" })?.value,
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let offsetString = components.queryItems?.first(where: { $0.name == "offset" })?.value,
               let offset = Int(offsetString),
               let targetDate = Calendar.current.date(byAdding: .day, value: offset, to: Calendar.current.startOfDay(for: Date())) else {
             return
         }
+        let scrollsToNow = offset == 0
+            && components.queryItems?.first(where: { $0.name == "anchor" })?.value == "now"
 
         Task { @MainActor in
             timelineDetent = .medium
@@ -581,7 +616,7 @@ struct TimelineScene<Content: View>: View {
             guard hasCompletedInitialTimelineLoad else { return }
             _ = await refreshAvailableTimelineDateCache()
             _ = await loadTimelineDate(targetDate)
-            targetScrollDate = targetDate
+            targetScrollDate = scrollsToNow ? nil : targetDate
             todayScrollRequest += 1
         }
     }
@@ -615,24 +650,47 @@ struct TimelineScene<Content: View>: View {
         mapViewportSize = size
         if let footprint = selectedFootprint {
             focusMap(on: footprint, animated: false)
+            // Match the timeline path below: MapKit otherwise preserves the
+            // old screen-space visible rect when the split-view detail column
+            // changes width, leaving a correctly fitted footprint visibly
+            // offset toward the former viewport.
+            mapViewportRevision &+= 1
+        } else if isSideBySide, let region = displayedMapRegion ?? renderedMapRegion {
+            // NavigationSplitView can preserve MapKit's old screen-space visible
+            // rect when its detail column changes width. Recreate the Map surface
+            // with the same geographic region so that region is centered in the
+            // new detail viewport rather than the previous column frame.
+            mapCameraTransitionTask?.cancel()
+            displayedMapRegion = region
+            renderedMapRegion = region
+            cameraPosition = .region(region)
+            mapViewportRevision &+= 1
         }
     }
 
     private func handleSelectedFootprintChange(_ newFootprint: Footprint?) {
         guard let footprint = newFootprint else {
-            // Dismissing the detail only clears its selection. Keep the camera
-            // where the user was viewing instead of restoring the timeline's
-            // full visible range behind the sheet.
             visibleMapUpdateTask?.cancel()
             renderedSelectedFootprintID = nil
-            timelineDetent = .medium
+            restoreTimelineDetentAfterFootprintDetail()
             return
         }
 
         // Selection takes ownership from any pending timeline camera update.
+        // Present the detail over the medium timeline, then restore the exact
+        // height the user had before opening it when the detail closes.
         visibleMapUpdateTask?.cancel()
+        if timelineDetentBeforeFootprintDetail == nil {
+            timelineDetentBeforeFootprintDetail = timelineDetent
+        }
         timelineDetent = .medium
         focusMap(on: footprint)
+    }
+
+    private func restoreTimelineDetentAfterFootprintDetail() {
+        guard let previousDetent = timelineDetentBeforeFootprintDetail else { return }
+        timelineDetentBeforeFootprintDetail = nil
+        timelineDetent = previousDetent
     }
 
     private func loadSelectedFootprintCameraCoordinates() async {
@@ -664,8 +722,6 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func focusMap(on footprint: Footprint, animated: Bool = true) {
-        mapCameraTransitionTask?.cancel()
-        isFollowingUserLocation = false
         let key = FootprintCameraSourceKey(id: footprint.footprintID, start: footprint.startTime, end: footprint.endTime)
         guard loadedFootprintCameraKey == key else { return }
         let coordinates = loadedFootprintCameraCoordinates
@@ -675,18 +731,19 @@ struct TimelineScene<Content: View>: View {
             x: mapViewportSize.width * 0.08,
             y: mapViewportSize.height * 0.10,
             width: mapViewportSize.width * 0.84,
-            height: mapViewportSize.height * (isSideBySide ? 0.80 : 0.33)
+            height: mapViewportSize.height * 0.80
         )
         guard let rect = FootprintCameraFraming.mapRect(
             coordinates: coordinates, viewport: mapViewportSize, visibleRect: visibleRect
         ) else { return }
+        let baseRegion = MKCoordinateRegion(rect)
+        let targetRegion = adjustedMapRegion(baseRegion)
         renderedSelectedFootprintID = footprint.footprintID
-        renderedMapRegion = MKCoordinateRegion(rect)
-        displayedMapRegion = renderedMapRegion
-        // Commit the destination once; a sheet lifecycle change cannot cancel
-        // a multi-step flight halfway to this footprint.
+        renderedMapRegion = targetRegion
+        displayedMapRegion = targetRegion
+        // Commit the destination once and let MapKit animate the camera.
         withAnimation(animated ? .easeInOut(duration: 0.35) : nil) {
-            cameraPosition = .rect(rect)
+            cameraPosition = .region(targetRegion)
         }
     }
 
@@ -700,26 +757,27 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func handleTimelineDetentChange(oldValue: PresentationDetent, newValue: PresentationDetent) {
-        if oldValue == .height(collapsedTimelineDetentHeight), newValue != .height(collapsedTimelineDetentHeight) {
-            unlockVisibleTimelineMapAfterInteraction()
-            return
-        }
-        if newValue == .height(collapsedTimelineDetentHeight) {
-            lockVisibleTimelineMapForInteraction()
-            guard !skipsNextMapExpansionCameraReset else {
-                skipsNextMapExpansionCameraReset = false
-                return
+        visibleMapUpdateTask?.cancel()
+        renderedMapDetentKey = currentMapDetentKey
+        let collapsedDetent = PresentationDetent.height(collapsedTimelineDetentHeight)
+
+        if oldValue == collapsedDetent, newValue == .medium {
+            mapInteractionLockedVisibleDates = nil
+            if let source = displayedMapRegion ?? renderedMapRegion {
+                animateMapCameraForDetent(to: mediumDetentMapRegion(fitting: source))
             }
-            resetLockedMapCamera(animated: true)
             return
         }
-        // The selected footprint was explicitly focused above. Changing the
-        // sheet detent must not immediately replace that camera with the
-        // timeline viewport (which can be transiently empty during detail
-        // presentation and therefore expand to the whole day).
-        guard selectedFootprint == nil else { return }
-        guard mapInteractionLockedVisibleDates == nil || isSideBySide else { return }
-        refreshVisibleTimelineMap()
+        if oldValue == .medium, newValue == collapsedDetent {
+            lockVisibleTimelineMapForInteraction()
+            if let source = displayedMapRegion ?? renderedMapRegion {
+                animateMapCameraForDetent(to: collapsedMapRegion(fromMediumCamera: source))
+            }
+            return
+        }
+
+        if oldValue == collapsedDetent { mapInteractionLockedVisibleDates = nil }
+        if newValue == collapsedDetent { lockVisibleTimelineMapForInteraction() }
     }
 
     private var loadableTimelineDateSet: Set<Date> {
@@ -935,7 +993,7 @@ struct TimelineScene<Content: View>: View {
             guard !Task.isCancelled else { break }
             guard !loadedDates.contains(daySnapshot.date) else { continue }
 
-            let items = Self.timelineItems(from: daySnapshot, allPlaces: snapshot.places)
+            let items = await Self.timelineItems(from: daySnapshot, allPlaces: snapshot.places)
             fetchedTimelines[daySnapshot.date] = items
 
             if shouldDisplayTimelineDate(daySnapshot.date, items: items) {
@@ -1039,7 +1097,7 @@ struct TimelineScene<Content: View>: View {
     }
 
     @MainActor
-    private static func timelineItems(from snapshot: TimelineDaySnapshot, allPlaces: [PlaceLite]) -> [TimelineItem] {
+    private static func timelineItems(from snapshot: TimelineDaySnapshot, allPlaces: [PlaceLite]) async -> [TimelineItem] {
         var items: [TimelineItem] = []
 
         for footprint in snapshot.footprints {
@@ -1074,14 +1132,26 @@ struct TimelineScene<Content: View>: View {
         }
 
         for transport in snapshot.transports {
-            let pathPoints = transport.points.map {
-                TransportPathPoint(
-                    coordinate: CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon),
-                    timestamp: $0.timestamp,
-                    isSyntheticPadding: $0.isSyntheticPadding ?? false
-                )
+            var pathPoints: [TransportPathPoint] = []
+            pathPoints.reserveCapacity(transport.points.count)
+            for (index, point) in transport.points.enumerated() {
+                pathPoints.append(TransportPathPoint(
+                    coordinate: CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon),
+                    timestamp: point.timestamp,
+                    isSyntheticPadding: point.isSyntheticPadding ?? false
+                ))
+                if index > 0, index % Self.timelineCoordinateConversionChunkSize == 0 {
+                    await Task.yield()
+                }
             }
-            let coordinates = pathPoints.map(\.coordinate)
+            var coordinates: [CLLocationCoordinate2D] = []
+            coordinates.reserveCapacity(pathPoints.count)
+            for (index, point) in pathPoints.enumerated() {
+                coordinates.append(point.coordinate)
+                if index > 0, index % Self.timelineCoordinateConversionChunkSize == 0 {
+                    await Task.yield()
+                }
+            }
             let type = TransportType(rawValue: transport.typeRaw) ?? .slow
             let manualType = transport.manualTypeRaw.flatMap { TransportType(rawValue: $0) }
             items.append(.transport(Transport(
@@ -1208,7 +1278,7 @@ struct TimelineScene<Content: View>: View {
             let hasRenderedTimeline = timelinesByDate[daySnapshot.date] != nil || timelineCache.isHidden(daySnapshot.date)
             guard reloadLoadedDates || !hasRenderedTimeline else { continue }
 
-            let items = Self.timelineItems(from: daySnapshot, allPlaces: snapshot.places)
+            let items = await Self.timelineItems(from: daySnapshot, allPlaces: snapshot.places)
             fetchedTimelines[daySnapshot.date] = items
 
             if shouldDisplayTimelineDate(daySnapshot.date, items: items, allowEmpty: allowEmpty) {
@@ -1381,13 +1451,13 @@ struct TimelineScene<Content: View>: View {
             deferredVisibleTimelineDates = dates
             return
         }
-        refreshVisibleTimelineMap(for: dates)
+        refreshVisibleTimelineMap(for: dates, delayNanoseconds: 80_000_000)
     }
 
     private func updateVisibleTimelineItemIDs(_ ids: Set<String>) {
         guard ids != visibleTimelineItemIDs else { return }
         visibleTimelineItemIDs = ids
-        refreshVisibleTimelineMap(for: visibleTimelineDates)
+        refreshVisibleTimelineMap(for: visibleTimelineDates, delayNanoseconds: 80_000_000)
     }
 
     /// Narrows a day's full item list down to whichever of those items are
@@ -1571,6 +1641,7 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func moveMapCamera(to target: MKCoordinateRegion, animated: Bool) {
+        guard isRenderableMapRegion(target) else { return }
         mapCameraTransitionTask?.cancel()
         let source = displayedMapRegion ?? renderedMapRegion
         renderedMapRegion = target
@@ -1587,13 +1658,6 @@ struct TimelineScene<Content: View>: View {
             return
         }
 
-        // Small re-fits are now the common case: as the timeline scrolls, the
-        // camera keeps nudging to match a slightly different set of visible
-        // items. The multi-step flight below is built for large jumps (e.g.
-        // switching to a different day) and is too costly to run on every
-        // minor nudge — each of its steps is its own SwiftUI state mutation
-        // and Map relayout. A single native animation covers a short hop just
-        // as smoothly for a fraction of the work.
         guard !isMinorCameraAdjustment(from: source, to: target) else {
             displayedMapRegion = target
             withAnimation(.easeInOut(duration: 0.35)) {
@@ -1619,6 +1683,19 @@ struct TimelineScene<Content: View>: View {
                 }
                 try? await Task.sleep(nanoseconds: 30_000_000)
             }
+        }
+    }
+
+    /// A sheet detent transition changes which vertical portion of the same
+    /// full-screen map is visible. Submit one camera animation alongside the
+    /// sheet animation; never resize or inset the Map itself.
+    private func animateMapCameraForDetent(to target: MKCoordinateRegion) {
+        guard isRenderableMapRegion(target) else { return }
+        mapCameraTransitionTask?.cancel()
+        renderedMapRegion = target
+        displayedMapRegion = target
+        withAnimation(.easeInOut(duration: 0.35)) {
+            cameraPosition = .region(target)
         }
     }
 
@@ -1778,45 +1855,63 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func adjustedMapRegion(for coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion? {
-        guard let region = coordinates.boundingRegion(paddingFactor: 1.4) else { return nil }
-        if isSideBySide { return isRenderableMapRegion(region) ? region : nil }
-        guard timelineDetent == .medium else { return isRenderableMapRegion(region) ? region : nil }
+        guard let region = coordinates.boundingRegion(paddingFactor: 1.4),
+              isRenderableMapRegion(region) else { return nil }
+        return adjustedMapRegion(region)
+    }
 
-        let mediumRegion = mediumDetentMapRegion(fitting: region)
-        // Widely separated coordinates can make the medium-sheet adjustment
-        // exceed MapKit's valid latitude span. Keep the valid bounding region
-        // rather than dropping the camera update altogether.
-        if isRenderableMapRegion(mediumRegion) {
-            return mediumRegion
-        }
-        return isRenderableMapRegion(region) ? region : nil
+    private func adjustedMapRegion(_ region: MKCoordinateRegion) -> MKCoordinateRegion {
+        guard !isSideBySide, timelineDetent == .medium else { return region }
+        let adjustedRegion = mediumDetentMapRegion(fitting: region)
+        return isRenderableMapRegion(adjustedRegion) ? adjustedRegion : region
     }
 
     private func mediumDetentMapRegion(fitting region: MKCoordinateRegion) -> MKCoordinateRegion {
-        let targetTopFraction = 0.075
-        let targetBottomFraction = 0.435
-        let north = region.center.latitude + region.span.latitudeDelta / 2
-        let south = region.center.latitude - region.span.latitudeDelta / 2
-        // boundingRegion already includes the content padding. Adding another
-        // horizontal multiplier zooms wide routes out unnecessarily.
-        let longitudeDelta = region.span.longitudeDelta
-        let fullMapAspectRatio = mapViewportSize.height > 1 && mapViewportSize.width > 1 ? mapViewportSize.height / mapViewportSize.width : 2.15
-        let longitudeDrivenLatitudeDelta = longitudeDelta * cos(region.center.latitude * .pi / 180) * fullMapAspectRatio
-        let desiredLatitudeDelta = max(
-            region.span.latitudeDelta,
-            (north - south) / (targetBottomFraction - targetTopFraction),
-            longitudeDrivenLatitudeDelta
-        )
-        // Keep the medium-sheet offset valid even when content spans a continent.
-        let latitudeDelta = min(desiredLatitudeDelta, 170)
-        // When width determines the scale, the content is shorter than the
-        // available band. Center it in that band instead of pinning it north.
+        let targetTopFraction = Double(mediumMapVisibleVerticalRange.lowerBound)
+        let targetBottomFraction = Double(mediumMapVisibleVerticalRange.upperBound)
+        let visibleFraction = targetBottomFraction - targetTopFraction
         let targetCenterFraction = (targetTopFraction + targetBottomFraction) / 2
-        let centerLatitude = region.center.latitude - (0.5 - targetCenterFraction) * latitudeDelta
+        let fullMapAspectRatio = mapViewportSize.height > 1 && mapViewportSize.width > 1
+            ? mapViewportSize.height / mapViewportSize.width
+            : 2.15
+        let longitudeDrivenLatitudeDelta = region.span.longitudeDelta
+            * cos(region.center.latitude * .pi / 180)
+            * fullMapAspectRatio
+        let latitudeDelta = min(
+            max(region.span.latitudeDelta / visibleFraction, longitudeDrivenLatitudeDelta),
+            170
+        )
+        let centerLatitude = region.center.latitude
+            - (0.5 - targetCenterFraction) * latitudeDelta
 
         return MKCoordinateRegion(
-            center: CLLocationCoordinate2D(latitude: centerLatitude, longitude: region.center.longitude),
-            span: MKCoordinateSpan(latitudeDelta: latitudeDelta, longitudeDelta: longitudeDelta)
+            center: CLLocationCoordinate2D(
+                latitude: centerLatitude,
+                longitude: region.center.longitude
+            ),
+            span: MKCoordinateSpan(
+                latitudeDelta: latitudeDelta,
+                longitudeDelta: region.span.longitudeDelta
+            )
+        )
+    }
+
+    private func collapsedMapRegion(fromMediumCamera region: MKCoordinateRegion) -> MKCoordinateRegion {
+        let targetTopFraction = Double(mediumMapVisibleVerticalRange.lowerBound)
+        let targetBottomFraction = Double(mediumMapVisibleVerticalRange.upperBound)
+        let visibleFraction = targetBottomFraction - targetTopFraction
+        let targetCenterFraction = (targetTopFraction + targetBottomFraction) / 2
+
+        return MKCoordinateRegion(
+            center: CLLocationCoordinate2D(
+                latitude: region.center.latitude
+                    + (0.5 - targetCenterFraction) * region.span.latitudeDelta,
+                longitude: region.center.longitude
+            ),
+            span: MKCoordinateSpan(
+                latitudeDelta: region.span.latitudeDelta * visibleFraction,
+                longitudeDelta: region.span.longitudeDelta
+            )
         )
     }
 
@@ -1848,6 +1943,7 @@ private struct TimelineView: View {
     // the view, so date-anchored restoration can read current row frames.
     @State private var rawDateFrames = ContinuousTimelineRawDateFrames()
     @State private var calendarScrollLockTarget: Date?
+    @State private var collapsedTimelineDateAwaitingAlignment: Date?
     @State private var calendarScrollRetryTask: Task<Void, Never>?
     @State private var calendarScrollAlignsTargetToTop = false
     @State private var latestDateFrames: [Date: CGRect] = [:]
@@ -1893,6 +1989,7 @@ private struct TimelineView: View {
     let locationManager: LocationManager
     @Binding var activeTimelineDate: Date
     @Binding var todayScrollRequest: Int
+    let returnToNowRequest: Int
     @Binding var targetScrollDate: Date?
     @Binding var timelineDetent: PresentationDetent
     @Binding var isCalendarScrollLocked: Bool
@@ -1903,6 +2000,7 @@ private struct TimelineView: View {
     /// window, beneath the records window that hosts every sheet.
     @Binding var selectedFootprintGroup: DFKMapView.AggregatedFootprint?
     @State private var footprintSelectedFromGroup: Footprint?
+    let onFootprintGroupCancelled: () -> Void
     let loadEarlierDates: () async -> Bool
     let loadLaterDates: () async -> Bool
     let loadLaterDatesAfter: (Date) async -> Bool
@@ -1973,16 +2071,6 @@ private struct TimelineView: View {
         )
     }
 
-    private var showsReturnToTodayButton: Bool {
-        guard !isCollapsed else { return false }
-
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        let activeDate = calendar.startOfDay(for: activeTimelineDate)
-        let daysFromToday = calendar.dateComponents([.day], from: activeDate, to: today).day ?? 0
-        return daysFromToday > 0
-    }
-
     private var canLoadEarlierDates: Bool {
         guard let firstDate = currentDates.first else { return false }
         return availableDates.contains { $0 < firstDate }
@@ -2017,12 +2105,18 @@ private struct TimelineView: View {
                 .onChange(of: todayScrollRequest) { _, _ in
                     requestScrollToToday(using: proxy)
                 }
+                .onChange(of: returnToNowRequest) { _, _ in
+                    requestScrollToToday(using: proxy, expandsCollapsedTimeline: false)
+                }
         }
     }
 
     private func recordsPage(proxy: ScrollViewProxy) -> some View {
         ZStack {
-            NavigationStack {
+            if isSideBySide, let selectedFootprint {
+                buildFootprintModalView(for: selectedFootprint, isInline: true)
+            } else {
+                NavigationStack {
                     GeometryReader { viewport in
                         // Keep the scroll view mounted while collapsed so its
                         // current offset survives re-expansion. Rendering it
@@ -2151,18 +2245,28 @@ private struct TimelineView: View {
                     .toolbar { headerToolbar(proxy: proxy) }
                     .navigationBarTitleDisplayMode(.inline)
                     } // GeometryReader
-            } // NavigationStack
-            if isInitialTimelineLoading {
-                // This is outside the scroll view so its material reaches the
-                // sheet's bottom edge. Keep the full title-bar band clear.
-                GeometryReader { viewport in
-                    initialTimelineLoadingOverlay
-                        .frame(
-                            width: viewport.size.width,
-                            height: max(0, viewport.size.height - 64)
-                        )
-                        .frame(maxHeight: .infinity, alignment: .bottom)
-                        .ignoresSafeArea(.container, edges: .bottom)
+                } // NavigationStack
+                .toolbar(removing: .sidebarToggle)
+            }
+            if isInitialTimelineLoading && (!isSideBySide || selectedFootprint == nil) {
+                Group {
+                    if isSideBySide {
+                        initialTimelineLoadingOverlay
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .ignoresSafeArea(.container)
+                    } else {
+                        // This is outside the scroll view so its material reaches
+                        // the sheet's bottom edge while its title band stays clear.
+                        GeometryReader { viewport in
+                            initialTimelineLoadingOverlay
+                                .frame(
+                                    width: viewport.size.width,
+                                    height: max(0, viewport.size.height - 64)
+                                )
+                                .frame(maxHeight: .infinity, alignment: .bottom)
+                                .ignoresSafeArea(.container, edges: .bottom)
+                        }
+                    }
                 }
                 .allowsHitTesting(false)
             }
@@ -2180,7 +2284,7 @@ private struct TimelineView: View {
             PhotoFullscreenView(assetIDs: assetIDs, currentIndex: currentIndex)
         }
         .sheet(item: Binding(
-            get: { isActive ? selectedFootprint : nil },
+            get: { isActive && !isSideBySide ? selectedFootprint : nil },
             set: { selectedFootprint = $0 }
         )) { footprint in
             buildFootprintModalView(for: footprint)
@@ -2189,7 +2293,10 @@ private struct TimelineView: View {
             get: { isActive ? selectedFootprintGroup : nil },
             set: { selectedFootprintGroup = $0 }
         ), onDismiss: {
-            guard let footprint = footprintSelectedFromGroup else { return }
+            guard let footprint = footprintSelectedFromGroup else {
+                onFootprintGroupCancelled()
+                return
+            }
             footprintSelectedFromGroup = nil
             selectedFootprint = storedFootprint(matching: footprint)
         }) { aggregated in
@@ -2289,17 +2396,35 @@ private struct TimelineView: View {
                             .scrollTargetLayout()
                         }
                         .scrollPosition(id: timelineScrollPositionBinding, anchor: .bottom)
-                        .scrollDisabled(isCollapsed || isPreservingViewportForEarlierLoad)
+                        // Viewport restoration already cancels itself as soon
+                        // as the user interacts. Do not freeze the whole
+                        // timeline while historical data is fetched.
+                        .scrollDisabled(isCollapsed)
                         .timelineHiddenScrollEdges()
                         .coordinateSpace(name: "continuousTimelineScroll")
                         .onChange(of: viewport.size) { oldSize, newSize in
                             restoreTimelineDateAfterRotation(from: oldSize, to: newSize, using: proxy)
                         }
                         .onPreferenceChange(ContinuousTimelineDateFramePreferenceKey.self) { frames in
-                            guard isActive else { return }
+                            guard isActive, !isCollapsed else { return }
                             let viewportHeight = viewport.size.height
-                            rawDateFrames.frames = frames
-                            rawDateFrames.viewportHeight = viewportHeight
+                            rawDateFrames.update(frames: frames, viewportHeight: viewportHeight)
+                            // A detent animation changes the viewport height on
+                            // every frame. Keep the latest geometry available
+                            // for restoration, but do not compete with UIKit by
+                            // recalculating titles, dates and map input mid-resize.
+                            guard !rawDateFrames.isViewportResizing else {
+                                dateFrameUpdateCoalescer.cancel()
+                                itemFrameUpdateCoalescer.cancel()
+                                return
+                            }
+                            // An explicit date jump owns the title until its
+                            // destination has settled. Geometry snapshots from
+                            // the row we just left can otherwise arrive one
+                            // frame late and visibly put the title back.
+                            if !isFreezingViewportDrivenUpdates {
+                                updateHeaderDateDisplay(from: frames, viewportHeight: viewportHeight)
+                            }
                             if hasCompletedInitialTimelinePositioning,
                                !isFreezingViewportDrivenUpdates,
                                let anchor = currentDateAnchor() {
@@ -2308,30 +2433,31 @@ private struct TimelineView: View {
                             // LazyVStack may publish several geometry snapshots
                             // in one frame. Keep only the newest one so state/map
                             // updates cannot form a per-frame feedback loop.
-                            dateFrameUpdateCoalescer.schedule {
-                                applyDateFrameUpdate(frames, viewportHeight: viewportHeight)
+                            dateFrameUpdateCoalescer.schedule(
+                                userWasInteracting: scrollRestorer.isUserInteracting,
+                                isInteractionActive: { scrollRestorer.isUserInteracting }
+                            ) { userWasInteracting in
+                                applyDateFrameUpdate(frames, viewportHeight: viewportHeight, userWasInteracting: userWasInteracting)
                             }
                         }
                         .onPreferenceChange(ContinuousTimelineItemFramePreferenceKey.self) { frames in
-                            guard isActive else { return }
+                            guard isActive, !isCollapsed else { return }
+                            guard !rawDateFrames.isViewportResizing else {
+                                itemFrameUpdateCoalescer.cancel()
+                                return
+                            }
                             let viewportHeight = viewport.size.height
-                            itemFrameUpdateCoalescer.schedule {
-                                applyItemFrameUpdate(frames, viewportHeight: viewportHeight)
+                            let userIsInteracting = scrollRestorer.isUserInteracting
+                            // Before the first manual scroll, the camera fits
+                            // the active day and does not consume row frames.
+                            guard mapFollowsVisibleContent || userIsInteracting else { return }
+                            itemFrameUpdateCoalescer.schedule(
+                                userWasInteracting: userIsInteracting,
+                                isInteractionActive: { scrollRestorer.isUserInteracting }
+                            ) { userWasInteracting in
+                                applyItemFrameUpdate(frames, viewportHeight: viewportHeight, userWasInteracting: userWasInteracting)
                             }
                         }
-                        .overlay(alignment: .bottom) {
-                            if isCollapsed {
-                                EmptyView()
-                            } else if showsReturnToTodayButton {
-                                Button {
-                                    requestScrollToToday(using: proxy)
-                                } label: {
-                                    Label("回到当下", systemImage: "arrow.down.to.line")
-                                }
-                                .returnToTodayButtonStyle()
-                                .accessibilityLabel("回到当下")
-                            }
-                    }
                     .onAppear {
                         if targetScrollDate != nil {
                             requestScrollToToday(using: proxy)
@@ -2347,6 +2473,27 @@ private struct TimelineView: View {
                         guard calendarScrollLockTarget == nil,
                               isActive else { return }
                         scheduleInitialScrollToTodayIfNeeded(using: proxy)
+                    }
+                    .onChange(of: timelineDetent) { oldValue, newValue in
+                        // A sheet resize changes every published frame even
+                        // though the user did not scroll the timeline. Ignore
+                        // that layout-only geometry so it cannot refit the map.
+                        dateFrameUpdateCoalescer.cancel()
+                        itemFrameUpdateCoalescer.cancel()
+                        freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.45)
+                        mapFollowsVisibleContent = false
+                        latestVisibleItemIDs = []
+
+                        if oldValue == .height(collapsedTimelineDetentHeight),
+                           newValue != .height(collapsedTimelineDetentHeight),
+                           let date = collapsedTimelineDateAwaitingAlignment {
+                            collapsedTimelineDateAwaitingAlignment = nil
+                            // The target row may still be unmounted after a
+                            // distant collapsed-date change. Reuse the normal
+                            // measured alignment path instead of issuing one
+                            // best-effort ScrollViewProxy jump.
+                            scrollToDate(date, using: proxy, alignToTop: true)
+                        }
                     }
                     .onChange(of: isReloadingTimelineExternally) { _, isReloading in
                         // A reload triggered outside this view (e.g. CloudKit changes syncing in
@@ -2475,6 +2622,7 @@ private struct TimelineView: View {
                         calendarScrollRetryTask = nil
                         externalReloadDateRestoreTask?.cancel()
                         dateFrameUpdateCoalescer.cancel()
+                        itemFrameUpdateCoalescer.cancel()
                     }
     }
 
@@ -2529,16 +2677,18 @@ private struct TimelineView: View {
         .accessibilityLabel("正在加载时间轴")
     }
     @ViewBuilder
-    private func buildFootprintModalView(for footprint: Footprint) -> some View {
+    private func buildFootprintModalView(for footprint: Footprint, isInline: Bool = false) -> some View {
         FootprintModalView(
             footprint: footprint,
             autoFocus: false,
-            isInline: false
-        ) { didChange in
-            guard didChange else { return }
-            invalidateAndRefreshTimeline(containing: footprint.startTime)
-            CloudSettingsManager.shared.triggerDataSyncPulse()
-        }
+            isInline: isInline,
+            onDismiss: { didChange in
+                guard didChange else { return }
+                invalidateAndRefreshTimeline(containing: footprint.startTime)
+                CloudSettingsManager.shared.triggerDataSyncPulse()
+            },
+            onRequestClose: isInline ? { selectedFootprint = nil } : nil
+        )
         .environment(locationManager)
         .transition(.move(edge: .bottom))
     }
@@ -2646,7 +2796,7 @@ private struct TimelineView: View {
 
     private func navigateRecordedDay(forward: Bool, using proxy: ScrollViewProxy) {
         guard let date = adjacentRecordedDate(forward: forward) else { return }
-        scrollToDate(date, using: proxy, alignToTop: true)
+        scrollToDate(date, using: proxy, alignToTop: true, prefersImmediateLoadedTarget: true)
     }
 
     private func prepareTimelineShare() {
@@ -2946,8 +3096,8 @@ private struct TimelineView: View {
         restoreDateAnchorAfterExternalReload(anchor, using: proxy)
     }
 
-    private func applyDateFrameUpdate(_ frames: [Date: CGRect], viewportHeight: CGFloat) {
-        let startedFollowingVisibleContent = beginFollowingVisibleContentIfNeeded()
+    private func applyDateFrameUpdate(_ frames: [Date: CGRect], viewportHeight: CGFloat, userWasInteracting: Bool) {
+        let startedFollowingVisibleContent = beginFollowingVisibleContentIfNeeded(userWasInteracting: userWasInteracting)
         if calendarScrollLockTarget == nil,
            !startedFollowingVisibleContent,
            !shouldProcessDateFrameUpdate(frames, viewportHeight: viewportHeight) {
@@ -2972,17 +3122,36 @@ private struct TimelineView: View {
         let bandTop: CGFloat = 52
         let bandBottom = max(bandTop, viewportHeight - 72)
         let centerY = viewportHeight * 0.5
+        let bottomContentProbeY = max(bandTop, viewportHeight - 132)
+        var visibleDates = Set<Date>()
+        var bottomDate: Date?
+        var bottomDateMinY = -CGFloat.infinity
 
-        var visibleDates = Set(frames.compactMap { date, frame in
+        for (date, frame) in frames {
             let intersectionTop = max(frame.minY, bandTop)
             let intersectionBottom = min(frame.maxY, bandBottom)
             let intersectionHeight = max(0, intersectionBottom - intersectionTop)
             let minimumVisibleHeight = min(90, max(36, frame.height * 0.2))
             let containsCenter = frame.minY <= centerY && frame.maxY >= centerY
-            return intersectionHeight >= minimumVisibleHeight || containsCenter ? date : nil
-        })
+            if intersectionHeight >= minimumVisibleHeight || containsCenter {
+                visibleDates.insert(date)
+            }
+            if frame.minY <= bottomContentProbeY,
+               frame.maxY >= bottomContentProbeY,
+               frame.minY > bottomDateMinY {
+                bottomDate = date
+                bottomDateMinY = frame.minY
+            }
+        }
 
-        if let bottomDate = bottomVisibleDate(in: frames, viewportHeight: viewportHeight) {
+        if bottomDate == nil {
+            for (date, frame) in frames
+                where frame.maxY > bandTop && frame.minY < viewportHeight && frame.minY > bottomDateMinY {
+                bottomDate = date
+                bottomDateMinY = frame.minY
+            }
+        }
+        if let bottomDate {
             visibleDates.insert(bottomDate)
         }
 
@@ -2990,16 +3159,17 @@ private struct TimelineView: View {
     }
 
     /// Returns true only for the update in which a manual scroll starts.
-    private func beginFollowingVisibleContentIfNeeded() -> Bool {
+    private func beginFollowingVisibleContentIfNeeded(userWasInteracting: Bool) -> Bool {
         guard !mapFollowsVisibleContent,
               calendarScrollLockTarget == nil,
-              scrollRestorer.isUserInteracting else { return false }
+              userWasInteracting || scrollRestorer.isUserInteracting else { return false }
         mapFollowsVisibleContent = true
         return true
     }
 
-    private func applyItemFrameUpdate(_ frames: [String: CGRect], viewportHeight: CGFloat) {
-        _ = beginFollowingVisibleContentIfNeeded()
+    private func applyItemFrameUpdate(_ frames: [String: CGRect], viewportHeight: CGFloat, userWasInteracting: Bool) {
+        guard !isFreezingViewportDrivenUpdates else { return }
+        _ = beginFollowingVisibleContentIfNeeded(userWasInteracting: userWasInteracting)
         // No visible-item subset means the map fits the whole active day.
         let itemIDs = mapFollowsVisibleContent
             ? significantVisibleItemIDs(in: frames, viewportHeight: viewportHeight)
@@ -3017,51 +3187,89 @@ private struct TimelineView: View {
         let bandTop: CGFloat = 52
         let bandBottom = max(bandTop, viewportHeight - 72)
         let centerY = viewportHeight * 0.5
+        var visibleItemIDs = Set<String>()
 
-        return Set(frames.compactMap { id, frame in
+        for (id, frame) in frames {
             let intersectionTop = max(frame.minY, bandTop)
             let intersectionBottom = min(frame.maxY, bandBottom)
             let intersectionHeight = max(0, intersectionBottom - intersectionTop)
             let minimumVisibleHeight = min(48, max(16, frame.height * 0.3))
             let containsCenter = frame.minY <= centerY && frame.maxY >= centerY
-            return intersectionHeight >= minimumVisibleHeight || containsCenter ? id : nil
-        })
+            if intersectionHeight >= minimumVisibleHeight || containsCenter {
+                visibleItemIDs.insert(id)
+            }
+        }
+        return visibleItemIDs
     }
 
     private func bottomVisibleDate(in frames: [Date: CGRect], viewportHeight: CGFloat) -> Date? {
         let bandTop: CGFloat = 52
         let bottomContentProbeY = max(bandTop, viewportHeight - 132)
+        var probeDate: Date?
+        var probeMinY = -CGFloat.infinity
+        var fallbackDate: Date?
+        var fallbackMinY = -CGFloat.infinity
 
-        if let probeDate = frames
-            .filter({ _, frame in frame.minY <= bottomContentProbeY && frame.maxY >= bottomContentProbeY })
-            .max(by: { $0.value.minY < $1.value.minY })?
-            .key {
-            return probeDate
+        for (date, frame) in frames {
+            if frame.minY <= bottomContentProbeY,
+               frame.maxY >= bottomContentProbeY,
+               frame.minY > probeMinY {
+                probeDate = date
+                probeMinY = frame.minY
+            }
+            if frame.maxY > bandTop,
+               frame.minY < viewportHeight,
+               frame.minY > fallbackMinY {
+                fallbackDate = date
+                fallbackMinY = frame.minY
+            }
         }
-
-        return frames
-            .filter { _, frame in frame.maxY > bandTop && frame.minY < viewportHeight }
-            .max(by: { $0.value.minY < $1.value.minY })?
-            .key
+        return probeDate ?? fallbackDate
     }
 
     private func headerVisibleDate(in frames: [Date: CGRect], viewportHeight: CGFloat) -> Date? {
         let bandTop: CGFloat = 52
         let headerProbeY = max(bandTop, viewportHeight * 0.38)
+        var probeDate: Date?
+        var probeMinY = -CGFloat.infinity
+        var fallbackDate: Date?
+        var fallbackDistance = CGFloat.infinity
 
-        if let probeDate = frames
-            .filter({ _, frame in frame.minY <= headerProbeY && frame.maxY >= headerProbeY })
-            .max(by: { $0.value.minY < $1.value.minY })?
-            .key {
-            return probeDate
+        for (date, frame) in frames {
+            if frame.minY <= headerProbeY,
+               frame.maxY >= headerProbeY,
+               frame.minY > probeMinY {
+                probeDate = date
+                probeMinY = frame.minY
+            }
+            if frame.maxY > bandTop, frame.minY < viewportHeight {
+                let distance = abs(frame.midY - headerProbeY)
+                if distance < fallbackDistance {
+                    fallbackDate = date
+                    fallbackDistance = distance
+                }
+            }
         }
+        return probeDate ?? fallbackDate
+    }
 
-        return frames
-            .filter { _, frame in frame.maxY > bandTop && frame.minY < viewportHeight }
-            .min { first, second in
-                abs(first.value.midY - headerProbeY) < abs(second.value.midY - headerProbeY)
-            }?
-            .key
+    /// Keep the title visually attached to the row under the header while the
+    /// finger is moving. This intentionally changes display-only state: the
+    /// coalesced viewport handler remains solely responsible for active date,
+    /// map range, loading, and other timeline calculations.
+    private func updateHeaderDateDisplay(from frames: [Date: CGRect], viewportHeight: CGFloat) {
+        let date: Date?
+        if (scrollRestorer.currentMetrics?.bottomDistance ?? .infinity) < 8 {
+            date = currentDates.last
+        } else {
+            date = headerVisibleDate(in: frames, viewportHeight: viewportHeight)
+        }
+        guard let date, headerVisibleDates != [date] else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            headerVisibleDates = [date]
+        }
     }
 
     private func applyViewportDates(from frames: [Date: CGRect], viewportHeight: CGFloat) {
@@ -3092,7 +3300,8 @@ private struct TimelineView: View {
     private func shouldProcessDateFrameUpdate(_ frames: [Date: CGRect], viewportHeight: CGFloat) -> Bool {
         guard latestViewportHeight > 0 else { return true }
         guard abs(latestViewportHeight - viewportHeight) <= 1 else { return true }
-        guard Set(frames.keys) == Set(latestDateFrames.keys) else { return true }
+        guard frames.count == latestDateFrames.count,
+              frames.keys.allSatisfy({ latestDateFrames[$0] != nil }) else { return true }
 
         let oldVisibleDates = significantVisibleDates(in: latestDateFrames, viewportHeight: latestViewportHeight)
         let newVisibleDates = significantVisibleDates(in: frames, viewportHeight: viewportHeight)
@@ -3183,7 +3392,6 @@ private struct TimelineView: View {
                         activityTypes: activityTypes,
                         allPlaces: allPlaces,
                         showsContinuation: true,
-                        usesMinimumBottomSpacing: shouldUseMinimumSpacingBeforeCurrentStay(item, at: index, in: items, date: date),
                         canMergeItem: canMergeAdjacentTimelineItem(item, at: index, in: items),
                         onTap: {
                             withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
@@ -3271,6 +3479,8 @@ private struct TimelineView: View {
     /// An explicit destination supersedes every previously captured viewport.
     /// Data loads may finish, but their old anchors must never win afterward.
     private func beginExplicitTimelineNavigation() {
+        dateFrameUpdateCoalescer.cancel()
+        itemFrameUpdateCoalescer.cancel()
         layoutViewportState.anchor = nil
         mapFollowsVisibleContent = false
         latestVisibleItemIDs = []
@@ -3298,7 +3508,10 @@ private struct TimelineView: View {
         freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.8)
     }
 
-    private func requestScrollToToday(using proxy: ScrollViewProxy) {
+    private func requestScrollToToday(
+        using proxy: ScrollViewProxy,
+        expandsCollapsedTimeline: Bool = true
+    ) {
         if let target = targetScrollDate {
             scrollToDate(target, using: proxy)
             targetScrollDate = nil
@@ -3307,7 +3520,7 @@ private struct TimelineView: View {
         
         beginExplicitTimelineNavigation()
         let generation = scrollNavigationGeneration
-        if isCollapsed {
+        if isCollapsed && expandsCollapsedTimeline {
             withAnimation(.easeInOut(duration: 0.2)) {
                 timelineDetent = .medium
             }
@@ -3323,12 +3536,16 @@ private struct TimelineView: View {
             let today = Calendar.current.startOfDay(for: Date())
             layoutViewportState.anchor = ContinuousTimelineDateAnchor(date: today, bottomOffset: 0)
             if !currentDates.contains(today) { _ = await loadDate(today, false) }
-            for delay in [0, 90_000_000, 220_000_000, 420_000_000] {
+            for (index, delay) in [0, 90_000_000, 220_000_000, 420_000_000].enumerated() {
                 if delay > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(delay))
                 }
                 guard !Task.isCancelled, generation == scrollNavigationGeneration else { return }
                 scrollToToday(using: proxy)
+                // Later passes only correct lazy-layout drift. The first pass
+                // is already the visible destination, so it can release the
+                // map immediately instead of holding it for all retries.
+                if index == 0 { isCalendarScrollLocked = false }
             }
             hasCompletedInitialTimelinePositioning = true
         }
@@ -3412,7 +3629,17 @@ private struct TimelineView: View {
         transportPendingSplit = nil
     }
 
-    private func scrollToDate(_ date: Date, using proxy: ScrollViewProxy, alignToTop: Bool = true) {
+    private func scrollToDate(
+        _ date: Date,
+        using proxy: ScrollViewProxy,
+        alignToTop: Bool = true,
+        prefersImmediateLoadedTarget: Bool = false
+    ) {
+        if isCollapsed {
+            selectDateWhileCollapsed(date)
+            return
+        }
+
         beginExplicitTimelineNavigation()
         let generation = scrollNavigationGeneration
         let normalizedDate = Calendar.current.startOfDay(for: date)
@@ -3443,13 +3670,51 @@ private struct TimelineView: View {
                   calendarScrollLockTarget == normalizedDate else { return }
 
             applySelectedCalendarDate(normalizedDate)
-            // Give the newly completed date list one main-actor layout pass
-            // before the first proxy.scrollTo call.
-            try? await Task.sleep(nanoseconds: 180_000_000)
-            guard !Task.isCancelled,
-                  generation == scrollNavigationGeneration,
-                  calendarScrollLockTarget == normalizedDate else { return }
-            scheduleLockedCalendarScroll(using: proxy)
+            // Start the jump in this tap's main-actor turn. The locked scroll
+            // loop below already re-measures and corrects newly mounted rows,
+            // so delaying every navigation for a speculative layout pass only
+            // makes already-loaded adjacent dates feel unresponsive.
+            scheduleLockedCalendarScroll(
+                using: proxy,
+                usesImmediateMountedPath: prefersImmediateLoadedTarget
+            )
+        }
+    }
+
+    /// A collapsed timeline is invisible. Moving its ScrollView through many
+    /// lazy rows only competes with the visible map camera animation. Select
+    /// and load the date now, then align the list once it is expanded again.
+    private func selectDateWhileCollapsed(_ date: Date) {
+        let normalizedDate = Calendar.current.startOfDay(for: date)
+        scrollNavigationGeneration = UUID()
+        let generation = scrollNavigationGeneration
+
+        // Record the destination before loading. If the sheet is expanded
+        // while that load is still in flight, its detent change must still
+        // start the visible timeline alignment.
+        collapsedTimelineDateAwaitingAlignment = normalizedDate
+
+        returnToTodayTask?.cancel()
+        initialTodayScrollTask?.cancel()
+        calendarScrollRetryTask?.cancel()
+        calendarScrollRetryTask = nil
+        calendarScrollLockTarget = nil
+        isCalendarScrollLocked = false
+        dateFrameUpdateCoalescer.cancel()
+        itemFrameUpdateCoalescer.cancel()
+        mapFollowsVisibleContent = false
+        latestVisibleItemIDs = []
+        visibleItemIDsChanged([])
+
+        Task { @MainActor in
+            if !currentDates.contains(normalizedDate) {
+                guard await loadDate(normalizedDate, true) else { return }
+            }
+            guard generation == scrollNavigationGeneration else { return }
+
+            layoutViewportState.anchor = ContinuousTimelineDateAnchor(date: normalizedDate, bottomOffset: 0)
+            applySelectedCalendarDate(normalizedDate)
+            hasCompletedInitialTimelinePositioning = true
         }
     }
 
@@ -3518,7 +3783,10 @@ private struct TimelineView: View {
         return upper.map { max(1, $0.frame.maxY + averageHeight - viewportHeight) }
     }
 
-    private func scheduleLockedCalendarScroll(using proxy: ScrollViewProxy) {
+    private func scheduleLockedCalendarScroll(
+        using proxy: ScrollViewProxy,
+        usesImmediateMountedPath: Bool = false
+    ) {
         guard let target = calendarScrollLockTarget else { return }
         guard calendarScrollRetryTask == nil else { return }
 
@@ -3529,15 +3797,63 @@ private struct TimelineView: View {
                 if generation == scrollNavigationGeneration { calendarScrollRetryTask = nil }
             }
 
-            // `dates` has changed, but LazyVStack needs one layout turn to
-            // mount the newly loaded target row before ScrollViewReader can
-            // resolve its ID reliably.
-            try? await Task.sleep(nanoseconds: 180_000_000)
             guard !Task.isCancelled,
                   generation == scrollNavigationGeneration,
                   calendarScrollLockTarget == target else { return }
 
             applySelectedCalendarDate(target)
+
+            // Previous/next navigation always targets an already loaded,
+            // neighbouring day. Do not send that common path through the
+            // distant-date 40-pass seek loop: after many historical days are
+            // loaded, repeatedly measuring the large LazyVStack is the hitch
+            // the user feels after tapping an arrow.
+            if usesImmediateMountedPath {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    proxy.scrollTo(
+                        alignsToTop ? ScrollTarget.dateLine(target) : ScrollTarget.date(target),
+                        anchor: alignsToTop ? .top : .bottom
+                    )
+                }
+
+                // One next-run-loop correction is enough for a neighbouring
+                // row that was just mounted. It also avoids keeping the date
+                // lock alive for the old minimum of six 50 ms passes.
+                await Task.yield()
+                guard !Task.isCancelled,
+                      generation == scrollNavigationGeneration,
+                      calendarScrollLockTarget == target else { return }
+                // Immediately after launch the neighbouring day can be in the
+                // loaded data but not yet mounted by LazyVStack. In that case
+                // ScrollViewProxy has only issued an estimated jump; unlocking
+                // here loses the destination entirely. Finish quickly only
+                // after the target row actually exists. Otherwise retain the
+                // lock and fall through to the measured seek path below.
+                let viewportHeight = rawDateFrames.viewportHeight
+                if let targetFrame = rawDateFrames.frames[target],
+                   viewportHeight > 0,
+                   targetFrame.maxY > 0,
+                   targetFrame.minY < viewportHeight {
+                    withTransaction(transaction) {
+                        proxy.scrollTo(
+                            alignsToTop ? ScrollTarget.dateLine(target) : ScrollTarget.date(target),
+                            anchor: alignsToTop ? .top : .bottom
+                        )
+                    }
+
+                    dateFrameUpdateCoalescer.cancel()
+                    itemFrameUpdateCoalescer.cancel()
+                    hasCompletedInitialTimelinePositioning = true
+                    timelineScrollPosition = nil
+                    calendarScrollLockTarget = nil
+                    isCalendarScrollLocked = false
+                    applySelectedCalendarDate(target)
+                    visibleDatesChanged([target])
+                    return
+                }
+            }
 
             // LazyVStack positions rows it has never rendered from an average
             // of the rows it has measured. A day whose real height is far from
@@ -3591,8 +3907,14 @@ private struct TimelineView: View {
                 guard !Task.isCancelled,
                       generation == scrollNavigationGeneration,
                       calendarScrollLockTarget == target else { return }
-                // The user took over; never fight their finger.
-                if scrollRestorer.isUserInteracting { break }
+                // A toolbar tap can arrive while the ScrollView is still
+                // reporting the tail of a previous deceleration. That is not
+                // the user taking over this new jump. Wait for it to end;
+                // breaking here used to mark an unperformed jump as complete.
+                if scrollRestorer.isUserInteracting {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    continue
+                }
 
                 let frames = rawDateFrames.frames
                 let viewportHeight = rawDateFrames.viewportHeight
@@ -3628,6 +3950,12 @@ private struct TimelineView: View {
                     }
                     if abs(delta) <= 2 {
                         stableAlignmentPasses += 1
+                        // Keep the remaining passes as silent alignment checks,
+                        // but do not make the map wait after the timeline has
+                        // visibly reached its destination.
+                        if stableAlignmentPasses == 1 {
+                            isCalendarScrollLocked = false
+                        }
                         if stableAlignmentPasses >= 6 { break }
                     } else {
                         stableAlignmentPasses = 0
@@ -3663,10 +3991,12 @@ private struct TimelineView: View {
 
             hasCompletedInitialTimelinePositioning = true
             let settledTarget = target
+            dateFrameUpdateCoalescer.cancel()
+            itemFrameUpdateCoalescer.cancel()
             timelineScrollPosition = nil
             calendarScrollLockTarget = nil
             isCalendarScrollLocked = false
-            freezesViewportDrivenUpdatesUntil = Date().addingTimeInterval(0.25)
+            applySelectedCalendarDate(settledTarget)
             visibleDatesChanged([settledTarget])
         }
     }
@@ -3698,6 +4028,11 @@ private struct TimelineView: View {
             guard generation == scrollNavigationGeneration else { return }
             isLoadingMoreEarlier = true
             isPreservingViewportForEarlierLoad = true
+            defer {
+                isLoadingMoreEarlier = false
+                isPreservingViewportForEarlierLoad = false
+                freezesViewportDrivenUpdatesUntil = nil
+            }
             timelineScrollPosition = nil
             freezesViewportDrivenUpdatesUntil = Date.distantFuture
             let anchorBeforeLoading = scrollRestorer.captureAnchor()
@@ -3709,9 +4044,8 @@ private struct TimelineView: View {
                 fallbackBottomDistance: bottomDistanceBeforeLoading
             )
             let didLoad = await loadEarlierDates()
-            isLoadingMoreEarlier = false
             guard generation == scrollNavigationGeneration else {
-                isPreservingViewportForEarlierLoad = false
+                scrollRestorer.cancelRestoration()
                 return
             }
 
@@ -3720,22 +4054,19 @@ private struct TimelineView: View {
                 // Restore the previous offset plus that height so the rows under
                 // the user's finger remain visually fixed.
                 scrollRestorer.restore(anchorBeforeLoading, fallbackBottomDistance: bottomDistanceBeforeLoading)
-                Task { @MainActor in
-                    for _ in 0..<30 where scrollRestorer.isRestoring {
-                        try? await Task.sleep(nanoseconds: 16_000_000)
-                    }
-                    guard generation == scrollNavigationGeneration else { return }
-                    if scrollRestorer.isRestoring {
-                        scrollRestorer.cancelRestoration()
-                    }
-                    isPreservingViewportForEarlierLoad = false
-                    freezesViewportDrivenUpdatesUntil = nil
-                    applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
+                for _ in 0..<30 where scrollRestorer.isRestoring {
+                    try? await Task.sleep(nanoseconds: 16_000_000)
                 }
+                guard generation == scrollNavigationGeneration else {
+                    scrollRestorer.cancelRestoration()
+                    return
+                }
+                if scrollRestorer.isRestoring {
+                    scrollRestorer.cancelRestoration()
+                }
+                applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
             } else {
                 scrollRestorer.cancelRestoration()
-                isPreservingViewportForEarlierLoad = false
-                freezesViewportDrivenUpdatesUntil = nil
             }
         }
     }
@@ -3813,22 +4144,6 @@ private struct TimelineView: View {
                 applyViewportDates(from: latestDateFrames, viewportHeight: latestViewportHeight)
             }
         }
-    }
-
-    private func shouldUseMinimumSpacingBeforeCurrentStay(_ item: TimelineItem, at index: Int, in items: [TimelineItem], date: Date) -> Bool {
-        guard Calendar.current.isDateInToday(date) else { return false }
-        guard let lastIndex = items.indices.last, index == lastIndex else { return false }
-        guard case .footprint(let footprint) = item else { return false }
-        guard let stopLocation = locationManager.potentialStopStartLocation else { return false }
-
-        if let footprintPlaceID = footprint.placeID,
-           let currentPlace = locationManager.matchedPlace,
-           footprintPlaceID == currentPlace.placeID {
-            return true
-        }
-
-        let footprintLocation = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
-        return footprintLocation.distance(from: stopLocation) <= 80
     }
 
     private func canMergeAdjacentTimelineItem(_ item: TimelineItem, at index: Int, in items: [TimelineItem]) -> Bool {
@@ -4368,25 +4683,70 @@ private final class ContinuousTimelineLayoutViewportState {
 private final class ContinuousTimelineRawDateFrames {
     var frames: [Date: CGRect] = [:]
     var viewportHeight: CGFloat = 0
+    private var lastViewportResizeTime = Date.distantPast
     /// Latest rendered date list; see `TimelineView.currentDates`.
     var dates: [Date] = []
+
+    var isViewportResizing: Bool {
+        Date().timeIntervalSince(lastViewportResizeTime) < 0.12
+    }
+
+    func update(frames: [Date: CGRect], viewportHeight: CGFloat) {
+        if self.viewportHeight > 0, abs(self.viewportHeight - viewportHeight) > 1 {
+            lastViewportResizeTime = Date()
+        }
+        self.frames = frames
+        self.viewportHeight = viewportHeight
+    }
 }
 
+@MainActor
 private final class ContinuousTimelineDateFrameUpdateCoalescer {
     private var task: Task<Void, Never>?
+    private var pendingUpdate: (@MainActor (Bool) -> Void)?
+    private var pendingUserInteraction = false
+    private var isInteractionActive: (@MainActor () -> Bool)?
+    private var latestScheduleTime = Date.distantPast
 
-    func schedule(_ update: @escaping @MainActor () -> Void) {
-        task?.cancel()
-        task = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 120_000_000)
-            guard !Task.isCancelled else { return }
-            update()
+    func schedule(
+        userWasInteracting: Bool,
+        isInteractionActive: @escaping @MainActor () -> Bool,
+        _ update: @escaping @MainActor (Bool) -> Void
+    ) {
+        pendingUpdate = update
+        pendingUserInteraction = pendingUserInteraction || userWasInteracting
+        self.isInteractionActive = isInteractionActive
+        latestScheduleTime = Date()
+        // Crossing a date boundary can publish many geometry snapshots. Keep
+        // one waiter alive and only replace its payload; repeatedly cancelling
+        // and creating main-actor tasks causes a visible hitch while scrolling.
+        guard task == nil else { return }
+        task = Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                guard !Task.isCancelled, let self else { return }
+                if self.isInteractionActive?() == true { continue }
+                if Date().timeIntervalSince(self.latestScheduleTime) < 0.12 { continue }
+                break
+            }
+            guard !Task.isCancelled, let self else { return }
+            let latestUpdate = self.pendingUpdate
+            let userWasInteracting = self.pendingUserInteraction
+            self.pendingUpdate = nil
+            self.pendingUserInteraction = false
+            self.isInteractionActive = nil
+            self.task = nil
+            latestUpdate?(userWasInteracting)
         }
     }
 
     func cancel() {
         task?.cancel()
         task = nil
+        pendingUpdate = nil
+        pendingUserInteraction = false
+        isInteractionActive = nil
+        latestScheduleTime = .distantPast
     }
 }
 
@@ -4747,7 +5107,6 @@ private struct ContinuousTimelineRow: View {
     let activityTypes: [ActivityType]
     let allPlaces: [Place]
     let showsContinuation: Bool
-    let usesMinimumBottomSpacing: Bool
     let canMergeItem: Bool
     let onTap: () -> Void
     let onMerge: () -> Void
@@ -5096,8 +5455,6 @@ private struct ContinuousTimelineRow: View {
     }
 
     private var bottomSpacing: CGFloat {
-        if usesMinimumBottomSpacing { return ContinuousTimelineLayout.minItemSpacing }
-
         let minutesUntilNextStart: TimeInterval
         if let nextStartTime {
             minutesUntilNextStart = max(1, nextStartTime.timeIntervalSince(item.startTime) / 60)
@@ -5489,30 +5846,6 @@ private extension View {
         }
     }
 
-    @ViewBuilder
-    func returnToTodayButtonStyle() -> some View {
-        if #available(iOS 26.0, *) {
-            self.buttonStyle(.glass)
-                .font(.headline.weight(.semibold))
-                .padding(.horizontal, 4)
-                .padding(.vertical, 2)
-        } else {
-            self.buttonStyle(.bordered)
-                .buttonBorderShape(.capsule)
-                .controlSize(.large)
-                .font(.headline.weight(.semibold))
-        }
-    }
-
-    @ViewBuilder
-    func mapLocationButtonStyle() -> some View {
-        if #available(iOS 26.0, *) {
-            self.buttonStyle(.glass)
-        } else {
-            self.buttonStyle(.bordered)
-                .buttonBorderShape(.circle)
-        }
-    }
 }
 
 private extension TimeInterval {

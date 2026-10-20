@@ -76,6 +76,7 @@ enum class TransportType(val raw: String) {
 
     fun canBeAutomaticallyInferred(speedKmh: Double, maxCategory: Int): Boolean {
         if (category > maxCategory) return false
+        if (category == 2 && speedKmh > com.ct106.difangke.AppConfig.TRANSPORT_AUTOMOTIVE_MIN_AVERAGE_SPEED_KMH) return false
         return automaticSpeedRange?.contains(speedKmh) == true
     }
 
@@ -174,18 +175,16 @@ enum class TransportType(val raw: String) {
             if (kmh > 15 && motion == Motion.WALKING) effectiveMotion = Motion.UNKNOWN
             if (kmh > 35 && motion == Motion.RUNNING) effectiveMotion = Motion.UNKNOWN
             if (motion == Motion.RUNNING && !hasCorroboratedRunningEvidence) effectiveMotion = Motion.UNKNOWN
-            val isUnknownLike = motion == Motion.UNKNOWN || motion == Motion.TILTING
-            if (kmh > 45 && (motion == Motion.WALKING || motion == Motion.RUNNING || isUnknownLike)) {
+            if (kmh > com.ct106.difangke.AppConfig.TRANSPORT_AUTOMOTIVE_MIN_AVERAGE_SPEED_KMH) {
                 effectiveMotion = Motion.IN_VEHICLE
             }
-            if (kmh > 100 && motion == Motion.ON_BICYCLE) effectiveMotion = Motion.IN_VEHICLE
             if (effectiveMotion == Motion.IN_VEHICLE && hasDominantOnFootEvidence && kmh < 14) {
                 effectiveMotion = Motion.WALKING
             }
 
             var maxAllowedTypeCategory = 4
             if (effectiveDistance < 3000) maxAllowedTypeCategory = 3
-            if (effectiveDistance < 500) maxAllowedTypeCategory = 2
+            if (effectiveDistance < 500 && kmh <= com.ct106.difangke.AppConfig.TRANSPORT_AUTOMOTIVE_MIN_AVERAGE_SPEED_KMH) maxAllowedTypeCategory = 2
 
             var safePreferredAuto = preferredAuto
             if (maxAllowedTypeCategory < 4 && safePreferredAuto.category >= 4) safePreferredAuto = CAR
@@ -213,7 +212,6 @@ enum class TransportType(val raw: String) {
                 }
                 Motion.RUNNING -> return RUNNING
                 Motion.ON_BICYCLE -> {
-                    if (kmh > 55) return safePreferredAuto
                     return preferredCycling
                 }
                 Motion.IN_VEHICLE -> {

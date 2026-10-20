@@ -301,11 +301,68 @@ struct DFKFootprintWidget: Widget {
 }
 
 #if canImport(ActivityKit)
-@available(iOS 16.1, *)
+@available(iOS 18.0, *)
 struct CurrentTrackingLiveActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: CurrentTrackingActivityAttributes.self) { context in
-            CurrentTrackingLockScreenContent(context: context)
+            CurrentTrackingAdaptiveContent(context: context)
+                // Supplemental Live Activities are rendered remotely on
+                // Apple Watch. A dynamic system background can resolve light
+                // while the activity's color scheme remains dark, producing
+                // white text on a white card. Use the Watch/Island host color
+                // here; the map container still renders above it.
+                .activityBackgroundTint(.black)
+                .activitySystemActionForegroundColor(.white)
+        } dynamicIsland: { context in
+            DynamicIsland {
+                DynamicIslandExpandedRegion(.leading) {
+                    HStack(spacing: 6) {
+                        Image(systemName: currentTrackingIcon(context.state))
+                            .foregroundStyle(currentTrackingAccent(context.state))
+                        Text(context.state.title)
+                            .font(.subheadline.bold())
+                            .lineLimit(1)
+                    }
+                    .padding(.leading, 4)
+                }
+                DynamicIslandExpandedRegion(.trailing) {
+                    CurrentActivityDuration(startedAt: context.state.startedAt, compact: false)
+                        .font(.subheadline.bold())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .padding(.trailing, 4)
+                }
+                DynamicIslandExpandedRegion(.bottom) {
+                    CurrentTrackingIslandBottomContent(context: context)
+                }
+            } compactLeading: {
+                Image(systemName: currentTrackingIcon(context.state))
+                    .foregroundStyle(currentTrackingAccent(context.state))
+            } compactTrailing: {
+                CurrentActivityDuration(startedAt: context.state.startedAt, compact: true)
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+            } minimal: {
+                CurrentTrackingMinimalIslandIcon(state: context.state)
+            }
+            .keylineTint(currentTrackingAccent(context.state))
+            .widgetURL(currentActivityDetailURL(for: context.state))
+        }
+        .supplementalActivityFamilies([.small, .medium])
+    }
+}
+
+@available(iOS 16.1, *)
+struct LegacyCurrentTrackingLiveActivityWidget: Widget {
+    var body: some WidgetConfiguration {
+        ActivityConfiguration(for: CurrentTrackingActivityAttributes.self) { context in
+            Group {
+                if #available(iOS 18.0, *) {
+                    CurrentTrackingAdaptiveContent(context: context)
+                } else {
+                    CurrentTrackingLockScreenContent(context: context)
+                }
+            }
                 .activityBackgroundTint(.clear)
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
@@ -343,6 +400,85 @@ struct CurrentTrackingLiveActivityWidget: Widget {
             .keylineTint(currentTrackingAccent(context.state))
             .widgetURL(currentActivityDetailURL(for: context.state))
         }
+    }
+}
+
+@available(iOS 18.0, *)
+private struct CurrentTrackingAdaptiveContent: View {
+    @Environment(\.activityFamily) private var family
+    let context: ActivityViewContext<CurrentTrackingActivityAttributes>
+
+    var body: some View {
+        if family == .small {
+            CurrentTrackingWatchContent(context: context)
+                .widgetURL(currentActivityDetailURL(for: context.state))
+        } else {
+            CurrentTrackingLockScreenContent(context: context)
+        }
+    }
+}
+
+@available(iOS 18.0, *)
+private struct CurrentTrackingWatchContent: View {
+    let context: ActivityViewContext<CurrentTrackingActivityAttributes>
+
+    private var state: CurrentTrackingActivityAttributes.ContentState { context.state }
+    private var usesDarkMap: Bool { true }
+    private var primaryForeground: Color { .white }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                CurrentActivityMapImage(
+                    sessionID: context.attributes.sessionID,
+                    revision: state.mapRevision,
+                    prefersDarkMap: usesDarkMap,
+                    maximumPixelSize: 200
+                )
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .clipped()
+                .overlay(
+                    LinearGradient(
+                        colors: [.black.opacity(0.24), .clear, .black.opacity(0.38)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 5) {
+                        Image(systemName: currentTrackingIcon(state))
+                            .foregroundStyle(currentTrackingAccent(state))
+                        Text(state.title)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        Spacer(minLength: 2)
+                        CurrentActivityDuration(startedAt: state.startedAt, compact: true)
+                            .font(.subheadline.weight(.semibold).monospacedDigit())
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    Label(state.placeName, systemImage: "mappin.and.ellipse")
+                        .font(.headline)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                // Use the host's measured bounds instead of padding. The
+                // remote Watch renderer can compress ordinary padding while
+                // archiving a supplemental Live Activity, but it cannot move
+                // content outside this explicit inset frame.
+                .frame(
+                    width: max(0, proxy.size.width - 16),
+                    height: max(0, proxy.size.height - 24),
+                    alignment: .topLeading
+                )
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .foregroundStyle(primaryForeground)
+        .clipped()
     }
 }
 
@@ -452,6 +588,7 @@ private struct CurrentTrackingLockScreenContent: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                 }
+                .offset(y: 3)
 
                 if state.kind == .transport {
                     CurrentTransportProgress(
@@ -461,6 +598,7 @@ private struct CurrentTrackingLockScreenContent: View {
                         onDarkMap: usesDarkMap,
                         compact: true
                     )
+                    .offset(y: 3)
 
                     HStack(alignment: .firstTextBaseline) {
                         CurrentMetric(
@@ -496,6 +634,7 @@ private struct CurrentTrackingLockScreenContent: View {
                             )
                         }
                     }
+                    .offset(y: 3)
                 }
             }
             .foregroundStyle(primaryForeground)
@@ -519,6 +658,7 @@ private struct CurrentTrackingLockScreenContent: View {
         .clipped()
         .widgetURL(currentActivityDetailURL(for: state))
     }
+
 }
 
 @available(iOS 16.1, *)
@@ -841,6 +981,7 @@ private struct CurrentActivityMapImage: View {
     let sessionID: String
     let revision: Int
     let prefersDarkMap: Bool
+    var maximumPixelSize: CGFloat? = nil
 
     var body: some View {
         if let container = FileManager.default.containerURL(
@@ -858,7 +999,11 @@ private struct CurrentActivityMapImage: View {
                 )
             if let image = urls.lazy.compactMap({ url -> UIImage? in
                 guard let data = try? Data(contentsOf: url) else { return nil }
-                return UIImage(data: data)
+                guard let image = UIImage(data: data) else { return nil }
+                guard let maximumPixelSize else { return image }
+                return image.preparingThumbnail(
+                    of: CGSize(width: maximumPixelSize, height: maximumPixelSize)
+                ) ?? image
             }).first {
                 Image(uiImage: image)
                     .resizable()
@@ -938,6 +1083,6 @@ private func formatCurrentSpeed(_ speed: Double?) -> String {
 private func currentActivityDetailURL(
     for _: CurrentTrackingActivityAttributes.ContentState
 ) -> URL {
-    URL(string: "difangke://timeline?offset=0")!
+    URL(string: "difangke://timeline?offset=0&anchor=now")!
 }
 #endif

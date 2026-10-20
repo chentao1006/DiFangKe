@@ -28,6 +28,7 @@ struct FootprintCardView: View {
     var showDateAboveTitle: Bool = false
     var fixedWidth: CGFloat? = nil
     var disableContextMenu: Bool = false
+    var showsTimeAsTitle: Bool = false
     var displayAddressOverride: String? = nil
     var resolvesUnknownAddress: Bool = true
     let onTap: (Footprint, Bool) -> Void
@@ -63,32 +64,42 @@ struct FootprintCardView: View {
                                 .padding(.bottom, -2)
                         }
                         
-                        HStack(spacing: 6) {
-                            let matchedPlace = matchedImportantPlace
-                            let displayText = matchedPlace?.name ?? displayAddressOverride ?? footprint.address ?? "未知地点"
-                            
-                            Text(displayText)
-                                .font(.system(.headline, design: .rounded))
-                                .foregroundColor(matchedPlace != nil ? .orange : Color.dfkMainText)
-                                .lineLimit(1)
-                                .opacity(isResolvingUnknownPlace && isPlaceTitleBreathing ? 0.38 : 1)
-                                .scaleEffect(isResolvingUnknownPlace && isPlaceTitleBreathing ? 0.985 : 1, anchor: .leading)
-                        }
-                        
-                        HStack(spacing: 4) {
+                        if showsTimeAsTitle {
                             Text(timeRangeString)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundColor(.secondary)
+                                .font(.system(.headline, design: .monospaced))
+                                .foregroundColor(Color.dfkMainText)
                                 .lineLimit(1)
-                            Text("·")
-                                .foregroundColor(.secondary.opacity(0.3))
                             Text(durationString)
                                 .font(.system(size: 12))
                                 .foregroundColor(.secondary)
+                        } else {
+                            HStack(spacing: 6) {
+                                let matchedPlace = matchedImportantPlace
+                                let displayText = matchedPlace?.name ?? displayAddressOverride ?? footprint.address ?? "未知地点"
+
+                                Text(displayText)
+                                    .font(.system(.headline, design: .rounded))
+                                    .foregroundColor(matchedPlace != nil ? .orange : Color.dfkMainText)
+                                    .lineLimit(1)
+                                    .opacity(isResolvingUnknownPlace && isPlaceTitleBreathing ? 0.38 : 1)
+                                    .scaleEffect(isResolvingUnknownPlace && isPlaceTitleBreathing ? 0.985 : 1, anchor: .leading)
+                            }
+
+                            HStack(spacing: 4) {
+                                Text(timeRangeString)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                Text("·")
+                                    .foregroundColor(.secondary.opacity(0.3))
+                                Text(durationString)
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                            }
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .layoutPriority(1)
                         }
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                        .layoutPriority(1)
                         
                                 if let reason = footprint.reason?.trimmingCharacters(in: .whitespacesAndNewlines),
                            !reason.isEmpty {

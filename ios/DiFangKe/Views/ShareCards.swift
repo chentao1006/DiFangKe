@@ -187,6 +187,7 @@ struct DFKShareCardSheet: View {
     var body: some View {
         if let payload {
             DFKShareCardPreviewView(payload: payload)
+                .id(payload.version)
         }
     }
 }

@@ -592,12 +592,22 @@ struct DFKMapView: View {
                                     UserAnnotation()
                                 }
                             }
+                            .id(timelineUpdateIdentifier ?? 0)
                             .mapStyle(.standard(elevation: .automatic, emphasis: .muted))
-                            .simultaneousGesture(TapGesture().onEnded { onMapInteraction?(.tap) })
+                            // Handle taps on the map surface itself. Native map
+                            // controls are subviews and must keep their own taps
+                            // without forwarding them to the host's collapse action.
+                            .simultaneousGesture(
+                                TapGesture().onEnded { onMapInteraction?(.tap) },
+                                including: .gesture
+                            )
                             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in onMapInteraction?(.pan) })
                             .simultaneousGesture(MagnificationGesture().onChanged { _ in onMapInteraction?(.zoom) })
                             .mapControls {
                                 if showsMapControls {
+                                    if showsUserLocation {
+                                        MapUserLocationButton()
+                                    }
                                     MapCompass()
                                     MapScaleView()
                                 }
@@ -630,7 +640,7 @@ struct DFKMapView: View {
                     interactiveMapReady = true
                 }
             }
-            .task(id: snapshotCacheKey(for: geometry.size)) {
+            .task(id: isInteractive ? nil : snapshotCacheKey(for: geometry.size)) {
                 guard !isInteractive else { return }
                 loadSnapshot(for: geometry.size, forceWidgetRefresh: false)
             }
@@ -1524,7 +1534,8 @@ struct FootprintGroupSheet: View {
                             footprint: footprint,
                             allPlaces: allPlaces,
                             showTimeline: false,
-                            disableContextMenu: true
+                            disableContextMenu: true,
+                            showsTimeAsTitle: true
                         ) { selected, _ in
                             onFootprintSelected(selected)
                         }

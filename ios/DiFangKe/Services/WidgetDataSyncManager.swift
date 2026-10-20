@@ -50,25 +50,8 @@ final class WidgetDataSyncManager {
         let icon: String
     }
 
-    private final class WidgetImageContinuation {
-        private let lock = NSLock()
-        private var didResume = false
-        private let continuation: CheckedContinuation<UIImage?, Never>
-
-        init(_ continuation: CheckedContinuation<UIImage?, Never>) {
-            self.continuation = continuation
-        }
-
-        func resume(returning image: UIImage?) {
-            lock.lock()
-            guard !didResume else {
-                lock.unlock()
-                return
-            }
-            didResume = true
-            lock.unlock()
-            continuation.resume(returning: image)
-        }
+    private struct SendableImageData: @unchecked Sendable {
+        let data: Data?
     }
     
     private var groupID: String { AppConfig.shared.appGroupID }
@@ -1059,25 +1042,35 @@ final class WidgetDataSyncManager {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return nil }
 
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
-        guard let asset = assets.firstObject else { return nil }
+        // Keep PHFetchResult and PHAsset inside one short-lived synchronous
+        // Photos scope. Capturing the asset in an async image callback keeps a
+        // client-side fetch attached to Photos' long-lived context and emits
+        // the retain-cycle warning seen during Live Activity refreshes.
+        let encoded = await Task.detached(priority: .utility) {
+            autoreleasepool {
+                let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+                guard let asset = assets.firstObject else { return SendableImageData(data: nil) }
 
-        return await withCheckedContinuation { continuation in
-            let continuationBox = WidgetImageContinuation(continuation)
-            let options = PHImageRequestOptions()
-            options.isNetworkAccessAllowed = false
-            options.deliveryMode = .fastFormat
-            options.resizeMode = .exact
+                let options = PHImageRequestOptions()
+                options.isNetworkAccessAllowed = false
+                options.deliveryMode = .fastFormat
+                options.resizeMode = .exact
+                options.isSynchronous = true
 
-            PHImageManager.default().requestImage(
-                for: asset,
-                targetSize: targetSize,
-                contentMode: .aspectFill,
-                options: options
-            ) { image, _ in
-                continuationBox.resume(returning: image)
+                var result: UIImage?
+                PHImageManager.default().requestImage(
+                    for: asset,
+                    targetSize: targetSize,
+                    contentMode: .aspectFill,
+                    options: options
+                ) { image, _ in
+                    result = image
+                }
+                return SendableImageData(data: result?.jpegData(compressionQuality: 0.9))
             }
-        }
+        }.value
+        guard let data = encoded.data else { return nil }
+        return UIImage(data: data)
     }
 
     private func loadAggregatedFootprintPhotoImages(_ aggregatedFootprints: [AggregatedFootprintSnapshot], targetSide: CGFloat) async -> [String: UIImage] {

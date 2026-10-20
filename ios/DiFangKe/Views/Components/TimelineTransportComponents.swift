@@ -263,7 +263,7 @@ struct TransportModalView: View {
                         }
                     }
                     .padding(20)
-                    .background(RoundedRectangle(cornerRadius: 24).fill(.ultraThinMaterial))
+                    .dfkDetailMaterial(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                     .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: -2)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 16)

@@ -75,8 +75,6 @@ class DayTimelineEngine(
 
         if (FootprintRules.absorbAdjacentAutomaticContinuations(allFps, allTps, ws)) allFps = ws.dayFootprints()
 
-        if (repairImpossibleAutomaticTransportTypes(allTps)) allTps = ws.dayTransports()
-
         if (reopenPrematureAutomaticTransportEnds(allTps, allFps)) {
             allFps = ws.dayFootprints()
             allTps = ws.dayTransports()
@@ -191,15 +189,18 @@ class DayTimelineEngine(
             syncDay(runConsolidation = false)
             autoFillMissingActivityTypes()
         }
+        // Classify against the final route and interval, after all geometry repairs.
+        repairImpossibleAutomaticTransportTypes(ws.dayTransports())
     }
 
     // ───────────────────────── repairs ─────────────────────────
 
-    /** Slow/running records that cannot be walking (≥1 km and ≥15 km/h, or too few steps). */
+    /** Repair automatic on-foot/cycling types that conflict with trip evidence. */
     fun repairImpossibleAutomaticTransportTypes(transports: List<WTransport>): Boolean {
         var changed = false
         for (t in transports) {
-            if (t.isManual || !(t.typeRaw == TransportType.SLOW.raw || t.typeRaw == TransportType.RUNNING.raw)) continue
+            val type = TransportType.from(t.typeRaw)
+            if (t.isManual || type.category > 2) continue
             val duration = secs(t.startTime, t.endTime)
             if (duration <= 0 || t.distance < AppConfig.WALKING_SANITY_MIN_DISTANCE) continue
             val kmh = t.distance / duration * 3.6
@@ -209,10 +210,15 @@ class DayTimelineEngine(
             val impossibleSpeed = kmh >= AppConfig.WALKING_IMPOSSIBLE_SPEED
             val fewSteps = t.stepCount != null && stepsPerMinute < AppConfig.WALKING_MIN_STEPS_PER_MINUTE &&
                 stepCount < AppConfig.WALKING_MIN_STEP_COUNT
-            if (!(impossibleSpeed || (fewSteps && kmh >= AppConfig.WALKING_SUSPICIOUS_SPEED))) continue
+            val isCycling = type.category == 2
+            if (isCycling) {
+                if (kmh <= AppConfig.TRANSPORT_AUTOMOTIVE_MIN_AVERAGE_SPEED_KMH) continue
+            } else if (!(impossibleSpeed || (fewSteps && kmh >= AppConfig.WALKING_SUSPICIOUS_SPEED))) continue
+            val routePoints = if (isCycling) t.pointsOrNull ?: continue else null
             val inferred = TransportType.classify(
                 speedMs = t.distance / duration, stepCount = stepCount, durationSec = duration,
-                distanceMeters = t.distance, pointCount = 2, preferredAuto = preferences.automotive,
+                distanceMeters = t.distance, pointCount = routePoints?.size ?: 2,
+                observedPointCount = routePoints?.count { !it.isSyntheticPadding }, preferredAuto = preferences.automotive,
                 preferredCycling = preferences.cycling, preferredTransport = preferences.road
             )
             val corrected = if (inferred == TransportType.SLOW || inferred == TransportType.RUNNING)

@@ -248,6 +248,9 @@ object AppConfig {
     const val TRANSPORT_UNOBSERVED_MIN_SPEED = 5.0
     const val UI_DEBOUNCE_INTERVAL_NS = 400000000L
     const val UI_MOVING_HOLD_DURATION = 120.0
+    /** 自动分类车载均速下限（km/h）；高于此值不能由骑行偏好覆盖。 */
+    const val TRANSPORT_AUTOMOTIVE_MIN_AVERAGE_SPEED_KMH = 45.0
+
     const val WALKING_IMPOSSIBLE_SPEED = 15.0
     const val WALKING_MIN_STEPS_PER_MINUTE = 12.0
     const val WALKING_MIN_STEP_COUNT = 40

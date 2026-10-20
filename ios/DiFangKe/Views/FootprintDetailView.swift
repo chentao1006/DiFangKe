@@ -154,6 +154,7 @@ struct FootprintModalView: View {
             footprintDetailContent
             .navigationTitle(isMinimized ? "" : "足迹详情")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
                 if isMinimized {
                     ToolbarItem(placement: .principal) {
@@ -352,11 +353,14 @@ struct FootprintModalView: View {
                 }
             }
         }
+        .toolbar(removing: .sidebarToggle)
+        .background(.ultraThinMaterial, ignoresSafeAreaEdges: .all)
         // No `selection:` binding: a bound detent only updates when a drag
         // ends, so any view update mid-drag (map flight, timeline jump,
         // location) re-applied the stale `.medium` and snapped the sheet back.
         // UIKit alone owns the detent while the user drags.
         .presentationDetents([.medium, .large])
+        .presentationBackground(.clear)
         .presentationBackgroundInteraction(.enabled)
     }
 }
@@ -408,7 +412,6 @@ extension FootprintModalView {
                 }
             }
         }
-        .background(Color.dfkBackground)
     }
 
     private func prepareMomentShare() {

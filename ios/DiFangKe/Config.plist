@@ -247,6 +247,10 @@
     <key>TRANSPORT_SPEED_SANITY_CHECK_DURATION</key>
     <real>120</real>
 
+    <!-- 自动分类车载均速下限（km/h）：超过此值，骑行传感器或历史偏好不能覆盖车载证据。 -->
+    <key>TRANSPORT_AUTOMOTIVE_MIN_AVERAGE_SPEED_KMH</key>
+    <real>45</real>
+
     <!-- 交通最大合理速度（m/s）：配合校验时长使用。例如 2 分钟内速度超过 150km/h (42m/s) 判定为离谱。 -->
     <key>TRANSPORT_MAX_REASONABLE_SPEED</key>
     <real>42</real>

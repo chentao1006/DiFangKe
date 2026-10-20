@@ -683,7 +683,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             predicate: #Predicate {
                 $0.statusValue != "ignored" && $0.endTime >= lookupStart && $0.startTime <= now
             },
-            sortBy: [SortDescriptor(\.endTime, order: .reverse), SortDescriptor(\.startTime, order: .reverse)]
+            sortBy: [SortDescriptor(\.startTime, order: .reverse), SortDescriptor(\.endTime, order: .reverse)]
         )
         let matches = ((try? context.fetch(descriptor)) ?? []).filter { candidate in
             // A return to the same place is a new visit. An old live anchor
@@ -696,7 +696,10 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
                       candidate.startTime >= interruptionEnd.addingTimeInterval(-continuationTolerance)
                 else { return false }
             }
-            if let placeID, candidate.placeID == placeID { return true }
+            // Once the current stay has a recognized place, that identity is
+            // authoritative. A nearby place inside the same distance threshold
+            // must not lend its activity type to this visit.
+            if let placeID { return candidate.placeID == placeID }
             return CLLocation(latitude: candidate.latitude, longitude: candidate.longitude)
                 .distance(from: anchor) < distanceThreshold
         }
@@ -705,14 +708,10 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         // live processor may advance its provisional anchor a few seconds beyond
         // the persisted footprint end; retain that edited record across this
         // sampling seam instead of briefly falling back to an unknown activity.
-        if let editedContinuation = matches.first(where: {
-            $0.status == .manual && $0.allowsAutomaticDurationExtension &&
-            $0.endTime >= lookupStart
-        }) {
-            return editedContinuation
-        }
+        // Preserve edits within the selected visit, not ahead of a newer visit.
         return matches.first(where: {
-            $0.endTime >= stayStart || ($0.status != .manual && $0.endTime >= lookupStart)
+            $0.endTime >= stayStart ||
+            (($0.status != .manual || $0.allowsAutomaticDurationExtension) && $0.endTime >= lookupStart)
         })
     }
 

@@ -601,6 +601,10 @@ class AppConfig {
         double(forKey: "GAP_MIN_DURATION_THRESHOLD")
     }
 
+    var transportAutomotiveMinAverageSpeedKmh: Double {
+        double(forKey: "TRANSPORT_AUTOMOTIVE_MIN_AVERAGE_SPEED_KMH")
+    }
+
     var transportMaxReasonableSpeed: Double {
         double(forKey: "TRANSPORT_MAX_REASONABLE_SPEED")
     }

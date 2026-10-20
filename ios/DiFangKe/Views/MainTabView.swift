@@ -34,6 +34,24 @@ struct MainTabView: View {
     @State private var selectedDate = Calendar.current.startOfDay(for: Date())
     @State private var destination: TimelineDestination?
     @State private var usesColumnLayout = false
+    @State private var returnToNowRequest = 0
+
+    private var recordTabIcon: String {
+        guard selectedTab == .records else {
+            return "point.bottomleft.forward.to.point.topright.scurvepath"
+        }
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let activeDate = calendar.startOfDay(for: selectedDate)
+        return activeDate < today
+            ? "location.fill.viewfinder"
+            : "point.bottomleft.forward.to.point.topright.scurvepath"
+    }
+
+    private var recordTabTitle: String {
+        guard selectedTab == .records else { return "记录" }
+        return Calendar.current.isDateInToday(selectedDate) ? "记录" : "回到当下"
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -47,6 +65,7 @@ struct MainTabView: View {
                 timelineDetent: $presentationDetent,
                 selectedTransport: $selectedTransport,
                 destination: $destination,
+                returnToNowRequest: returnToNowRequest,
                 onRequestRecords: { selectedTab = .records }
             ) { map, records in
                 nativeTabs(records: AnyView(recordScreen(map: map, records: records, usesColumns: usesColumns)))
@@ -74,6 +93,9 @@ struct MainTabView: View {
         if usesColumns {
             NavigationSplitView(columnVisibility: .constant(.all)) {
                 records
+                    .if(UIDevice.current.userInterfaceIdiom == .pad) { view in
+                        view.navigationSplitViewColumnWidth(min: 380, ideal: 440, max: 520)
+                    }
             } detail: {
                 map
             }
@@ -134,9 +156,17 @@ struct MainTabView: View {
     }
 
     private func tabs(records: AnyView) -> some View {
-        TabView(selection: $selectedTab) {
+        TabView(selection: Binding(
+            get: { selectedTab },
+            set: { newTab in
+                if newTab == .records && selectedTab == .records {
+                    returnToNowRequest &+= 1
+                }
+                selectedTab = newTab
+            }
+        )) {
             records
-                .tabItem { Label("记录", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath") }
+                .tabItem { Label(recordTabTitle, systemImage: recordTabIcon) }
                 .tag(Tab.records)
             NavigationStack {
                 Color.clear.navigationTitle("出行")
@@ -150,7 +180,7 @@ struct MainTabView: View {
                     openRecord(date: footprint.startTime, footprintID: footprint.footprintID)
                 }
             )
-            .tabItem { Label("回顾", systemImage: "chart.bar") }
+            .tabItem { Label("回顾", systemImage: "chart.bar.xaxis.ascending.badge.clock") }
             .tag(Tab.review)
             NavigationStack { SettingsView() }
                 .tabItem { Label("设置", systemImage: "gearshape") }

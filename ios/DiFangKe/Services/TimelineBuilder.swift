@@ -1539,7 +1539,7 @@ class PersistentTimelineBuilder {
         return TransportType.allCases.first { counts[$0] == highestCount }
     }
 
-    /// 修正历史上已经落库、但物理上不可能是步行的自动交通记录。
+    /// 修正已落库、但与步行证据或车载均速约束冲突的自动交通记录。
     /// 手动选择过的记录属于用户事实，绝不能被自动纠正覆盖。
     private static func repairImpossibleAutomaticTransportTypes(
         _ transports: [TransportRecord],
@@ -1551,9 +1551,8 @@ class PersistentTimelineBuilder {
         var changed = false
         for transport in transports {
             guard transport.manualTypeRaw == nil,
-                  transport.typeRaw == TransportType.slow.rawValue || transport.typeRaw == TransportType.running.rawValue else {
-                continue
-            }
+                  let type = TransportType(rawValue: transport.typeRaw),
+                  type.category <= 2 else { continue }
 
             // Nearby trips with similar distances may be a real walking
             // connection. Type repair must never delete their observations;
@@ -1569,14 +1568,26 @@ class PersistentTimelineBuilder {
             // 步数明显低于正常步行水平时，即使均速不算"不可能"也当作误判处理。
             let hasImpossibleWalkingSpeed = kmh >= 15
             let hasImplausiblyFewSteps = transport.stepCount != nil && stepsPerMinute < 12 && stepCount < 40
-            guard hasImpossibleWalkingSpeed || (hasImplausiblyFewSteps && kmh >= 3) else { continue }
+            let isCycling = type.category == 2
+            if isCycling {
+                guard kmh > AppConfig.shared.transportAutomotiveMinAverageSpeedKmh else { continue }
+            } else {
+                guard hasImpossibleWalkingSpeed || (hasImplausiblyFewSteps && kmh >= 3) else { continue }
+            }
+            // A stored cycling route must use its real observation count;
+            // fabricated sparse endpoints would falsely suggest urban rail.
+            let routePoints = isCycling
+                ? (try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData))
+                : nil
+            if isCycling && routePoints == nil { continue }
 
             let inferred = TransportType.from(
                 speed: transport.distance / duration,
                 stepCount: stepCount,
                 duration: duration,
                 distanceMeters: transport.distance,
-                pointCount: 2,
+                pointCount: routePoints?.count ?? 2,
+                observedPointCount: routePoints?.filter { $0.isSyntheticPadding != true }.count,
                 preferredAutomotive: preferredAuto,
                 preferredCycling: preferredCycling,
                 preferredTransport: preferredTransport
@@ -1797,16 +1808,6 @@ class PersistentTimelineBuilder {
 
         if Footprint.absorbAdjacentAutomaticContinuations(allFps, transports: allTps, context: context) {
             allFps = (try? context.fetch(fpDesc)) ?? []
-        }
-
-        if repairImpossibleAutomaticTransportTypes(
-            allTps,
-            in: context,
-            preferredAuto: preferredAuto,
-            preferredCycling: preferredCycling,
-            preferredTransport: preferredRoadTransport
-        ) {
-            allTps = (try? context.fetch(tpDesc)) ?? []
         }
 
         let (allRawPoints, driftTimestamps) = await Task.detached {
@@ -2059,6 +2060,17 @@ class PersistentTimelineBuilder {
 #endif
         }
         
+        // Recheck the final persisted metrics after route repair, merging,
+        // endpoint alignment and consolidation. Earlier classification may
+        // have used a shorter route or a longer interval.
+        _ = repairImpossibleAutomaticTransportTypes(
+            (try? context.fetch(tpDesc)) ?? [],
+            in: context,
+            preferredAuto: preferredAuto,
+            preferredCycling: preferredCycling,
+            preferredTransport: preferredRoadTransport
+        )
+
         // 优先同步解析当天的地点，这样 indicator 结束时地点都已经解析完了
         await resolveAddresses(for: date, in: context)
 

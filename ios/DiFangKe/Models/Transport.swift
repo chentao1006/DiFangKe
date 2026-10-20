@@ -62,6 +62,9 @@ enum TransportType: String, CaseIterable, Codable {
 
     func canBeAutomaticallyInferred(at speedKmh: Double, maxCategory: Int) -> Bool {
         guard category <= maxCategory, let automaticSpeedRange else { return false }
+        if category == 2 && speedKmh > AppConfig.shared.transportAutomotiveMinAverageSpeedKmh {
+            return false
+        }
         return automaticSpeedRange.contains(speedKmh)
     }
     
@@ -151,11 +154,9 @@ enum TransportType: String, CaseIterable, Codable {
             // 跑步证据不足时不要误降为步行；交还给后续速度、距离、轨迹点和偏好车辆的综合兜底。
             effectiveMotionType = .unknown
         }
-        if kmh > 45 && (motionType == .walking || motionType == .running || motionType == .unknown) {
-            effectiveMotionType = .automotive // 确定是车载
-        }
-        if kmh > 100 && motionType == .cycling {
-            effectiveMotionType = .automotive 
+        // High average speed overrides ambiguous motion hints and cycling habits.
+        if kmh > AppConfig.shared.transportAutomotiveMinAverageSpeedKmh {
+            effectiveMotionType = .automotive
         }
         if effectiveMotionType == .automotive && hasDominantOnFootEvidence && kmh < 14 {
             effectiveMotionType = .walking
@@ -167,7 +168,7 @@ enum TransportType: String, CaseIterable, Codable {
         if effectiveDistance < 3000 {
             maxAllowedTypeCategory = 3
         }
-        if effectiveDistance < 500 {
+        if effectiveDistance < 500 && kmh <= AppConfig.shared.transportAutomotiveMinAverageSpeedKmh {
             maxAllowedTypeCategory = 2
         }
 
@@ -217,7 +218,6 @@ enum TransportType: String, CaseIterable, Codable {
         case .running:
             return .running
         case .cycling:
-            if kmh > 55 { return safePreferredAuto }
             return preferredCycling
         case .automotive:
             if kmh > 100 && maxAllowedTypeCategory >= 4 { return .train }
