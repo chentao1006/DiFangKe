@@ -21,9 +21,14 @@ import java.util.Date
         DailyInsightEntity::class,
         TransportManualSelectionEntity::class,
         // Retired future-trip feature: table kept only for schema compatibility.
-        FutureTripEntity::class
+        FutureTripEntity::class,
+        TripEntity::class,
+        TripDayEntity::class,
+        TripDayCityEntity::class,
+        TripItemEntity::class,
+        HomeCityEntity::class
     ],
-    version = 9,
+    version = 11,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -37,6 +42,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun transportManualSelectionDao(): TransportManualSelectionDao
     /** Retained only for schema compatibility (future trips were removed). */
     abstract fun futureTripDao(): FutureTripDao
+    abstract fun tripDao(): TripDao
 
     companion object {
         @Volatile
@@ -162,6 +168,22 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `trips` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, `notes` TEXT NOT NULL, `kindRaw` TEXT NOT NULL, `stateRaw` TEXT NOT NULL, `originRaw` TEXT NOT NULL, `plannedStartDay` INTEGER NOT NULL, `plannedEndDay` INTEGER NOT NULL, `actualStartedAt` INTEGER, `actualEndedAt` INTEGER, `endReasonRaw` TEXT, `homeCityKeyAtCreation` TEXT, `titleUserEdited` INTEGER NOT NULL, `datesUserEdited` INTEGER NOT NULL, `citiesUserEdited` INTEGER NOT NULL, `coverTypeRaw` TEXT NOT NULL, `coverPhotoIdentifier` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))""")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `trip_days` (`id` TEXT NOT NULL, `tripID` TEXT NOT NULL, `day` INTEGER NOT NULL, `timeZoneIdentifier` TEXT NOT NULL, `orderIndex` INTEGER NOT NULL, `notes` TEXT NOT NULL, PRIMARY KEY(`id`))""")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `trip_day_cities` (`id` TEXT NOT NULL, `tripDayID` TEXT NOT NULL, `countryCode` TEXT NOT NULL, `countryName` TEXT NOT NULL, `cityName` TEXT NOT NULL, `latitude` REAL, `longitude` REAL, `timeZoneIdentifier` TEXT, `orderIndex` INTEGER NOT NULL, `notes` TEXT NOT NULL, `isUserEdited` INTEGER NOT NULL, PRIMARY KEY(`id`))""")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `trip_items` (`id` TEXT NOT NULL, `tripDayID` TEXT NOT NULL, `kindRaw` TEXT NOT NULL, `orderIndex` INTEGER NOT NULL, `stopScopeRaw` TEXT, `countryCode` TEXT, `countryName` TEXT, `cityName` TEXT, `placeID` TEXT, `placeName` TEXT, `address` TEXT, `latitude` REAL, `longitude` REAL, `startTime` INTEGER, `endTime` INTEGER, `activityTypeValue` TEXT, `transportTypeRaw` TEXT, `lineName` TEXT, `startLocationName` TEXT, `endLocationName` TEXT, `notes` TEXT NOT NULL, `sourceFootprintID` TEXT, `sourceTransportRecordID` TEXT, `planStatusRaw` TEXT NOT NULL, PRIMARY KEY(`id`))""")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `home_city` (`id` TEXT NOT NULL, `countryCode` TEXT NOT NULL, `countryName` TEXT NOT NULL, `cityName` TEXT NOT NULL, `latitude` REAL, `longitude` REAL, `timeZoneIdentifier` TEXT, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))""")
+            }
+        }
+
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `trips` ADD COLUMN `activityTypeValue` TEXT")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -169,7 +191,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "dfk_v1_stable.db"
                 )
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                 .build()
                 INSTANCE = instance
                 instance

@@ -2,8 +2,10 @@ package com.ct106.difangke.service
 
 import android.net.Uri
 import android.location.Location
+import android.location.Geocoder
 import android.util.Log
 import com.ct106.difangke.BuildConfig
+import com.ct106.difangke.DiFangKeApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -60,6 +62,91 @@ class GeocodeService private constructor() {
         val countryName: String?,
         val cityName: String?
     )
+
+    data class CitySearchResult(
+        val cityName: String,
+        val countryCode: String,
+        val countryName: String,
+        val latitude: Double,
+        val longitude: Double
+    )
+
+    /** Global city lookup normalized to city-level results only. */
+    suspend fun searchCities(keyword: String): List<CitySearchResult> = withContext(Dispatchers.IO) {
+        val query = keyword.trim()
+        if (query.isEmpty()) return@withContext emptyList()
+        val globalResults = runCatching {
+            @Suppress("DEPRECATION")
+            fun addresses(locale: Locale) = Geocoder(DiFangKeApp.instance, locale)
+                .getFromLocationName(query, 20).orEmpty()
+
+            val english = addresses(Locale.ENGLISH).filter { !it.countryCode.equals("CN", ignoreCase = true) }
+            val simplifiedChinese = addresses(Locale.SIMPLIFIED_CHINESE).filter { it.countryCode.equals("CN", ignoreCase = true) }
+            (english + simplifiedChinese).mapNotNull { address ->
+                    val candidates = sequenceOf(address.locality, address.subAdminArea, address.subLocality, address.adminArea)
+                        .mapNotNull { it?.trim()?.takeIf(String::isNotEmpty) }
+                        .filterNot { it.endsWith("街道") }
+                        .toList()
+                    val city = candidates.firstOrNull { candidate ->
+                        candidate.contains(query, ignoreCase = true) || query.contains(candidate, ignoreCase = true)
+                    } ?: candidates.firstOrNull() ?: return@mapNotNull null
+                    val code = address.countryCode?.trim()?.uppercase().orEmpty()
+                    CitySearchResult(
+                        cityName = city,
+                        countryCode = code,
+                        countryName = address.countryName?.trim().orEmpty().ifEmpty { countryDisplayName(code).orEmpty() },
+                        latitude = address.latitude,
+                        longitude = address.longitude
+                    )
+                }
+        }.getOrDefault(emptyList())
+
+        val json = getJson("/place/v1/suggestion?keyword=${Uri.encode(query)}&region=${Uri.encode("全国")}&region_fix=0&page_size=20")
+        val domesticResults = buildList {
+            val data = json?.optJSONArray("data") ?: return@buildList
+            for (index in 0 until data.length()) {
+                val item = data.optJSONObject(index) ?: continue
+                val info = item.optJSONObject("ad_info") ?: continue
+                val district = info.optString("district").trim()
+                val resultName = item.optString("title").trim()
+                val city = resultName
+                    .takeIf { it.isSupportedAdministrativeName() && it.matchesAdministrativeQuery(query) }
+                    ?: district.takeIf { it.isSupportedAdministrativeName() && it.matchesAdministrativeQuery(query) }
+                    ?: info.optString("city").trim().ifEmpty { info.optString("province").trim() }
+                val location = item.optJSONObject("location") ?: continue
+                if (city.isEmpty()) continue
+                val nationName = info.optString("nation").trim()
+                val rawNationCode = info.optString("nation_code").trim().uppercase()
+                val code = countryCodeForName(nationName)
+                    ?: rawNationCode.takeIf { it.length == 2 }
+                    ?: if (rawNationCode == "156") "CN" else rawNationCode
+                val countryName = nationName.ifEmpty { countryDisplayName(code).orEmpty() }
+                add(CitySearchResult(city, code, countryName, location.optDouble("lat"), location.optDouble("lng")))
+            }
+        }
+        val foldedQuery = query.lowercase(Locale.getDefault())
+        val matchingDomesticResults = domesticResults.filter {
+                "${it.cityName} ${it.countryName} ${it.countryCode}"
+                    .lowercase(Locale.getDefault())
+                    .contains(foldedQuery)
+            }
+        (globalResults + matchingDomesticResults)
+            .distinctBy { "${it.countryCode.uppercase()}|${it.cityName.lowercase()}" }
+    }
+
+    private fun String.isSupportedAdministrativeName(): Boolean =
+        listOf("自治县", "自治旗", "民族乡", "民族苏木", "林区", "特区", "市", "县", "旗", "镇", "乡", "苏木")
+            .any { suffix -> endsWith(suffix) }
+
+    private fun String.matchesAdministrativeQuery(query: String): Boolean {
+        val suffixes = listOf("自治县", "自治旗", "民族乡", "民族苏木", "林区", "特区", "市", "县", "旗", "镇", "乡", "苏木")
+        val suffix = suffixes.firstOrNull { endsWith(it) } ?: return false
+        val normalizedName = simplifiedChinese(this).trim()
+        val normalizedBaseName = simplifiedChinese(removeSuffix(suffix)).trim()
+        val normalizedQuery = simplifiedChinese(query).trim()
+        return normalizedName.equals(normalizedQuery, ignoreCase = true) ||
+            normalizedBaseName.equals(normalizedQuery, ignoreCase = true)
+    }
 
     /**
      * 逆地理编码：获取语义化地址
@@ -133,6 +220,33 @@ class GeocodeService private constructor() {
         centerLon: Double,
         radiusMeters: Int = 10000 // 搜索模式下范围扩大到 10km
     ): List<SearchResult> = searchTencentPois(keyword, centerLat, centerLon, radiusMeters)
+
+    /** Global standard-place lookup used when a trip has no meaningful nearby center yet. */
+    suspend fun searchPlaces(keyword: String): List<SearchResult> = withContext(Dispatchers.IO) {
+        val query = keyword.trim()
+        if (query.isEmpty()) return@withContext emptyList()
+        val platformResults = runCatching {
+            @Suppress("DEPRECATION")
+            Geocoder(DiFangKeApp.instance, if (query.any { it.code > 127 }) Locale.SIMPLIFIED_CHINESE else Locale.ENGLISH)
+                .getFromLocationName(query, 20).orEmpty()
+                .mapNotNull { address ->
+                    val name = sequenceOf(address.featureName, address.locality, address.subAdminArea, address.adminArea)
+                        .mapNotNull { it?.trim()?.takeIf(String::isNotEmpty) }.firstOrNull() ?: return@mapNotNull null
+                    SearchResult(name, address.getAddressLine(0).orEmpty(), address.latitude, address.longitude)
+                }
+        }.getOrDefault(emptyList())
+        val json = getJson("/place/v1/suggestion?keyword=${Uri.encode(query)}&region=${Uri.encode("全国")}&region_fix=0&page_size=30")
+        val domesticResults = buildList {
+            val data = json?.optJSONArray("data") ?: return@buildList
+            for (index in 0 until data.length()) {
+                val poi = data.optJSONObject(index) ?: continue
+                val location = poi.optJSONObject("location") ?: continue
+                val name = poi.optString("title").trim()
+                if (name.isNotEmpty()) add(SearchResult(name, poi.optString("address"), location.optDouble("lat"), location.optDouble("lng")))
+            }
+        }
+        (platformResults + domesticResults).distinctBy { "${it.name}|${it.latitude}|${it.longitude}" }
+    }
 
     private suspend fun searchTencentPois(keyword: String, lat: Double, lon: Double, radius: Int): List<SearchResult> =
         withContext(Dispatchers.IO) {

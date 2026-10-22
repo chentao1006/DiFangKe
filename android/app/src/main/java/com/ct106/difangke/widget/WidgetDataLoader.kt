@@ -90,7 +90,7 @@ object WidgetDataLoader {
                 fp.placeID?.let { id -> userPlaces[id]?.name?.takeIf { it.isNotBlank() } }?.let { return it }
                 val address = fp.address
                 if (!address.isNullOrBlank() && address != "null" && address != "[]") return address
-                return fp.title?.takeIf { it.isNotBlank() }
+                return fp.cityName?.takeIf { it.isNotBlank() }
             }
 
             // Unique places: name → placeID → ~100 m grid (iOS daily summary rules).

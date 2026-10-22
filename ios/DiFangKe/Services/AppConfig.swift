@@ -1,5 +1,11 @@
 import Foundation
 
+struct ConfiguredTripCity: Decodable {
+    let scope: String, group: String, cityName: String, countryCode: String, countryName: String
+    let latitude: Double, longitude: Double, timeZoneIdentifier: String
+    let searchAliases: [String]?
+}
+
 class AppConfig {
     static let shared = AppConfig()
     
@@ -55,6 +61,13 @@ class AppConfig {
         }
         return 0
     }
+
+    lazy var tripMajorCities: [ConfiguredTripCity] = {
+        guard let url = Bundle.main.url(forResource: "trip_major_cities", withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let cities = try? JSONDecoder().decode([ConfiguredTripCity].self, from: data) else { return [] }
+        return cities
+    }()
     
     // --- 算法专用便捷访问属性 ---
     
@@ -146,6 +159,18 @@ class AppConfig {
     
     var habitAnalysisLookbackDays: Int {
         int(forKey: "HABIT_ANALYSIS_LOOKBACK_DAYS")
+    }
+
+    var tripScanBatchDays: Int {
+        max(1, int(forKey: "TRIP_SCAN_BATCH_DAYS"))
+    }
+
+    var tripScanIntervalHours: Int {
+        max(1, int(forKey: "TRIP_SCAN_INTERVAL_HOURS"))
+    }
+
+    var tripMaximumDurationDays: Int {
+        max(1, int(forKey: "TRIP_MAXIMUM_DURATION_DAYS"))
     }
 
     var ridiculousAccuracyThreshold: Double {

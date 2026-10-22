@@ -19,6 +19,7 @@ final class DFKMapSnapshotCache {
 
     private init() {
         memoryCache.countLimit = 24
+        memoryCache.totalCostLimit = 32 * 1024 * 1024
         let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         cacheDirectory = caches.appendingPathComponent("DFKMapSnapshots", isDirectory: true)
         if !fileManager.fileExists(atPath: cacheDirectory.path) {
@@ -41,7 +42,7 @@ final class DFKMapSnapshotCache {
 
         let url = cacheURL(for: key)
         if let data = try? Data(contentsOf: url), let diskImage = UIImage(data: data) {
-            memoryCache.setObject(diskImage, forKey: key as NSString)
+            memoryCache.setObject(diskImage, forKey: key as NSString, cost: Self.memoryCost(of: diskImage))
             updateAccessDate(for: url)
             scheduleCleanupIfNeeded(force: false)
             return diskImage
@@ -51,7 +52,7 @@ final class DFKMapSnapshotCache {
     }
 
     func setImage(_ image: UIImage, for key: String) {
-        memoryCache.setObject(image, forKey: key as NSString)
+        memoryCache.setObject(image, forKey: key as NSString, cost: Self.memoryCost(of: image))
 
         let url = cacheURL(for: key)
         ioQueue.async {
@@ -69,6 +70,14 @@ final class DFKMapSnapshotCache {
         ioQueue.async {
             try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    func removeAllMemoryImages() {
+        memoryCache.removeAllObjects()
+    }
+
+    private static func memoryCost(of image: UIImage) -> Int {
+        (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0)
     }
 
     func calculateCacheSize() -> Int64 {
@@ -2166,7 +2175,7 @@ extension CLLocationCoordinate2D {
     }
 }
 
-private struct MapPinTeardropShape: Shape {
+struct MapPinTeardropShape: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
         guard rect.width > 0 && rect.height > 0 else {
@@ -2250,7 +2259,7 @@ private extension UIBezierPath {
     }
 }
 
-fileprivate extension Color {
+extension Color {
     func darker(by percentage: CGFloat = 0.15) -> Color {
         var h: CGFloat = 0
         var s: CGFloat = 0

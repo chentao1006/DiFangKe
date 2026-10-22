@@ -1894,7 +1894,7 @@ enum DFKShareCardFactory {
         })
         // Use persisted route mileage when it is complete. Older timeline data
         // can have an incomplete TransportRecord, so the footprint-to-footprint
-        // travel distance is the fallback baseline for a period total.
+        // trip distance is the fallback baseline for a period total.
         let recordedMileage = transports.reduce(0) { $0 + max(0, $1.distance) }
         let inferredMileage = footprintTransferDistance(footprints)
         let totalMileage = max(recordedMileage, inferredMileage)

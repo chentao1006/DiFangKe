@@ -35,7 +35,6 @@ import com.google.gson.Gson
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
-import com.ct106.difangke.data.model.FootprintTitles
 import com.ct106.difangke.service.LocationTrackingService
 import java.text.SimpleDateFormat
 import java.util.Locale

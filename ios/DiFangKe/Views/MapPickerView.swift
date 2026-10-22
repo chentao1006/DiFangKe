@@ -332,13 +332,13 @@ actor OpenStreetMapGeocoder {
     private var internationalHierarchyCache: [String: Result] = [:]
     private var nextRequestDate = Date.distantPast
 
-    func lookup(coordinate: CLLocationCoordinate2D) async -> Result? {
+    func lookup(coordinate: CLLocationCoordinate2D, language: String = "zh-CN") async -> Result? {
         guard coordinate.latitude.isFinite, coordinate.longitude.isFinite,
               CLLocationCoordinate2DIsValid(coordinate) else {
             return nil
         }
 
-        let key = String(format: "%.4f,%.4f", coordinate.latitude, coordinate.longitude)
+        let key = String(format: "%.4f,%.4f|%@", coordinate.latitude, coordinate.longitude, language)
         if let cached = cache[key] {
             return cached
         }
@@ -352,7 +352,7 @@ actor OpenStreetMapGeocoder {
             URLQueryItem(name: "lon", value: String(coordinate.longitude)),
             URLQueryItem(name: "zoom", value: "18"),
             URLQueryItem(name: "addressdetails", value: "1"),
-            URLQueryItem(name: "accept-language", value: "zh-CN"),
+            URLQueryItem(name: "accept-language", value: language),
             URLQueryItem(name: "email", value: Self.contactEmail)
         ]
         guard let url = components.url else {
@@ -387,12 +387,12 @@ actor OpenStreetMapGeocoder {
     /// Country/city statistics need a globally reachable hierarchy service,
     /// not a POI search result. Try BigDataCloud first, then retain Nominatim
     /// as a fallback for networks where it is available.
-    func lookupInternationalHierarchy(coordinate: CLLocationCoordinate2D) async -> Result? {
+    func lookupInternationalHierarchy(coordinate: CLLocationCoordinate2D, language: String = "zh") async -> Result? {
         guard coordinate.latitude.isFinite, coordinate.longitude.isFinite,
               CLLocationCoordinate2DIsValid(coordinate) else {
             return nil
         }
-        let key = String(format: "%.4f,%.4f", coordinate.latitude, coordinate.longitude)
+        let key = String(format: "%.4f,%.4f|%@", coordinate.latitude, coordinate.longitude, language)
         if let cached = internationalHierarchyCache[key] {
             return cached
         }
@@ -401,9 +401,10 @@ actor OpenStreetMapGeocoder {
         components.queryItems = [
             URLQueryItem(name: "latitude", value: String(coordinate.latitude)),
             URLQueryItem(name: "longitude", value: String(coordinate.longitude)),
-            URLQueryItem(name: "localityLanguage", value: "zh")
+            URLQueryItem(name: "localityLanguage", value: language)
         ]
-        guard let url = components.url else { return await lookup(coordinate: coordinate) }
+        let nominatimLanguage = language == "en" ? "en" : "zh-CN"
+        guard let url = components.url else { return await lookup(coordinate: coordinate, language: nominatimLanguage) }
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
@@ -411,27 +412,28 @@ actor OpenStreetMapGeocoder {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
-                return await lookup(coordinate: coordinate)
+                return await lookup(coordinate: coordinate, language: nominatimLanguage)
             }
             guard httpResponse.statusCode == 200 else {
-                return await lookup(coordinate: coordinate)
+                return await lookup(coordinate: coordinate, language: nominatimLanguage)
             }
             let payload = try JSONDecoder().decode(BigDataCloudReverseResponse.self, from: data)
             guard let rawCode = payload.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !rawCode.isEmpty,
                   let rawCity = (payload.city ?? payload.locality ?? payload.principalSubdivision)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !rawCity.isEmpty else {
-                return await lookup(coordinate: coordinate)
+                return await lookup(coordinate: coordinate, language: nominatimLanguage)
             }
             let countryCode = rawCode.uppercased()
-            let countryName = Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: countryCode)
+            let countryLocale = language == "en" ? Locale(identifier: "en_US") : Locale(identifier: "zh_Hans_CN")
+            let countryName = countryLocale.localizedString(forRegionCode: countryCode)
                 ?? payload.countryName?.split(separator: ";", maxSplits: 1).first.map(String.init)
                 ?? countryCode
             let result = Result(placeName: rawCity, address: "\(countryName) \(rawCity)", countryCode: countryCode, countryName: countryName, cityName: rawCity)
             internationalHierarchyCache[key] = result
             return result
         } catch {
-            return await lookup(coordinate: coordinate)
+            return await lookup(coordinate: coordinate, language: nominatimLanguage)
         }
     }
 

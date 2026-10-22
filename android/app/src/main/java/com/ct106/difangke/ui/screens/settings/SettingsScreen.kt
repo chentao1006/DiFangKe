@@ -283,7 +283,7 @@ fun SettingsScreen(
             item {
                 SettingsToggleItem(
                     title = "AI 智能辅助",
-                    subtitle = "使用 AI 自动生成足迹标题与备注",
+                    subtitle = "使用 AI 辅助分析足迹并生成备注",
                     checked = isAiEnabled,
                     onCheckedChange = { viewModel.setAiEnabled(it) }
                 )

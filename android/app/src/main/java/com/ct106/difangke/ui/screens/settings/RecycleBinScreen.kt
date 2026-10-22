@@ -81,7 +81,7 @@ private fun RecycleFootprintRow(
     onDelete: () -> Unit
 ) {
     ListItem(
-        headlineContent = { Text(footprint.address?.takeIf { it.isNotBlank() } ?: footprint.title?.takeIf { it.isNotBlank() } ?: "未知地点") },
+        headlineContent = { Text(footprint.address?.takeIf { it.isNotBlank() } ?: footprint.cityName?.takeIf { it.isNotBlank() } ?: "未知地点") },
         supportingContent = { Text("${dateFormat.format(footprint.startTime)} - ${SimpleDateFormat("HH:mm", Locale.CHINA).format(footprint.endTime)}") },
         trailingContent = {
             Row {

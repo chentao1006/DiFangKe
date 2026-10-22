@@ -19,10 +19,11 @@ struct TimelineDestination: Identifiable, Equatable {
 /// Owns navigation. Only Records hosts a map and a native resizable sheet.
 struct MainTabView: View {
     private enum Tab: Hashable {
-        case records, travel, review, settings
+        case records, trip, review, settings
     }
 
     var initialDate: Date?
+    var tripContainer: ModelContainer?
     @State private var selectedTab: Tab = .records
     @State private var isPresented = true
     @State private var presentationDetent: PresentationDetent = .medium
@@ -168,11 +169,18 @@ struct MainTabView: View {
             records
                 .tabItem { Label(recordTabTitle, systemImage: recordTabIcon) }
                 .tag(Tab.records)
-            NavigationStack {
-                Color.clear.navigationTitle("出行")
+            Group {
+                if let tripContainer {
+                    NavigationStack { TripView(isActive: selectedTab == .trip) }
+                        .modelContainer(tripContainer)
+                } else {
+                    NavigationStack {
+                        ContentUnavailableView("行程数据不可用", systemImage: "exclamationmark.triangle")
+                    }
+                }
             }
             .tabItem { Label("出行", systemImage: "map") }
-            .tag(Tab.travel)
+            .tag(Tab.trip)
             ReviewTabView(
                 initialDate: selectedDate,
                 onDateSelected: { date in openRecord(date: date) },
@@ -183,7 +191,7 @@ struct MainTabView: View {
             .tabItem { Label("回顾", systemImage: "chart.bar.xaxis.ascending.badge.clock") }
             .tag(Tab.review)
             NavigationStack { SettingsView() }
-                .tabItem { Label("设置", systemImage: "gearshape") }
+                .tabItem { Label("设置", systemImage: "gear") }
                 .tag(Tab.settings)
         }
     }
@@ -274,6 +282,7 @@ private final class RecordSheetHostController: UIViewController {
     private var stackedSheetObservations: [NSKeyValueObservation] = []
     private var observedStackedSheets: [ObjectIdentifier] = []
     private var hasFullHeightStackedSheet = false
+    private var hasFullScreenStackedPresentation = false
     var onFullHeightStackedSheetChange: ((Bool) -> Void)?
 
     override func loadView() {
@@ -349,9 +358,18 @@ private final class RecordSheetHostController: UIViewController {
             let identifier = sheet.selectedDetentIdentifier ?? sheet.detents.first?.identifier
             return identifier == .large
         }
-        guard isFullHeight != hasFullHeightStackedSheet else { return }
-        hasFullHeightStackedSheet = isFullHeight
-        onFullHeightStackedSheetChange?(isFullHeight)
+        let isFullScreen = sheets.contains { controller in
+            controller.modalPresentationStyle == .fullScreen
+                || controller.modalPresentationStyle == .overFullScreen
+        }
+        if isFullScreen != hasFullScreenStackedPresentation {
+            hasFullScreenStackedPresentation = isFullScreen
+            updateWindow()
+        }
+        if isFullHeight != hasFullHeightStackedSheet {
+            hasFullHeightStackedSheet = isFullHeight
+            onFullHeightStackedSheetChange?(isFullHeight)
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -378,7 +396,10 @@ private final class RecordSheetHostController: UIViewController {
             return
         }
         let rectInWindow = view.convert(view.bounds, to: parentWindow)
-        let frame = parentWindow.convert(rectInWindow, to: scene.coordinateSpace)
+        let recordsFrame = parentWindow.convert(rectInWindow, to: scene.coordinateSpace)
+        let frame = hasFullScreenStackedPresentation
+            ? scene.coordinateSpace.bounds
+            : recordsFrame
         if recordWindow == nil {
             let host = UIHostingController(rootView: content)
             host.view.backgroundColor = .clear

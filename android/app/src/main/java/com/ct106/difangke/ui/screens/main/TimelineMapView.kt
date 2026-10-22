@@ -131,7 +131,7 @@ fun TimelineMapView(
             holder.lastUser = userLocation
             map.clear()
             map.addImportantPlaceCircles(overlays.places)
-            overlays.routes.forEach { drawSmoothedRoute(map, it, routeColor) }
+            overlays.routes.forEach { drawSmoothedTimelineRoute(map, it, routeColor) }
             userLocation?.let {
                 map.addMarker(
                     MarkerOptions()
@@ -258,7 +258,7 @@ internal fun parseRouteSegments(pointsJson: String?): List<List<LatLng>> {
 }
 
 /** Distance-filtered, moving-average + Catmull-Rom smoothed polyline (as the old MiniMapView). */
-private fun smooth(segment: List<LatLng>): List<LatLng> {
+internal fun smoothTimelineRoute(segment: List<LatLng>): List<LatLng> {
     if (segment.size < 2) return segment
     val filtered = mutableListOf(segment.first())
     val result = FloatArray(1)
@@ -298,7 +298,7 @@ private fun smooth(segment: List<LatLng>): List<LatLng> {
     return out
 }
 
-private fun drawSmoothedRoute(map: TencentMap, pointsJson: String, color: Int) {
-    val segments = parseRouteSegments(pointsJson).map(::smooth).filter { it.size >= 2 }
+internal fun drawSmoothedTimelineRoute(map: TencentMap, pointsJson: String, color: Int) {
+    val segments = parseRouteSegments(pointsJson).map(::smoothTimelineRoute).filter { it.size >= 2 }
     segments.forEach { map.addPolyline(PolylineOptions().addAll(it).width(12f).color(color)) }
 }

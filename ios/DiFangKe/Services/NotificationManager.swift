@@ -154,7 +154,7 @@ class NotificationManager {
         
         let saysStayedHome = effectiveOverview?.contains("宅在家") == true || effectiveOverview?.contains("没出门") == true || effectiveOverview?.contains("在家休息") == true
         // Never let a stale/model-generated "stayed home" sentence contradict
-        // recorded travel.  The factual stats remain visible either way.
+        // recorded trip. The factual stats remain visible either way.
         if isAiEnabled, let effectiveOverview, !effectiveOverview.isEmpty, !(transportCount > 0 && saysStayedHome) {
             let finalBody = "\(effectiveOverview)\n\(statsInfo)"
             self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: "每日足迹汇总", body: finalBody)

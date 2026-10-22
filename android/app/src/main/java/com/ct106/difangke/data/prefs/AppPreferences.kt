@@ -45,6 +45,12 @@ class AppPreferences(private val context: Context) {
         
         val KEY_LOCATION_ACCURACY_MODE = stringPreferencesKey("locationAccuracyMode")
         val KEY_IS_LIVE_NOTIFICATION_ENABLED = booleanPreferencesKey("isLiveNotificationEnabled")
+        val KEY_TRIP_INTRO_COMPLETED = booleanPreferencesKey("tripIntroductionCompleted")
+        val KEY_TRIP_AUTOMATIC_RECOGNITION = booleanPreferencesKey("tripAutomaticRecognitionEnabled")
+        val KEY_TRIP_SCAN_RUNNING = booleanPreferencesKey("tripScanRunning")
+        val KEY_TRIP_SCAN_CURSOR = longPreferencesKey("tripScanCursor")
+        val KEY_TRIP_SCAN_PENDING = stringPreferencesKey("tripScanPendingAwaySegment")
+        val KEY_TRIP_SUPPRESSED_RANGES = stringPreferencesKey("tripSuppressedAutomaticDateRanges")
     }
 
     // ── Flows（响应式读取）──────────────────────────────────────────
@@ -84,6 +90,9 @@ class AppPreferences(private val context: Context) {
     val isNotificationGuideDismissed: Flow<Boolean> = context.dataStore.data.map {
         it[KEY_IS_NOTIFICATION_GUIDE_DISMISSED] ?: false
     }
+    val tripIntroductionCompleted: Flow<Boolean> = context.dataStore.data.map { it[KEY_TRIP_INTRO_COMPLETED] ?: false }
+    val tripAutomaticRecognitionEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_TRIP_AUTOMATIC_RECOGNITION] ?: false }
+    val tripScanRunning: Flow<Boolean> = context.dataStore.data.map { it[KEY_TRIP_SCAN_RUNNING] ?: false }
 
     // ── Suspend 写入 ──────────────────────────────────────────────
     suspend fun setTrackingEnabled(enabled: Boolean) =
@@ -133,6 +142,26 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setNotificationGuideDismissed(dismissed: Boolean) =
         context.dataStore.edit { it[KEY_IS_NOTIFICATION_GUIDE_DISMISSED] = dismissed }
+
+    suspend fun setTripIntroductionCompleted(completed: Boolean) = context.dataStore.edit { it[KEY_TRIP_INTRO_COMPLETED] = completed }
+    suspend fun setTripAutomaticRecognitionEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_TRIP_AUTOMATIC_RECOGNITION] = enabled }
+    suspend fun setTripScanRunning(running: Boolean) = context.dataStore.edit { it[KEY_TRIP_SCAN_RUNNING] = running }
+    suspend fun getTripScanCursor(): Long? = context.dataStore.data.map { it[KEY_TRIP_SCAN_CURSOR] }.first()
+    suspend fun setTripScanCursor(value: Long) = context.dataStore.edit { it[KEY_TRIP_SCAN_CURSOR] = value }
+    suspend fun getTripScanPending(): String? = context.dataStore.data.map { it[KEY_TRIP_SCAN_PENDING] }.first()
+    suspend fun setTripScanPending(value: String?) = context.dataStore.edit {
+        if (value == null) it.remove(KEY_TRIP_SCAN_PENDING) else it[KEY_TRIP_SCAN_PENDING] = value
+    }
+    suspend fun getTripSuppressedRanges(): String? = context.dataStore.data.map { it[KEY_TRIP_SUPPRESSED_RANGES] }.first()
+    suspend fun setTripSuppressedRanges(value: String?) = context.dataStore.edit {
+        if (value == null) it.remove(KEY_TRIP_SUPPRESSED_RANGES) else it[KEY_TRIP_SUPPRESSED_RANGES] = value
+    }
+    suspend fun clearTripSuppressedRanges() = context.dataStore.edit { it.remove(KEY_TRIP_SUPPRESSED_RANGES) }
+    suspend fun resetTripScanState() = context.dataStore.edit {
+        it.remove(KEY_TRIP_SCAN_CURSOR)
+        it.remove(KEY_TRIP_SCAN_PENDING)
+        it[KEY_TRIP_SCAN_RUNNING] = false
+    }
 
     suspend fun setHasLaunchedBefore(launched: Boolean) =
         context.dataStore.edit { it[KEY_HAS_LAUNCHED_BEFORE] = launched }

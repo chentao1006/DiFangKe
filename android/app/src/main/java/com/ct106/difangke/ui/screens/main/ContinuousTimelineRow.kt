@@ -291,30 +291,16 @@ private fun FootprintMarkerWithPicker(
     val activity = activityTypes.firstOrNull { it.id == footprint.activityTypeValue }
     val tint = activity?.let { parseActivityColor(it.colorHex) } ?: Color.Gray
     Box {
-        Box(
-            modifier = Modifier
-                .size(TimelineLayout.markerSize)
-                .shadow(2.dp, CircleShape)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surface)
-                .clickable {
+        TimelineFootprintMarker(
+            icon = activity?.icon ?: "place",
+            tint = tint,
+            modifier = Modifier.clickable {
                     scope.launch {
                         suggested = viewModel.suggestedActivities(footprint, activityTypes, allPlaces)
                         showPicker = true
                     }
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            Box(
-                Modifier
-                    .size(TimelineLayout.markerSize - 5.dp)
-                    .clip(CircleShape)
-                    .background(Brush.verticalGradient(listOf(lerp(tint, Color.White, 0.25f), tint))),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(getIconForName(activity?.icon ?: "place"), null, tint = Color.White, modifier = Modifier.size(12.dp))
-            }
-        }
+                }
+        )
         ActivityPickerMenu(
             expanded = showPicker,
             suggested = suggested,
@@ -391,18 +377,7 @@ private fun PickerSectionTitle(title: String) {
 private fun TransportMarkerWithMenu(recordID: String, typeRaw: String, viewModel: MainViewModel) {
     var expanded by remember { mutableStateOf(false) }
     Box(Modifier.size(TimelineLayout.markerSize), contentAlignment = Alignment.Center) {
-        Box(
-            modifier = Modifier
-                .size(TimelineLayout.markerSize - 4.dp)
-                .shadow(2.dp, CircleShape)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surface)
-                .border(1.2.dp, DfkAccent, CircleShape)
-                .clickable { expanded = true },
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(timelineTransportIcon(typeRaw), null, tint = DfkAccent, modifier = Modifier.size(11.dp))
-        }
+        TimelineTransportMarker(typeRaw, Modifier.clickable { expanded = true })
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             TransportType.entries.forEach { type ->
                 DropdownMenuItem(
@@ -417,6 +392,36 @@ private fun TransportMarkerWithMenu(recordID: String, typeRaw: String, viewModel
                     }
                 )
             }
+        }
+    }
+}
+
+@Composable
+internal fun TimelineFootprintMarker(icon: String, tint: Color, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier.size(TimelineLayout.markerSize).shadow(2.dp, CircleShape).clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surface),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            Modifier.size(TimelineLayout.markerSize - 5.dp).clip(CircleShape)
+                .background(Brush.verticalGradient(listOf(lerp(tint, Color.White, 0.25f), tint))),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(getIconForName(icon), null, tint = Color.White, modifier = Modifier.size(12.dp))
+        }
+    }
+}
+
+@Composable
+internal fun TimelineTransportMarker(typeRaw: String, modifier: Modifier = Modifier) {
+    Box(Modifier.size(TimelineLayout.markerSize), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = modifier.size(TimelineLayout.markerSize - 4.dp).shadow(2.dp, CircleShape).clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surface).border(1.2.dp, DfkAccent, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(timelineTransportIcon(typeRaw), null, tint = DfkAccent, modifier = Modifier.size(11.dp))
         }
     }
 }

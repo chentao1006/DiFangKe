@@ -16,7 +16,6 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontWeight
 import com.ct106.difangke.ui.screens.history.ReviewScreen
 import com.ct106.difangke.ui.screens.settings.SettingsScreen
 import java.util.Date
@@ -30,11 +29,10 @@ data class TimelineDestination(
 
 private enum class MainTab(val label: String, val icon: ImageVector) {
     RECORDS("记录", Icons.Default.Timeline),
-    TRAVEL("出行", Icons.Outlined.Map),
+    TRIP("出行", Icons.Outlined.Map),
     REVIEW("回顾", Icons.Outlined.BarChart),
     SETTINGS("设置", Icons.Outlined.Settings)
 }
-
 /**
  * iOS MainTabView: owns app navigation. Only Records hosts the map and the
  * resizable timeline sheet; Review opens a day or footprint there.
@@ -84,7 +82,7 @@ fun MainTabScreen(
             )
             when (selectedTab) {
                 MainTab.RECORDS -> Unit
-                MainTab.TRAVEL -> TravelScreen()
+                MainTab.TRIP -> TripScreen()
                 MainTab.REVIEW -> ReviewScreen(
                     onFootprintSelected = { footprint ->
                         destination = TimelineDestination(footprint.startTime, footprint.footprintID)
@@ -94,16 +92,5 @@ fun MainTabScreen(
                 MainTab.SETTINGS -> SettingsScreen(onNavigate = onNavigate)
             }
         }
-    }
-}
-
-/** iOS MainTabView → 出行: an empty placeholder for now. */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TravelScreen() {
-    Scaffold(
-        topBar = { TopAppBar(title = { Text("出行", fontWeight = FontWeight.Bold) }) }
-    ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize())
     }
 }

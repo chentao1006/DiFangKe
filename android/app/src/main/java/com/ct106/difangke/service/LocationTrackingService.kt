@@ -17,7 +17,6 @@ import androidx.core.app.ServiceCompat
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.data.location.RawLocationStore
-import com.ct106.difangke.data.model.FootprintTitles
 import com.ct106.difangke.data.model.TransportType
 import com.ct106.difangke.service.tracking.DailyStats
 import com.ct106.difangke.service.tracking.DepartureDetector
@@ -1073,8 +1072,6 @@ class LocationTrackingService : Service() {
                                                 footprint.copy(
                                                         placeID = placeID,
                                                         address = placeName,
-                                                        title = FootprintTitles.generate(placeName, footprint.startTime.time / 1000),
-                                                        isTitleEditedByHand = true,
                                                         isAddressEditedByHand = true,
                                                         statusValue = "manual",
                                                         // Picking a place only changes place fields: a stay whose

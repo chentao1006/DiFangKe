@@ -15,13 +15,14 @@ struct FootprintModalView: View {
     @ObservedObject var photoService = PhotoService.shared
     @Bindable var footprint: Footprint
     var allPlaces: [Place] = []
+    var activityTypes: [ActivityType]?
     var onDismiss: ((Bool) -> Void)? = nil
     /// When set, the host closes the sheet itself (e.g. to start animating its
     /// own layout before the dismissal), instead of this view calling dismiss().
     var onRequestClose: (() -> Void)? = nil
     
-    @Query private var savedPlaces: [Place]
-    @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
+    @State private var loadedPlaces: [Place] = []
+    @State private var loadedActivities: [ActivityType] = []
     
     @State private var hasChanged = false
     @State private var showAI = false
@@ -32,7 +33,7 @@ struct FootprintModalView: View {
     @State private var showPhotoPicker = false
     @State private var showCamera = false
     @State private var selectedPhotoID: String? = nil
-    @State private var orderedPhotoAssetIDs: [String] = []
+    @State private var orderedPhotoAssetIDs: [String]?
     @State private var showAddPlaceModal = false
     @State private var isUpdatingAddress = false
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
@@ -48,14 +49,19 @@ struct FootprintModalView: View {
     
     var isDraft: Bool = false
     var isInline: Bool = false
+    var startsExpanded: Bool = false
+    var scrollsToPhotosOnAppear: Bool = false
     @Binding private var presentationDetent: PresentationDetent
     
-    init(footprint: Footprint, allPlaces: [Place] = [], autoFocus: Bool = false, isDraft: Bool = false, isInline: Bool = false, presentationDetent: Binding<PresentationDetent> = .constant(.large), onDismiss: ((Bool) -> Void)? = nil, onRequestClose: (() -> Void)? = nil) {
+    init(footprint: Footprint, allPlaces: [Place] = [], activityTypes: [ActivityType]? = nil, autoFocus: Bool = false, isDraft: Bool = false, isInline: Bool = false, startsExpanded: Bool = false, scrollsToPhotosOnAppear: Bool = false, presentationDetent: Binding<PresentationDetent> = .constant(.large), onDismiss: ((Bool) -> Void)? = nil, onRequestClose: (() -> Void)? = nil) {
         self._footprint = Bindable(footprint)
         self.allPlaces = allPlaces
+        self.activityTypes = activityTypes
         self.autoFocus = autoFocus
         self.isDraft = isDraft
         self.isInline = isInline
+        self.startsExpanded = startsExpanded
+        self.scrollsToPhotosOnAppear = scrollsToPhotosOnAppear
         self._presentationDetent = presentationDetent
         self.onDismiss = onDismiss
         self.onRequestClose = onRequestClose
@@ -66,6 +72,34 @@ struct FootprintModalView: View {
             onRequestClose()
         } else if !isInline {
             dismiss()
+        }
+    }
+
+    private var allActivities: [ActivityType] {
+        activityTypes ?? loadedActivities
+    }
+
+    private var savedPlaces: [Place] {
+        !allPlaces.isEmpty ? allPlaces : loadedPlaces
+    }
+
+    private func loadReferenceDataIfNeeded() {
+        // Photo-import drafts can be presented from the separate Trip store.
+        // Their reference data is injected explicitly; never query that store
+        // for record-only Place or ActivityType entities.
+        guard !isDraft else { return }
+        if allPlaces.isEmpty {
+            loadedPlaces = (try? modelContext.fetch(
+                FetchDescriptor<Place>(sortBy: [SortDescriptor(\.name)])
+            )) ?? []
+        }
+        if activityTypes == nil {
+            loadedActivities = (try? modelContext.fetch(
+                FetchDescriptor<ActivityType>(sortBy: [
+                    SortDescriptor(\.sortOrder),
+                    SortDescriptor(\.name)
+                ])
+            )) ?? []
         }
     }
     
@@ -83,12 +117,7 @@ struct FootprintModalView: View {
     }
 
     private var displayedPhotoAssetIDs: [String] {
-        let currentIDs = footprint.photoAssetIDs
-        guard orderedPhotoAssetIDs.count == currentIDs.count,
-              Set(orderedPhotoAssetIDs) == Set(currentIDs) else {
-            return currentIDs
-        }
-        return orderedPhotoAssetIDs
+        orderedPhotoAssetIDs ?? footprint.photoAssetIDs
     }
 
     private func refreshPhotoAssetOrder() {
@@ -98,32 +127,12 @@ struct FootprintModalView: View {
             return
         }
 
-        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        guard status == .authorized || status == .limited else {
-            orderedPhotoAssetIDs = assetIDs
-            return
-        }
-
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: assetIDs, options: nil)
-        var creationDates: [String: Date] = [:]
-        assets.enumerateObjects { asset, _, _ in
-            creationDates[asset.localIdentifier] = asset.creationDate
-        }
-
-        orderedPhotoAssetIDs = assetIDs.enumerated().sorted { lhs, rhs in
-            let lhsDate = creationDates[lhs.element]
-            let rhsDate = creationDates[rhs.element]
-            switch (lhsDate, rhsDate) {
-            case let (left?, right?) where left != right:
-                return left > right
-            case (_?, nil):
-                return true
-            case (nil, _?):
-                return false
-            default:
-                return lhs.offset < rhs.offset
-            }
-        }.map(\.element)
+        // `photoAssetIDs` may contain local identifiers synced from another
+        // device. They are not valid identifiers in this photo library and
+        // rendering them creates a second set of permanently empty tiles.
+        // Keep the stored references for Cloud Identifier recovery, but only
+        // present assets that Photos can actually resolve on this device.
+        orderedPhotoAssetIDs = photoService.displayableAssetIDs(assetIDs)
     }
 
     private func ensureFootprintManaged() {
@@ -220,7 +229,7 @@ struct FootprintModalView: View {
             } message: {
                 Text("删除后，该足迹将不再出现在时间轴上。")
             }
-            .sheet(isPresented: $showingActivityTypeEditor) {
+            .sheet(isPresented: $showingActivityTypeEditor, onDismiss: loadReferenceDataIfNeeded) {
                 ActivityTypeEditorView()
             }
             .sheet(item: $sharePayload) { _ in
@@ -232,6 +241,7 @@ struct FootprintModalView: View {
                 }
             }
             .onAppear {
+                loadReferenceDataIfNeeded()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { withAnimation(.easeOut(duration: 0.3)) { showAI = true } }
                 
                 if isAutoPhotoLinkEnabled {
@@ -319,7 +329,7 @@ struct FootprintModalView: View {
                 let index = displayedPhotoAssetIDs.firstIndex(of: item.value) ?? 0
                 PhotoFullscreenView(assetIDs: displayedPhotoAssetIDs, currentIndex: index)
             }
-            .sheet(isPresented: $showAddPlaceModal) {
+            .sheet(isPresented: $showAddPlaceModal, onDismiss: loadReferenceDataIfNeeded) {
                 AddToFavoriteModal(footprint: footprint)
             }
             .alert("确认移除照片？", isPresented: $showingPhotoDeleteAlert) {
@@ -359,7 +369,7 @@ struct FootprintModalView: View {
         // ends, so any view update mid-drag (map flight, timeline jump,
         // location) re-applied the stale `.medium` and snapped the sheet back.
         // UIKit alone owns the detent while the user drags.
-        .presentationDetents([.medium, .large])
+        .presentationDetents(startsExpanded ? [.large] : [.medium, .large])
         .presentationBackground(.clear)
         .presentationBackgroundInteraction(.enabled)
     }
@@ -409,6 +419,14 @@ extension FootprintModalView {
                     }
 
                     Spacer().frame(height: 30)
+                }
+            }
+            .task {
+                guard scrollsToPhotosOnAppear else { return }
+                try? await Task.sleep(for: .milliseconds(120))
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeOut(duration: 0.22)) {
+                    proxy.scrollTo("footprintPhotos", anchor: .top)
                 }
             }
         }
@@ -550,7 +568,7 @@ extension FootprintModalView {
                     suggestedItems: presentation.suggestedItems,
                     allItems: presentation.allItems,
                     onSelect: applyActivityType,
-                    onAdd: {
+                    onAdd: isDraft ? nil : {
                         DispatchQueue.main.async {
                             showingActivityTypeEditor = true
                         }
@@ -848,7 +866,10 @@ extension FootprintModalView {
     private func footerContent(onBeginReasonEditing: @escaping () -> Void) -> some View {
         Group {
             aiContent(onBeginReasonEditing: onBeginReasonEditing)
-            photoSection.padding(.horizontal, 24).padding(.top, 16)
+            photoSection
+                .padding(.horizontal, 24)
+                .padding(.top, 16)
+                .id("footprintPhotos")
         }
     }
     
@@ -896,7 +917,7 @@ extension FootprintModalView {
             }
             .padding(.leading, 4)
             
-            if footprint.photoAssetIDs.isEmpty {
+            if displayedPhotoAssetIDs.isEmpty {
                 if PhotoService.shared.authorizationStatus == .notDetermined {
                     // Contextual Permission Request
                     Button {

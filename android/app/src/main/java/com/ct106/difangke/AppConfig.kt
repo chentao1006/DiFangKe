@@ -1,7 +1,48 @@
 package com.ct106.difangke
 
+import org.json.JSONArray
+
+data class ConfiguredTripCity(
+    val scope: String,
+    val group: String,
+    val cityName: String,
+    val countryCode: String,
+    val countryName: String,
+    val latitude: Double,
+    val longitude: Double,
+    val timeZoneIdentifier: String,
+    val searchAliases: List<String>
+)
+
 /** 对应 iOS 的 Config.plist + AppConfig.swift 所有算法阈值与服务配置集中在此处 */
 object AppConfig {
+    const val TRIP_SCAN_BATCH_DAYS = 14
+    const val TRIP_SCAN_INTERVAL_HOURS = 24L
+    const val TRIP_MAXIMUM_DURATION_DAYS = 31
+
+    val TRIP_MAJOR_CITIES: List<ConfiguredTripCity> by lazy {
+        val json = DiFangKeApp.instance.assets.open("trip_major_cities.json")
+            .bufferedReader().use { it.readText() }
+        val array = JSONArray(json)
+        buildList {
+            for (index in 0 until array.length()) {
+                val item = array.getJSONObject(index)
+                add(ConfiguredTripCity(
+                    scope = item.getString("scope"),
+                    group = item.getString("group"),
+                    cityName = item.getString("cityName"),
+                    countryCode = item.getString("countryCode"),
+                    countryName = item.getString("countryName"),
+                    latitude = item.getDouble("latitude"),
+                    longitude = item.getDouble("longitude"),
+                    timeZoneIdentifier = item.getString("timeZoneIdentifier"),
+                    searchAliases = item.optJSONArray("searchAliases")?.let { aliases ->
+                        buildList { for (aliasIndex in 0 until aliases.length()) add(aliases.getString(aliasIndex)) }
+                    }.orEmpty()
+                ))
+            }
+        }
+    }
 
     // ── AI 服务配置 ──────────────────────────────────────────────
     val SERVICE_SECRET = BuildConfig.SERVICE_SECRET

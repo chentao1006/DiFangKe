@@ -828,8 +828,8 @@ class DayTimelineEngine(
                     RouteCoordinate(current.endLoc.first, current.endLoc.second, current.end.time, true, !current.includesTransport),
                     RouteCoordinate(next.startLoc.first, next.startLoc.second, next.start.time, true, !next.includesTransport)
                 )
-                val estimatedTravelTime = straightDist / max(AppConfig.TRANSPORT_UNOBSERVED_MIN_SPEED, AppConfig.TRANSPORT_DEPARTURE_MINIMUM_SPEED)
-                actualStart = maxDate(gapStart, gapEnd.plusSeconds(-estimatedTravelTime))
+                val estimatedTripTime = straightDist / max(AppConfig.TRANSPORT_UNOBSERVED_MIN_SPEED, AppConfig.TRANSPORT_DEPARTURE_MINIMUM_SPEED)
+                actualStart = maxDate(gapStart, gapEnd.plusSeconds(-estimatedTripTime))
                 actualEnd = gapEnd
             }
 

@@ -1,6 +1,12 @@
 import SwiftUI
 import MapKit
 
+func normalizedPlaceSearchKey(_ value: String) -> String {
+    let folded = value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    let latin = folded.applyingTransform(.toLatin, reverse: false) ?? folded
+    return String(latin.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }).lowercased()
+}
+
 struct PlaceSearchResult: Identifiable, Hashable {
     let id: String
     let name: String
@@ -22,6 +28,7 @@ struct PlaceSearchResult: Identifiable, Hashable {
 @MainActor
 class PlacePickerViewModel: NSObject, ObservableObject {
     @Published var searchResults: [PlaceSearchResult] = []
+    @Published private(set) var isSearching = false
     private var searchTask: Task<Void, Never>?
     private var completionResolutionTask: Task<Void, Never>?
     private let searchCompleter = MKLocalSearchCompleter()
@@ -41,6 +48,7 @@ class PlacePickerViewModel: NSObject, ObservableObject {
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedQuery.isEmpty else {
             searchResults = []
+            isSearching = false
             activeQuery = ""
             finalizedQuery = ""
             return
@@ -49,6 +57,7 @@ class PlacePickerViewModel: NSObject, ObservableObject {
         activeQuery = normalizedQuery
         finalizedQuery = ""
         searchResults = []
+        isSearching = true
         searchCompleter.queryFragment = normalizedQuery
 
         searchTask = Task { [weak self] in
@@ -75,6 +84,7 @@ class PlacePickerViewModel: NSObject, ObservableObject {
             }
             searchResults = prioritizeExactMatches(convertedFallback, over: globalResults, query: normalizedQuery)
             finalizedQuery = normalizedQuery
+            isSearching = false
         }
     }
 
@@ -112,9 +122,9 @@ class PlacePickerViewModel: NSObject, ObservableObject {
     }
 
     private func prioritizeExactMatches(_ fallback: [PlaceSearchResult], over apple: [PlaceSearchResult], query: String) -> [PlaceSearchResult] {
-        let normalizedQuery = query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        let normalizedQuery = normalizedPlaceSearchKey(query)
         let exactFallback = fallback.filter {
-            $0.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(normalizedQuery)
+            normalizedPlaceSearchKey($0.name).contains(normalizedQuery)
         }
         let combined = exactFallback.isEmpty ? apple + fallback : exactFallback + apple + fallback
         var seen = Set<String>()
@@ -128,10 +138,15 @@ extension PlacePickerViewModel: MKLocalSearchCompleterDelegate {
         Task { @MainActor [weak self] in
             guard let self, !activeQuery.isEmpty else { return }
             let query = activeQuery
+            let foldedQuery = normalizedPlaceSearchKey(query)
+            let matchingCompletions = completions.filter {
+                normalizedPlaceSearchKey("\($0.title) \($0.subtitle)").contains(foldedQuery)
+            }
+            guard !matchingCompletions.isEmpty else { return }
             completionResolutionTask?.cancel()
             completionResolutionTask = Task { @MainActor [weak self] in
                 guard let self else { return }
-                let items = await resolveCompletions(completions, for: query)
+                let items = await resolveCompletions(matchingCompletions, for: query)
                 guard !Task.isCancelled, activeQuery == query, finalizedQuery != query, !items.isEmpty else { return }
                 searchResults = items
             }

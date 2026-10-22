@@ -432,35 +432,6 @@ data class DaySummary(
     }
 }
 
-// ── 足迹标题生成（对应 iOS Footprint.titleTemplates）──────────────
-object FootprintTitles {
-    private val templates = listOf(
-        "在 %s 停留",
-        "位于 %s",
-        "在此处停留",
-        "探索 %s"
-    )
-
-    fun generate(locationName: String, seed: Long): String {
-        return locationName
-    }
-
-    fun isGeneric(title: String): Boolean {
-        val generics = setOf("地点记录", "正在获取位置...", "未知地点", "点位记录", "发现足迹", "在某地停留", "此处", "某地", "")
-        if (title in generics) return true
-        for (w in listOf("此处", "某地")) {
-            for (t in templates) {
-                if (title == String.format(t, w)) return true
-            }
-        }
-        return false
-    }
-
-    fun extractLocation(title: String): String {
-        return title.trim().ifEmpty { "未知位置" }
-    }
-}
-
 // ── 扩展属性：用于简化数据库实体的坐标访问 ───────────────────────
 val com.ct106.difangke.data.db.entity.FootprintEntity.representativeLatitude: Double get() {
     return extractFirstDoubleOrZero(latitudeJson)

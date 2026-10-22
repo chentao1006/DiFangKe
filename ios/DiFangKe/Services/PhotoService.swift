@@ -77,6 +77,7 @@ enum PhotoImportDraftRecovery {
 
 class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     static let shared = PhotoService()
+    private let displayableAssetIDsCache = NSCache<NSString, NSArray>()
     
     @Published var authorizationStatus: PHAuthorizationStatus = .notDetermined
     @Published var isScanCancelled = false
@@ -96,7 +97,12 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     
     override init() {
         super.init()
+        displayableAssetIDsCache.countLimit = 64
         checkStatus()
+    }
+
+    func clearTransientCaches() {
+        displayableAssetIDsCache.removeAllObjects()
     }
     
     deinit {
@@ -128,6 +134,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     }
     
     func photoLibraryDidChange(_ changeInstance: PHChange) {
+        displayableAssetIDsCache.removeAllObjects()
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard (status == .authorized || status == .limited),
               let container = modelContext?.container else { return }
@@ -210,6 +217,48 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.fetchLimit = 1
         return PHAsset.fetchAssets(withLocalIdentifiers: assetIDs, options: options).firstObject
+    }
+
+    /// IDs that Photos can resolve on this device, de-duplicated and ordered
+    /// newest first. Stored cross-device IDs remain untouched in the model.
+    func displayableAssetIDs(_ assetIDs: [String]) -> [String] {
+        guard !assetIDs.isEmpty else { return [] }
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return assetIDs }
+        let cacheKey = assetIDs.joined(separator: "\u{1F}") as NSString
+        if let cached = displayableAssetIDsCache.object(forKey: cacheKey) as? [String] {
+            return cached
+        }
+
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: assetIDs, options: nil)
+        var creationDates: [String: Date] = [:]
+        var availableAssetIDs = Set<String>()
+        assets.enumerateObjects { asset, _, _ in
+            availableAssetIDs.insert(asset.localIdentifier)
+            creationDates[asset.localIdentifier] = asset.creationDate
+        }
+
+        var displayedIdentifiers = Set<String>()
+        let result = assetIDs
+            .filter { availableAssetIDs.contains($0) && displayedIdentifiers.insert($0).inserted }
+            .enumerated()
+            .sorted { lhs, rhs in
+                let lhsDate = creationDates[lhs.element]
+                let rhsDate = creationDates[rhs.element]
+                switch (lhsDate, rhsDate) {
+                case let (left?, right?) where left != right:
+                    return left > right
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                default:
+                    return lhs.offset < rhs.offset
+                }
+            }
+            .map(\.element)
+        displayableAssetIDsCache.setObject(result as NSArray, forKey: cacheKey)
+        return result
     }
 
     /// Photos taken this long before/after a stay still belong to it.

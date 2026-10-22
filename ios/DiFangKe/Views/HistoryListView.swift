@@ -1203,11 +1203,17 @@ struct SegmentedPickerModifier: ViewModifier {
 }
 
 // MARK: - Import Helpers
+struct PhotoImportReviewPayload: Identifiable {
+    let id = UUID()
+    let results: [Footprint]
+    let places: [Place]
+    let activityTypes: [ActivityType]
+}
+
 struct ImportSheetsModifier: ViewModifier {
     @Environment(LocationManager.self) private var locationManager
     @Binding var showingPhotoImportRange: Bool
-    @Binding var isShowingResults: Bool
-    @Binding var scannedResults: [Footprint]
+    @Binding var reviewPayload: PhotoImportReviewPayload?
     let onStartScan: (Date, Date) -> Void
     let onConfirmImport: ([Footprint]) -> Void
     func body(content: Content) -> some View {
@@ -1216,9 +1222,14 @@ struct ImportSheetsModifier: ViewModifier {
                 PhotoImportRangePicker { s, e in showingPhotoImportRange = false; onStartScan(s, e) }
                     .presentationDetents([.medium])
             }
-            .sheet(isPresented: $isShowingResults) { 
-                PhotoImportResultsView(results: scannedResults, onConfirm: onConfirmImport)
-                    .environment(locationManager)
+            .sheet(item: $reviewPayload) { payload in
+                PhotoImportResultsView(
+                    results: payload.results,
+                    allPlaces: payload.places,
+                    allActivityTypes: payload.activityTypes,
+                    onConfirm: onConfirmImport
+                )
+                .environment(locationManager)
             }
     }
 }
@@ -1228,12 +1239,13 @@ struct ImportSheetsModifier: ViewModifier {
 struct PhotoImportFlowModifier: ViewModifier {
     @Environment(\.modelContext) private var modelContext
     @Binding var isRequested: Bool
+    let modelContainer: ModelContainer?
     let onImported: () -> Void
     @State private var showingPhotoImportRange = false
     @State private var isScanning = false
     @State private var isImporting = false
     @State private var scannedResults: [Footprint] = []
-    @State private var isShowingResults = false
+    @State private var reviewPayload: PhotoImportReviewPayload?
     @State private var showingNoResultsAlert = false
     @State private var showingImportSuccessAlert = false
     @State private var successCount = 0
@@ -1251,26 +1263,27 @@ struct PhotoImportFlowModifier: ViewModifier {
             }
             .modifier(ImportSheetsModifier(
                 showingPhotoImportRange: $showingPhotoImportRange,
-                isShowingResults: $isShowingResults,
-                scannedResults: $scannedResults,
+                reviewPayload: $reviewPayload,
                 onStartScan: startScanning,
                 onConfirmImport: { selectedFootprints in
+                    let destinationContext = modelContainer.map(ModelContext.init) ?? modelContext
                     isImporting = true
-                    isShowingResults = false
+                    reviewPayload = nil
 
                     // 为了避免主线程卡顿，我们将保存和后续处理移入异步任务
                     // 虽然 Footprint 已在 MainActor 创建，但 yield 允许 UI 保持响应
                     Task {
                         for fp in selectedFootprints {
-                            modelContext.insert(fp)
+                            destinationContext.insert(fp)
                         }
 
                         // 尝试在后台进行保存（SwiftData 支持在异步上下文中调用 save）
-                        try? modelContext.save()
+                        try? destinationContext.save()
 
                         await MainActor.run {
                             scannedResults = []
                             onImported()
+                            TripScanManager.shared.scanAfterPhotoImport()
                             self.successCount = selectedFootprints.count
                             self.isImporting = false
                             self.showingImportSuccessAlert = true
@@ -1311,11 +1324,12 @@ struct PhotoImportFlowModifier: ViewModifier {
         photoService.isScanCancelled = false
         isScanning = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let sourceContext = modelContainer.map(ModelContext.init) ?? modelContext
             let finalEnd = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: end) ?? end
             // Fetched when a scan starts, so hosts don't observe every footprint.
-            let allFootprints = (try? modelContext.fetch(FetchDescriptor<Footprint>())) ?? []
-            let allPlaces = (try? modelContext.fetch(FetchDescriptor<Place>(sortBy: [SortDescriptor(\.name)]))) ?? []
-            let allActivityTypes = (try? modelContext.fetch(FetchDescriptor<ActivityType>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? []
+            let allFootprints = (try? sourceContext.fetch(FetchDescriptor<Footprint>())) ?? []
+            let allPlaces = (try? sourceContext.fetch(FetchDescriptor<Place>(sortBy: [SortDescriptor(\.name)]))) ?? []
+            let allActivityTypes = (try? sourceContext.fetch(FetchDescriptor<ActivityType>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? []
             let activeFootprints = allFootprints.filter { $0.status != .ignored }
             let existingIDs = Set(activeFootprints.flatMap { $0.photoAssetIDs })
             let liteHistory = activeFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
@@ -1329,7 +1343,11 @@ struct PhotoImportFlowModifier: ViewModifier {
                 self.isScanning = false
                 if !results.isEmpty {
                     self.scannedResults = results
-                    self.isShowingResults = true
+                    self.reviewPayload = PhotoImportReviewPayload(
+                        results: results,
+                        places: allPlaces,
+                        activityTypes: allActivityTypes
+                    )
                 } else {
                     self.showingNoResultsAlert = true
                 }
@@ -1344,8 +1362,16 @@ struct PhotoImportFlowModifier: ViewModifier {
 }
 
 extension View {
-    func photoImportFlow(isRequested: Binding<Bool>, onImported: @escaping () -> Void = {}) -> some View {
-        modifier(PhotoImportFlowModifier(isRequested: isRequested, onImported: onImported))
+    func photoImportFlow(
+        isRequested: Binding<Bool>,
+        modelContainer: ModelContainer? = nil,
+        onImported: @escaping () -> Void = {}
+    ) -> some View {
+        modifier(PhotoImportFlowModifier(
+            isRequested: isRequested,
+            modelContainer: modelContainer,
+            onImported: onImported
+        ))
     }
 }
 
@@ -1357,15 +1383,15 @@ struct ImportOverlaysModifier: ViewModifier {
     let onCancelScan: () -> Void
     func body(content: Content) -> some View {
         content
-            .alert("未发现足迹", isPresented: $showingNoResultsAlert) { Button("好", role: .cancel) { } } message: { Text("未发现包含位置信息的照片或者都已导入过。") }
-            .alert("同步成功", isPresented: $showingImportSuccessAlert) { Button("太棒了", role: .cancel) { } } message: { Text("成功寻回 \(successCount) 个足迹！") }
+            .alert("没有可导入的足迹", isPresented: $showingNoResultsAlert) { Button("完成", role: .cancel) { } } message: { Text("所选时间内没有带地点信息的新照片。") }
+            .alert("导入完成", isPresented: $showingImportSuccessAlert) { Button("完成", role: .cancel) { } } message: { Text("已导入 \(successCount) 个足迹。") }
             .overlay { if isScanning {
                 ZStack {
                     Color.black.opacity(0.2).ignoresSafeArea()
                     VStack(spacing: 20) {
                         ProgressView(value: Double(scanProgress), total: max(1, Double(scanTotal))).tint(.white).frame(width: 200)
                         VStack(spacing: 8) {
-                            Text("正在读取照片...").foregroundColor(.white).font(.headline)
+                            Text("正在查找照片中的足迹…").foregroundColor(.white).font(.headline)
                             Text("\(scanProgress) / \(scanTotal)").foregroundColor(.white.opacity(0.7)).font(.caption.monospacedDigit())
                         }
                         
@@ -1383,7 +1409,7 @@ struct ImportOverlaysModifier: ViewModifier {
                     Color.black.opacity(0.3).ignoresSafeArea()
                     VStack(spacing: 16) {
                         ProgressView().tint(.white).controlSize(.large)
-                        Text("正在存入时光足迹...").foregroundColor(.white).font(.headline)
+                        Text("正在导入足迹…").foregroundColor(.white).font(.headline)
                     }
                     .padding(30)
                     .background(RoundedRectangle(cornerRadius: 20).fill(Color.black.opacity(0.7)))
@@ -1428,23 +1454,41 @@ struct PhotoImportRangePicker: View {
     var onSelect: (Date, Date) -> Void
     var body: some View {
         NavigationStack {
-            VStack {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("从照片查找足迹")
+                    .font(.title2.bold())
+
+                Text("接下来会根据照片的拍摄时间和位置信息，查找这一年中可以导入的足迹。")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("选择年份")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 8)
+
                 Picker("年份", selection: $selectedYear) {
                     ForEach((min(earliestYear, selectedYear)...Calendar.current.component(.year, from: Date())), id: \.self) { Text("\(String(format: "%d", $0))年").tag($0) }
-                }.pickerStyle(.wheel)
+                }
+                .pickerStyle(.wheel)
+                .frame(maxWidth: .infinity)
+
                 Button {
                     let s = Calendar.current.date(from: DateComponents(year: selectedYear, month: 1, day: 1))!
                     let e = Calendar.current.date(from: DateComponents(year: selectedYear, month: 12, day: 31, hour: 23, minute: 59))!
                     onSelect(s, e)
                 } label: {
-                    Text("开始导入")
+                    Text("查找足迹")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                 }
                 .dfkPrimaryActionButtonStyle()
-                .padding(.horizontal, 16)
             }
-            .navigationTitle("寻回那年的记忆")
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() } } }
             .onAppear {
                 if let earliestDate = PhotoService.shared.getEarliestAssetDate() {
@@ -1460,13 +1504,13 @@ struct PhotoImportResultsView: View {
     @Environment(LocationManager.self) private var locationManager
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) var dismiss
-    @Query private var allPlaces: [Place]
-    @Query(sort: \ActivityType.sortOrder) private var allActivityTypes: [ActivityType]
     @State private var selectedIDs: Set<UUID> = []
     @State private var selectedFootprintForEdit: Footprint?
     @State private var didCommitImport = false
     
     let results: [Footprint]
+    let allPlaces: [Place]
+    let allActivityTypes: [ActivityType]
     let onConfirm: ([Footprint]) -> Void
     
     private var groupedResults: [(Date, [Footprint])] {
@@ -1482,8 +1526,15 @@ struct PhotoImportResultsView: View {
         return "\(year)年"
     }
     
-    init(results: [Footprint], onConfirm: @escaping ([Footprint]) -> Void) { 
+    init(
+        results: [Footprint],
+        allPlaces: [Place],
+        allActivityTypes: [ActivityType],
+        onConfirm: @escaping ([Footprint]) -> Void
+    ) {
         self.results = results
+        self.allPlaces = allPlaces
+        self.allActivityTypes = allActivityTypes
         self.onConfirm = onConfirm
         self._selectedIDs = State(initialValue: Set(results.map { $0.footprintID })) 
     }
@@ -1563,7 +1614,12 @@ struct PhotoImportResultsView: View {
             .navigationTitle("\(scanYear)的足迹")
             .navigationBarTitleDisplayMode(.inline)
             .sheet(item: $selectedFootprintForEdit) { fp in
-                FootprintModalView(footprint: fp, isDraft: true)
+                FootprintModalView(
+                    footprint: fp,
+                    allPlaces: allPlaces,
+                    activityTypes: allActivityTypes,
+                    isDraft: true
+                )
                     .environment(locationManager)
             }
             .onAppear {

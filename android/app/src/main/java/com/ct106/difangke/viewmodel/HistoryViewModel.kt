@@ -157,9 +157,13 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                     summaryMap[date] = DaySummary(
                         date = date,
                         totalDuration = fps.sumOf { it.duration },
-                        footprintCount = fps.map { (it.title ?: "").ifEmpty { it.locationHash } }.distinct().size,
+                        footprintCount = fps.map {
+                            it.placeID ?: it.address?.trim()?.takeIf(String::isNotEmpty) ?: it.locationHash
+                        }.distinct().size,
                         highlightCount = fps.count { it.isHighlight == true },
-                        highlightTitle = fps.firstOrNull { it.isHighlight == true }?.title,
+                        highlightTitle = fps.firstOrNull { it.isHighlight == true }?.let {
+                            it.address?.takeIf(String::isNotBlank) ?: it.cityName?.takeIf(String::isNotBlank)
+                        },
                         hasConfirmed = fps.any { it.aiAnalyzed },
                         hasCandidate = fps.any { !it.aiAnalyzed },
                         timelineIcons = icons,

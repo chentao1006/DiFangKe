@@ -7,7 +7,6 @@ import androidx.compose.runtime.*
 import com.ct106.difangke.data.db.entity.DailyInsightEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
-import com.ct106.difangke.data.model.FootprintTitles
 import com.google.gson.Gson
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
@@ -162,7 +161,7 @@ class OpenAIService private constructor() {
         placeName: String? = null,
         activityName: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
-        if (fp.aiAnalyzed || FootprintTitles.isGeneric(fp.title ?: "")) return@withContext false
+        if (fp.aiAnalyzed) return@withContext false
 
         val startStr = TIME_FMT.format(fp.startTime)
         val endStr = TIME_FMT.format(fp.endTime)
@@ -189,13 +188,12 @@ class OpenAIService private constructor() {
         地点与活动信息：$promptSnippet
 
         请根据以上信息进行分析并输出：
-        1. 简短标题：10字以内，反映地点内涵或活动属性，严禁使用“地点记录”、“停留”、“发现足迹”等通用废话。
-        2. 精彩程度：0.0 ~ 1.0。
-        3. 足迹备注：20字以内，要求富有生活气息、温情且具有洞察力。
+        1. 精彩程度：0.0 ~ 1.0。
+        2. 足迹备注：20字以内，要求富有生活气息、温情且具有洞察力。
            【注意】：即便信息极少，也要尝试从时间段提取美感，绝对禁止出现“没有详情”、“具体活动不明”等死板表述。
 
         返回格式（严格JSON）：
-        { "title": "...", "score": 0.85, "reason": "..." }
+        { "score": 0.85, "reason": "..." }
         """.trimIndent()
 
         val body = mapOf(
@@ -214,13 +212,9 @@ class OpenAIService private constructor() {
             val cleanStr = content.replace("```json", "").replace("```", "").trim()
             val resultJson = JSONObject(cleanStr)
 
-            val newTitle = resultJson.optString("title", "新足迹")
-            val reason = resultJson.optString("reason", "")
             val score = resultJson.optDouble("score", 0.0).toFloat()
 
             val updatedFp = fp.copy(
-                // title = newTitle,
-                // reason = reason,
                 aiScore = score,
                 aiAnalyzed = true
             )
@@ -276,7 +270,7 @@ class OpenAIService private constructor() {
             val locationText = when {
                 matchedPlace != null && matchedPlace.name.isNotBlank() -> matchedPlace.name.trim()
                 !fp.address.isNullOrBlank() && fp.address != "null" && fp.address != "[]" -> fp.address.trim()
-                !fp.title.isNullOrBlank() && !FootprintTitles.isGeneric(fp.title) -> fp.title.trim()
+                !fp.cityName.isNullOrBlank() -> fp.cityName.trim()
                 else -> ""
             }
             

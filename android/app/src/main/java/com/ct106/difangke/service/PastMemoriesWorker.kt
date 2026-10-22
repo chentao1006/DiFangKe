@@ -117,7 +117,9 @@ class PastMemoriesWorker(
             val cal = Calendar.getInstance().apply { time = highlight.startTime }
             val fpYear = cal.get(Calendar.YEAR)
             val yearsAgo = currentYear - fpYear
-            val placeName = (highlight.title ?: "").ifEmpty { highlight.address ?: "某个地方" }
+            val placeName = highlight.address?.takeIf { it.isNotBlank() }
+                ?: highlight.cityName?.takeIf { it.isNotBlank() }
+                ?: "某个地方"
 
             NotificationHelper.sendPastMemoriesNotification(
                 context,

@@ -320,7 +320,7 @@ internal fun buildTransportMapMarkers(items: List<TimelineItem.TransportItem>): 
         )
     }
 
-private fun loadPinThumbnail(context: android.content.Context, uriString: String): Bitmap? = runCatching {
+internal fun loadPinThumbnail(context: android.content.Context, uriString: String): Bitmap? = runCatching {
     val uri = Uri.parse(uriString)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && uri.scheme == "content") {
         context.contentResolver.loadThumbnail(uri, Size(160, 160), null)

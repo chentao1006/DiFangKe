@@ -1553,7 +1553,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     /// Automatic mode must keep a cheap standard-location session alive while
     /// stationary. Region/Visit/significant-change wakeups are intentionally
-    /// coarse and can arrive only after the user has travelled hundreds of
+    /// coarse and can arrive only after the user has moved hundreds of
     /// metres; they are backups, not a substitute for detecting departure.
     private func applyAutomaticStationaryDepartureWatchSettings() {
         applyPowerSavingLocationSettings()
@@ -3090,10 +3090,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
             let previousDistance = previousCandidate.distance(from: startLoc)
             let outwardProgress = distance - previousDistance
-            let travelledDistance = location.distance(from: previousCandidate)
-            let averageSpeed = travelledDistance / interval
+            let tripDistance = location.distance(from: previousCandidate)
+            let averageSpeed = tripDistance / interval
             return outwardProgress >= AppConfig.shared.departureConfirmationMinProgress
-                && travelledDistance >= AppConfig.shared.departureConfirmationMinProgress
+                && tripDistance >= AppConfig.shared.departureConfirmationMinProgress
                 && averageSpeed >= AppConfig.shared.departureConfirmationMinAverageSpeed
         }
 
@@ -4879,7 +4879,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         } else {
             // 创建一个新地点
             // 当用户忽略地点时，我们应该以“地址”作为地点的标识，而不应混入特定单次足迹的“标题”。
-            // 比如足迹标题可能是“在星巴克喝咖啡”，但忽略该地点应该是针对这个坐标/地址，后续所有该地的记录都应被忽略。
+            // 忽略地点应针对坐标/地址，后续所有该地的记录都应被忽略。
             let name = (footprint.address ?? "未命名地点").isEmpty ? "已忽略地点" : (footprint.address ?? "已忽略地点")
             place = Place(
                 name: name,
@@ -6073,7 +6073,18 @@ final class CurrentLiveActivityManager {
             < AppConfig.shared.currentLocationFreshnessThreshold
             ? location.timestamp
             : now
-        let startedAt = provisionalTransportStartedAt ?? freshLocationStart
+        let detectedMovementAt = manager.uiMovingStartedAt ?? freshLocationStart
+        var startEvidence = manager.allTodayPoints.filter {
+            $0.timestamp <= now && CLLocationCoordinate2DIsValid($0.coordinate)
+        }
+        if startEvidence.last.map({ location.timestamp > $0.timestamp }) ?? true {
+            startEvidence.append(location)
+        }
+        let inferredStart = PersistentTimelineBuilder.inferredTransportStart(
+            locations: startEvidence,
+            detectedMovementAt: detectedMovementAt
+        )
+        let startedAt = provisionalTransportStartedAt ?? inferredStart
         if provisionalTransportStartedAt == nil {
             provisionalTransportStartedAt = startedAt
             provisionalTransportStartLocation = lastState?.kind == .footprint

@@ -61,7 +61,9 @@ class WFootprint(
         for (p in other) if (!photos.contains(p)) photos.add(p)
     }
 
-    fun toEntity(): FootprintEntity = (original ?: FootprintEntity(footprintID = id, title = "")).copy(
+    fun toEntity(): FootprintEntity = (original ?: FootprintEntity(footprintID = id)).copy(
+        title = null,
+        isTitleEditedByHand = false,
         footprintID = id,
         date = date,
         startTime = startTime,

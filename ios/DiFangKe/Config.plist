@@ -224,6 +224,12 @@
     <!-- 同步与业务逻辑参数 -->
     <key>CLOUD_SYNC_LOOKBACK_DAYS</key>
     <integer>7</integer>
+	<key>TRIP_SCAN_BATCH_DAYS</key>
+	<integer>14</integer>
+	<key>TRIP_SCAN_INTERVAL_HOURS</key>
+	<integer>24</integer>
+	<key>TRIP_MAXIMUM_DURATION_DAYS</key>
+	<integer>31</integer>
     <key>TAG_INHERITANCE_DISTANCE</key>
     <real>150</real>
     <key>TIMELINE_OVERLAP_TIME_TOLERANCE</key>

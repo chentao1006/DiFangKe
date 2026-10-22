@@ -116,7 +116,11 @@ struct StableActivityPickerPopover: View {
             }
             .padding(.vertical, 8)
         }
-        .frame(width: 300, height: min(480, pickerHeight))
+        .frame(width: 300)
+        .frame(
+            idealHeight: min(480, pickerHeight),
+            maxHeight: min(480, pickerHeight)
+        )
         .presentationCompactAdaptation(.popover)
     }
 
@@ -173,28 +177,72 @@ struct SuggestionsMenu<Label: View>: View {
     @ViewBuilder var label: () -> Label
     
     @State private var presentation: LocationSuggestionsPresentation?
+    @State private var suggestions: [LocationSuggestion] = []
+    @State private var hasLoaded = false
 
     var body: some View {
-        Button {
-            // Capture the editing anchor and selection target once per opening.
-            // Live location updates must not restart or reorder an open picker.
-            presentation = LocationSuggestionsPresentation(
-                coordinate: coordinate,
-                onSearchRequested: onSearchRequested,
-                onSelect: { suggestion in
-                    if let customSelected = onCustomSelection {
-                        customSelected(suggestion.name)
-                    } else {
-                        locationManager.selectSuggestion(suggestion, forOngoing: forOngoing, footprint: footprint, isDraft: isDraft)
+        Menu {
+            Button("搜索其他地点...") {
+                (presentation?.onSearchRequested ?? onSearchRequested)()
+            }
+
+            Divider()
+
+            suggestionItems
+                // Menu content only exists while the native menu is open.
+                // The presentation snapshot prevents live location updates
+                // from changing its coordinate or selection target mid-open.
+                .task {
+                    let presentation = makePresentation()
+                    self.presentation = presentation
+                    suggestions = []
+                    hasLoaded = false
+                    guard let coordinate = presentation.coordinate else {
+                        hasLoaded = true
+                        return
                     }
-                    onSelectionApplied?()
+                    let results = await locationManager.fetchNearbySuggestions(at: coordinate)
+                    guard !Task.isCancelled, self.presentation?.id == presentation.id else { return }
+                    suggestions = results
+                    hasLoaded = true
                 }
-            )
         } label: {
             label()
         }
-        .popover(item: $presentation) { presentation in
-            LocationSuggestionsPopover(locationManager: locationManager, presentation: presentation)
+    }
+
+    private func makePresentation() -> LocationSuggestionsPresentation {
+        LocationSuggestionsPresentation(
+            coordinate: coordinate,
+            onSearchRequested: onSearchRequested,
+            onSelect: { suggestion in
+                if let customSelected = onCustomSelection {
+                    customSelected(suggestion.name)
+                } else {
+                    locationManager.selectSuggestion(
+                        suggestion,
+                        forOngoing: forOngoing,
+                        footprint: footprint,
+                        isDraft: isDraft
+                    )
+                }
+                onSelectionApplied?()
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var suggestionItems: some View {
+        if !hasLoaded {
+            Text("正在寻找附近地点...")
+        } else if suggestions.isEmpty {
+            Text("未发现附近建议")
+        } else {
+            ForEach(suggestions) { suggestion in
+                Button(suggestion.name) {
+                    presentation?.onSelect(suggestion)
+                }
+            }
         }
     }
 }
@@ -204,80 +252,6 @@ private struct LocationSuggestionsPresentation: Identifiable {
     let coordinate: CLLocationCoordinate2D?
     let onSearchRequested: () -> Void
     let onSelect: (LocationSuggestion) -> Void
-}
-
-private struct LocationSuggestionsPopover: View {
-    @Environment(\.dismiss) private var dismiss
-    let locationManager: LocationManager
-    let presentation: LocationSuggestionsPresentation
-
-    // Owned by this presentation, independent of the timeline's live state.
-    @State private var suggestions: [LocationSuggestion] = []
-    @State private var hasLoaded = false
-    @State private var requestsSearch = false
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                Button {
-                    // Present search only after this popover has fully left the
-                    // hierarchy; a sheet requested mid-dismissal can be dropped.
-                    requestsSearch = true
-                    dismiss()
-                } label: {
-                    row("搜索其他地点...")
-                }
-                Divider().padding(.vertical, 4)
-
-                if !hasLoaded {
-                    row("正在寻找附近地点...")
-                        .foregroundStyle(.secondary)
-                } else if suggestions.isEmpty {
-                    row("未发现附近建议")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(suggestions) { suggestion in
-                        Button {
-                            presentation.onSelect(suggestion)
-                            dismiss()
-                        } label: {
-                            row(suggestion.name)
-                        }
-                    }
-                }
-            }
-            .padding(.vertical, 8)
-        }
-        .buttonStyle(.plain)
-        .frame(width: 300, height: min(480, CGFloat(max(1, suggestions.count) + 1) * 56 + 24))
-        .presentationCompactAdaptation(.popover)
-        .onDisappear {
-            if requestsSearch {
-                presentation.onSearchRequested()
-            }
-        }
-        .task {
-            // Empty results are also final for this opening. Never clear a
-            // loaded list or reload it when the parent receives new coordinates.
-            guard !hasLoaded else { return }
-            guard let coordinate = presentation.coordinate else {
-                hasLoaded = true
-                return
-            }
-            let results = await locationManager.fetchNearbySuggestions(at: coordinate)
-            guard !Task.isCancelled else { return }
-            suggestions = results
-            hasLoaded = true
-        }
-    }
-
-    private func row(_ title: String) -> some View {
-        Text(title)
-            .font(.body)
-            .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-            .padding(.horizontal, 16)
-            .contentShape(Rectangle())
-    }
 }
 
 struct LocationSearchSheet: View {

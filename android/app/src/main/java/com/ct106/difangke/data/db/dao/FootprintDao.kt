@@ -14,6 +14,9 @@ interface FootprintDao {
         @Query("SELECT * FROM footprints WHERE statusValue != 'ignored' ORDER BY startTime DESC")
         suspend fun getAll(): List<FootprintEntity>
 
+        @Query("SELECT * FROM footprints WHERE statusValue != 'ignored' ORDER BY startTime ASC LIMIT 1")
+        suspend fun getEarliest(): FootprintEntity?
+
         @Query(
                 "SELECT * FROM footprints WHERE startTime < :end AND endTime > :start AND statusValue != 'ignored' ORDER BY startTime ASC"
         )
@@ -99,6 +102,7 @@ interface FootprintDao {
         @Query("DELETE FROM footprints WHERE startTime >= :start AND startTime < :end")
         suspend fun deleteBetween(start: Date, end: Date)
 
+        // 保留旧字段条件，只为避免清理历史候选足迹时删除旧版本中曾手动编辑过的记录。
         @Query(
                 "DELETE FROM footprints WHERE startTime >= :start AND startTime < :end AND statusValue = 'candidate' AND isTitleEditedByHand = 0"
         )

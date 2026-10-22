@@ -234,6 +234,7 @@ struct TimelineScene<Content: View>: View {
     @State private var isReloadingTimelineExternally = false
     @State private var mapInteractionEnableTask: Task<Void, Never>?
     @State private var selectedFootprint: Footprint?
+    @State private var selectedFootprintStartsExpanded = false
     @State private var timelineDetentBeforeFootprintDetail: PresentationDetent?
     @State private var mapTapDetentBeforeCollapse: PresentationDetent?
     @State private var loadedFootprintCameraKey: FootprintCameraSourceKey?
@@ -372,6 +373,7 @@ struct TimelineScene<Content: View>: View {
             isCalendarScrollLocked: $isCalendarScrollLocked,
             isSideBySide: isSideBySide,
             selectedFootprint: $selectedFootprint,
+            selectedFootprintStartsExpanded: $selectedFootprintStartsExpanded,
             selectedTransport: $selectedTransport,
             selectedFootprintGroup: $selectedFootprintGroup,
             onFootprintGroupCancelled: restoreTimelineDetentAfterFootprintDetail,
@@ -670,6 +672,7 @@ struct TimelineScene<Content: View>: View {
 
     private func handleSelectedFootprintChange(_ newFootprint: Footprint?) {
         guard let footprint = newFootprint else {
+            selectedFootprintStartsExpanded = false
             visibleMapUpdateTask?.cancel()
             renderedSelectedFootprintID = nil
             restoreTimelineDetentAfterFootprintDetail()
@@ -1995,6 +1998,7 @@ private struct TimelineView: View {
     @Binding var isCalendarScrollLocked: Bool
     let isSideBySide: Bool
     @Binding var selectedFootprint: Footprint?
+    @Binding var selectedFootprintStartsExpanded: Bool
     @Binding var selectedTransport: Transport?
     /// Presented here rather than by the map: the map lives in the app
     /// window, beneath the records window that hosts every sheet.
@@ -2014,6 +2018,7 @@ private struct TimelineView: View {
     /// Starts the shared photo import flow here, without leaving Records.
     @State private var isPhotoImportRequested = false
     @Binding var selectedMapPhotoAssetID: String?
+    @State private var selectedMapPhotoAssetIDs: [String] = []
 
     private var isCollapsed: Bool {
         !isSideBySide && timelineDetent == .height(collapsedTimelineDetentHeight)
@@ -2277,9 +2282,12 @@ private struct TimelineView: View {
         .photoImportFlow(isRequested: $isPhotoImportRequested)
         .fullScreenCover(item: Binding(
             get: { selectedMapPhotoAssetID.map { IdentifiableString(value: $0) } },
-            set: { selectedMapPhotoAssetID = $0?.value }
+            set: {
+                selectedMapPhotoAssetID = $0?.value
+                if $0 == nil { selectedMapPhotoAssetIDs = [] }
+            }
         )) { item in
-            let assetIDs = selectedFootprint?.photoAssetIDs ?? [item.value]
+            let assetIDs = selectedMapPhotoAssetIDs.isEmpty ? [item.value] : selectedMapPhotoAssetIDs
             let currentIndex = assetIDs.firstIndex(of: item.value) ?? 0
             PhotoFullscreenView(assetIDs: assetIDs, currentIndex: currentIndex)
         }
@@ -2682,6 +2690,8 @@ private struct TimelineView: View {
             footprint: footprint,
             autoFocus: false,
             isInline: isInline,
+            startsExpanded: selectedFootprintStartsExpanded,
+            scrollsToPhotosOnAppear: selectedFootprintStartsExpanded,
             onDismiss: { didChange in
                 guard didChange else { return }
                 invalidateAndRefreshTimeline(containing: footprint.startTime)
@@ -3394,12 +3404,23 @@ private struct TimelineView: View {
                         showsContinuation: true,
                         canMergeItem: canMergeAdjacentTimelineItem(item, at: index, in: items),
                         onTap: {
+                            selectedFootprintStartsExpanded = false
                             withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
                                 switch item {
                                 case .footprint(let footprint): selectedFootprint = storedFootprint(matching: footprint)
                                 case .transport(let transport): selectedTransport = transport
                                 }
                             }
+                        },
+                        onPhotoTap: { assetID in
+                            guard case .footprint(let footprint) = item else { return }
+                            selectedMapPhotoAssetIDs = PhotoService.shared.displayableAssetIDs(footprint.photoAssetIDs)
+                            selectedMapPhotoAssetID = assetID
+                        },
+                        onShowAllPhotos: {
+                            guard case .footprint(let footprint) = item else { return }
+                            selectedFootprintStartsExpanded = true
+                            selectedFootprint = storedFootprint(matching: footprint)
                         },
                         onMerge: {
                             switch item {
@@ -4985,8 +5006,43 @@ enum ContinuousTimelineLayout {
     static let minItemSpacing: CGFloat = 12
     static let maxItemSpacing: CGFloat = 160
     static let photoThumbnailSize: CGFloat = 58
+    static let multiPhotoGridMaxWidth: CGFloat = 252
     static let dateSeparatorOffset: CGFloat = -12
     static let lineColor = Color.secondary.opacity(0.35)
+}
+
+struct TimelineFootprintMarker: View {
+    let icon: String
+    let tint: Color
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color(uiColor: .systemBackground))
+                .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
+            Circle()
+                .fill(LinearGradient(colors: [tint.lighter(by: 0.25), tint], startPoint: .top, endPoint: .bottom))
+                .padding(2.5)
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: ContinuousTimelineLayout.markerSize, height: ContinuousTimelineLayout.markerSize)
+    }
+}
+
+struct TimelineTransportMarker: View {
+    let icon: String
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(Color.dfkAccent)
+            .frame(width: ContinuousTimelineLayout.markerSize - 4, height: ContinuousTimelineLayout.markerSize - 4)
+            .background(Color(uiColor: .systemBackground), in: Circle())
+            .overlay(Circle().strokeBorder(Color.dfkAccent, lineWidth: 1.2))
+            .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
+    }
 }
 
 private struct DottedTimelineSeparator: View {
@@ -5109,6 +5165,8 @@ private struct ContinuousTimelineRow: View {
     let showsContinuation: Bool
     let canMergeItem: Bool
     let onTap: () -> Void
+    let onPhotoTap: (String) -> Void
+    let onShowAllPhotos: () -> Void
     let onMerge: () -> Void
     let onSplit: () -> Void
     let onToggleFavorite: () -> Void
@@ -5118,6 +5176,9 @@ private struct ContinuousTimelineRow: View {
     @State private var isResolvingUnknownPlace = false
     @State private var isPlaceTitleBreathing = false
     @State private var activityPickerPresentation: ActivityPickerPresentation?
+    @State private var displayablePhotoAssetIDs: [String] = []
+    @State private var didResolvePhotoAssetIDs = false
+    @State private var didRequestPhotoLink = false
 
     var body: some View {
         HStack(alignment: .top, spacing: ContinuousTimelineLayout.markerSpacing) {
@@ -5180,13 +5241,16 @@ private struct ContinuousTimelineRow: View {
             }
             .frame(width: ContinuousTimelineLayout.markerSize)
 
-            HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 if item.isTransport {
                     Text(transportLineText)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .padding(.top, 5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: onTap)
                 } else {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(title)
@@ -5208,45 +5272,36 @@ private struct ContinuousTimelineRow: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onTap)
                 }
 
-                Spacer(minLength: 0)
-
-                if !photoAssetIDs.isEmpty {
-                    ZStack(alignment: .topTrailing) {
-                        ContinuousTimelinePhotoThumbnail(assetIDs: photoAssetIDs)
-                            .frame(width: ContinuousTimelineLayout.photoThumbnailSize, height: ContinuousTimelineLayout.photoThumbnailSize)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .strokeBorder(Color.primary.opacity(0.08))
-                            )
-
-                        if photoCount > 1 {
-                            Text("\(photoCount)")
-                                .font(.caption2.weight(.bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .background(.black.opacity(0.58), in: Capsule())
-                                .padding(4)
-                        }
-                    }
+                if !timelinePhotoAssetIDs.isEmpty {
+                    TimelinePhotoGrid(
+                        assetIDs: timelinePhotoAssetIDs,
+                        onPhotoTap: onPhotoTap,
+                        onOverflowTap: onShowAllPhotos
+                    )
                 }
             }
             .padding(.bottom, bottomSpacing)
         }
         .frame(minHeight: 52, alignment: .top)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
         .task(id: unresolvedFootprintID) {
             await retryUnknownFootprintLocationIfNeeded()
+        }
+        .task(id: photoAssetIDs) {
+            didResolvePhotoAssetIDs = false
+            displayablePhotoAssetIDs = PhotoService.shared.displayableAssetIDs(photoAssetIDs)
+            didResolvePhotoAssetIDs = true
         }
         .onAppear {
             // Same as FootprintCardView: associate photos taken (or synced)
             // after the footprint was saved, so rows show them and photo
             // import excludes them, without opening the detail first.
-            if case .footprint(let footprint) = item {
+            if !didRequestPhotoLink, case .footprint(let footprint) = item {
+                didRequestPhotoLink = true
                 locationManager.linkPhotos(to: footprint, context: modelContext)
             }
         }
@@ -5343,34 +5398,9 @@ private struct ContinuousTimelineRow: View {
     @ViewBuilder
     private var timelineMarker: some View {
         if case .footprint = item {
-            ZStack {
-                Circle()
-                    .fill(Color(uiColor: .systemBackground))
-                    .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
-                    .frame(width: markerSize, height: markerSize)
-
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            gradient: Gradient(colors: [tint.lighter(by: 0.25), tint]),
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .frame(width: markerSize - 5, height: markerSize - 5)
-
-                Image(systemName: icon)
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.white)
-            }
+            TimelineFootprintMarker(icon: icon, tint: tint)
         } else {
-            Image(systemName: icon)
-                .font(markerIconFont)
-                .foregroundStyle(markerForeground)
-                .frame(width: markerSize, height: markerSize)
-                .background(markerBackground, in: Circle())
-                .overlay(Circle().strokeBorder(markerStroke, lineWidth: markerStrokeWidth))
-                .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
+            TimelineTransportMarker(icon: icon)
         }
     }
 
@@ -5473,9 +5503,11 @@ private struct ContinuousTimelineRow: View {
         return footprint.photoAssetIDs
     }
 
-    private var photoCount: Int {
-        guard case .footprint(let footprint) = item else { return 0 }
-        return footprint.photoAssetIDs.count
+    /// LazyVStack may recreate an off-screen row. Keep its photo layout present
+    /// while the displayable-ID check runs so recycling the row cannot collapse
+    /// and then expand its height.
+    private var timelinePhotoAssetIDs: [String] {
+        didResolvePhotoAssetIDs ? displayablePhotoAssetIDs : photoAssetIDs
     }
 
     private var isHighlightedFootprint: Bool {
@@ -5545,11 +5577,15 @@ private struct ContinuousTimelineRow: View {
     }
 }
 
-private struct ContinuousTimelinePhotoThumbnail: View {
+struct ContinuousTimelinePhotoThumbnail: View {
     /// All of the footprint's photos; the thumbnail shows the latest taken.
     let assetIDs: [String]
+    var targetSide: CGFloat = ContinuousTimelineLayout.photoThumbnailSize
+    var fitsOriginalAspectRatio = false
+    var onImageSizeChange: ((CGSize) -> Void)? = nil
     @State private var image: UIImage?
     @State private var requestID: PHImageRequestID?
+    @State private var requestGeneration = UUID()
 
     var body: some View {
         ZStack {
@@ -5558,65 +5594,219 @@ private struct ContinuousTimelinePhotoThumbnail: View {
             if let image {
                 Image(uiImage: image)
                     .resizable()
-                    .scaledToFill()
+                    .aspectRatio(contentMode: fitsOriginalAspectRatio ? .fit : .fill)
             } else {
                 Image(systemName: "photo")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
         }
+        .aspectRatio(
+            fitsOriginalAspectRatio ? originalAspectRatio : 1,
+            contentMode: .fit
+        )
         .clipped()
         .task(id: assetIDs) {
             requestThumbnail()
         }
         .onDisappear {
             cancelRequest()
+            image = nil
         }
+    }
+
+    private var originalAspectRatio: CGFloat {
+        guard let image, image.size.height > 0 else { return 4 / 3 }
+        return image.size.width / image.size.height
     }
 
     private func requestThumbnail() {
         cancelRequest()
         image = nil
+        let generation = UUID()
+        requestGeneration = generation
 
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return }
 
         guard let asset = PhotoService.shared.latestAsset(among: assetIDs) else { return }
 
-        let scale = UIScreen.main.scale
-        let side = ContinuousTimelineLayout.photoThumbnailSize * scale
+        let side = targetSide * (fitsOriginalAspectRatio ? 3 : 2)
+        let qualityKey = fitsOriginalAspectRatio ? "high-v2" : "fast"
+        let cacheKey = "\(asset.localIdentifier)|\(Int(side.rounded()))|\(fitsOriginalAspectRatio ? "fit" : "fill")|\(qualityKey)"
+        if let cached = TimelinePhotoThumbnailCache.shared.image(for: cacheKey) {
+            image = cached
+            onImageSizeChange?(cached.size)
+            return
+        }
         let options = PHImageRequestOptions()
-        options.deliveryMode = .opportunistic
-        options.resizeMode = .fast
+        options.deliveryMode = fitsOriginalAspectRatio ? .highQualityFormat : .fastFormat
+        options.resizeMode = fitsOriginalAspectRatio ? .exact : .fast
         options.isNetworkAccessAllowed = true
 
         let manager = PHImageManager.default()
         requestID = manager.requestImage(
             for: asset,
             targetSize: CGSize(width: side, height: side),
-            contentMode: .aspectFill,
+            contentMode: fitsOriginalAspectRatio ? .aspectFit : .aspectFill,
             options: options
         ) { thumbnail, info in
             let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
             guard !cancelled else { return }
 
             DispatchQueue.main.async {
+                guard self.requestGeneration == generation else { return }
                 if let thumbnail {
+                    TimelinePhotoThumbnailCache.shared.setImage(thumbnail, for: cacheKey)
                     self.image = thumbnail
+                    self.onImageSizeChange?(thumbnail.size)
                 }
-                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if !isDegraded {
-                    self.requestID = nil
-                }
+                self.requestID = nil
             }
         }
     }
 
     private func cancelRequest() {
+        requestGeneration = UUID()
         if let requestID {
             PHImageManager.default().cancelImageRequest(requestID)
             self.requestID = nil
         }
+    }
+}
+
+@MainActor
+private final class TimelinePhotoThumbnailCache {
+    static let shared = TimelinePhotoThumbnailCache()
+    private let images = NSCache<NSString, UIImage>()
+    private let aspectRatios = NSCache<NSString, NSNumber>()
+
+    private init() {
+        images.countLimit = 72
+        images.totalCostLimit = 24 * 1024 * 1024
+    }
+
+    func image(for key: String) -> UIImage? {
+        images.object(forKey: key as NSString)
+    }
+
+    func setImage(_ image: UIImage, for key: String) {
+        let cost = (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0)
+        images.setObject(image, forKey: key as NSString, cost: cost)
+    }
+
+    func aspectRatio(for assetID: String) -> CGFloat? {
+        aspectRatios.object(forKey: assetID as NSString).map { CGFloat(truncating: $0) }
+    }
+
+    func setAspectRatio(_ aspectRatio: CGFloat, for assetID: String) {
+        aspectRatios.setObject(NSNumber(value: Double(aspectRatio)), forKey: assetID as NSString)
+    }
+}
+
+struct TimelinePhotoGrid: View {
+    let assetIDs: [String]
+    let onPhotoTap: (String) -> Void
+    let onOverflowTap: () -> Void
+    @State private var measuredSinglePhotoAspectRatio: CGFloat?
+
+    private var columns: [GridItem] {
+        let count = assetIDs.count == 1 || assetIDs.count == 4 ? 2 : min(3, assetIDs.count)
+        return Array(repeating: GridItem(.flexible(), spacing: 4), count: count)
+    }
+
+    private var visibleAssetIDs: [String] { Array(assetIDs.prefix(9)) }
+
+    var body: some View {
+        Group {
+            if let assetID = assetIDs.first, assetIDs.count == 1 {
+                Button {
+                    onPhotoTap(assetID)
+                } label: {
+                    ContinuousTimelinePhotoThumbnail(
+                        assetIDs: [assetID],
+                        targetSide: 300,
+                        fitsOriginalAspectRatio: true,
+                        onImageSizeChange: { size in
+                            guard size.width > 0, size.height > 0 else { return }
+                            let ratio = size.width / size.height
+                            TimelinePhotoThumbnailCache.shared.setAspectRatio(ratio, for: assetID)
+                            guard abs(singlePhotoAspectRatio - ratio) > 0.01 else { return }
+                            measuredSinglePhotoAspectRatio = ratio
+                        }
+                    )
+                    .frame(
+                        width: singlePhotoSize.width,
+                        height: singlePhotoSize.height,
+                        alignment: .leading
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.06))
+                    }
+                }
+                .buttonStyle(.plain)
+                .frame(
+                    width: singlePhotoSize.width,
+                    height: singlePhotoSize.height,
+                    alignment: .leading
+                )
+            } else {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 4) {
+                    ForEach(Array(visibleAssetIDs.enumerated()), id: \.offset) { index, assetID in
+                        Button {
+                            if index == 8 && assetIDs.count > 9 {
+                                onOverflowTap()
+                            } else {
+                                onPhotoTap(assetID)
+                            }
+                        } label: {
+                            Color.clear
+                                .aspectRatio(1, contentMode: .fit)
+                                .overlay {
+                                    ContinuousTimelinePhotoThumbnail(
+                                        assetIDs: [assetID],
+                                        targetSide: 160
+                                    )
+                                }
+                                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .strokeBorder(Color.primary.opacity(0.06))
+                                }
+                                .overlay {
+                                    if index == 8 && assetIDs.count > 9 {
+                                        ZStack {
+                                            Color.black.opacity(0.48)
+                                            Text("\(assetIDs.count - 9)+")
+                                                .font(.title3.bold())
+                                                .foregroundStyle(.white)
+                                        }
+                                    }
+                                }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .frame(maxWidth: ContinuousTimelineLayout.multiPhotoGridMaxWidth, alignment: .leading)
+            }
+        }
+        .onChange(of: assetIDs) { _, _ in
+            measuredSinglePhotoAspectRatio = nil
+        }
+    }
+
+    private var singlePhotoAspectRatio: CGFloat {
+        if let measuredSinglePhotoAspectRatio { return measuredSinglePhotoAspectRatio }
+        guard let assetID = assetIDs.first else { return 4 / 3 }
+        return TimelinePhotoThumbnailCache.shared.aspectRatio(for: assetID) ?? 4 / 3
+    }
+
+    private var singlePhotoSize: CGSize {
+        let ratio = max(0.01, singlePhotoAspectRatio)
+        let width = min(ContinuousTimelineLayout.multiPhotoGridMaxWidth, 220 * ratio)
+        return CGSize(width: width, height: width / ratio)
     }
 }
 
@@ -5848,7 +6038,7 @@ private extension View {
 
 }
 
-private extension TimeInterval {
+extension TimeInterval {
     var formattedTimelineDuration: String {
         let totalMinutes = max(1, Int(self / 60))
         let hours = totalMinutes / 60

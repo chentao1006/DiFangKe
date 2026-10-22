@@ -1334,7 +1334,7 @@ class TimelineBuilder {
 
     /// An automatic trip starts from the previous confirmed stay even when
     /// low-power tracking does not deliver another fix until the user has
-    /// already travelled far away. Keep the first observed fix as route
+    /// already moved far away. Keep the first observed fix as route
     /// evidence and prepend the stay as synthetic (dashed) geometry.
     static func anchoringAutomaticTransportStart(
         _ points: [CodableCoordinate],
@@ -2490,13 +2490,13 @@ class PersistentTimelineBuilder {
                                isStableStayBoundary: !next.includesTransport
                            )]
                     // With no observed route, the whole footprint-to-footprint
-                    // gap is not evidence of travel. Bias the uncertain start
-                    // toward arrival using a conservative minimum travel pace.
-                    let estimatedTravelTime = straightDist / max(
+                    // gap is not evidence of a trip. Bias the uncertain start
+                    // toward arrival using a conservative minimum trip pace.
+                    let estimatedTripTime = straightDist / max(
                         AppConfig.shared.transportUnobservedMinSpeed,
                         AppConfig.shared.transportDepartureMinimumSpeed
                     )
-                    actualStartTime = max(gapStart, gapEnd.addingTimeInterval(-estimatedTravelTime))
+                    actualStartTime = max(gapStart, gapEnd.addingTimeInterval(-estimatedTripTime))
                 }
 
 
@@ -4130,6 +4130,67 @@ class PersistentTimelineBuilder {
         let inferredStartTime: Date
     }
 
+    /// Use the same bounded departure backfill as automatic transport records
+    /// while the current trip is still provisional.
+    static func inferredTransportStart(
+        locations: [CLLocation],
+        detectedMovementAt: Date
+    ) -> Date {
+        let ordered = locations
+            .filter { CLLocationCoordinate2DIsValid($0.coordinate) }
+            .sorted { $0.timestamp < $1.timestamp }
+        guard !ordered.isEmpty else { return detectedMovementAt }
+
+        let detectionIndex = ordered.lastIndex {
+            $0.timestamp <= detectedMovementAt
+        } ?? 0
+        guard detectionIndex > 0 else {
+            return ordered[detectionIndex].timestamp
+        }
+        return inferredDepartureStart(
+            previousLocation: ordered[detectionIndex - 1],
+            movementPoints: Array(ordered[detectionIndex...])
+        )
+    }
+
+    private static func inferredDepartureStart(
+        previousLocation: CLLocation,
+        movementPoints: [CLLocation]
+    ) -> Date {
+        guard let detectedMovement = movementPoints.first else {
+            return previousLocation.timestamp
+        }
+        let detectedMovementTime = detectedMovement.timestamp
+        let sampleEnd = detectedMovementTime.addingTimeInterval(
+            AppConfig.shared.transportDepartureSpeedSampleDuration
+        )
+        let speedSamples = movementPoints.filter { $0.timestamp <= sampleEnd }
+        let sampleDuration = (speedSamples.last?.timestamp ?? detectedMovementTime)
+            .timeIntervalSince(detectedMovementTime)
+        let calculatedSpeed = sampleDuration > 0 && speedSamples.count >= 2
+            ? TimelineBuilder.calculateDistance(speedSamples) / sampleDuration
+            : 0
+        let reportedSpeed = speedSamples.map(\.speed).filter { $0 >= 0 }.max() ?? 0
+        let measuredSpeed = max(calculatedSpeed, reportedSpeed)
+        guard measuredSpeed >= AppConfig.shared.transportDepartureMinimumSpeed else {
+            return detectedMovementTime
+        }
+        let locationUncertainty = max(0, detectedMovement.horizontalAccuracy)
+            + max(0, previousLocation.horizontalAccuracy)
+        let distanceAtDetection = max(
+            0,
+            detectedMovement.distance(from: previousLocation) - locationUncertainty
+        )
+        let backfillDuration = min(
+            distanceAtDetection / measuredSpeed * AppConfig.shared.transportDepartureBackfillFraction,
+            AppConfig.shared.transportDepartureMaximumBackfillDuration
+        )
+        return max(
+            previousLocation.timestamp,
+            detectedMovementTime.addingTimeInterval(-backfillDuration)
+        )
+    }
+
     private static func transportObservationAfterDormantGap(_ points: [CLLocation]) -> TransportObservation {
         guard let first = points.min(by: { $0.timestamp < $1.timestamp }) else {
             return TransportObservation(points: [], inferredStartTime: .distantPast)
@@ -4157,35 +4218,9 @@ class PersistentTimelineBuilder {
             }
 
             let movementPoints = Array(ordered[index...])
-            let detectedMovementTime = movementPoints[0].timestamp
-            let sampleEnd = detectedMovementTime.addingTimeInterval(
-                AppConfig.shared.transportDepartureSpeedSampleDuration
-            )
-            let speedSamples = movementPoints.filter { $0.timestamp <= sampleEnd }
-            let sampleDuration = (speedSamples.last?.timestamp ?? detectedMovementTime)
-                .timeIntervalSince(detectedMovementTime)
-            let calculatedSpeed = sampleDuration > 0 && speedSamples.count >= 2
-                ? TimelineBuilder.calculateDistance(speedSamples) / sampleDuration
-                : 0
-            let reportedSpeed = speedSamples.map(\.speed).filter { $0 >= 0 }.max() ?? 0
-            let measuredSpeed = max(calculatedSpeed, reportedSpeed)
-            // A missing or unreliable speed is not evidence for a five-minute
-            // backfill. In that case the first moving fix is the safe start.
-            guard measuredSpeed >= AppConfig.shared.transportDepartureMinimumSpeed else {
-                return TransportObservation(points: movementPoints, inferredStartTime: detectedMovementTime)
-            }
-            let departureSpeed = measuredSpeed
-            let locationUncertainty = max(0, movementPoints[0].horizontalAccuracy)
-                + max(0, ordered[index - 1].horizontalAccuracy)
-            let distanceAtDetection = max(0,
-                movementPoints[0].distance(from: ordered[index - 1]) - locationUncertainty)
-            let backfillDuration = min(
-                distanceAtDetection / departureSpeed * AppConfig.shared.transportDepartureBackfillFraction,
-                AppConfig.shared.transportDepartureMaximumBackfillDuration
-            )
-            let inferredStart = max(
-                ordered[index - 1].timestamp,
-                detectedMovementTime.addingTimeInterval(-backfillDuration)
+            let inferredStart = inferredDepartureStart(
+                previousLocation: ordered[index - 1],
+                movementPoints: movementPoints
             )
             return TransportObservation(points: movementPoints, inferredStartTime: inferredStart)
         }

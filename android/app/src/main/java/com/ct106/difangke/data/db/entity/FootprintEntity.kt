@@ -22,6 +22,7 @@ data class FootprintEntity(
     /** JSON 编码的经度数组，对应 iOS longitudeData */
     val longitudeJson: String = "[]",
     val locationHash: String = "",
+    /** 仅为兼容既有数据库保留；当前业务不得读写，地点展示使用结构化地点字段。 */
     val title: String? = null,
     val reason: String? = null,
     val statusValue: String = "candidate",
@@ -35,6 +36,7 @@ data class FootprintEntity(
     val isHighlight: Boolean? = null,
     val isPlaceSuggestionIgnored: Boolean = false,
     val aiAnalyzed: Boolean = false,
+    /** 仅为兼容旧数据清理策略保留，不再表示当前可编辑业务属性。 */
     val isTitleEditedByHand: Boolean = false,
     val activityTypeValue: String? = null,
     /** JSON 编码的照片 ID 数组 */
@@ -66,7 +68,7 @@ data class FootprintEntity(
 }
 
 /**
- * Mirrors iOS `Footprint.markManualMetadataEdit()`: metadata edits (title,
+     * Mirrors iOS `Footprint.markManualMetadataEdit()`: metadata edits (place,
  * activity, notes, place) make the stay manual. If it was not manual yet,
  * automatic duration growth stays allowed; time edits/splits that already
  * marked it manual keep their explicit boundary.

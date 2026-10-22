@@ -170,6 +170,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 await WidgetDataSyncManager.shared.syncTodayOnly()
                 await WidgetDataSyncManager.shared.syncRecentHistoryIfNeeded()
                 WatchSyncManager.shared.syncHourlyIfNeeded()
+                TripScanManager.shared.scanIfNeeded()
                 
                 task.setTaskCompleted(success: true)
             }
@@ -231,6 +232,8 @@ struct DiFangKeApp: App {
     @State private var showSplash = true
     
     @State private var modelContainer: ModelContainer?
+    @State private var tripContainer: ModelContainer?
+    @State private var modelInitializationError: String?
     @State private var foregroundWidgetSyncTask: Task<Void, Never>?
     @State private var backgroundWidgetSyncTask: Task<Void, Never>?
     @State private var watchHourlySyncTask: Task<Void, Never>?
@@ -245,7 +248,7 @@ struct DiFangKeApp: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                if let container = modelContainer {
+                if let container = modelContainer, let tripContainer {
                     ZStack {
                         if showSplash {
                             SplashScreenView()
@@ -256,7 +259,7 @@ struct DiFangKeApp: App {
                             }
                                 .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
                         } else {
-                            MainTabView()
+                            MainTabView(tripContainer: tripContainer)
                                 .environment(locationManager)
                                 .onAppear {
                                     CloudSettingsManager.shared.startSyncing()
@@ -264,6 +267,7 @@ struct DiFangKeApp: App {
                                     locationManager.modelContext = context
                                     PhotoService.shared.modelContext = context
                                     OpenAIService.shared.modelContainer = container
+                                    TripScanManager.shared.scanIfNeeded()
 
                                     // A preview normally owns only detached
                                     // models. If the process was terminated in
@@ -310,8 +314,21 @@ struct DiFangKeApp: App {
                     }
                     .modelContainer(container)
                 } else {
-                    // While the model container is loading, show the splash screen
-                    SplashScreenView()
+                    if let modelInitializationError {
+                        ContentUnavailableView {
+                            Label("无法打开数据", systemImage: "exclamationmark.triangle")
+                        } description: {
+                            Text(modelInitializationError)
+                        } actions: {
+                            Button("重试") {
+                                self.modelInitializationError = nil
+                                Task { await initializeModelContainer() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    } else {
+                        SplashScreenView()
+                    }
                 }
             }
             .animation(.easeInOut(duration: 0.8), value: showSplash)
@@ -327,6 +344,7 @@ struct DiFangKeApp: App {
                     watchHourlySyncTask = Task {
                         while !Task.isCancelled {
                             WatchSyncManager.shared.syncHourlyIfNeeded()
+                            TripScanManager.shared.scanIfNeeded()
                             try? await Task.sleep(nanoseconds: 60 * 60 * 1_000_000_000)
                         }
                     }
@@ -400,46 +418,43 @@ struct DiFangKeApp: App {
     }
     
     private func initializeModelContainer() async {
-        // Existing installations were created with an unversioned SwiftData schema.
-        // Keep opening that store directly so SwiftData can perform its normal
-        // lightweight migration when FutureTrip is added.
-        // FutureTrip belongs to the removed trip-plan feature. It must stay
-        // registered so existing (and CloudKit-mirrored) stores keep matching
-        // this schema; dropping an entity is not a safe change for them.
-        let schema = Schema([
-            Footprint.self,
-            Place.self,
-            TransportManualSelection.self,
-            ActivityType.self,
-            DailyInsight.self,
-            TransportRecord.self,
-            FutureTrip.self
-        ])
-        
+        guard modelContainer == nil, modelInitializationError == nil else { return }
         let isFirstLaunch = !UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
         let shouldEnableCloudKit = shouldUseCloudServices
-        
-        let modelConfiguration = ModelConfiguration(
-            "dfk_v5_stable",
-            schema: schema,
-            isStoredInMemoryOnly: false,
-            groupContainer: AppConfig.shared.appGroupID.isEmpty ? .none : .identifier(AppConfig.shared.appGroupID),
-            cloudKitDatabase: shouldEnableCloudKit ? .automatic : .none
-        )
-        
+
         do {
-            // 使用 Task.detached 确保在后台线程创建容器，绝对不阻塞主线程
-            let container = try await Task.detached(priority: .userInitiated) {
-                try ModelContainer(for: schema, configurations: [modelConfiguration])
-            }.value
+            let container: ModelContainer
+            let usesCloudKit: Bool
+            do {
+                container = try await makeLegacyModelContainer(useCloudKit: shouldEnableCloudKit)
+                usesCloudKit = shouldEnableCloudKit
+            } catch where shouldEnableCloudKit {
+                print("SwiftData CLOUD RETRY ERROR: \(error)")
+                container = try await makeLegacyModelContainer(useCloudKit: false)
+                usesCloudKit = false
+            }
+
+            let tripContainer: ModelContainer
+            do {
+                tripContainer = try await makeTripModelContainer(useCloudKit: usesCloudKit)
+            } catch where usesCloudKit {
+                print("Trip SwiftData CLOUD RETRY ERROR: \(error)")
+                tripContainer = try await makeTripModelContainer(useCloudKit: false)
+            }
+
             await MainActor.run {
+                TripScanManager.shared.configure(
+                    legacyContainer: container,
+                    tripContainer: tripContainer
+                )
                 self.modelContainer = container
+                self.tripContainer = tripContainer
                 // Watch connectivity is part of the data/recording lifecycle, not
                 // the timeline screen's lifecycle. A location wake can create a
                 // footprint while TimelineView has never appeared; install the
                 // observer and session before any UI is shown in that case.
                 WatchSyncManager.shared.start(context: container.mainContext)
-                UserDefaults.standard.set(shouldEnableCloudKit, forKey: "activeModelContainerUsesCloudKit")
+                UserDefaults.standard.set(usesCloudKit, forKey: "activeModelContainerUsesCloudKit")
                 if isFirstLaunch {
                     UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
                 }
@@ -447,10 +462,54 @@ struct DiFangKeApp: App {
             }
         } catch {
             print("SwiftData CRITICAL ERROR: \(error)")
-            // Do not replace a failed persistent store with an empty in-memory
-            // container. That makes all data appear deleted and risks users
-            // creating new data against a non-persistent store.
+            await MainActor.run { self.modelInitializationError = error.localizedDescription }
         }
+    }
+
+    private func makeLegacyModelContainer(useCloudKit: Bool) async throws -> ModelContainer {
+        let groupContainer: ModelConfiguration.GroupContainer = AppConfig.shared.appGroupID.isEmpty
+            ? .none : .identifier(AppConfig.shared.appGroupID)
+        return try await Task.detached(priority: .userInitiated) {
+            // This must stay identical to the released unversioned container.
+            // Even placing the trip models in another configuration of the same
+            // ModelContainer changes the combined Core Data model and attempts
+            // an in-place migration of dfk_v5_stable.store.
+            let schema = Schema([
+                Footprint.self,
+                Place.self,
+                TransportManualSelection.self,
+                ActivityType.self,
+                DailyInsight.self,
+                TransportRecord.self,
+                FutureTrip.self
+            ])
+            let configuration = ModelConfiguration(
+                "dfk_v5_stable",
+                schema: schema,
+                isStoredInMemoryOnly: false,
+                groupContainer: groupContainer,
+                cloudKitDatabase: useCloudKit ? .automatic : .none
+            )
+            return try ModelContainer(for: schema, configurations: [configuration])
+        }.value
+    }
+
+    private func makeTripModelContainer(useCloudKit: Bool) async throws -> ModelContainer {
+        let groupContainer: ModelConfiguration.GroupContainer = AppConfig.shared.appGroupID.isEmpty
+            ? .none : .identifier(AppConfig.shared.appGroupID)
+        return try await Task.detached(priority: .userInitiated) {
+            let schema = Schema([
+                Trip.self, TripDay.self, TripDayCity.self, TripItem.self, HomeCity.self
+            ])
+            let configuration = ModelConfiguration(
+                "dfk_trip_v1",
+                schema: schema,
+                isStoredInMemoryOnly: false,
+                groupContainer: groupContainer,
+                cloudKitDatabase: useCloudKit ? .automatic : .none
+            )
+            return try ModelContainer(for: schema, configurations: [configuration])
+        }.value
     }
     
     private var shouldUseCloudServices: Bool {

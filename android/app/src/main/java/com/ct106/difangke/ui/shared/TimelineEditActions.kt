@@ -176,6 +176,8 @@ object TimelineEditActions {
         val secondCoords = coordinatesFor(raw, fp, secondStart, fp.endTime, ratio, 1.0)
 
         val first = fp.copy(
+            title = null,
+            isTitleEditedByHand = false,
             allowsAutomaticDurationExtension = false,
             endTime = firstEnd,
             date = startOfDay(fp.startTime),
@@ -196,7 +198,6 @@ object TimelineEditActions {
             latitudeJson = secondCoords?.first ?: first.latitudeJson,
             longitudeJson = secondCoords?.second ?: first.longitudeJson,
             locationHash = "MANUAL_SPLIT",
-            title = fp.title,
             reason = fp.reason,
             statusValue = FootprintStatus.MANUAL.raw,
             aiScore = fp.aiScore,
@@ -209,7 +210,7 @@ object TimelineEditActions {
             cityName = fp.cityName,
             isPlaceSuggestionIgnored = fp.isPlaceSuggestionIgnored,
             aiAnalyzed = fp.aiAnalyzed,
-            isTitleEditedByHand = fp.isTitleEditedByHand,
+            isTitleEditedByHand = false,
             isAddressEditedByHand = fp.isAddressEditedByHand,
             activityTypeValue = secondActivityTypeValue,
             stepCount = splitInt(fp.stepCount, ratio, true),

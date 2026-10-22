@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		B941AA120000000000000001 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA120000000000000002 /* Views/MainTabView.swift */; };
+		B941AA130000000000000001 /* TripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA130000000000000002 /* TripView.swift */; };
+		B941AA140000000000000001 /* TripScanManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA140000000000000002 /* TripScanManager.swift */; };
 		06A904412C0FBE70CFD67936 /* HistoryListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C2C5158B30717A490546E3 /* HistoryListView.swift */; };
 		134DBA94706ABB8ACD8C6EF5 /* ExportManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FAF51D5207C3CFEFBEB0667 /* ExportManager.swift */; };
 		167F3466A9C607E0782581EB /* DiFangKeWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */; };
@@ -42,6 +44,7 @@
 		B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */; };
 		BB95F1637D3ABD303156926C /* EditPlaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D7A089B6F99853042F8B6A1 /* EditPlaceSheet.swift */; };
 		C199604340369E777F064D7B /* Config.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8406ACF5012D1DB8F428AB9C /* Config.plist */; };
+		C1A2B3C4D5E6F70123456789 /* trip_major_cities.json in Resources */ = {isa = PBXBuildFile; fileRef = C1A2B3C4D5E6F70123456788 /* trip_major_cities.json */; };
 		C641B0512FE2720C009DC763 /* SafeMKMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C641B0502FE2720C009DC763 /* SafeMKMapView.swift */; };
 		C64D3D9E2F80058600BB3C3F /* IgnoredPlacesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3D9D2F80058600BB3C3F /* IgnoredPlacesView.swift */; };
 		C64D3DA02F8111A800BB3C3F /* RawLogsManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C64D3D9F2F8111A800BB3C3F /* RawLogsManagerView.swift */; };
@@ -164,6 +167,8 @@
 
 /* Begin PBXFileReference section */
 		B941AA120000000000000002 /* Views/MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MainTabView.swift; sourceTree = "<group>"; };
+		B941AA130000000000000002 /* TripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripView.swift; sourceTree = "<group>"; };
+		B941AA140000000000000002 /* TripScanManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripScanManager.swift; sourceTree = "<group>"; };
 		0109B5C3A46C595F984A0148 /* 地方客.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "地方客.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		0DA88C94F7EAC66D28F00A84 /* FootprintDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FootprintDetailView.swift; sourceTree = "<group>"; };
 		0F466FD610098E71DB17C54D /* LocationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationManager.swift; sourceTree = "<group>"; };
@@ -183,6 +188,7 @@
 		77C2C5158B30717A490546E3 /* HistoryListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryListView.swift; sourceTree = "<group>"; };
 		7D750760587987B7CCDAB5FF /* MapPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapPickerView.swift; sourceTree = "<group>"; };
 		8406ACF5012D1DB8F428AB9C /* Config.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Config.plist; sourceTree = "<group>"; };
+		C1A2B3C4D5E6F70123456788 /* trip_major_cities.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = trip_major_cities.json; path = ../../config/trip_major_cities.json; sourceTree = "<group>"; };
 		8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataDeduplicationService.swift; sourceTree = "<group>"; };
 		8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiFangKeSchema.swift; sourceTree = "<group>"; };
 		8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTrip.swift; sourceTree = "<group>"; };
@@ -340,6 +346,7 @@
 				76746EBFA55AE24E965803B1 /* Assets.xcassets */,
 				C6FC95002F9A67B2004E1FE6 /* AppIcon.icon */,
 				8406ACF5012D1DB8F428AB9C /* Config.plist */,
+				C1A2B3C4D5E6F70123456788 /* trip_major_cities.json */,
 				A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */,
 				B941AA120000000000000002 /* Views/MainTabView.swift */,
 				2C84EEA3EDC02DA770FA555B /* DiFangKeApp.swift */,
@@ -373,6 +380,7 @@
 		538DCFE6EA70DBBAA1239C2D /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				B941AA130000000000000002 /* TripView.swift */,
 				8F4D2CA36A1B43D0A6C7E2B1 /* ShareCards.swift */,
 				C6ACF7662F95110B006D9536 /* RawPointsListView.swift */,
 				C68544472F86A80500C605E9 /* HistoryStatisticsView.swift */,
@@ -400,6 +408,7 @@
 		6C24D087F1ECA32C5EED5AC4 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				B941AA140000000000000002 /* TripScanManager.swift */,
 				8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */,
 				C67848572FA3A082002DF823 /* WidgetDataSyncManager.swift */,
 				C6D2DE392F90E39800466878 /* HealthManager.swift */,
@@ -648,6 +657,7 @@
 				C6FC95012F9A67B2004E1FE6 /* AppIcon.icon in Resources */,
 				E5CF6588D5181064FB5CB42D /* Assets.xcassets in Resources */,
 				C199604340369E777F064D7B /* Config.plist in Resources */,
+				C1A2B3C4D5E6F70123456789 /* trip_major_cities.json in Resources */,
 				4A0BE9B15A8560F2969D5C2D /* Secrets.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -695,6 +705,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B941AA140000000000000001 /* TripScanManager.swift in Sources */,
+				B941AA130000000000000001 /* TripView.swift in Sources */,
 				C64D3DA22F81251E00BB3C3F /* AiSettingsView.swift in Sources */,
 				9F3F925B82CF4EEDED4E3AFF /* AddPlaceSheet.swift in Sources */,
 				8D0E1F2A3B4C5D6E7F8091A2 /* DataDeduplicationService.swift in Sources */,

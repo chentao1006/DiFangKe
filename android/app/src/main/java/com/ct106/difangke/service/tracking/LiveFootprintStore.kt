@@ -4,7 +4,6 @@ import android.util.Log
 import com.ct106.difangke.data.db.AppDatabase
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.PlaceEntity
-import com.ct106.difangke.data.model.FootprintTitles
 import com.ct106.difangke.service.PlaceMatcher
 import com.google.gson.Gson
 import java.util.Calendar
@@ -196,7 +195,6 @@ class LiveFootprintStore(private val db: AppDatabase) {
             latitudeJson = gson.toJson(c.points.map { it.latitude }),
             longitudeJson = gson.toJson(c.points.map { it.longitude }),
             locationHash = FootprintEntity.generateLocationHash(lat, lon),
-            title = FootprintTitles.generate(address ?: "此处", c.startMs / 1000),
             statusValue = if (ignored != null) "ignored" else "candidate",
             placeID = matched?.placeID ?: ignored?.placeID,
             address = address,
