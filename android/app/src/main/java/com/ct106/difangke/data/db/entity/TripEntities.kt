@@ -52,6 +52,7 @@ data class TripDayCityEntity(
     val countryCode: String = "",
     val countryName: String = "",
     val cityName: String,
+    val cityIdentifier: String? = null,
     val latitude: Double? = null,
     val longitude: Double? = null,
     val timeZoneIdentifier: String? = null,
@@ -70,6 +71,7 @@ data class TripItemEntity(
     val countryCode: String? = null,
     val countryName: String? = null,
     val cityName: String? = null,
+    val cityIdentifier: String? = null,
     val placeID: String? = null,
     val placeName: String? = null,
     val address: String? = null,
@@ -94,8 +96,34 @@ data class HomeCityEntity(
     val countryCode: String = "",
     val countryName: String = "",
     val cityName: String,
+    val cityIdentifier: String? = null,
     val latitude: Double? = null,
     val longitude: Double? = null,
     val timeZoneIdentifier: String? = null,
     val updatedAt: Date = Date()
 )
+
+fun tripCityIdentityKey(
+    cityIdentifier: String?,
+    countryCode: String?,
+    cityName: String?
+): String {
+    val identifier = cityIdentifier?.trim().orEmpty()
+    if (identifier.isNotEmpty()) return "id|${identifier.lowercase()}"
+    return "legacy|${countryCode.orEmpty().trim().lowercase()}|${cityName.orEmpty().trim().lowercase()}"
+}
+
+fun tripCitiesMatch(
+    firstIdentifier: String?,
+    firstCountryCode: String?,
+    firstCityName: String?,
+    secondIdentifier: String?,
+    secondCountryCode: String?,
+    secondCityName: String?
+): Boolean {
+    val firstID = firstIdentifier?.trim().orEmpty()
+    val secondID = secondIdentifier?.trim().orEmpty()
+    if (firstID.isNotEmpty() && secondID.isNotEmpty()) return firstID.equals(secondID, ignoreCase = true)
+    return tripCityIdentityKey(null, firstCountryCode, firstCityName) ==
+        tripCityIdentityKey(null, secondCountryCode, secondCityName)
+}

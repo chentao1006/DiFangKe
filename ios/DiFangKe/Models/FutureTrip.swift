@@ -1,5 +1,8 @@
 import Foundation
 import SwiftData
+#if canImport(ActivityKit)
+import ActivityKit
+#endif
 
 /// Legacy persistence model for the removed trip-plan ("未来行程") feature.
 ///
@@ -150,6 +153,9 @@ final class TripDayCity {
     var countryCode: String = ""
     var countryName: String = ""
     var cityName: String = ""
+    /// Stable administrative-area identity returned by the shared city resolver.
+    /// Display names remain localized and must not be used as the primary identity.
+    var cityIdentifier: String?
     var latitude: Double?
     var longitude: Double?
     var timeZoneIdentifier: String?
@@ -157,12 +163,13 @@ final class TripDayCity {
     var notes: String = ""
     var isUserEdited: Bool = false
 
-    init(id: UUID = UUID(), tripDayID: UUID, countryCode: String = "", countryName: String = "", cityName: String, latitude: Double? = nil, longitude: Double? = nil, timeZoneIdentifier: String? = nil, orderIndex: Int = 0, notes: String = "", isUserEdited: Bool = true) {
+    init(id: UUID = UUID(), tripDayID: UUID, countryCode: String = "", countryName: String = "", cityName: String, cityIdentifier: String? = nil, latitude: Double? = nil, longitude: Double? = nil, timeZoneIdentifier: String? = nil, orderIndex: Int = 0, notes: String = "", isUserEdited: Bool = true) {
         self.id = id
         self.tripDayID = tripDayID
         self.countryCode = countryCode
         self.countryName = countryName
         self.cityName = cityName
+        self.cityIdentifier = cityIdentifier
         self.latitude = latitude
         self.longitude = longitude
         self.timeZoneIdentifier = timeZoneIdentifier
@@ -182,6 +189,7 @@ final class TripItem {
     var countryCode: String?
     var countryName: String?
     var cityName: String?
+    var cityIdentifier: String?
     var placeID: UUID?
     var placeName: String?
     var address: String?
@@ -215,14 +223,140 @@ final class HomeCity {
     var countryCode: String = ""
     var countryName: String = ""
     var cityName: String = ""
+    var cityIdentifier: String?
     var latitude: Double?
     var longitude: Double?
     var timeZoneIdentifier: String?
     var updatedAt: Date = Date()
 
-    init(cityName: String, countryCode: String = "", countryName: String = "") {
+    init(cityName: String, countryCode: String = "", countryName: String = "", cityIdentifier: String? = nil) {
         self.cityName = cityName
         self.countryCode = countryCode
         self.countryName = countryName
+        self.cityIdentifier = cityIdentifier
     }
 }
+
+/// One identity function for every trip city comparison. New records use a
+/// provider-backed administrative identifier; the normalized name is retained
+/// only so existing records created before the identifier field remain usable.
+func tripCityIdentityKey(
+    identifier: String?,
+    countryCode: String?,
+    cityName: String?
+) -> String {
+    if let identifier = identifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !identifier.isEmpty {
+        return "id|\(identifier.lowercased())"
+    }
+    return "legacy|\(countryCode?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "")|\(cityName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "")"
+}
+
+func tripCitiesMatch(
+    firstIdentifier: String?,
+    firstCountryCode: String?,
+    firstCityName: String?,
+    secondIdentifier: String?,
+    secondCountryCode: String?,
+    secondCityName: String?
+) -> Bool {
+    let firstID = firstIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let secondID = secondIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let firstID, !firstID.isEmpty, let secondID, !secondID.isEmpty {
+        return firstID.caseInsensitiveCompare(secondID) == .orderedSame
+    }
+    return tripCityIdentityKey(identifier: nil, countryCode: firstCountryCode, cityName: firstCityName)
+        == tripCityIdentityKey(identifier: nil, countryCode: secondCountryCode, cityName: secondCityName)
+}
+
+enum TripRouteOptionSelectionStore {
+    private static let keyPrefix = "tripRouteOptionIndex."
+
+    static func selectedIndex(for stopID: UUID, optionCount: Int) -> Int {
+        guard optionCount > 0 else { return 0 }
+        let index = UserDefaults.standard.integer(forKey: keyPrefix + stopID.uuidString)
+        return min(max(0, index), optionCount - 1)
+    }
+
+    static func setSelectedIndex(_ index: Int, for stopID: UUID) {
+        UserDefaults.standard.set(max(0, index), forKey: keyPrefix + stopID.uuidString)
+    }
+
+    static func clear(for stopID: UUID) {
+        UserDefaults.standard.removeObject(forKey: keyPrefix + stopID.uuidString)
+    }
+}
+
+#if canImport(ActivityKit)
+/// Shared contract for the active planned trip's next destination.
+public struct TripProgressActivityAttributes: ActivityAttributes {
+    public struct ContentState: Codable, Hashable {
+        public var stopID: String
+        public var placeName: String
+        public var cityName: String?
+        public var notes: String?
+        public var currentDistance: Double?
+        public var segmentDistance: Double?
+        public var originName: String?
+        public var sequenceNumber: Int
+        public var totalStops: Int
+        public var arrivalDate: Date?
+        public var transportTypeRaw: String?
+        public var routeSummary: String?
+        public var routeGuidance: String?
+        public var tripActivityIcon: String?
+        public var tripActivityColorHex: String?
+        public var isWithinArrivalRadius: Bool
+        public var latitude: Double?
+        public var longitude: Double?
+
+        public init(
+            stopID: String,
+            placeName: String,
+            cityName: String? = nil,
+            notes: String?,
+            currentDistance: Double?,
+            segmentDistance: Double? = nil,
+            originName: String? = nil,
+            sequenceNumber: Int,
+            totalStops: Int,
+            arrivalDate: Date?,
+            transportTypeRaw: String?,
+            routeSummary: String? = nil,
+            routeGuidance: String? = nil,
+            tripActivityIcon: String? = nil,
+            tripActivityColorHex: String? = nil,
+            isWithinArrivalRadius: Bool,
+            latitude: Double?,
+            longitude: Double?
+        ) {
+            self.stopID = stopID
+            self.placeName = placeName
+            self.cityName = cityName
+            self.notes = notes
+            self.currentDistance = currentDistance
+            self.segmentDistance = segmentDistance
+            self.originName = originName
+            self.sequenceNumber = sequenceNumber
+            self.totalStops = totalStops
+            self.arrivalDate = arrivalDate
+            self.transportTypeRaw = transportTypeRaw
+            self.routeSummary = routeSummary
+            self.routeGuidance = routeGuidance
+            self.tripActivityIcon = tripActivityIcon
+            self.tripActivityColorHex = tripActivityColorHex
+            self.isWithinArrivalRadius = isWithinArrivalRadius
+            self.latitude = latitude
+            self.longitude = longitude
+        }
+    }
+
+    public var tripID: String
+    public var tripTitle: String
+
+    public init(tripID: String, tripTitle: String) {
+        self.tripID = tripID
+        self.tripTitle = tripTitle
+    }
+}
+#endif

@@ -64,6 +64,7 @@ internal fun TimelineMapPane(
     activityTypes: List<ActivityTypeEntity>,
     allPlaces: List<PlaceEntity>,
     bottomPaddingPx: Int,
+    suspendCameraUpdates: Boolean,
     onUserPan: () -> Unit,
     onSelect: (TimelineSelection) -> Unit
 ) {
@@ -164,6 +165,7 @@ internal fun TimelineMapPane(
             overlays = overlays,
             cameraFit = cameraFit,
             bottomPaddingPx = bottomPaddingPx,
+            suspendCameraUpdates = suspendCameraUpdates,
             userLocation = userLocation,
             isFollowingUser = isFollowingUser,
             followUserRequest = followUserRequest,

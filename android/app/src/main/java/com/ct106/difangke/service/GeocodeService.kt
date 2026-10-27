@@ -10,9 +10,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 腾讯位置服务的地理编码与 POI 搜索。
@@ -23,6 +26,8 @@ class GeocodeService private constructor() {
         val shared: GeocodeService by lazy { GeocodeService() }
         private const val TAG = "GeocodeService"
         private const val BASE_URL = "https://apis.map.qq.com/ws"
+        private val routeOptionsCache = ConcurrentHashMap<String, List<RoutePlan>>()
+        private val cityIdentityCache = ConcurrentHashMap<String, String>()
 
         /** iOS `applyingTransform("Traditional-Simplified")`; identity before API 29. */
         fun simplifiedChinese(value: String): String {
@@ -35,7 +40,9 @@ class GeocodeService private constructor() {
         /** zh_Hans_CN country name for an ISO region code. */
         fun countryDisplayName(countryCode: String?): String? {
             val code = countryCode?.trim()?.uppercase()?.takeIf { it.length == 2 } ?: return null
-            return Locale("", code).getDisplayCountry(Locale.SIMPLIFIED_CHINESE).takeIf { it.isNotBlank() && it != code }
+            return Locale.Builder().setRegion(code).build()
+                .getDisplayCountry(Locale.SIMPLIFIED_CHINESE)
+                .takeIf { it.isNotBlank() && it != code }
         }
 
         fun flagEmoji(countryCode: String): String {
@@ -60,7 +67,8 @@ class GeocodeService private constructor() {
         val address: String?,
         val countryCode: String?,
         val countryName: String?,
-        val cityName: String?
+        val cityName: String?,
+        val cityIdentifier: String?
     )
 
     data class CitySearchResult(
@@ -68,7 +76,24 @@ class GeocodeService private constructor() {
         val countryCode: String,
         val countryName: String,
         val latitude: Double,
-        val longitude: Double
+        val longitude: Double,
+        val cityIdentifier: String? = null
+    )
+
+    data class RouteInstruction(
+        val title: String,
+        val detail: String?,
+        val transportTypeRaw: String,
+        val latitude: Double? = null,
+        val longitude: Double? = null,
+        val points: List<Pair<Double, Double>> = emptyList()
+    )
+
+    data class RoutePlan(
+        val points: List<Pair<Double, Double>>,
+        val distanceMeters: Double,
+        val durationMinutes: Double,
+        val instructions: List<RouteInstruction>
     )
 
     /** Global city lookup normalized to city-level results only. */
@@ -121,7 +146,15 @@ class GeocodeService private constructor() {
                     ?: rawNationCode.takeIf { it.length == 2 }
                     ?: if (rawNationCode == "156") "CN" else rawNationCode
                 val countryName = nationName.ifEmpty { countryDisplayName(code).orEmpty() }
-                add(CitySearchResult(city, code, countryName, location.optDouble("lat"), location.optDouble("lng")))
+                val adcode = normalizedTencentCityCode(
+                    info.optString("adcode").trim(),
+                    info.optString("city_code").trim(),
+                    rawNationCode
+                )
+                val identifier = adcode.takeIf(String::isNotEmpty)?.let {
+                    "tencent:${rawNationCode.lowercase()}:${it.lowercase()}"
+                }
+                add(CitySearchResult(city, code, countryName, location.optDouble("lat"), location.optDouble("lng"), identifier))
             }
         }
         val foldedQuery = query.lowercase(Locale.getDefault())
@@ -131,7 +164,7 @@ class GeocodeService private constructor() {
                     .contains(foldedQuery)
             }
         (globalResults + matchingDomesticResults)
-            .distinctBy { "${it.countryCode.uppercase()}|${it.cityName.lowercase()}" }
+            .distinctBy { it.cityIdentifier ?: "${it.countryCode.uppercase()}|${it.cityName.lowercase()}" }
     }
 
     private fun String.isSupportedAdministrativeName(): Boolean =
@@ -174,14 +207,105 @@ class GeocodeService private constructor() {
         val cityName = sequenceOf("city", "district", "province")
             .mapNotNull { key -> addressComponent?.optString(key)?.trim()?.takeIf(String::isNotEmpty) }
             .firstOrNull()
-        ReverseGeocodeResult(address, countryCode, countryName, cityName)
+        val adInfo = payload.optJSONObject("ad_info")
+        val adcode = normalizedTencentCityCode(
+            adInfo?.optString("adcode")?.trim().orEmpty(),
+            adInfo?.optString("city_code")?.trim().orEmpty(),
+            adInfo?.optString("nation_code")?.trim().orEmpty()
+        )
+        val nationCode = adInfo?.optString("nation_code")?.trim().orEmpty()
+        val cityIdentifier = adcode.takeIf(String::isNotEmpty)?.let {
+            "tencent:${nationCode.lowercase()}:${it.lowercase()}"
+        } ?: globalCityIdentifier(lat, lon, cityName.orEmpty(), countryCode.orEmpty())
+        ReverseGeocodeResult(address, countryCode, countryName, cityName, cityIdentifier)
+    }
+
+    /** Stable city identity for configured/search-selected cities and POI reverse geocoding alike. */
+    suspend fun resolveCityIdentifier(
+        lat: Double,
+        lon: Double,
+        cityName: String,
+        countryCode: String
+    ): String? = withContext(Dispatchers.IO) {
+        val cacheKey = String.format(Locale.US, "%.4f,%.4f", lat, lon)
+        cityIdentityCache[cacheKey]?.let { return@withContext it }
+        val tencent = getJson("/geocoder/v1/?location=$lat,$lon&get_poi=0")
+            ?.optJSONObject("result")
+            ?.optJSONObject("ad_info")
+        val adcode = normalizedTencentCityCode(
+            tencent?.optString("adcode")?.trim().orEmpty(),
+            tencent?.optString("city_code")?.trim().orEmpty(),
+            tencent?.optString("nation_code")?.trim().orEmpty()
+        )
+        val nationCode = tencent?.optString("nation_code")?.trim().orEmpty()
+        val identifier = if (adcode.isNotEmpty()) {
+            "tencent:${nationCode.lowercase()}:${adcode.lowercase()}"
+        } else {
+            globalCityIdentifier(lat, lon, cityName, countryCode)
+        }
+        identifier?.let { cityIdentityCache[cacheKey] = it }
+        identifier
+    }
+
+    private fun globalCityIdentifier(
+        lat: Double,
+        lon: Double,
+        cityName: String,
+        countryCode: String
+    ): String? = try {
+        val url = "https://api.bigdatacloud.net/data/reverse-geocode-client" +
+            "?latitude=${Uri.encode(lat.toString())}&longitude=${Uri.encode(lon.toString())}&localityLanguage=en"
+        httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val payload = response.body?.string()?.let(::JSONObject) ?: return null
+            val targets = listOf(cityName, payload.optString("city"), payload.optString("locality"))
+                .map(::normalizedCityIdentityName)
+                .filter(String::isNotEmpty)
+            val localityInfo = payload.optJSONObject("localityInfo")
+            val areas = buildList<JSONObject> {
+                listOf("administrative", "informative").forEach { key ->
+                    val array = localityInfo?.optJSONArray(key) ?: return@forEach
+                    for (index in 0 until array.length()) array.optJSONObject(index)?.let(::add)
+                }
+            }
+            val area = areas.firstOrNull {
+                normalizedCityIdentityName(it.optString("name")) in targets
+            } ?: return null
+            val geonameID = area.optString("geonameId").trim()
+            if (geonameID.isNotEmpty()) return "geonames:${geonameID.lowercase()}"
+            val wikidataID = area.optString("wikidataId").trim()
+            if (wikidataID.isNotEmpty()) return "wikidata:${wikidataID.lowercase()}"
+            val isoCode = area.optString("isoCode").trim()
+            if (isoCode.isNotEmpty()) return "iso:${countryCode.lowercase()}:${isoCode.lowercase()}"
+            null
+        }
+    } catch (error: Exception) {
+        Log.w(TAG, "Global city identity request failed", error)
+        null
+    }
+
+    private fun normalizedCityIdentityName(value: String): String = simplifiedChinese(value)
+        .lowercase(Locale.getDefault())
+        .replace(" ", "")
+        .replace("市", "")
+        .replace("特别行政区", "")
+
+    private fun normalizedTencentCityCode(adcode: String, cityCode: String, nationCode: String): String {
+        if (cityCode.isNotEmpty()) return cityCode
+        if (nationCode != "156" || adcode.length != 6) return adcode
+        return if (adcode.take(2) in setOf("11", "12", "31", "50")) {
+            adcode.take(2) + "0000"
+        } else {
+            adcode.take(4) + "00"
+        }
     }
 
     private fun countryCodeForName(name: String): String? {
         if (name == "中国" || name.equals("China", ignoreCase = true)) return "CN"
         return Locale.getISOCountries().firstOrNull { code ->
-            Locale("", code).getDisplayCountry(Locale.SIMPLIFIED_CHINESE).equals(name, ignoreCase = true) ||
-                Locale("", code).displayCountry.equals(name, ignoreCase = true)
+            val locale = Locale.Builder().setRegion(code).build()
+            locale.getDisplayCountry(Locale.SIMPLIFIED_CHINESE).equals(name, ignoreCase = true) ||
+                locale.displayCountry.equals(name, ignoreCase = true)
         }
     }
 
@@ -314,6 +438,299 @@ class GeocodeService private constructor() {
     } catch (error: Exception) {
         Log.w(TAG, "Tencent location service request failed", error)
         null
+    }
+
+    /** Road-following route used by planned-trip maps. Coordinates are GCJ-02, matching Tencent Map. */
+    suspend fun routePolyline(
+        fromLat: Double,
+        fromLon: Double,
+        toLat: Double,
+        toLon: Double,
+        transportTypeRaw: String?
+    ): List<Pair<Double, Double>> = routePlan(
+        fromLat,
+        fromLon,
+        toLat,
+        toLon,
+        transportTypeRaw
+    )?.points.orEmpty()
+
+    suspend fun routePlan(
+        fromLat: Double,
+        fromLon: Double,
+        toLat: Double,
+        toLon: Double,
+        transportTypeRaw: String?
+    ): RoutePlan? = routePlans(fromLat, fromLon, toLat, toLon, transportTypeRaw).firstOrNull()
+
+    suspend fun routePlans(
+        fromLat: Double,
+        fromLon: Double,
+        toLat: Double,
+        toLon: Double,
+        transportTypeRaw: String?
+    ): List<RoutePlan> = withContext(Dispatchers.IO) {
+        val mode = when (transportTypeRaw) {
+            "slow", "running" -> "walking"
+            "bicycle" -> "bicycling"
+            "ebike" -> "ebicycling"
+            "bus", "subway", "train" -> "transit"
+            "car", "motorcycle" -> "driving"
+            else -> return@withContext emptyList()
+        }
+        val from = String.format(Locale.US, "%.6f,%.6f", fromLat, fromLon)
+        val to = String.format(Locale.US, "%.6f,%.6f", toLat, toLon)
+        val cacheKey = "v5|$mode|$from|$to"
+        routeOptionsCache[cacheKey]?.let { return@withContext it }
+        val storedRoutes = storedRoutes(cacheKey)
+        if (BuildConfig.TENCENT_MAP_KEY.isBlank()) return@withContext storedRoutes
+        val options = when (mode) {
+            "transit" -> "&policy=LEAST_TIME"
+            "driving" -> "&get_mp=1"
+            else -> ""
+        }
+        val result = getJson("/direction/v1/$mode/?from=$from&to=$to&output=json$options")
+            ?.optJSONObject("result") ?: return@withContext storedRoutes
+        val responseRoutes = result.optJSONArray("routes") ?: return@withContext storedRoutes
+        val plans = buildList {
+            for (index in 0 until responseRoutes.length()) {
+                val route = responseRoutes.optJSONObject(index) ?: continue
+                val points = decodeRouteCoordinates(route)
+                if (points.size < 2) continue
+                add(
+                    RoutePlan(
+                        points = points,
+                        distanceMeters = route.optDouble("distance", measuredRouteDistance(points)),
+                        durationMinutes = route.optDouble("duration", 0.0),
+                        instructions = decodeRouteInstructions(route)
+                    )
+                )
+            }
+        }
+        if (plans.isEmpty()) return@withContext storedRoutes
+        routeOptionsCache[cacheKey] = plans
+        storeRoutes(cacheKey, plans)
+        plans
+    }
+
+    private fun storedRoutes(cacheKey: String): List<RoutePlan> = runCatching {
+        val raw = routeCacheFile(cacheKey).takeIf(File::isFile)?.readText() ?: return@runCatching null
+        val json = JSONObject(raw)
+        val routes = json.optJSONArray("routes")?.let { routesJSON ->
+            buildList {
+                for (index in 0 until routesJSON.length()) {
+                    decodeStoredRoute(routesJSON.optJSONObject(index))?.let(::add)
+                }
+            }
+        } ?: listOfNotNull(decodeStoredRoute(json))
+        routes.takeIf(List<RoutePlan>::isNotEmpty)?.also {
+            routeOptionsCache[cacheKey] = it
+        }
+    }.getOrNull().orEmpty()
+
+    private fun decodeStoredRoute(json: JSONObject?): RoutePlan? {
+        json ?: return null
+        val pointsJSON = json.optJSONArray("points") ?: return null
+        val points = buildList {
+            for (index in 0 until pointsJSON.length()) {
+                val point = pointsJSON.optJSONArray(index) ?: continue
+                if (point.length() >= 2) add(point.optDouble(0) to point.optDouble(1))
+            }
+        }
+        if (points.size < 2) return null
+        val instructionsJSON = json.optJSONArray("instructions")
+        val instructions = buildList {
+            if (instructionsJSON != null) {
+                for (index in 0 until instructionsJSON.length()) {
+                    val instruction = instructionsJSON.optJSONObject(index) ?: continue
+                    add(
+                        RouteInstruction(
+                            title = instruction.optString("title"),
+                            detail = instruction.optString("detail").takeIf(String::isNotBlank),
+                            transportTypeRaw = instruction.optString("transportTypeRaw", "car"),
+                            latitude = instruction.optDouble("latitude").takeIf(Double::isFinite),
+                            longitude = instruction.optDouble("longitude").takeIf(Double::isFinite),
+                            points = instruction.optJSONArray("points")?.let { pointsJSON ->
+                                buildList {
+                                    for (pointIndex in 0 until pointsJSON.length()) {
+                                        val point = pointsJSON.optJSONArray(pointIndex) ?: continue
+                                        if (point.length() >= 2) add(point.optDouble(0) to point.optDouble(1))
+                                    }
+                                }
+                            }.orEmpty()
+                        )
+                    )
+                }
+            }
+        }
+        return RoutePlan(
+            points = points,
+            distanceMeters = json.optDouble("distanceMeters", measuredRouteDistance(points)),
+            durationMinutes = json.optDouble("durationMinutes", 0.0),
+            instructions = instructions
+        )
+    }
+
+    private fun storeRoutes(cacheKey: String, routes: List<RoutePlan>) {
+        val json = JSONObject().apply {
+            put("routes", JSONArray().apply {
+                routes.forEach { route -> put(encodeStoredRoute(route)) }
+            })
+        }
+        val file = routeCacheFile(cacheKey)
+        file.parentFile?.mkdirs()
+        file.writeText(json.toString())
+    }
+
+    private fun encodeStoredRoute(route: RoutePlan): JSONObject = JSONObject().apply {
+        put("points", JSONArray().apply {
+            route.points.forEach { (latitude, longitude) ->
+                put(JSONArray().put(latitude).put(longitude))
+            }
+        })
+        put("distanceMeters", route.distanceMeters)
+        put("durationMinutes", route.durationMinutes)
+        put("instructions", JSONArray().apply {
+            route.instructions.forEach { instruction ->
+                put(JSONObject().apply {
+                    put("title", instruction.title)
+                    put("detail", instruction.detail ?: "")
+                    put("transportTypeRaw", instruction.transportTypeRaw)
+                    instruction.latitude?.let { put("latitude", it) }
+                    instruction.longitude?.let { put("longitude", it) }
+                    if (instruction.points.isNotEmpty()) {
+                        put("points", JSONArray().apply {
+                            instruction.points.forEach { (latitude, longitude) ->
+                                put(JSONArray().put(latitude).put(longitude))
+                            }
+                        })
+                    }
+                })
+            }
+        })
+    }
+
+    private fun routeCacheFile(cacheKey: String): File = File(
+        File(DiFangKeApp.instance.filesDir, "trip_routes"),
+        "${md5(cacheKey)}.json"
+    )
+
+    private fun decodeRouteCoordinates(route: JSONObject): List<Pair<Double, Double>> {
+        decodeTencentPolyline(route.optJSONArray("polyline")).takeIf { it.isNotEmpty() }?.let { return it }
+        val result = mutableListOf<Pair<Double, Double>>()
+        listOf("steps", "walking", "routes").forEach { key ->
+            when (val child = route.opt(key)) {
+                is org.json.JSONArray -> {
+                    for (index in 0 until child.length()) {
+                        val objectChild = child.optJSONObject(index) ?: continue
+                        decodeRouteCoordinates(objectChild).forEach { coordinate ->
+                            if (result.lastOrNull() != coordinate) result += coordinate
+                        }
+                    }
+                }
+                is JSONObject -> {
+                    decodeRouteCoordinates(child).forEach { coordinate ->
+                        if (result.lastOrNull() != coordinate) result += coordinate
+                    }
+                }
+            }
+        }
+        when (val lines = route.opt("lines")) {
+            is org.json.JSONArray -> lines.optJSONObject(0)?.let { line ->
+                decodeRouteCoordinates(line).forEach { coordinate ->
+                    if (result.lastOrNull() != coordinate) result += coordinate
+                }
+            }
+            is JSONObject -> decodeRouteCoordinates(lines).forEach { coordinate ->
+                if (result.lastOrNull() != coordinate) result += coordinate
+            }
+        }
+        return result
+    }
+
+    private fun decodeRouteInstructions(route: JSONObject): List<RouteInstruction> {
+        val steps = route.optJSONArray("steps") ?: return emptyList()
+        return buildList {
+            for (index in 0 until steps.length()) {
+                val step = steps.optJSONObject(index) ?: continue
+                val stepCoordinate = decodeRouteCoordinates(step).firstOrNull()
+                when (step.optString("mode").uppercase(Locale.ROOT)) {
+                    "WALKING" -> add(
+                        RouteInstruction(
+                            title = "步行",
+                            detail = routeMetricText(step.optDouble("distance", 0.0), step.optDouble("duration", 0.0)),
+                            transportTypeRaw = "slow",
+                            latitude = stepCoordinate?.first,
+                            longitude = stepCoordinate?.second,
+                            points = decodeRouteCoordinates(step)
+                        )
+                    )
+                    "TRANSIT" -> {
+                        val lines = step.optJSONArray("lines") ?: continue
+                        lines.optJSONObject(0)?.let { line ->
+                            val linePoints = decodeRouteCoordinates(line)
+                            val lineCoordinate = linePoints.firstOrNull() ?: stepCoordinate
+                            val details = buildList {
+                                line.optJSONObject("geton")?.optString("title")?.takeIf(String::isNotBlank)?.let { add("${it}上车") }
+                                line.optJSONObject("getoff")?.optString("title")?.takeIf(String::isNotBlank)?.let { add("${it}下车") }
+                                line.optInt("station_count").takeIf { it > 0 }?.let { add("${it}站") }
+                                routeMetricText(line.optDouble("distance", 0.0), line.optDouble("duration", 0.0))?.let { add(it) }
+                            }
+                            val vehicle = when (line.optString("vehicle").uppercase(Locale.ROOT)) {
+                                "SUBWAY" -> "subway"
+                                "TRAIN" -> "train"
+                                else -> "bus"
+                            }
+                            add(
+                                RouteInstruction(
+                                    title = line.optString("title").ifBlank { "公共交通" },
+                                    detail = details.takeIf { it.isNotEmpty() }?.joinToString(" · "),
+                                    transportTypeRaw = vehicle,
+                                    latitude = lineCoordinate?.first,
+                                    longitude = lineCoordinate?.second,
+                                    points = linePoints
+                                )
+                            )
+                        }
+                    }
+                    else -> step.optString("instruction").takeIf(String::isNotBlank)?.let { instruction ->
+                        add(
+                            RouteInstruction(
+                                title = instruction,
+                                detail = routeMetricText(step.optDouble("distance", 0.0), step.optDouble("duration", 0.0)),
+                                transportTypeRaw = "car",
+                                latitude = stepCoordinate?.first,
+                                longitude = stepCoordinate?.second,
+                                points = decodeRouteCoordinates(step)
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun routeMetricText(distance: Double, durationMinutes: Double): String? = buildList {
+        if (distance > 0) add(if (distance < 1_000) "${distance.toInt().coerceAtLeast(1)}米" else String.format(Locale.CHINA, "%.1f公里", distance / 1_000))
+        if (durationMinutes > 0) add("约${durationMinutes.toInt().coerceAtLeast(1)}分钟")
+    }.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+
+    private fun measuredRouteDistance(points: List<Pair<Double, Double>>): Double =
+        points.zipWithNext().sumOf { (start, end) ->
+            val result = FloatArray(1)
+            Location.distanceBetween(start.first, start.second, end.first, end.second, result)
+            result[0].toDouble()
+        }
+
+    private fun decodeTencentPolyline(values: org.json.JSONArray?): List<Pair<Double, Double>> {
+        if (values == null || values.length() < 2) return emptyList()
+        val coordinates = DoubleArray(values.length()) { values.optDouble(it) }
+        for (index in 2 until coordinates.size) {
+            coordinates[index] = coordinates[index - 2] + coordinates[index] / 1_000_000.0
+        }
+        return coordinates.toList().chunked(2).mapNotNull { pair ->
+            if (pair.size == 2 && pair[0].isFinite() && pair[1].isFinite()) pair[0] to pair[1] else null
+        }
     }
 
     /**

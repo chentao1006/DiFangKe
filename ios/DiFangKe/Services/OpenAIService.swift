@@ -47,6 +47,7 @@ class OpenAIService {
     private var tomorrowQuoteCompletions: [(String, String) -> Void] = []
     private var pastQuoteCompletions: [(String, String) -> Void] = []
     private var ongoingCompletions: [(String) -> Void] = []
+    private var currentDailyOverviewCompletions: [String: [(String?) -> Void]] = [:]
     
     // 快速查找集合，避免线性搜索导致卡顿
     private var dailySummaryDateSet = Set<Date>()
@@ -435,6 +436,17 @@ class OpenAIService {
                 return
             }
 
+            guard let profile else {
+                await MainActor.run { completion(nil) }
+                return
+            }
+
+            if currentDailyOverviewCompletions[profile.fingerprint] != nil {
+                currentDailyOverviewCompletions[profile.fingerprint]?.append(completion)
+                return
+            }
+            currentDailyOverviewCompletions[profile.fingerprint] = [completion]
+
             let resolved = await self.resolveDailySummary(
                 date: startOfDate,
                 fpIds: fpIds,
@@ -456,9 +468,10 @@ class OpenAIService {
                 try? context.save()
             }
 
-            await MainActor.run {
-                completion(resolved?.content)
-            }
+            let completions = currentDailyOverviewCompletions.removeValue(
+                forKey: profile.fingerprint
+            ) ?? [completion]
+            completions.forEach { $0(resolved?.content) }
         }
     }
 
@@ -581,6 +594,7 @@ class OpenAIService {
         let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
         
         var lines: [String] = []
+        var fingerprintParts: [String] = []
         
         var events: [(Date, String)] = []
         var transportEventCount = 0
@@ -600,6 +614,16 @@ class OpenAIService {
                 if !factLine.isEmpty {
                     events.append((fp.startTime, factLine))
                 }
+                fingerprintParts.append([
+                    "footprint",
+                    fp.footprintID.uuidString,
+                    fp.placeID?.uuidString ?? "",
+                    fp.address ?? "",
+                    fp.activityTypeValue ?? "",
+                    fp.reason ?? "",
+                    fp.isHighlight == true ? "highlight" : "",
+                    fp.statusValue
+                ].joined(separator: "|"))
 
             }
         }
@@ -623,6 +647,11 @@ class OpenAIService {
                 if !transportTypeNames.contains(typeName) {
                     transportTypeNames.append(typeName)
                 }
+                fingerprintParts.append([
+                    "transport",
+                    tp.recordID.uuidString,
+                    type
+                ].joined(separator: "|"))
             }
         }
         
@@ -644,7 +673,12 @@ class OpenAIService {
         )
         return DailySummaryProfile(
             lines: lines,
-            fingerprint: lines.joined(separator: "\n"),
+            // Ongoing footprint end times and transport distance change with
+            // routine location updates. They belong in the AI facts above, but
+            // not in the identity used to decide whether another request is
+            // needed. Structural timeline changes and user-owned edits still
+            // produce a new fingerprint.
+            fingerprint: fingerprintParts.sorted().joined(separator: "\n"),
             fallbackSummary: fallbackSummary
         )
     }

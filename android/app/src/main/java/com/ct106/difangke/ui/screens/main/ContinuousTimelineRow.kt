@@ -12,6 +12,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MergeType
+import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.*
@@ -103,7 +104,7 @@ internal fun ContinuousTimelineRow(
     }?.footprintID
     var isResolving by remember(unresolvedID) { mutableStateOf(false) }
     LaunchedEffect(unresolvedID) {
-        if (unresolvedID != null && footprint != null) {
+        if (unresolvedID != null) {
             isResolving = true
             try { viewModel.retryUnknownAddress(footprint) } finally { isResolving = false }
         }
@@ -468,7 +469,7 @@ private fun RowContextMenu(
             }
             DropdownMenuItem(
                 text = { Text("拆分足迹") },
-                leadingIcon = { Icon(Icons.Default.CallSplit, null) },
+                leadingIcon = { Icon(Icons.AutoMirrored.Filled.CallSplit, null) },
                 onClick = run(actions.onSplit)
             )
         } else {
@@ -481,7 +482,7 @@ private fun RowContextMenu(
             }
             DropdownMenuItem(
                 text = { Text("拆分交通") },
-                leadingIcon = { Icon(Icons.Default.CallSplit, null) },
+                leadingIcon = { Icon(Icons.AutoMirrored.Filled.CallSplit, null) },
                 onClick = run(actions.onSplit)
             )
         }

@@ -7,6 +7,10 @@
 	<string></string>
 	<key>PUBLIC_SERVICE_URL</key>
 	<string></string>
+	<key>TENCENT_MAP_KEY</key>
+	<string></string>
+	<key>TENCENT_MAP_SECRET</key>
+	<string></string>
 	<key>AI_LIMIT_PER_MINUTE</key>
 	<integer>1</integer>
 	<key>AI_LIMIT_PER_HOUR</key>
@@ -230,6 +234,9 @@
 	<integer>24</integer>
 	<key>TRIP_MAXIMUM_DURATION_DAYS</key>
 	<integer>31</integer>
+	<!-- 进行中的计划：当前位置进入下一个目的地此半径后自动标记到达（米） -->
+	<key>TRIP_PLAN_ARRIVAL_RADIUS_METERS</key>
+	<real>200</real>
     <key>TAG_INHERITANCE_DISTANCE</key>
     <real>150</real>
     <key>TIMELINE_OVERLAP_TIME_TOLERANCE</key>

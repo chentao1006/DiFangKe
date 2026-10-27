@@ -6,35 +6,14 @@ struct SettingsView: View {
     @Environment(\.requestReview) private var requestReview
     @Environment(LocationManager.self) private var locationManager
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
-    @AppStorage("isCurrentLiveActivityEnabled") private var isCurrentLiveActivityEnabled = true
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder)]) private var allActivities: [ActivityType]
     @AppStorage("isICloudSyncEnabled") private var isICloudSyncEnabled = false
     @AppStorage("raw_recording_source_device_id") private var rawRecordingSourceDeviceID = ""
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
-    @AppStorage("dailyNotificationHour") private var notificationHour: Int = 21
-    @AppStorage("dailyNotificationMinute") private var notificationMinute: Int = 0
-    @AppStorage("isDailyNotificationEnabled") private var isDailyNotificationEnabled = true
-    @AppStorage("isHighlightNotificationEnabled") private var isHighlightNotificationEnabled = true
-    @AppStorage("isPastMemoriesNotificationEnabled") private var isPastMemoriesNotificationEnabled = true
     @AppStorage("isAutoPhotoLinkEnabled") private var isAutoPhotoLinkEnabled = true
     @AppStorage("aiServiceType") private var aiServiceType = "public"
     @AppStorage(LocationAccuracyMode.userDefaultsKey) private var locationAccuracyModeRaw = LocationAccuracyMode.automatic.rawValue
-    
-    @State private var showingSettingsAlert = false
-    
-    private var notificationTime: Binding<Date> {
-        Binding(
-            get: {
-                Calendar.current.date(bySettingHour: notificationHour, minute: notificationMinute, second: 0, of: Date()) ?? Date()
-            },
-            set: {
-                let components = Calendar.current.dateComponents([.hour, .minute], from: $0)
-                notificationHour = components.hour ?? 21
-                notificationMinute = components.minute ?? 0
-            }
-        )
-    }
 
     private var useCurrentDeviceForRawRecordingBinding: Binding<Bool> {
         Binding(
@@ -138,21 +117,11 @@ struct SettingsView: View {
                     Text("Apple 健康")
                 }
 
-                Toggle("实时活动", isOn: $isCurrentLiveActivityEnabled)
-                    .onChange(of: isCurrentLiveActivityEnabled) { _, isEnabled in
-#if canImport(ActivityKit)
-                        if #available(iOS 16.1, *) {
-                            if isEnabled {
-                                locationManager.checkLiveActivity()
-                            } else {
-                                CurrentLiveActivityManager.shared.stop()
-                            }
-                        }
-#endif
-                    }
-                Text("在锁屏和灵动岛显示当前足迹与交通")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                NavigationLink {
+                    LiveActivitySettingsView()
+                } label: {
+                    Text("实时活动")
+                }
             }
             
             .task(id: rawRecordingSourceDeviceID) {
@@ -223,52 +192,10 @@ struct SettingsView: View {
                 }
             }
 
-            Section(header: Text("推送通知")) {
-                Toggle("每日足迹汇总", isOn: $isDailyNotificationEnabled)
-                    .onChange(of: isDailyNotificationEnabled) { _, newValue in
-                        if newValue {
-                            NotificationManager.shared.requestAuthorization { granted in
-                                if !granted {
-                                    isDailyNotificationEnabled = false
-                                    showingSettingsAlert = true
-                                } else {
-                                    updateNotifications()
-                                }
-                            }
-                        } else {
-                            updateNotifications()
-                        }
-                    }
-                if isDailyNotificationEnabled {
-                    DatePicker("通知时间", selection: notificationTime, displayedComponents: .hourAndMinute)
-                        .onChange(of: notificationHour) { _, _ in updateNotifications() }
-                        .onChange(of: notificationMinute) { _, _ in updateNotifications() }
+            Section {
+                NavigationLink("推送通知") {
+                    NotificationSettingsView()
                 }
-                
-                Toggle("新地点足迹提醒", isOn: $isHighlightNotificationEnabled)
-                    .onChange(of: isHighlightNotificationEnabled) { _, newValue in
-                        if newValue {
-                            NotificationManager.shared.requestAuthorization { granted in
-                                if !granted {
-                                    isHighlightNotificationEnabled = false
-                                    showingSettingsAlert = true
-                                }
-                            }
-                        }
-                    }
-                
-                Toggle("往年今日提醒", isOn: $isPastMemoriesNotificationEnabled)
-                    .onChange(of: isPastMemoriesNotificationEnabled) { _, newValue in
-                        if newValue {
-                            NotificationManager.shared.requestAuthorization { granted in
-                                if !granted {
-                                    isPastMemoriesNotificationEnabled = false
-                                    showingSettingsAlert = true
-                                }
-                            }
-                        }
-                    }
-                
             }
             
             Section(header: Text("系统配置"), footer: Text("智能分析服务将根据您的地点历史自动建议标题。")) {
@@ -339,15 +266,107 @@ struct SettingsView: View {
         .navigationTitle("设置")
         .navigationBarTitleDisplayMode(.large)
         .tint(.dfkAccent)
-        .onAppear {
-            NotificationManager.shared.getAuthorizationStatus { status in
-                if status == .denied {
-                    // 仅在系统权限明确被拒绝时，才同步将内部开关关闭
-                    // 避免在 .notDetermined (尚未询问) 状态下误将用户默认开启的选项重置为关闭
-                    isDailyNotificationEnabled = false
-                    isHighlightNotificationEnabled = false
-                    isPastMemoriesNotificationEnabled = false
+    }
+}
+
+private struct NotificationSettingsView: View {
+    @Environment(LocationManager.self) private var locationManager
+    @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("dailyNotificationHour") private var notificationHour: Int = 21
+    @AppStorage("dailyNotificationMinute") private var notificationMinute: Int = 0
+    @AppStorage("isDailyNotificationEnabled") private var isDailyNotificationEnabled = true
+    @AppStorage("isHighlightNotificationEnabled") private var isHighlightNotificationEnabled = true
+    @AppStorage("isPastMemoriesNotificationEnabled") private var isPastMemoriesNotificationEnabled = true
+    @State private var showingSettingsAlert = false
+    @State private var isSystemNotificationEnabled = false
+
+    private var notificationTime: Binding<Date> {
+        Binding(
+            get: {
+                Calendar.current.date(
+                    bySettingHour: notificationHour,
+                    minute: notificationMinute,
+                    second: 0,
+                    of: Date()
+                ) ?? Date()
+            },
+            set: {
+                let components = Calendar.current.dateComponents([.hour, .minute], from: $0)
+                notificationHour = components.hour ?? 21
+                notificationMinute = components.minute ?? 0
+            }
+        )
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    HStack {
+                        Text("允许通知")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Toggle("", isOn: .constant(isSystemNotificationEnabled))
+                            .labelsHidden()
+                            .allowsHitTesting(false)
+                    }
+                    .contentShape(Rectangle())
                 }
+            } footer: {
+                Text("通知总开关由系统管理，点此前往地方客的系统设置。")
+            }
+
+            if isSystemNotificationEnabled {
+                Section("通知内容") {
+                    Toggle("每日足迹汇总", isOn: $isDailyNotificationEnabled)
+                        .onChange(of: isDailyNotificationEnabled) { _, newValue in
+                            if newValue {
+                                NotificationManager.shared.requestAuthorization { granted in
+                                    if granted {
+                                        updateNotifications()
+                                    } else {
+                                        isDailyNotificationEnabled = false
+                                        showingSettingsAlert = true
+                                    }
+                                }
+                            } else {
+                                updateNotifications()
+                            }
+                        }
+                    if isDailyNotificationEnabled {
+                        DatePicker("通知时间", selection: notificationTime, displayedComponents: .hourAndMinute)
+                            .onChange(of: notificationHour) { _, _ in updateNotifications() }
+                            .onChange(of: notificationMinute) { _, _ in updateNotifications() }
+                    }
+
+                    Toggle("新地点足迹提醒", isOn: $isHighlightNotificationEnabled)
+                        .onChange(of: isHighlightNotificationEnabled) { _, newValue in
+                            requestAuthorizationIfNeeded(newValue) {
+                                isHighlightNotificationEnabled = false
+                            }
+                        }
+
+                    Toggle("往年今日提醒", isOn: $isPastMemoriesNotificationEnabled)
+                        .onChange(of: isPastMemoriesNotificationEnabled) { _, newValue in
+                            requestAuthorizationIfNeeded(newValue) {
+                                isPastMemoriesNotificationEnabled = false
+                            }
+                        }
+                }
+            }
+        }
+        .navigationTitle("推送通知")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            refreshSystemNotificationStatus()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                refreshSystemNotificationStatus()
             }
         }
         .alert("需要通知权限", isPresented: $showingSettingsAlert) {
@@ -361,21 +380,104 @@ struct SettingsView: View {
             Text("您已在系统中关闭了应用的通知权限，为及时收到足迹汇总提醒，请前往系统设置中开启。")
         }
     }
-    
+
+    private func refreshSystemNotificationStatus() {
+        NotificationManager.shared.getAuthorizationStatus { status in
+            isSystemNotificationEnabled = status == .authorized
+                || status == .provisional
+                || status == .ephemeral
+        }
+    }
+
+    private func requestAuthorizationIfNeeded(_ isEnabled: Bool, onDenied: @escaping () -> Void) {
+        guard isEnabled else { return }
+        NotificationManager.shared.requestAuthorization { granted in
+            guard !granted else { return }
+            onDenied()
+            showingSettingsAlert = true
+        }
+    }
+
     private func updateNotifications() {
         NotificationManager.shared.updateDailySummary(
             isEnabled: isDailyNotificationEnabled,
             hour: notificationHour,
             minute: notificationMinute
         )
-        
-        if isDailyNotificationEnabled {
-            // If it's evening, try to get a real summary immediately
-            let hour = Calendar.current.component(.hour, from: Date())
-            if hour >= 18 {
-                locationManager.triggerNotificationSummaryRefresh()
+
+        if isDailyNotificationEnabled,
+           Calendar.current.component(.hour, from: Date()) >= 18 {
+            locationManager.triggerNotificationSummaryRefresh()
+        }
+    }
+}
+
+private struct LiveActivitySettingsView: View {
+    @Environment(LocationManager.self) private var locationManager
+    @AppStorage(CurrentLiveActivitySettings.enabledKey) private var isEnabled = true
+    @AppStorage(CurrentLiveActivitySettings.footprintEnabledKey) private var isFootprintEnabled = true
+    @AppStorage(CurrentLiveActivitySettings.transportEnabledKey) private var isTransportEnabled = true
+    @AppStorage(CurrentLiveActivitySettings.tripProgressEnabledKey) private var isTripProgressEnabled = true
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("实时活动", isOn: $isEnabled)
+                    .onChange(of: isEnabled) { _, enabled in
+                        updateCurrentLiveActivity(enabled: enabled)
+                    }
+            } footer: {
+                Text("在锁屏和灵动岛显示实时状态")
+            }
+
+            if isEnabled {
+                Section("显示内容") {
+                    Toggle("地点停留", isOn: $isFootprintEnabled)
+                        .onChange(of: isFootprintEnabled) { _, _ in
+                            refreshCurrentLiveActivity()
+                        }
+                    Toggle("交通移动", isOn: $isTransportEnabled)
+                        .onChange(of: isTransportEnabled) { _, _ in
+                            refreshCurrentLiveActivity()
+                        }
+                    Toggle("出行进程", isOn: $isTripProgressEnabled)
+                        .onChange(of: isTripProgressEnabled) { _, enabled in
+#if canImport(ActivityKit)
+                            guard #available(iOS 16.1, *) else { return }
+                            if enabled {
+                                TripScanManager.shared.refreshActiveTripProgress()
+                            } else {
+                                TripProgressLiveActivityManager.shared.stop()
+                            }
+#endif
+                        }
+                }
             }
         }
+        .navigationTitle("实时活动")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func updateCurrentLiveActivity(enabled: Bool) {
+#if canImport(ActivityKit)
+        guard #available(iOS 16.1, *) else { return }
+        if enabled {
+            locationManager.checkLiveActivity(forceContentUpdate: true)
+            TripScanManager.shared.refreshActiveTripProgress()
+        } else {
+            CurrentLiveActivityManager.shared.stop()
+            TripProgressLiveActivityManager.shared.stop()
+        }
+#endif
+    }
+
+    private func refreshCurrentLiveActivity() {
+#if canImport(ActivityKit)
+        if #available(iOS 16.1, *) {
+            locationManager.checkLiveActivity(forceContentUpdate: true)
+            TripScanManager.shared.refreshActiveTripProgress()
+        }
+#endif
     }
 }
 

@@ -82,7 +82,8 @@ class PlacePickerViewModel: NSObject, ObservableObject {
             let convertedFallback = fallbackResults.map {
                 PlaceSearchResult(name: $0.name, address: $0.address, coordinate: $0.coordinate)
             }
-            searchResults = prioritizeExactMatches(convertedFallback, over: globalResults, query: normalizedQuery)
+            let resolvedResults = prioritizeExactMatches(convertedFallback, over: globalResults, query: normalizedQuery)
+            searchResults = preservingArrivalOrder(existing: searchResults, appending: resolvedResults)
             finalizedQuery = normalizedQuery
             isSearching = false
         }
@@ -129,6 +130,14 @@ class PlacePickerViewModel: NSObject, ObservableObject {
         let combined = exactFallback.isEmpty ? apple + fallback : exactFallback + apple + fallback
         var seen = Set<String>()
         return combined.filter { seen.insert($0.id).inserted }
+    }
+
+    private func preservingArrivalOrder(
+        existing: [PlaceSearchResult],
+        appending additions: [PlaceSearchResult]
+    ) -> [PlaceSearchResult] {
+        var seen = Set(existing.map(\.id))
+        return existing + additions.filter { seen.insert($0.id).inserted }
     }
 }
 

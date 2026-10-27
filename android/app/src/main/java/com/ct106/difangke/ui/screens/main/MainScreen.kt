@@ -446,6 +446,7 @@ private fun ContinuousTimelineScreen(
             activityTypes = activityTypes,
             allPlaces = allPlaces,
             bottomPaddingPx = sheetHeightPx.toInt(),
+            suspendCameraUpdates = detent == SheetDetent.LARGE,
             onUserPan = {
                 // iOS handleMapInteraction: touching the map minimizes the timeline.
                 if (selection == null && detent != SheetDetent.COLLAPSED) detent = SheetDetent.COLLAPSED

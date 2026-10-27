@@ -28,7 +28,7 @@ data class TimelineDestination(
 )
 
 private enum class MainTab(val label: String, val icon: ImageVector) {
-    RECORDS("记录", Icons.Default.Timeline),
+    RECORDS("足迹", Icons.Default.Timeline),
     TRIP("出行", Icons.Outlined.Map),
     REVIEW("回顾", Icons.Outlined.BarChart),
     SETTINGS("设置", Icons.Outlined.Settings)

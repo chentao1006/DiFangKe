@@ -187,6 +187,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     }
     
     // 处理用户点击通知进入 App 的行为
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let userInfo = response.notification.request.content.userInfo
 
@@ -338,6 +346,7 @@ struct DiFangKeApp: App {
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
                     locationManager.refreshAuthorizationStatus()
+                    TripScanManager.shared.refreshActiveTripProgress()
                     backgroundWidgetSyncTask?.cancel()
                     backgroundWidgetSyncTask = nil
                     watchHourlySyncTask?.cancel()

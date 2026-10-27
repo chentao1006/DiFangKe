@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package com.ct106.difangke.ui.screens.settings
 
 import androidx.compose.foundation.background

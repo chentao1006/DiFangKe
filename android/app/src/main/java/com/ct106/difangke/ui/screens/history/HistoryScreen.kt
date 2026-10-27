@@ -510,9 +510,7 @@ fun MonthDayCell(
                 leadingIcon = { Icon(Icons.AutoMirrored.Filled.List, null) }
             )
         }
-        if (hasData) {
-            MonthDayTimelineRing(date, summary!!)
-        }
+        summary?.let { MonthDayTimelineRing(date, it) }
         Text(
             text = Calendar.getInstance().apply { time = date }.get(Calendar.DAY_OF_MONTH).toString(),
             style = MaterialTheme.typography.bodySmall,

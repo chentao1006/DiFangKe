@@ -19,6 +19,9 @@ object AppConfig {
     const val TRIP_SCAN_BATCH_DAYS = 14
     const val TRIP_SCAN_INTERVAL_HOURS = 24L
     const val TRIP_MAXIMUM_DURATION_DAYS = 31
+    /** 进行中的计划：当前位置进入下一个目的地此半径后自动标记到达（米）。 */
+    const val TRIP_PLAN_ARRIVAL_RADIUS_METERS = 200.0
+    const val TRIP_PLAN_ARRIVAL_CHECK_INTERVAL_SECONDS = 15.0
 
     val TRIP_MAJOR_CITIES: List<ConfiguredTripCity> by lazy {
         val json = DiFangKeApp.instance.assets.open("trip_major_cities.json")

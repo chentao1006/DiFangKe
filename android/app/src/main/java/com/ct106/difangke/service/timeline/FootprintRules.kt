@@ -101,7 +101,7 @@ object FootprintRules {
         if (!isSameDay(existing.startTime, end.plusSeconds(-0.001))) return false
         if (!existing.hasLocations) return false
         if (GeoMath.distance(existing.latitude, existing.longitude, lat, lon) >= AppConfig.STAY_DISTANCE_THRESHOLD) return false
-        if (activeCurrentStay && anchor != null && anchor.timestamp > existing.endTime) {
+        if (activeCurrentStay && anchor.timestamp > existing.endTime) {
             if (!existing.allowsAutomaticDurationExtension || secs(existing.endTime, anchor.timestamp) > 5 * 60) return false
         }
         val extensionStart = existing.endTime

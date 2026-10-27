@@ -1325,6 +1325,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     self?.forceHighAccuracyBoost()
                 }
                 self?.updateUIMovementState(isMovingEvidence: isMoving, source: "motion:isMoving")
+                if !isMoving {
+                    TripScanManager.shared.refreshActiveTripProgress()
+                }
             }
             .store(in: &cancellables)
 
@@ -3163,6 +3166,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         if let departureFix = lastLocation {
             uiMovingStartedAt = min(uiMovingStartedAt ?? departureFix.timestamp, departureFix.timestamp)
         }
+#if canImport(ActivityKit)
+        if #available(iOS 16.1, *) {
+            // This is the single confirmed stay -> movement transition. Check
+            // the actual ActivityKit state here instead of hoping a later Live
+            // Activity refresh reaches its recovery branch.
+            CurrentLiveActivityManager.shared.notifyIfMissingForConfirmedMovement()
+        }
+#endif
         // uiIsMoving may already be true, so its change handler is not guaranteed
         // to fire here. The cleared stay anchor changes the shared state itself.
         checkLiveActivity(forceContentUpdate: true)
@@ -3503,8 +3514,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         
     }
     
-    private func checkAndSendNewPlaceNotification(for footprint: Footprint, place: Place?) {
-        guard let context = modelContext else { return }
+    private func checkAndSendNewPlaceNotification(
+        for footprint: Footprint,
+        place: Place?,
+        context: ModelContext
+    ) {
         let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
         let startTime = footprint.startTime
 
@@ -3864,7 +3878,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // A detail can only be opened after the footprint has been saved.  Attach its ID
             // to the highlight notification so tapping it opens this footprint directly.
             if !isHistorical {
-                checkAndSendNewPlaceNotification(for: newFootprint, place: effectivePlace)
+                checkAndSendNewPlaceNotification(
+                    for: newFootprint,
+                    place: effectivePlace,
+                    context: context
+                )
             }
             
             // 核心修复：重置或历史回溯时也要触发分析逻辑，以补全地址和标题
@@ -4288,7 +4306,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
             let resolvedOverview: String?
             if overviewStatus.0,
-               NotificationManager.shared.claimDailySummaryAIRequestIfNeeded() {
+               UserDefaults.standard.bool(forKey: "isAiAssistantEnabled") {
                 resolvedOverview = await withCheckedContinuation { continuation in
                     Task { @MainActor in
                         OpenAIService.shared.currentDailyOverviewSummary(
@@ -5573,6 +5591,36 @@ extension TimeInterval {
 import ActivityKit
 import SwiftData
 
+enum CurrentLiveActivitySettings {
+    static let enabledKey = "isCurrentLiveActivityEnabled"
+    static let footprintEnabledKey = "isFootprintLiveActivityEnabled"
+    static let transportEnabledKey = "isTransportLiveActivityEnabled"
+    static let tripProgressEnabledKey = "isTripProgressLiveActivityEnabled"
+
+    static var isEnabled: Bool {
+        enabled(forKey: enabledKey)
+    }
+
+    static var isTripProgressEnabled: Bool {
+        isEnabled && enabled(forKey: tripProgressEnabledKey)
+    }
+
+    static func isEnabled(for kind: CurrentTrackingActivityKind) -> Bool {
+        guard isEnabled else { return false }
+        switch kind {
+        case .footprint:
+            return enabled(forKey: footprintEnabledKey)
+        case .transport:
+            return enabled(forKey: transportEnabledKey)
+        }
+    }
+
+    private static func enabled(forKey key: String) -> Bool {
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: key) == nil || defaults.bool(forKey: key)
+    }
+}
+
 @available(iOS 16.1, *)
 @MainActor
 final class CurrentLiveActivityManager {
@@ -5606,9 +5654,7 @@ final class CurrentLiveActivityManager {
     private init() {}
 
     private var isEnabled: Bool {
-        let defaults = UserDefaults.standard
-        return defaults.object(forKey: "isCurrentLiveActivityEnabled") == nil
-            || defaults.bool(forKey: "isCurrentLiveActivityEnabled")
+        CurrentLiveActivitySettings.isEnabled
     }
 
     func updateLiveActivity(
@@ -5642,6 +5688,26 @@ final class CurrentLiveActivityManager {
             pendingUpdate = nil
             await endAll()
         }
+    }
+
+    func notifyIfMissingForConfirmedMovement() {
+        guard CurrentLiveActivitySettings.isEnabled(for: .transport) else { return }
+
+        let canDisplayActivities = ActivityAuthorizationInfo().areActivitiesEnabled
+        let hasDisplayableActivity = canDisplayActivities
+            && Activity<CurrentTrackingActivityAttributes>.activities.contains {
+                $0.attributes.sessionID.hasPrefix(Self.layoutSessionPrefix)
+                    && ($0.activityState == .active || $0.activityState == .stale)
+            }
+        guard !hasDisplayableActivity else { return }
+
+        // Mark the transition before the normal refresh runs so its fallback
+        // path cannot enqueue the same immediate notification a second time.
+        UserDefaults.standard.set(
+            CurrentTrackingActivityKind.transport.rawValue,
+            forKey: Self.lastKnownKindKey
+        )
+        NotificationManager.shared.sendLiveActivityRecoveryNotification(isMoving: true)
     }
 
     private func enqueueUpdate(
@@ -5680,9 +5746,52 @@ final class CurrentLiveActivityManager {
         forceContentUpdate: Bool,
         lifecycleRevision expectedLifecycleRevision: Int
     ) async {
-        guard isEnabled,
-              ActivityAuthorizationInfo().areActivitiesEnabled,
-              LocationManager.shared.isTracking else {
+        guard isEnabled, LocationManager.shared.isTracking else {
+            await endAll()
+            return
+        }
+
+        let activeActivities = Activity<CurrentTrackingActivityAttributes>.activities
+        let activitiesAuthorized = ActivityAuthorizationInfo().areActivitiesEnabled
+        let compatibleActivity = activeActivities.first {
+            activitiesAuthorized
+                && $0.attributes.sessionID.hasPrefix(Self.layoutSessionPrefix)
+                && ($0.activityState == .active || $0.activityState == .stale)
+        }
+
+        // A location event commonly relaunches the app in the background before
+        // SwiftData has opened. Detecting a confirmed moving/stationary transition
+        // does not need the database, so notify before the model-context guard.
+        // Otherwise the exact case this fallback is meant for returns early and
+        // never tells the user that the missing Live Activity needs reopening.
+        if compatibleActivity == nil, UIApplication.shared.applicationState != .active {
+            let manager = LocationManager.shared
+            let currentKind: CurrentTrackingActivityKind = manager.isCurrentlyMoving
+                ? .transport
+                : .footprint
+            guard CurrentLiveActivitySettings.isEnabled(for: currentKind) else {
+                await endAll()
+                return
+            }
+            let defaults = UserDefaults.standard
+            let previousKind = defaults.string(forKey: Self.lastKnownKindKey)
+            let kindChanged = previousKind.map { $0 != currentKind.rawValue }
+                ?? (currentKind == .transport)
+            if kindChanged {
+                NotificationManager.shared.sendLiveActivityRecoveryNotification(
+                    isMoving: currentKind == .transport
+                )
+            }
+            defaults.set(currentKind.rawValue, forKey: Self.lastKnownKindKey)
+            for activity in activeActivities {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+            currentActivity = nil
+            print("[CurrentLiveActivity] no active activity in background; recovery notification handled")
+            return
+        }
+
+        guard activitiesAuthorized else {
             await endAll()
             return
         }
@@ -5702,12 +5811,15 @@ final class CurrentLiveActivityManager {
             print("[CurrentLiveActivity] waiting for recognized current state")
             return
         }
+        guard CurrentLiveActivitySettings.isEnabled(for: resolved.state.kind) else {
+            await endAll()
+            return
+        }
 
-        let activeActivities = Activity<CurrentTrackingActivityAttributes>.activities
         // ActivityKit is the source of truth. A retained Activity instance can
         // already be ended/dismissed by the system; reusing it makes updates
         // silently target an object that is no longer visible.
-        var existingActivity = activeActivities.first
+        var existingActivity = compatibleActivity
         currentActivity = existingActivity
         if let activity = existingActivity,
            !activity.attributes.sessionID.hasPrefix(Self.layoutSessionPrefix) {
@@ -5743,26 +5855,6 @@ final class CurrentLiveActivityManager {
         // minute bucket also provides a deterministic fallback there.
         let durationRefreshInterval: TimeInterval = state.kind == .transport ? 60 : 5 * 60
         state.durationUpdateBucket = Int(Date().timeIntervalSince1970 / durationRefreshInterval)
-
-        // An ordinary background location wake can update an existing Live
-        // Activity but can't create a replacement. When the tracking state has
-        // genuinely changed and the activity is gone, ask the user to reopen
-        // the app instead of repeatedly making a request ActivityKit will deny.
-        if existingActivity == nil, UIApplication.shared.applicationState != .active {
-            let defaults = UserDefaults.standard
-            let previousKind = defaults.string(forKey: Self.lastKnownKindKey)
-            let kindChanged = previousKind.map { $0 != state.kind.rawValue }
-                ?? (state.kind == .transport)
-            if kindChanged {
-                NotificationManager.shared.sendLiveActivityRecoveryNotification(
-                    isMoving: state.kind == .transport
-                )
-            }
-            defaults.set(state.kind.rawValue, forKey: Self.lastKnownKindKey)
-            lastState = state
-            print("[CurrentLiveActivity] no active activity in background; recovery notification handled")
-            return
-        }
 
         // Publish the new coordinates/text/metrics before doing any MapKit or
         // Photos work. Snapshot generation can outlive the short background

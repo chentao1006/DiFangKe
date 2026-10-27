@@ -109,36 +109,14 @@ object TransportRules {
         return splitIndex
     }
 
-    // ── short trip with stable stay boundaries ──
-    fun hasStableBoundaryShortTripEvidence(points: List<RouteCoordinate>, duration: Double): Boolean {
-        if (!(duration > 0 && duration < AppConfig.TRANSPORT_MIN_DURATION_THRESHOLD)) return false
-        val valid = points.filter { it.isValid }
-        val boundaries = valid.filter { it.isStableStayBoundary }.sortedBy { it.timestamp ?: Long.MIN_VALUE }
-        if (boundaries.size < 2) return false
-        val start = boundaries.first(); val end = boundaries.last()
-        if (GeoMath.distance(start.lat, start.lon, end.lat, end.lon) < AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD) return false
-
-        val observed = valid.filter { !it.isSyntheticPadding && it.timestamp != null }.sortedBy { it.timestamp!! }
-        if (observed.size < 3) return false
-        for (index in 1 until observed.size) {
-            val gap = (observed[index].timestamp!! - observed[index - 1].timestamp!!) / 1000.0
-            if (!(gap > 0 && gap <= AppConfig.TRANSPORT_DEPARTURE_SPEED_SAMPLE_DURATION)) return false
-        }
-        val first = observed.first(); val last = observed.last()
-        val minimumVisibleMiddle = max(25.0, AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD - 2 * AppConfig.STAY_DISTANCE_THRESHOLD)
-        val d = { a: RouteCoordinate, b: RouteCoordinate -> GeoMath.distance(a.lat, a.lon, b.lat, b.lon) }
-        return d(first, last) >= minimumVisibleMiddle && d(first, start) < d(first, end) && d(last, end) < d(last, start)
-    }
-
     fun hasMinimumAutomaticTransportSpan(record: WTransport): Boolean {
         if (record.distance < AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD) return false
+        if (secs(record.startTime, record.endTime) < AppConfig.TRANSPORT_MIN_DURATION_THRESHOLD) return false
         val decoded = record.pointsOrNull ?: return true
         val valid = decoded.filter { it.isValid }
         val observed = valid.filter { !it.isSyntheticPadding }
-        val evidence = if (observed.isEmpty()) valid else observed
-        if (evidence.size < 2) return false
-        if (GeoMath.maxDiameter(evidence.map { it.latLon }) >= AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD) return true
-        return hasStableBoundaryShortTripEvidence(valid, secs(record.startTime, record.endTime))
+        if (observed.size < 2) return false
+        return GeoMath.maxDiameter(observed.map { it.latLon }) >= AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD
     }
 
     // ── observed route helpers ──

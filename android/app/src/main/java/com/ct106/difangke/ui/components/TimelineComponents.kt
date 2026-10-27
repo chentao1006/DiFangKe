@@ -246,7 +246,7 @@ fun FootprintCardView(
                     }
                     val locationText = when {
                         matchedPlace != null -> matchedPlace.name
-                        !footprint.address.isNullOrEmpty() && footprint.address != "null" && footprint.address != "[]" -> footprint.address!!
+                        !footprint.address.isNullOrEmpty() && footprint.address != "null" && footprint.address != "[]" -> footprint.address
                         else -> "未知位置"
                     }
 
@@ -458,7 +458,6 @@ private fun getTransportIcon(typeRaw: String): ImageVector {
         com.ct106.difangke.data.model.TransportType.TRAIN -> Icons.Default.Train
         com.ct106.difangke.data.model.TransportType.AIRPLANE -> Icons.Default.Flight
         com.ct106.difangke.data.model.TransportType.SHIP -> Icons.Default.DirectionsBoat
-        else -> Icons.Default.DirectionsBus
     }
 }
 
@@ -494,7 +493,6 @@ fun TimelineRow(
                 onClick = onClick
             )
         }
-        else -> Unit
     }
 }
 

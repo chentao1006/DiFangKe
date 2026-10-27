@@ -404,6 +404,471 @@ struct LegacyCurrentTrackingLiveActivityWidget: Widget {
 }
 
 @available(iOS 18.0, *)
+struct TripProgressLiveActivityWidget: Widget {
+    var body: some WidgetConfiguration {
+        ActivityConfiguration(for: TripProgressActivityAttributes.self) { context in
+            TripProgressAdaptiveContent(context: context)
+                .activityBackgroundTint(.black)
+                .activitySystemActionForegroundColor(.white)
+        } dynamicIsland: { context in
+            tripProgressDynamicIsland(context)
+        }
+        .supplementalActivityFamilies([.small, .medium])
+    }
+}
+
+@available(iOS 16.1, *)
+struct LegacyTripProgressLiveActivityWidget: Widget {
+    var body: some WidgetConfiguration {
+        ActivityConfiguration(for: TripProgressActivityAttributes.self) { context in
+            Group {
+                if #available(iOS 18.0, *) {
+                    TripProgressAdaptiveContent(context: context)
+                } else {
+                    TripProgressLockScreenContent(context: context)
+                }
+            }
+            .activityBackgroundTint(.clear)
+            .activitySystemActionForegroundColor(.white)
+        } dynamicIsland: { context in
+            tripProgressDynamicIsland(context)
+        }
+    }
+}
+
+@available(iOS 16.1, *)
+private func tripProgressDynamicIsland(
+    _ context: ActivityViewContext<TripProgressActivityAttributes>
+) -> DynamicIsland {
+    DynamicIsland {
+        DynamicIslandExpandedRegion(.leading) {
+            HStack(spacing: 6) {
+                TripProgressActivityMarker(state: context.state)
+                Text(context.attributes.tripTitle)
+                    .font(.subheadline.bold())
+                    .lineLimit(1)
+            }
+            .padding(.leading, 4)
+        }
+        DynamicIslandExpandedRegion(.trailing) {
+            Text("第\(context.state.sequenceNumber)站")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.trailing, 4)
+        }
+        DynamicIslandExpandedRegion(.bottom) {
+            TripProgressIslandBottomContent(context: context)
+        }
+    } compactLeading: {
+        Text(context.state.cityName ?? context.state.placeName)
+            .font(.caption.bold())
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+    } compactTrailing: {
+        Text(formatTripProgressCompactDistance(context.state.currentDistance))
+            .font(.caption.bold())
+    } minimal: {
+        Text(context.state.cityName ?? context.state.placeName)
+            .font(.caption2.bold())
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.5)
+    }
+    .keylineTint(tripProgressAccent(context.state))
+    .widgetURL(tripProgressDetailURL(context))
+}
+
+@available(iOS 16.1, *)
+private struct TripProgressIslandBottomContent: View {
+    let context: ActivityViewContext<TripProgressActivityAttributes>
+
+    // 与足迹实时活动的展开灵动岛保持相同高度和地图承载方式。
+    private let expandedBottomHeight: CGFloat = 112
+    private let mapInset: CGFloat = 8
+
+    var body: some View {
+        TripProgressMapImage(
+            tripID: context.attributes.tripID,
+            latitude: context.state.latitude,
+            longitude: context.state.longitude,
+            prefersDarkMap: true
+        )
+        .frame(
+            maxWidth: .infinity,
+            minHeight: expandedBottomHeight - mapInset,
+            maxHeight: expandedBottomHeight - mapInset
+        )
+        .clipped()
+        .overlay(
+            LinearGradient(
+                colors: [.black.opacity(0.28), .black.opacity(0.08), .black.opacity(0.42)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+        .overlay(alignment: .top) {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(context.state.placeName)
+                        .font(.headline)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.68)
+                        .layoutPriority(1)
+                    Spacer(minLength: 8)
+                    Text("还有 \(formatTripProgressDistance(context.state.currentDistance))")
+                        .font(.subheadline.bold().monospacedDigit())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                if let guidance = context.state.routeGuidance, !guidance.isEmpty {
+                    Label(
+                        guidance,
+                        systemImage: tripProgressTransportIcon(context.state.transportTypeRaw)
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.76))
+                    .lineLimit(1)
+                }
+
+                TripArrivalProgress(state: context.state, compact: true)
+                    .padding(.top, 6)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            TripProgressBrand(foreground: .white.opacity(0.72))
+                .padding(.trailing, 8)
+                .padding(.bottom, 5)
+        }
+        .foregroundStyle(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .padding(.horizontal, mapInset)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: expandedBottomHeight,
+            maxHeight: expandedBottomHeight,
+            alignment: .top
+        )
+        .widgetURL(tripProgressDetailURL(context))
+    }
+}
+
+@available(iOS 18.0, *)
+private struct TripProgressAdaptiveContent: View {
+    @Environment(\.activityFamily) private var family
+    let context: ActivityViewContext<TripProgressActivityAttributes>
+
+    var body: some View {
+        if family == .small {
+            TripProgressWatchContent(context: context)
+                .widgetURL(tripProgressDetailURL(context))
+        } else {
+            TripProgressLockScreenContent(context: context)
+        }
+    }
+}
+
+@available(iOS 18.0, *)
+private struct TripProgressWatchContent: View {
+    let context: ActivityViewContext<TripProgressActivityAttributes>
+
+    private var progress: Double {
+        guard let total = context.state.segmentDistance,
+              let remaining = context.state.currentDistance,
+              total.isFinite, remaining.isFinite,
+              total > 0 else { return 0 }
+        return min(1, max(0, 1 - remaining / total))
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                TripProgressMapImage(
+                    tripID: context.attributes.tripID,
+                    latitude: context.state.latitude,
+                    longitude: context.state.longitude,
+                    prefersDarkMap: true
+                )
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .clipped()
+                .overlay(
+                    LinearGradient(
+                        colors: [.black.opacity(0.24), .clear, .black.opacity(0.42)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .center, spacing: 7) {
+                        Image(systemName: context.state.tripActivityIcon ?? "map.fill")
+                            .font(.headline)
+                            .foregroundStyle(tripProgressAccent(context.state))
+                            .frame(width: 22, alignment: .leading)
+                        Text(context.attributes.tripTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                            .layoutPriority(1)
+                        Spacer(minLength: 2)
+                        Text("第\(context.state.sequenceNumber)站")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.72))
+                            .lineLimit(1)
+                    }
+
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(context.state.placeName)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .layoutPriority(0)
+                        Spacer(minLength: 2)
+                        Text("还有\(formatTripProgressCompactDistance(context.state.currentDistance))")
+                            .font(.caption.bold().monospacedDigit())
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .layoutPriority(2)
+                    }
+
+                    GeometryReader { progressProxy in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(.white.opacity(0.28))
+                            Capsule()
+                                .fill(Color("AccentColor"))
+                                .frame(width: progressProxy.size.width * progress)
+                        }
+                    }
+                    .frame(height: 5)
+                }
+                .frame(
+                    width: max(0, proxy.size.width - 16),
+                    height: max(0, proxy.size.height - 14),
+                    alignment: .center
+                )
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .foregroundStyle(.white)
+        .clipped()
+        .widgetURL(tripProgressDetailURL(context))
+    }
+}
+
+@available(iOS 16.1, *)
+private struct TripProgressLockScreenContent: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let context: ActivityViewContext<TripProgressActivityAttributes>
+
+    private var usesDarkMap: Bool { colorScheme == .dark }
+    private var primaryForeground: Color { usesDarkMap ? .white : .black }
+
+    var body: some View {
+        ZStack {
+            GeometryReader { proxy in
+                TripProgressMapImage(
+                    tripID: context.attributes.tripID,
+                    latitude: context.state.latitude,
+                    longitude: context.state.longitude,
+                    prefersDarkMap: usesDarkMap
+                )
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .clipped()
+                .overlay(
+                    LinearGradient(
+                        colors: usesDarkMap
+                            ? [.black.opacity(0.18), .clear, .black.opacity(0.28)]
+                            : [.white.opacity(0.36), .clear, .white.opacity(0.46)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .center, spacing: 7) {
+                    TripProgressActivityMarker(state: context.state, size: 26)
+                    Text(context.attributes.tripTitle)
+                        .font(.headline.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.76)
+                    Spacer(minLength: 8)
+                    Text("第\(context.state.sequenceNumber)站")
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(primaryForeground.opacity(0.72))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(context.state.placeName)
+                            .font(.title3.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.68)
+                            .layoutPriority(1)
+                        Spacer(minLength: 8)
+                        Text("还有 \(formatTripProgressDistance(context.state.currentDistance))")
+                            .font(.headline.bold().monospacedDigit())
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    TripArrivalProgress(state: context.state, compact: false)
+                        .padding(.top, 12)
+                }
+                .padding(.top, 6)
+            }
+            .foregroundStyle(primaryForeground)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, minHeight: 170, maxHeight: 170, alignment: .top)
+        .overlay(alignment: .bottomTrailing) {
+            TripProgressBrand(foreground: primaryForeground.opacity(0.72))
+                .padding(.trailing, 14)
+                .padding(.bottom, 8)
+        }
+        .clipped()
+        .widgetURL(tripProgressDetailURL(context))
+    }
+}
+
+private struct TripProgressActivityMarker: View {
+    let state: TripProgressActivityAttributes.ContentState
+    var size: CGFloat = 22
+
+    var body: some View {
+        Image(systemName: state.tripActivityIcon ?? "map.fill")
+            .font(.system(size: size * 0.72, weight: .semibold))
+            .foregroundStyle(tripProgressAccent(state))
+            .frame(width: size, height: size, alignment: .center)
+    }
+}
+
+private struct TripProgressBrand: View {
+    let foreground: Color
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image("AppLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 16, height: 16)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            Text("地方客")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(foreground)
+        }
+    }
+}
+
+@available(iOS 16.1, *)
+private struct TripArrivalProgress: View {
+    let state: TripProgressActivityAttributes.ContentState
+    let compact: Bool
+
+    private var progress: Double {
+        guard let total = state.segmentDistance,
+              let remaining = state.currentDistance,
+              total.isFinite, remaining.isFinite,
+              total > 0 else { return 0 }
+        return min(1, max(0, 1 - remaining / total))
+    }
+
+    var body: some View {
+        CurrentTransportProgress(
+            start: state.originName ?? "出发",
+            end: state.placeName,
+            icon: tripProgressTransportIcon(state.transportTypeRaw),
+            accent: Color("AccentColor"),
+            onDarkMap: true,
+            compact: compact,
+            progress: progress,
+            showsEndpoints: false,
+            lineWidth: 4
+        )
+        .accessibilityLabel("前往\(state.placeName)，已完成\(Int((progress * 100).rounded()))%")
+    }
+}
+
+private struct TripProgressMapImage: View {
+    let tripID: String
+    let latitude: Double?
+    let longitude: Double?
+    let prefersDarkMap: Bool
+    var body: some View {
+        if let latitude, let longitude,
+           let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.com.ct106.difangke"
+           ) {
+            let hash = String(format: "%.3f_%.3f", latitude, longitude)
+            let suffix = prefersDarkMap ? "dark" : "light"
+            let url = container.appendingPathComponent("trip_\(tripID)_\(hash)_\(suffix).png")
+            if let data = try? Data(contentsOf: url), let image = UIImage(data: data) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .clipped()
+            }
+        }
+    }
+}
+
+@available(iOS 16.1, *)
+private func tripProgressDetailURL(
+    _ context: ActivityViewContext<TripProgressActivityAttributes>
+) -> URL {
+    URL(string: "difangke://trip/detail?id=\(context.attributes.tripID)")!
+}
+
+private func formatTripProgressDistance(_ distance: Double?) -> String {
+    guard let distance, distance.isFinite, distance >= 0 else { return "—" }
+    if distance < 1_000 { return String(format: "%.0f 米", distance) }
+    let kilometers = distance / 1_000
+    return "\(kilometers.formatted(.number.grouping(.never).precision(.fractionLength(0...1)))) 公里"
+}
+
+private func formatTripProgressCompactDistance(_ distance: Double?) -> String {
+    guard let distance, distance.isFinite, distance >= 0 else { return "—" }
+    if distance < 1_000 { return String(format: "%.0fm", distance) }
+    let kilometers = distance / 1_000
+    return "\(kilometers.formatted(.number.grouping(.never).precision(.fractionLength(0...1))))km"
+}
+
+private func tripProgressTransportIcon(_ rawValue: String?) -> String {
+    switch rawValue {
+    case "slow": return "figure.walk"
+    case "running": return "figure.run"
+    case "bicycle": return "bicycle"
+    case "ebike": return "moped.fill"
+    case "motorcycle": return "motorcycle.fill"
+    case "bus": return "bus.fill"
+    case "car": return "car.fill"
+    case "subway": return "tram.fill"
+    case "train": return "train.side.front.car"
+    case "airplane": return "airplane"
+    case "ship": return "ferry.fill"
+    default: return "arrow.right"
+    }
+}
+
+private func tripProgressAccent(
+    _ state: TripProgressActivityAttributes.ContentState
+) -> Color {
+    guard let colorHex = state.tripActivityColorHex, !colorHex.isEmpty else {
+        return Color("AccentColor")
+    }
+    return currentActivityColor(colorHex)
+}
+
+@available(iOS 18.0, *)
 private struct CurrentTrackingAdaptiveContent: View {
     @Environment(\.activityFamily) private var family
     let context: ActivityViewContext<CurrentTrackingActivityAttributes>
@@ -862,10 +1327,14 @@ private struct CurrentActivityPhotoStack: View {
 @available(iOS 16.1, *)
 private struct CurrentTransportProgress: View {
     let start: String
+    var end: String? = nil
     let icon: String
     let accent: Color
     let onDarkMap: Bool
     var compact = false
+    var progress: Double = 0.5
+    var showsEndpoints = true
+    var lineWidth: CGFloat = 3
 
     private var foreground: Color { onDarkMap ? .white : .black }
 
@@ -873,19 +1342,25 @@ private struct CurrentTransportProgress: View {
         VStack(spacing: compact ? 2 : 4) {
             GeometryReader { proxy in
                 let leadingX: CGFloat = 7
-                let currentX = proxy.size.width / 2
                 let trailingX = proxy.size.width - 7
+                let currentX = leadingX + (trailingX - leadingX) * min(1, max(0, progress))
                 ZStack(alignment: .leading) {
                     Path { path in
                         path.move(to: CGPoint(x: leadingX, y: 12))
                         path.addLine(to: CGPoint(x: trailingX, y: 12))
                     }
-                    .stroke(foreground.opacity(0.34), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .stroke(
+                        foreground.opacity(0.34),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                    )
                     Path { path in
                         path.move(to: CGPoint(x: leadingX, y: 12))
                         path.addLine(to: CGPoint(x: currentX, y: 12))
                     }
-                    .stroke(accent, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .stroke(
+                        accent,
+                        style: StrokeStyle(lineWidth: lineWidth + 1, lineCap: .round)
+                    )
                     Circle().fill(accent).frame(width: 12, height: 12).position(x: leadingX, y: 12)
                     Circle().fill(onDarkMap ? Color.black : Color.white)
                         .overlay(Circle().stroke(accent, lineWidth: 1.2))
@@ -903,16 +1378,24 @@ private struct CurrentTransportProgress: View {
             }
             .frame(height: 24)
 
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(start).lineLimit(1)
+            if showsEndpoints {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(start).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Color.clear.frame(maxWidth: .infinity, minHeight: 1)
+                    if let end {
+                        Text(end)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    } else {
+                        Color.clear.frame(maxWidth: .infinity, minHeight: 1)
+                    }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Color.clear.frame(maxWidth: .infinity, minHeight: 1)
-                Color.clear.frame(maxWidth: .infinity, minHeight: 1)
+                .font(.caption)
+                .foregroundStyle(foreground)
             }
-            .font(.caption)
-            .foregroundStyle(foreground)
         }
     }
 }

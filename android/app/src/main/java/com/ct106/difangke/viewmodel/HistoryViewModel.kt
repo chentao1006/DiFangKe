@@ -236,7 +236,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                     }.getOrNull()
                     val address = when {
                         place?.isUserDefined == true -> place.name
-                        !place?.address.isNullOrBlank() -> place?.address
+                        !place?.address.isNullOrBlank() -> place.address
                         else -> geocode?.address
                     }
                     candidate.copy(

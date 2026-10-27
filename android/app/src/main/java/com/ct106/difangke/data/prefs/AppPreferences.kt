@@ -157,6 +157,13 @@ class AppPreferences(private val context: Context) {
         if (value == null) it.remove(KEY_TRIP_SUPPRESSED_RANGES) else it[KEY_TRIP_SUPPRESSED_RANGES] = value
     }
     suspend fun clearTripSuppressedRanges() = context.dataStore.edit { it.remove(KEY_TRIP_SUPPRESSED_RANGES) }
+    suspend fun getTripRouteOptionIndex(stopID: String): Int = context.dataStore.data
+        .map { it[intPreferencesKey("tripRouteOptionIndex.$stopID")] ?: 0 }
+        .first()
+    suspend fun setTripRouteOptionIndex(stopID: String, index: Int?) = context.dataStore.edit {
+        val key = intPreferencesKey("tripRouteOptionIndex.$stopID")
+        if (index == null) it.remove(key) else it[key] = index.coerceAtLeast(0)
+    }
     suspend fun resetTripScanState() = context.dataStore.edit {
         it.remove(KEY_TRIP_SCAN_CURSOR)
         it.remove(KEY_TRIP_SCAN_PENDING)

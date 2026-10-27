@@ -16,16 +16,17 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ct106.difangke.data.db.entity.PlaceEntity
@@ -85,17 +86,18 @@ internal fun CurrentStayTimelineRow(
     val speedKmh = ((ongoing?.speed ?: tracking?.speed ?: 0.0).coerceAtLeast(0.0)) * 3.6
     val isMoving = ongoing == null
     val userPlaces = places.filter { it.isUserDefined && !it.isIgnored }
-    val placeName = remember(ongoing, places) {
-        if (ongoing == null) "此处" else {
+    val placeName: String? = remember(ongoing, places) {
+        if (ongoing == null) null else {
             val matched = userPlaces
                 .filter { distanceMeters(ongoing.lat, ongoing.lon, it.latitude, it.longitude) <= maxOf(it.radius, 30f) }
                 .minByOrNull { distanceMeters(ongoing.lat, ongoing.lon, it.latitude, it.longitude) }
             val address = ongoing.address?.trim().orEmpty()
-            matched?.name ?: if (address.isEmpty() || address == "正在解析位置..." || address == "未知位置") "此处" else address
+            matched?.name?.trim()?.takeUnless { it.isUnresolvedCurrentPlaceName() }
+                ?: address.takeUnless { it.isUnresolvedCurrentPlaceName() }
         }
     }
     val title = when {
-        !isMoving -> "正在${placeName}停留"
+        !isMoving -> placeName?.let { "正在${it}停留" } ?: "正在停留"
         speedKmh > 90 -> "正在高速移动"
         speedKmh > 30 -> "正在快速移动"
         speedKmh > 5 -> "正在持续移动"
@@ -136,30 +138,22 @@ internal fun CurrentStayTimelineRow(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             if (ongoing != null) {
-                val underline = MaterialTheme.colorScheme.onSurface
-                Row(
-                    modifier = Modifier.clickable { showPlacePicker = true },
-                    verticalAlignment = Alignment.Bottom
-                ) {
-                    Text("正在", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text(
-                        placeName,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.drawBehind {
-                            val y = size.height - 1.dp.toPx()
-                            drawLine(
-                                color = underline,
-                                start = Offset(0f, y),
-                                end = Offset(size.width, y),
-                                strokeWidth = 1.dp.toPx(),
-                                cap = StrokeCap.Round,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(0.1f, 3.dp.toPx()))
-                            )
+                Text(
+                    text = buildAnnotatedString {
+                        append("正在")
+                        if (placeName != null) {
+                            withStyle(SpanStyle(textDecoration = TextDecoration.Underline)) {
+                                append(placeName)
+                            }
+                            append("停留")
+                        } else {
+                            append("停留")
                         }
-                    )
-                    Text("停留", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                }
+                    },
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clickable { showPlacePicker = true }
+                )
             } else {
                 Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             }
@@ -183,6 +177,18 @@ internal fun CurrentStayTimelineRow(
         )
     }
 }
+
+private val unresolvedCurrentPlaceNames = setOf(
+    "",
+    "未知位置",
+    "未知地点",
+    "地点记录",
+    "正在解析位置...",
+    "此处"
+)
+
+private fun String.isUnresolvedCurrentPlaceName(): Boolean =
+    this in unresolvedCurrentPlaceNames || startsWith("正在解析位置")
 
 /** iOS CurrentTimelineBreathingMarker; pulse is faster while moving. */
 @Composable

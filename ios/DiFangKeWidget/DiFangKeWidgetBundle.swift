@@ -7,6 +7,7 @@ struct DiFangKeWidgetBundle: WidgetBundle {
         DFKFootprintWidget()
 #if canImport(ActivityKit)
         currentTrackingWidget()
+        tripProgressWidget()
 #endif
     }
 
@@ -15,6 +16,14 @@ struct DiFangKeWidgetBundle: WidgetBundle {
             return WidgetBundleBuilder.buildBlock(CurrentTrackingLiveActivityWidget())
         } else {
             return WidgetBundleBuilder.buildBlock(LegacyCurrentTrackingLiveActivityWidget())
+        }
+    }
+
+    private func tripProgressWidget() -> some Widget {
+        if #available(iOS 18.0, *) {
+            return WidgetBundleBuilder.buildBlock(TripProgressLiveActivityWidget())
+        } else {
+            return WidgetBundleBuilder.buildBlock(LegacyTripProgressLiveActivityWidget())
         }
     }
 }

@@ -115,8 +115,9 @@ class TripScanWorker(context: Context, params: WorkerParameters) : CoroutineWork
             val homeDay = cities.any { cityMatches(it, home) }
             val away = cities.filterNot { cityMatches(it, home) }
             if (away.isNotEmpty()) {
-                if (pending != null && inclusiveDayCount(Date(pending!!.start), cursor) > AppConfig.TRIP_MAXIMUM_DURATION_DAYS) {
-                    persist(pending!!, home, db, prefs)
+                val currentPending = pending
+                if (currentPending != null && inclusiveDayCount(Date(currentPending.start), cursor) > AppConfig.TRIP_MAXIMUM_DURATION_DAYS) {
+                    persist(currentPending, home, db, prefs)
                     pending = null
                 }
                 val current = pending ?: Pending(cursor.time, cursor.time, linkedMapOf()).also { pending = it }
@@ -174,21 +175,32 @@ class TripScanWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 && (it.originRaw != "automatic"
                     || inclusiveDayCount(mergedStart, mergedEnd) <= AppConfig.TRIP_MAXIMUM_DURATION_DAYS)
         }
+        val orderedPendingCities = pending.days.entries.sortedBy { it.key }.flatMap { it.value }
+            .distinctBy { cityKey(it.countryCode, it.cityName) }
+        val resolvedStart = if (existing?.datesUserEdited == true) existing.plannedStartDay else minOf(existing?.plannedStartDay ?: Date(pending.start), Date(pending.start))
+        val resolvedEnd = if (existing?.datesUserEdited == true) existing.plannedEndDay else maxOf(existing?.plannedEndDay ?: Date(pending.end), Date(pending.end))
+        val generatedTitle = automaticTitle(
+            orderedPendingCities,
+            home,
+            resolvedStart,
+            resolvedEnd
+        )
         val trip = existing?.copy(
-            plannedStartDay = if (existing.datesUserEdited) existing.plannedStartDay else minOf(existing.plannedStartDay, Date(pending.start)),
-            plannedEndDay = if (existing.datesUserEdited) existing.plannedEndDay else maxOf(existing.plannedEndDay, Date(pending.end)),
+            title = existing.title,
+            plannedStartDay = resolvedStart,
+            plannedEndDay = resolvedEnd,
             activityTypeValue = existing.activityTypeValue ?: dominantAwayActivityType(footprints, home),
             stateRaw = if (existing.state == TripState.DRAFT) TripState.HISTORICAL.raw else existing.stateRaw,
             updatedAt = Date()
         ) ?: TripEntity(
-            title = automaticTitle(pending.days.values.flatten(), home),
+            title = generatedTitle,
             activityTypeValue = dominantAwayActivityType(footprints, home),
             kindRaw = TripKind.HISTORICAL.raw,
             stateRaw = TripState.HISTORICAL.raw,
             originRaw = "automatic",
             plannedStartDay = Date(pending.start),
             plannedEndDay = Date(pending.end),
-            homeCityKeyAtCreation = cityKey(home.countryCode, home.cityName)
+            homeCityKeyAtCreation = cityKey(home.countryCode, home.cityName, home.cityIdentifier)
         )
         dao.upsertTrip(trip)
         val existingDays = dao.getAllDays().filter { it.tripID == trip.id }
@@ -199,12 +211,28 @@ class TripScanWorker(context: Context, params: WorkerParameters) : CoroutineWork
             val day = daysByKey[key] ?: TripDayEntity(tripID = trip.id, day = date)
             dao.upsertDay(day)
             daysByKey[key] = day
-            val present = existingCities.filter { it.tripDayID == day.id }.map { cityKey(it.countryCode, it.cityName) }.toSet()
+            val present = existingCities.filter { it.tripDayID == day.id }
             cities.forEachIndexed { index, city ->
-                if (cityKey(city.countryCode, city.cityName) !in present) {
+                val stored = present.firstOrNull {
+                    tripCitiesMatch(it.cityIdentifier, it.countryCode, it.cityName, null, city.countryCode, city.cityName)
+                }
+                if (stored == null) {
                     dao.upsertCity(TripDayCityEntity(tripDayID = day.id, countryCode = city.countryCode, countryName = city.countryName, cityName = city.cityName, latitude = city.latitude, longitude = city.longitude, orderIndex = index, isUserEdited = false))
+                } else if (!trip.citiesUserEdited && !stored.isUserEdited && stored.orderIndex != index) {
+                    dao.upsertCity(stored.copy(orderIndex = index))
                 }
             }
+        }
+        if (trip.originRaw == "automatic" && !trip.titleUserEdited) {
+            val refreshedDays = dao.getAllDays().filter { it.tripID == trip.id }.sortedBy { it.day }
+            val refreshedDayIDs = refreshedDays.map { it.id }.toSet()
+            val citiesByDay = dao.getAllCities().filter { it.tripDayID in refreshedDayIDs }.groupBy { it.tripDayID }
+            val orderedCities = refreshedDays.flatMap { day ->
+                citiesByDay[day.id].orEmpty().sortedBy { it.orderIndex }
+            }.distinctBy { cityKey(it.countryCode, it.cityName) }.map {
+                City(it.countryCode, it.countryName, it.cityName, it.latitude, it.longitude)
+            }
+            dao.upsertTrip(trip.copy(title = automaticTitle(orderedCities, home, resolvedStart, resolvedEnd)))
         }
     }
 
@@ -258,14 +286,30 @@ class TripScanWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
     }
 
-    private fun automaticTitle(cities: List<City>, home: HomeCityEntity): String {
+    private fun automaticTitle(cities: List<City>, home: HomeCityEntity, start: Date, end: Date): String {
         val foreignCountries = cities
             .filter { isKnownForeignCountry(it, home) }
             .distinctBy { it.countryCode.trim().uppercase().ifEmpty { normalized(it.countryName) } }
             .map { it.countryName.trim().ifEmpty { it.countryCode.trim().uppercase() } }
             .filter { it.isNotEmpty() }
-        if (foreignCountries.isNotEmpty()) return foreignCountries.take(3).joinToString("、")
-        return cities.map { it.cityName }.distinct().take(3).joinToString("、")
+        val destination = if (foreignCountries.isNotEmpty()) {
+            foreignCountries.take(3).joinToString("")
+        } else {
+            cities.map { it.cityName.trim().removeSuffix("市") }.filter { it.isNotEmpty() }.distinct().take(3).joinToString("")
+        }
+        if (destination.isEmpty()) return "行程"
+        return "$destination${chineseNumber(inclusiveDayCount(start, end))}日行"
+    }
+
+    private fun chineseNumber(value: Int): String {
+        val digits = listOf("零", "一", "二", "三", "四", "五", "六", "七", "八", "九")
+        return when {
+            value < 10 -> digits[value]
+            value == 10 -> "十"
+            value < 20 -> "十${digits[value % 10]}"
+            value < 100 -> "${digits[value / 10]}十${if (value % 10 == 0) "" else digits[value % 10]}"
+            else -> value.toString()
+        }
     }
 
     private fun isKnownForeignCountry(city: City, home: HomeCityEntity): Boolean {
@@ -301,7 +345,8 @@ class TripScanWorker(context: Context, params: WorkerParameters) : CoroutineWork
     private fun startOfDay(date: Date) = Calendar.getInstance().apply { time = date; set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.time
     private fun dayKey(date: Date) = dayFormat().format(date)
     private fun dayFormat() = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-    private fun cityKey(country: String, city: String) = "${country.trim().lowercase()}|${city.trim().lowercase()}"
+    private fun cityKey(country: String, city: String, identifier: String? = null) =
+        tripCityIdentityKey(identifier, country, city)
     private fun firstCoordinate(json: String): Double? = runCatching { JSONArray(json).optDouble(0).takeUnless { it.isNaN() } }.getOrNull()
     private fun Date.coerceAtMost(other: Date) = if (after(other)) other else this
 }

@@ -50,8 +50,8 @@ struct MainTabView: View {
     }
 
     private var recordTabTitle: String {
-        guard selectedTab == .records else { return "记录" }
-        return Calendar.current.isDateInToday(selectedDate) ? "记录" : "回到当下"
+        guard selectedTab == .records else { return "足迹" }
+        return Calendar.current.isDateInToday(selectedDate) ? "足迹" : "回到当下"
     }
 
     var body: some View {
@@ -87,6 +87,7 @@ struct MainTabView: View {
                 }
             }
         }
+        .onOpenURL(perform: handleTripDeepLink)
     }
 
     @ViewBuilder
@@ -199,6 +200,23 @@ struct MainTabView: View {
     private func openRecord(date: Date, footprintID: UUID? = nil) {
         destination = TimelineDestination(date: date, footprintID: footprintID)
         selectedTab = .records
+    }
+
+    private func handleTripDeepLink(_ url: URL) {
+        guard url.scheme == "difangke", url.host == "trip",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let tripValue = components.queryItems?.first(where: { $0.name == "id" })?.value,
+              let tripID = UUID(uuidString: tripValue) else { return }
+
+        selectedTab = .trip
+        if url.path == "/action",
+           components.queryItems?.first(where: { $0.name == "type" })?.value == "arrive",
+           let stopValue = components.queryItems?.first(where: { $0.name == "stop" })?.value,
+           let stopID = UUID(uuidString: stopValue) {
+            TripScanManager.shared.requestPlannedStopArrivalConfirmation(stopID, tripID: tripID)
+        } else {
+            TripScanManager.shared.requestOpenTrip(tripID)
+        }
     }
 }
 

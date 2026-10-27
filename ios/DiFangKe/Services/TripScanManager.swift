@@ -1,5 +1,12 @@
 import Foundation
 import SwiftData
+import CoreLocation
+#if canImport(ActivityKit)
+import ActivityKit
+import MapKit
+import SwiftUI
+import UIKit
+#endif
 
 struct TripImportedCity: Sendable, Hashable {
     let countryCode: String
@@ -64,6 +71,9 @@ final class TripScanManager {
     private var resumesAfterReturningToForeground = false
     private var pausedForAppBackground = false
     private var rescansAfterPhotoImport = false
+    private(set) var requestedTripID: UUID?
+    private(set) var requestedTripArrivalStopID: UUID?
+    private var progressRouteByStopID: [UUID: (summary: String, guidance: String?, coordinates: [CLLocationCoordinate2D])] = [:]
 
     private init() {
         scannedThrough = UserDefaults.standard.object(forKey: Keys.cursor) as? Date
@@ -71,12 +81,253 @@ final class TripScanManager {
 
     var recordModelContainer: ModelContainer? { legacyContainer }
 
+    func refreshActiveTripProgress() {
+        refreshActiveTripProgress(at: LocationManager.shared.lastLocation)
+    }
+
+    /// Only the next unfinished destination is eligible. Lifecycle and movement
+    /// transitions may complete it, but a later stop must never skip the plan ahead.
+    private func refreshActiveTripProgress(at location: CLLocation?) {
+        guard let tripContainer else { return }
+        let now = Date()
+        let context = tripContainer.mainContext
+        let activeTrips = (try? context.fetch(FetchDescriptor<Trip>()))?.filter { $0.state == .active } ?? []
+        guard let trip = activeTrips.sorted(by: { ($0.actualStartedAt ?? .distantPast) > ($1.actualStartedAt ?? .distantPast) }).first else {
+            progressRouteByStopID.removeAll()
+#if canImport(ActivityKit)
+            if #available(iOS 16.1, *) { TripProgressLiveActivityManager.shared.stop() }
+#endif
+            return
+        }
+        let days = ((try? context.fetch(FetchDescriptor<TripDay>())) ?? [])
+            .filter { $0.tripID == trip.id }
+            .sorted { $0.day == $1.day ? $0.orderIndex < $1.orderIndex : $0.day < $1.day }
+        let dayOrder = Dictionary(uniqueKeysWithValues: days.enumerated().map { ($0.element.id, $0.offset) })
+        let orderedStops = ((try? context.fetch(FetchDescriptor<TripItem>())) ?? [])
+            .filter {
+                dayOrder[$0.tripDayID] != nil &&
+                $0.kindRaw == TripItemKind.stop.rawValue
+            }
+            .sorted(by: {
+                let leftDay = dayOrder[$0.tripDayID] ?? .max
+                let rightDay = dayOrder[$1.tripDayID] ?? .max
+                return leftDay == rightDay ? $0.orderIndex < $1.orderIndex : leftDay < rightDay
+            })
+        var next = orderedStops.first { $0.planStatusRaw == "planned" }
+        let arrivalRadius = AppConfig.shared.tripPlanArrivalRadiusMeters
+        let hasFreshLocation = location.map {
+            abs($0.timestamp.timeIntervalSinceNow) <= AppConfig.shared.currentLocationFreshnessThreshold
+        } ?? false
+        if let location,
+           hasFreshLocation,
+           location.horizontalAccuracy >= 0,
+           location.horizontalAccuracy <= arrivalRadius,
+           arrivalRadius > 0,
+           let currentNext = next,
+           let latitude = currentNext.latitude,
+           let longitude = currentNext.longitude,
+           location.distance(from: CLLocation(latitude: latitude, longitude: longitude)) <= arrivalRadius {
+            currentNext.planStatusRaw = "completed"
+            trip.updatedAt = now
+            try? context.save()
+            next = orderedStops.first { $0.planStatusRaw == "planned" }
+        }
+
+#if canImport(ActivityKit)
+        guard #available(iOS 16.1, *) else { return }
+        guard let next else {
+            TripProgressLiveActivityManager.shared.endActivity(for: trip.id)
+            return
+        }
+        let coordinate = next.latitude.flatMap { latitude in
+            next.longitude.map { longitude in CLLocation(latitude: latitude, longitude: longitude) }
+        }
+        let distance = location.flatMap { current in coordinate.map { current.distance(from: $0) } }
+        let day = days.first { $0.id == next.tripDayID }
+        let arrivalDate = next.startTime.flatMap { value -> Date? in
+            guard let day else { return value }
+            return value == Calendar.autoupdatingCurrent.startOfDay(for: day.day) ? nil : value
+        }
+        let nextIndex = orderedStops.firstIndex(where: { $0.id == next.id }) ?? 0
+        let homeCity = ((try? context.fetch(FetchDescriptor<HomeCity>())) ?? []).first
+        let segmentOrigin: (name: String, location: CLLocation)? = {
+            if nextIndex > 0,
+               let latitude = orderedStops[nextIndex - 1].latitude,
+               let longitude = orderedStops[nextIndex - 1].longitude {
+                let previous = orderedStops[nextIndex - 1]
+                return (
+                    previous.placeName ?? previous.address ?? previous.cityName ?? "上一站",
+                    CLLocation(latitude: latitude, longitude: longitude)
+                )
+            }
+            if let homeCity,
+               let latitude = homeCity.latitude,
+               let longitude = homeCity.longitude {
+                return (
+                    homeCity.cityName.isEmpty ? "常居地" : homeCity.cityName,
+                    CLLocation(latitude: latitude, longitude: longitude)
+                )
+            }
+            return nil
+        }()
+        let segmentDistance = segmentOrigin.flatMap { origin in
+            coordinate.map { origin.location.distance(from: $0) }
+        }
+        let cachedRoute = progressRouteByStopID[next.id]
+        let tripActivityStyle = resolvedActivityStyle(for: trip.activityTypeValue)
+        let state = TripProgressActivityAttributes.ContentState(
+            stopID: next.id.uuidString,
+            placeName: next.placeName ?? next.address ?? next.cityName ?? "地点",
+            cityName: next.cityName,
+            notes: {
+                let value = next.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+                return value.isEmpty ? nil : value
+            }(),
+            currentDistance: distance,
+            segmentDistance: segmentDistance,
+            originName: segmentOrigin?.name,
+            sequenceNumber: nextIndex + 1,
+            totalStops: orderedStops.count,
+            arrivalDate: arrivalDate,
+            transportTypeRaw: next.transportTypeRaw,
+            routeSummary: cachedRoute?.summary,
+            routeGuidance: cachedRoute?.guidance,
+            tripActivityIcon: tripActivityStyle?.icon,
+            tripActivityColorHex: tripActivityStyle?.colorHex,
+            isWithinArrivalRadius: distance.map { $0 <= arrivalRadius } ?? false,
+            latitude: next.latitude,
+            longitude: next.longitude
+        )
+        TripProgressLiveActivityManager.shared.update(
+            tripID: trip.id,
+            tripTitle: trip.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "进行中的行程"
+                : trip.title,
+            state: state,
+            originCoordinate: segmentOrigin?.location.coordinate,
+            destinationCoordinate: coordinate?.coordinate,
+            currentCoordinate: location?.coordinate,
+            routeCoordinates: cachedRoute?.coordinates
+        )
+        if let segmentOrigin,
+           let destinationLatitude = next.latitude,
+           let destinationLongitude = next.longitude,
+           next.transportTypeRaw?.isEmpty == false {
+            let tripID = trip.id
+            let tripTitle = trip.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "进行中的行程"
+                : trip.title
+            let nextID = next.id
+            let transportTypeRaw = next.transportTypeRaw
+            Task { @MainActor in
+                let routes = await TencentTripDirections.routes(
+                    from: segmentOrigin.location.coordinate,
+                    to: CLLocationCoordinate2D(latitude: destinationLatitude, longitude: destinationLongitude),
+                    transportTypeRaw: transportTypeRaw
+                )
+                guard !routes.isEmpty,
+                      orderedStops.first(where: { $0.planStatusRaw == "planned" })?.id == nextID else { return }
+                let preferredIndex = TripRouteOptionSelectionStore.selectedIndex(
+                    for: nextID,
+                    optionCount: routes.count
+                )
+                let route = routes[preferredIndex]
+                let summary = Self.routeSummary(route, transportTypeRaw: transportTypeRaw)
+                let guidance = Self.routeGuidance(route)
+                self.progressRouteByStopID[nextID] = (summary, guidance, route.coordinates)
+                var routeState = state
+                routeState.routeSummary = summary
+                routeState.routeGuidance = guidance
+                TripProgressLiveActivityManager.shared.update(
+                    tripID: tripID,
+                    tripTitle: tripTitle,
+                    state: routeState,
+                    originCoordinate: segmentOrigin.location.coordinate,
+                    destinationCoordinate: CLLocationCoordinate2D(
+                        latitude: destinationLatitude,
+                        longitude: destinationLongitude
+                    ),
+                    currentCoordinate: location?.coordinate,
+                    routeCoordinates: route.coordinates
+                )
+            }
+        }
+#endif
+    }
+
+    private func resolvedActivityStyle(for value: String?) -> TripActivityStyle? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty,
+              let legacyContainer else { return nil }
+        let context = ModelContext(legacyContainer)
+        let descriptor = FetchDescriptor<ActivityType>(
+            sortBy: [SortDescriptor(\.sortOrder), SortDescriptor(\.name)]
+        )
+        return ((try? context.fetch(descriptor)) ?? []).first {
+            $0.id.uuidString == value || $0.name == value
+        }.map {
+            TripActivityStyle(id: $0.id.uuidString, name: $0.name, icon: $0.icon, colorHex: $0.colorHex)
+        }
+    }
+
+#if canImport(ActivityKit)
+    private static func routeSummary(_ route: TripPlannedRoute, transportTypeRaw: String?) -> String {
+        let type = TransportType(rawValue: transportTypeRaw ?? "")?.localizedName ?? "交通"
+        let distance = route.distance < 1_000
+            ? "\(max(1, Int(route.distance.rounded())))米"
+            : String(format: "%.1f公里", route.distance / 1_000)
+        let minutes = max(1, Int((route.expectedTravelTime / 60).rounded()))
+        return "\(type) · \(distance) · 约\(minutes)分钟"
+    }
+
+    private static func routeGuidance(_ route: TripPlannedRoute) -> String? {
+        guard !route.instructions.isEmpty else { return nil }
+        return route.instructions.map { instruction in
+            guard instruction.title != "步行", let detail = instruction.detail else {
+                return instruction.title
+            }
+            let stations = detail.split(separator: "·")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { $0.hasSuffix("上车") || $0.hasSuffix("下车") }
+            return stations.isEmpty
+                ? instruction.title
+                : "\(instruction.title)：\(stations.joined(separator: " → "))"
+        }.joined(separator: " → ")
+    }
+#endif
+
+    func requestOpenTrip(_ tripID: UUID) {
+        requestedTripID = tripID
+    }
+
+    func consumeRequestedTripID() {
+        requestedTripID = nil
+    }
+
+    func requestPlannedStopArrivalConfirmation(_ stopID: UUID, tripID: UUID) {
+        requestedTripArrivalStopID = stopID
+        requestOpenTrip(tripID)
+    }
+
+    func consumeRequestedTripArrivalStopID() {
+        requestedTripArrivalStopID = nil
+    }
+
+    func endTripProgressActivity(for tripID: UUID) {
+#if canImport(ActivityKit)
+        if #available(iOS 16.1, *) {
+            TripProgressLiveActivityManager.shared.endActivity(for: tripID)
+        }
+#endif
+    }
+
     func configure(legacyContainer: ModelContainer, tripContainer: ModelContainer) {
         self.legacyContainer = legacyContainer
         self.tripContainer = tripContainer
         Task.detached(priority: .utility) {
             Self.finalizeLegacyAutomaticDrafts(in: tripContainer)
         }
+        refreshActiveTripProgress()
     }
 
     func scanIfNeeded(force: Bool = false, onlyMissingDates: Bool = false) {
@@ -427,7 +678,10 @@ final class TripScanManager {
                 let key = dayKey(day)
                 if pending == nil { pending = Pending(startDay: day, endDay: day, citiesByDay: [:]) }
                 pending?.endDay = day
-                pending?.citiesByDay[key] = Array(Set(converted)).sorted { $0.cityName < $1.cityName }
+                var seenCities = Set<String>()
+                pending?.citiesByDay[key] = converted.filter {
+                    seenCities.insert(cityKey($0.countryCode, $0.cityName)).inserted
+                }
             }
             let endedAtHome = evidence?.lastCity.map { cityMatches($0, home: home) } ?? isHomeDay
             if endedAtHome, let completed = pending {
@@ -475,16 +729,16 @@ final class TripScanManager {
             }
             trip.updatedAt = Date()
         } else {
-            let pendingCities = pending.citiesByDay.values.flatMap { $0 }
+            let pendingCities = orderedCities(in: pending)
             trip = Trip(
-                title: automaticTitle(for: pendingCities, home: home),
+                title: automaticTitle(for: pendingCities, home: home, start: pending.startDay, end: pending.endDay),
                 kind: .historical,
                 state: .historical,
                 origin: .automatic,
                 plannedStartDay: pending.startDay,
                 plannedEndDay: pending.endDay
             )
-            trip.homeCityKeyAtCreation = cityKey(home.countryCode, home.cityName)
+            trip.homeCityKeyAtCreation = cityKey(home.countryCode, home.cityName, identifier: home.cityIdentifier)
             trip.titleUserEdited = false
             context.insert(trip)
         }
@@ -516,10 +770,50 @@ final class TripScanManager {
             let tripDay = daysByKey[key] ?? TripDay(tripID: trip.id, day: date)
             if tripDay.modelContext == nil { context.insert(tripDay) }
             daysByKey[key] = tripDay
-            let currentKeys = Set(allCities.filter { $0.tripDayID == tripDay.id }.map { cityKey($0.countryCode, $0.cityName) })
-            for (index, city) in cities.enumerated() where !currentKeys.contains(cityKey(city.countryCode, city.cityName)) {
-                context.insert(TripDayCity(tripDayID: tripDay.id, countryCode: city.countryCode, countryName: city.countryName, cityName: city.cityName, latitude: city.latitude, longitude: city.longitude, orderIndex: index, isUserEdited: false))
+            let currentCities = allCities.filter { $0.tripDayID == tripDay.id }
+            for (index, city) in cities.enumerated() {
+                if let existing = currentCities.first(where: {
+                    tripCitiesMatch(
+                        firstIdentifier: $0.cityIdentifier,
+                        firstCountryCode: $0.countryCode,
+                        firstCityName: $0.cityName,
+                        secondIdentifier: nil,
+                        secondCountryCode: city.countryCode,
+                        secondCityName: city.cityName
+                    )
+                }) {
+                    if !trip.citiesUserEdited, !existing.isUserEdited { existing.orderIndex = index }
+                } else {
+                    context.insert(TripDayCity(tripDayID: tripDay.id, countryCode: city.countryCode, countryName: city.countryName, cityName: city.cityName, latitude: city.latitude, longitude: city.longitude, orderIndex: index, isUserEdited: false))
+                }
             }
+        }
+        if trip.originRaw == TripOrigin.automatic.rawValue, !trip.titleUserEdited {
+            let refreshedDays = ((try? context.fetch(FetchDescriptor<TripDay>())) ?? [])
+                .filter { $0.tripID == trip.id }
+                .sorted { $0.day == $1.day ? $0.orderIndex < $1.orderIndex : $0.day < $1.day }
+            let refreshedDayIDs = Set(refreshedDays.map(\.id))
+            let refreshedCities = ((try? context.fetch(FetchDescriptor<TripDayCity>())) ?? [])
+                .filter { refreshedDayIDs.contains($0.tripDayID) }
+            var seen = Set<String>()
+            let orderedCities = refreshedDays.flatMap { day in
+                refreshedCities.filter { $0.tripDayID == day.id }.sorted { $0.orderIndex < $1.orderIndex }
+            }.compactMap { city -> PendingCity? in
+                guard seen.insert(cityKey(city.countryCode, city.cityName)).inserted else { return nil }
+                return PendingCity(
+                    countryCode: city.countryCode,
+                    countryName: city.countryName,
+                    cityName: city.cityName,
+                    latitude: city.latitude,
+                    longitude: city.longitude
+                )
+            }
+            trip.title = automaticTitle(
+                for: orderedCities,
+                home: home,
+                start: trip.plannedStartDay,
+                end: trip.plannedEndDay
+            )
         }
     }
 
@@ -594,7 +888,12 @@ final class TripScanManager {
         return result
     }
 
-    nonisolated private static func automaticTitle(for cities: [PendingCity], home: HomeCity) -> String {
+    nonisolated private static func automaticTitle(
+        for cities: [PendingCity],
+        home: HomeCity,
+        start: Date,
+        end: Date
+    ) -> String {
         var seenCountries = Set<String>()
         let foreignCountries = cities.compactMap { city -> String? in
             guard isKnownForeignCountry(city, home: home) else { return nil }
@@ -604,11 +903,34 @@ final class TripScanManager {
             guard !key.isEmpty, seenCountries.insert(key).inserted else { return nil }
             return countryName.isEmpty ? countryCode : countryName
         }
+        let destination: String
         if !foreignCountries.isEmpty {
-            return foreignCountries.prefix(3).joined(separator: "、")
+            destination = foreignCountries.prefix(3).joined()
+        } else {
+            destination = cities.map(\.cityName).uniqued().prefix(3).map { shortCityName($0) }.joined()
         }
-        let cityNames = cities.map(\.cityName).uniqued()
-        return cityNames.prefix(3).joined(separator: "、")
+        guard !destination.isEmpty else { return "行程" }
+        let dayCount = inclusiveDayCount(from: start, through: end)
+        return "\(destination)\(chineseNumber(dayCount))日行"
+    }
+
+    nonisolated private static func orderedCities(in pending: Pending) -> [PendingCity] {
+        var seen = Set<String>()
+        return pending.citiesByDay.keys.sorted().flatMap { pending.citiesByDay[$0] ?? [] }.filter {
+            seen.insert(cityKey($0.countryCode, $0.cityName)).inserted
+        }
+    }
+
+    nonisolated private static func shortCityName(_ value: String) -> String {
+        let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.hasSuffix("市") ? String(name.dropLast()) : name
+    }
+
+    nonisolated private static func chineseNumber(_ value: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.numberStyle = .spellOut
+        return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
     nonisolated private static func isKnownForeignCountry(_ city: PendingCity, home: HomeCity) -> Bool {
@@ -668,9 +990,8 @@ final class TripScanManager {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    nonisolated private static func cityKey(_ country: String, _ city: String) -> String {
-        "\(country)|\(city)".folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    nonisolated private static func cityKey(_ country: String, _ city: String, identifier: String? = nil) -> String {
+        tripCityIdentityKey(identifier: identifier, countryCode: country, cityName: city)
     }
 
     nonisolated private static func dayKey(_ date: Date) -> String { dayFormatter.string(from: date) }
@@ -724,6 +1045,279 @@ final class TripScanManager {
         static let suppressedRanges = "tripSuppressedAutomaticDateRanges"
     }
 }
+
+#if canImport(ActivityKit)
+@available(iOS 16.1, *)
+@MainActor
+final class TripProgressLiveActivityManager {
+    static let shared = TripProgressLiveActivityManager()
+
+    private var currentActivity: Activity<TripProgressActivityAttributes>?
+    private var mapSnapshotKeyByTripID: [String: String] = [:]
+
+    private init() {}
+
+    func update(
+        tripID: UUID,
+        tripTitle: String,
+        state: TripProgressActivityAttributes.ContentState,
+        originCoordinate: CLLocationCoordinate2D? = nil,
+        destinationCoordinate: CLLocationCoordinate2D? = nil,
+        currentCoordinate: CLLocationCoordinate2D? = nil,
+        routeCoordinates: [CLLocationCoordinate2D]? = nil
+    ) {
+        Task { @MainActor in
+            guard CurrentLiveActivitySettings.isTripProgressEnabled,
+                  ActivityAuthorizationInfo().areActivitiesEnabled else {
+                await endAll()
+                return
+            }
+
+            let tripIDString = tripID.uuidString
+            let activities = Activity<TripProgressActivityAttributes>.activities
+            var activity = activities.first { $0.attributes.tripID == tripIDString }
+            for duplicate in activities where duplicate.id != activity?.id {
+                await duplicate.end(nil, dismissalPolicy: .immediate)
+            }
+
+            if let existing = activity,
+               existing.attributes.tripTitle != tripTitle {
+                await existing.end(nil, dismissalPolicy: .immediate)
+                activity = nil
+            }
+
+            let transportType = TransportType(rawValue: state.transportTypeRaw ?? "")
+            await ensureMapSnapshot(
+                tripID: tripIDString,
+                latitude: state.latitude,
+                longitude: state.longitude,
+                originCoordinate: originCoordinate,
+                destinationCoordinate: destinationCoordinate,
+                currentCoordinate: currentCoordinate,
+                routeCoordinates: routeCoordinates,
+                transportIcon: transportType?.icon ?? "arrow.triangle.swap",
+                drawsDirectConnection: transportType == .airplane || transportType == .ship
+            )
+            let content = ActivityContent(state: state, staleDate: nil)
+            // Route loading and map rendering above suspend this task. Another
+            // refresh may have created the activity while it was suspended, so
+            // resolve the system activity again immediately before requesting.
+            let refreshedActivities = Activity<TripProgressActivityAttributes>.activities
+            let refreshedActivity = refreshedActivities.first { $0.attributes.tripID == tripIDString }
+            for duplicate in refreshedActivities
+            where duplicate.attributes.tripID == tripIDString && duplicate.id != refreshedActivity?.id {
+                await duplicate.end(nil, dismissalPolicy: .immediate)
+            }
+            if let existing = refreshedActivity ?? activity {
+                currentActivity = existing
+                await existing.update(content)
+            } else {
+                do {
+                    currentActivity = try Activity.request(
+                        attributes: TripProgressActivityAttributes(
+                            tripID: tripIDString,
+                            tripTitle: tripTitle
+                        ),
+                        content: content,
+                        pushType: nil
+                    )
+                } catch {
+                    print("[TripProgressLiveActivity] request failed: \(error)")
+                }
+            }
+        }
+    }
+
+    func endActivity(for tripID: UUID) {
+        let tripIDString = tripID.uuidString
+        Task { @MainActor in
+            for activity in Activity<TripProgressActivityAttributes>.activities
+            where activity.attributes.tripID == tripIDString {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+            if currentActivity?.attributes.tripID == tripIDString {
+                currentActivity = nil
+            }
+            mapSnapshotKeyByTripID[tripIDString] = nil
+        }
+    }
+
+    func stop() {
+        Task { @MainActor in await endAll() }
+    }
+
+    private func endAll() async {
+        for activity in Activity<TripProgressActivityAttributes>.activities {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
+        currentActivity = nil
+        mapSnapshotKeyByTripID.removeAll()
+    }
+
+    private func ensureMapSnapshot(
+        tripID: String,
+        latitude: Double?,
+        longitude: Double?,
+        originCoordinate: CLLocationCoordinate2D?,
+        destinationCoordinate: CLLocationCoordinate2D?,
+        currentCoordinate: CLLocationCoordinate2D?,
+        routeCoordinates: [CLLocationCoordinate2D]?,
+        transportIcon: String,
+        drawsDirectConnection: Bool
+    ) async {
+        guard let latitude, let longitude,
+              latitude.isFinite, longitude.isFinite,
+              let container = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: "group.com.ct106.difangke"
+              ) else { return }
+
+        let hash = String(format: "%.3f_%.3f", latitude, longitude)
+        let lightURL = container.appendingPathComponent("trip_\(tripID)_\(hash)_light.png")
+        let darkURL = container.appendingPathComponent("trip_\(tripID)_\(hash)_dark.png")
+        let destination = destinationCoordinate
+            ?? CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        let current = currentCoordinate ?? originCoordinate ?? destination
+        guard CLLocationCoordinate2DIsValid(current), CLLocationCoordinate2DIsValid(destination) else { return }
+        let route = (routeCoordinates ?? []).filter(CLLocationCoordinate2DIsValid)
+        let routeIdentity = route.isEmpty
+            ? "none"
+            : "\(route.count):\(String(format: "%.4f,%.4f", route[route.count / 2].latitude, route[route.count / 2].longitude))"
+        let snapshotKey = [
+            String(format: "%.3f,%.3f", current.latitude, current.longitude),
+            String(format: "%.3f,%.3f", destination.latitude, destination.longitude),
+            routeIdentity,
+            transportIcon
+        ].joined(separator: "|")
+        guard mapSnapshotKeyByTripID[tripID] != snapshotKey
+                || !FileManager.default.fileExists(atPath: lightURL.path)
+                || !FileManager.default.fileExists(atPath: darkURL.path) else { return }
+
+        let options = MKMapSnapshotter.Options()
+        options.region = remainingRouteRegion(current: current, destination: destination)
+        options.size = CGSize(width: 400, height: 200)
+        options.scale = 2
+        options.showsBuildings = true
+
+        do {
+            options.traitCollection = UITraitCollection(userInterfaceStyle: .light)
+            let lightSnapshot = try await MKMapSnapshotter(options: options).start()
+            let lightImage = renderedTripProgressMap(
+                lightSnapshot,
+                routeCoordinates: route,
+                currentCoordinate: current,
+                destinationCoordinate: destination,
+                drawsDirectConnection: drawsDirectConnection,
+                interfaceStyle: .light
+            )
+            try lightImage.pngData()?.write(to: lightURL, options: .atomic)
+
+            options.traitCollection = UITraitCollection(userInterfaceStyle: .dark)
+            let darkSnapshot = try await MKMapSnapshotter(options: options).start()
+            let darkImage = renderedTripProgressMap(
+                darkSnapshot,
+                routeCoordinates: route,
+                currentCoordinate: current,
+                destinationCoordinate: destination,
+                drawsDirectConnection: drawsDirectConnection,
+                interfaceStyle: .dark
+            )
+            try darkImage.pngData()?.write(to: darkURL, options: .atomic)
+            mapSnapshotKeyByTripID[tripID] = snapshotKey
+        } catch {
+            print("[TripProgressLiveActivity] map snapshot failed: \(error)")
+        }
+    }
+
+    private func remainingRouteRegion(
+        current: CLLocationCoordinate2D,
+        destination: CLLocationCoordinate2D
+    ) -> MKCoordinateRegion {
+        MKCoordinateRegion(
+            center: CLLocationCoordinate2D(
+                latitude: (current.latitude + destination.latitude) / 2,
+                longitude: (current.longitude + destination.longitude) / 2
+            ),
+            span: MKCoordinateSpan(
+                latitudeDelta: max(0.01, abs(current.latitude - destination.latitude) * 1.45),
+                longitudeDelta: max(0.01, abs(current.longitude - destination.longitude) * 1.45)
+            )
+        )
+    }
+
+    private func renderedTripProgressMap(
+        _ snapshot: MKMapSnapshotter.Snapshot,
+        routeCoordinates: [CLLocationCoordinate2D],
+        currentCoordinate: CLLocationCoordinate2D,
+        destinationCoordinate: CLLocationCoordinate2D,
+        drawsDirectConnection: Bool,
+        interfaceStyle: UIUserInterfaceStyle
+    ) -> UIImage {
+        let traits = UITraitCollection(userInterfaceStyle: interfaceStyle)
+        let markerBackground = UIColor.systemBackground.resolvedColor(with: traits)
+        return UIGraphicsImageRenderer(size: snapshot.image.size).image { _ in
+            snapshot.image.draw(at: .zero)
+
+            let displayedRouteCoordinates: [CLLocationCoordinate2D]
+            let isDirectConnection: Bool
+            if routeCoordinates.count > 1 {
+                displayedRouteCoordinates = routeCoordinates
+                isDirectConnection = false
+            } else if drawsDirectConnection {
+                displayedRouteCoordinates = [currentCoordinate, destinationCoordinate]
+                isDirectConnection = true
+            } else {
+                displayedRouteCoordinates = []
+                isDirectConnection = false
+            }
+
+            if displayedRouteCoordinates.count > 1 {
+                let routePath = UIBezierPath()
+                for (index, coordinate) in displayedRouteCoordinates.enumerated() {
+                    let point = snapshot.point(for: coordinate)
+                    if index == 0 { routePath.move(to: point) } else { routePath.addLine(to: point) }
+                }
+                UIColor(red: 0, green: 0.73, blue: 0.78, alpha: 0.9).setStroke()
+                routePath.lineWidth = isDirectConnection ? 3 : 5
+                routePath.lineCapStyle = .round
+                routePath.lineJoinStyle = .round
+                if isDirectConnection {
+                    routePath.setLineDash([8, 8], count: 2, phase: 0)
+                }
+                routePath.stroke()
+
+            }
+
+            drawTripProgressMapMarker(
+                at: snapshot.point(for: currentCoordinate),
+                color: UIColor.systemGreen,
+                backgroundColor: markerBackground,
+                in: snapshot.image.size
+            )
+            drawTripProgressMapMarker(
+                at: snapshot.point(for: destinationCoordinate),
+                color: UIColor(red: 0, green: 0.73, blue: 0.78, alpha: 1),
+                backgroundColor: markerBackground,
+                in: snapshot.image.size
+            )
+        }
+    }
+
+    private func drawTripProgressMapMarker(
+        at point: CGPoint,
+        color: UIColor,
+        backgroundColor: UIColor,
+        in size: CGSize
+    ) {
+        guard point.x >= 0, point.y >= 0, point.x <= size.width, point.y <= size.height else { return }
+        let rect = CGRect(x: point.x - 8, y: point.y - 8, width: 16, height: 16)
+        let path = UIBezierPath(ovalIn: rect)
+        backgroundColor.setFill()
+        path.fill()
+        color.setFill()
+        UIBezierPath(ovalIn: rect.insetBy(dx: 3, dy: 3)).fill()
+    }
+}
+#endif
 
 private extension Array where Element == String {
     func uniqued() -> [String] {

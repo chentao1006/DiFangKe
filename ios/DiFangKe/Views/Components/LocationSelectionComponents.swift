@@ -1,8 +1,109 @@
 import SwiftUI
+import UIKit
 import MapKit
 import CoreLocation
 
 // MARK: - IME-safe text editing
+
+/// A UIKit-backed single-line field that never writes SwiftUI state back into
+/// the native control while an input method has marked text. This preserves
+/// Chinese Pinyin composition even when the surrounding SwiftUI form refreshes.
+struct DFKIMETextField: UIViewRepresentable {
+    let placeholder: String
+    @Binding var text: String
+    var textStyle: UIFont.TextStyle = .body
+
+    func makeUIView(context: Context) -> UITextField {
+        let textField = UITextField()
+        textField.placeholder = placeholder
+        textField.font = .preferredFont(forTextStyle: textStyle)
+        textField.adjustsFontForContentSizeCategory = true
+        textField.delegate = context.coordinator
+        textField.addTarget(context.coordinator, action: #selector(Coordinator.textChanged(_:)), for: .editingChanged)
+        return textField
+    }
+
+    func updateUIView(_ textField: UITextField, context: Context) {
+        textField.placeholder = placeholder
+        textField.font = .preferredFont(forTextStyle: textStyle)
+        guard textField.markedTextRange == nil, textField.text != text else { return }
+        textField.text = text
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        @Binding private var text: String
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        @objc func textChanged(_ textField: UITextField) {
+            text = textField.text ?? ""
+        }
+    }
+}
+
+/// Multiline counterpart of `DFKIMETextField`. The placeholder remains in
+/// SwiftUI, while the native text view exclusively owns in-progress marked text.
+struct DFKIMEMultilineTextField: View {
+    let placeholder: String
+    @Binding var text: String
+    var minHeight: CGFloat = 36
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty {
+                Text(placeholder)
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 7)
+                    .allowsHitTesting(false)
+            }
+            DFKIMETextView(text: $text)
+        }
+        .frame(minHeight: minHeight)
+    }
+}
+
+private struct DFKIMETextView: UIViewRepresentable {
+    @Binding var text: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.delegate = context.coordinator
+        textView.backgroundColor = .clear
+        textView.font = .preferredFont(forTextStyle: .body)
+        textView.isScrollEnabled = false
+        textView.textContainerInset = UIEdgeInsets(top: 7, left: -5, bottom: 7, right: 0)
+        textView.textContainer.lineFragmentPadding = 0
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        guard textView.markedTextRange == nil, textView.text != text else { return }
+        textView.text = text
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        @Binding private var text: String
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            text = textView.text
+            textView.invalidateIntrinsicContentSize()
+        }
+    }
+}
 
 /// Keeps in-progress input-method composition out of a parent form's state updates.
 ///
@@ -179,6 +280,7 @@ struct SuggestionsMenu<Label: View>: View {
     @State private var presentation: LocationSuggestionsPresentation?
     @State private var suggestions: [LocationSuggestion] = []
     @State private var hasLoaded = false
+    @State private var isLoading = false
 
     var body: some View {
         Menu {
@@ -186,25 +288,16 @@ struct SuggestionsMenu<Label: View>: View {
                 (presentation?.onSearchRequested ?? onSearchRequested)()
             }
 
-            Divider()
-
-            suggestionItems
+            Section {
+                suggestionItems
+            }
                 // Menu content only exists while the native menu is open.
-                // The presentation snapshot prevents live location updates
-                // from changing its coordinate or selection target mid-open.
+                // Keep one immutable presentation and one request for the
+                // entire open interaction. Updating the menu from loading to
+                // results recreates this content, so an unguarded task would
+                // immediately clear and fetch the same list again.
                 .task {
-                    let presentation = makePresentation()
-                    self.presentation = presentation
-                    suggestions = []
-                    hasLoaded = false
-                    guard let coordinate = presentation.coordinate else {
-                        hasLoaded = true
-                        return
-                    }
-                    let results = await locationManager.fetchNearbySuggestions(at: coordinate)
-                    guard !Task.isCancelled, self.presentation?.id == presentation.id else { return }
-                    suggestions = results
-                    hasLoaded = true
+                    await loadSuggestionsIfNeeded()
                 }
         } label: {
             label()
@@ -229,6 +322,37 @@ struct SuggestionsMenu<Label: View>: View {
                 onSelectionApplied?()
             }
         )
+    }
+
+    @MainActor
+    private func loadSuggestionsIfNeeded() async {
+        guard !hasLoaded, !isLoading else { return }
+
+        let presentation: LocationSuggestionsPresentation
+        if let existingPresentation = self.presentation {
+            presentation = existingPresentation
+        } else {
+            let newPresentation = makePresentation()
+            self.presentation = newPresentation
+            presentation = newPresentation
+        }
+
+        isLoading = true
+        defer {
+            if self.presentation?.id == presentation.id {
+                isLoading = false
+            }
+        }
+
+        guard let coordinate = presentation.coordinate else {
+            hasLoaded = true
+            return
+        }
+
+        let results = await locationManager.fetchNearbySuggestions(at: coordinate)
+        guard !Task.isCancelled, self.presentation?.id == presentation.id else { return }
+        suggestions = results
+        hasLoaded = true
     }
 
     @ViewBuilder

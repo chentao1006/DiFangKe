@@ -6,13 +6,6 @@ class NotificationManager {
     static let shared = NotificationManager()
     private let newFootprintActivityCategoryID = "dfk.newFootprintActivity"
 
-    // Keep this in the app's normal defaults, not an in-memory LocationManager
-    // property: notification refresh is entered from location updates, timeline
-    // rebuilds, settings changes, and footprint edits, including after relaunch.
-    private let dailySummaryAIRequestKey = "lastDailySummaryAIRequestTimestamp"
-    private let legacyDailySummaryAIRequestKey = "lastDailySummaryAIRequestAt"
-    private let dailySummaryAIRequestLock = NSLock()
-    
     private init() {}
 
     func registerNotificationCategories() {
@@ -98,40 +91,6 @@ class NotificationManager {
         }
     }
     
-    func claimDailySummaryAIRequestIfNeeded() -> Bool {
-        let defaults = UserDefaults.standard
-        guard defaults.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true,
-              defaults.bool(forKey: "isAiAssistantEnabled") else { return false }
-
-        // `object(forKey:) as? Date` silently treats a previously persisted
-        // numeric/string value as missing.  That made each refresh path think
-        // it owned a new one-hour window.  Store an explicit epoch timestamp
-        // and migrate the older Date value once.
-        dailySummaryAIRequestLock.lock()
-        defer { dailySummaryAIRequestLock.unlock() }
-
-        let now = Date().timeIntervalSince1970
-        let lastRequest: TimeInterval
-        if let timestamp = defaults.object(forKey: dailySummaryAIRequestKey) as? NSNumber {
-            lastRequest = timestamp.doubleValue
-        } else if let date = defaults.object(forKey: legacyDailySummaryAIRequestKey) as? Date {
-            lastRequest = date.timeIntervalSince1970
-        } else {
-            lastRequest = 0
-        }
-
-        // Public capacity is shared and must be protected more aggressively.
-        // A user-provided endpoint keeps the existing one-hour lower bound.
-        let minimumInterval: TimeInterval = defaults.string(forKey: "aiServiceType") == "custom"
-            ? 60 * 60
-            : 3 * 60 * 60
-        guard now - lastRequest >= minimumInterval else { return false }
-        defaults.set(now, forKey: dailySummaryAIRequestKey)
-        // Retain the legacy value for users who roll back to a preceding build.
-        defaults.set(Date(timeIntervalSince1970: now), forKey: legacyDailySummaryAIRequestKey)
-        return true
-    }
-
     func refreshDailySummary(placeCount: Int, mileage: Double, transportCount: Int = 0, overviewSummary: String? = nil) {
         let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }
@@ -212,9 +171,8 @@ class NotificationManager {
     /// background location wake. Notify only when a confirmed tracking-state
     /// transition needs the user to reopen the app and restore it.
     func sendLiveActivityRecoveryNotification(isMoving: Bool) {
-        let defaults = UserDefaults.standard
-        guard defaults.object(forKey: "isCurrentLiveActivityEnabled") == nil
-                || defaults.bool(forKey: "isCurrentLiveActivityEnabled") else {
+        let kind: CurrentTrackingActivityKind = isMoving ? .transport : .footprint
+        guard CurrentLiveActivitySettings.isEnabled(for: kind) else {
             return
         }
 

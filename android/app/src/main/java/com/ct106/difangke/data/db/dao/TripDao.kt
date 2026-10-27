@@ -43,6 +43,70 @@ interface TripDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertHomeCity(city: HomeCityEntity)
     @Query("DELETE FROM home_city") suspend fun deleteHomeCity()
 
+    @Transaction
+    suspend fun createPlan(
+        trip: TripEntity,
+        days: List<TripDayEntity>,
+        cities: List<TripDayCityEntity>
+    ) {
+        upsertTrip(trip)
+        days.forEach { upsertDay(it) }
+        cities.forEach { upsertCity(it) }
+    }
+
+    @Transaction
+    suspend fun startPlan(tripID: String, shiftDays: Int, actualStartedAt: Date) {
+        val trip = getTrips().firstOrNull { it.id == tripID } ?: return
+        fun shifted(date: Date): Date = Calendar.getInstance().apply {
+            time = date
+            add(Calendar.DAY_OF_YEAR, shiftDays)
+        }.time
+        val days = getAllDays().filter { it.tripID == tripID }
+        val dayIDs = days.map { it.id }.toSet()
+        val items = getAllItems().filter { it.tripDayID in dayIDs }
+        if (shiftDays != 0) {
+            days.forEach { upsertDay(it.copy(day = shifted(it.day))) }
+            items.forEach { item ->
+                upsertItem(item.copy(
+                    startTime = item.startTime?.let(::shifted),
+                    endTime = item.endTime?.let(::shifted)
+                ))
+            }
+        }
+        upsertTrip(trip.copy(
+            stateRaw = TripState.ACTIVE.raw,
+            plannedStartDay = if (shiftDays == 0) trip.plannedStartDay else shifted(trip.plannedStartDay),
+            plannedEndDay = if (shiftDays == 0) trip.plannedEndDay else shifted(trip.plannedEndDay),
+            actualStartedAt = actualStartedAt,
+            actualEndedAt = null,
+            endReasonRaw = null,
+            datesUserEdited = trip.datesUserEdited || shiftDays != 0,
+            updatedAt = Date()
+        ))
+    }
+
+    @Transaction
+    suspend fun replacePlan(
+        trip: TripEntity,
+        days: List<TripDayEntity>,
+        cities: List<TripDayCityEntity>,
+        items: List<TripItemEntity>
+    ) {
+        deleteItemsForTrip(trip.id)
+        deleteCitiesForTrip(trip.id)
+        deleteDaysForTrip(trip.id)
+        upsertTrip(trip)
+        days.forEach { upsertDay(it) }
+        cities.forEach { upsertCity(it) }
+        items.forEach { upsertItem(it) }
+    }
+
+    @Transaction
+    suspend fun replacePlanItems(tripID: String, items: List<TripItemEntity>) {
+        deleteItemsForTrip(tripID)
+        items.forEach { upsertItem(it) }
+    }
+
     @Query("SELECT * FROM trips WHERE originRaw = 'automatic' AND titleUserEdited = 0 AND datesUserEdited = 0 AND citiesUserEdited = 0")
     suspend fun getReplaceableAutomaticTrips(): List<TripEntity>
     @Query("UPDATE trips SET stateRaw = 'historical', kindRaw = 'historical' WHERE originRaw = 'automatic' AND stateRaw = 'draft'")
@@ -82,7 +146,7 @@ interface TripDao {
             time = date
             set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
         }.timeInMillis
-        fun cityKey(city: TripDayCityEntity) = "${city.countryCode}|${city.cityName}".lowercase()
+        fun cityKey(city: TripDayCityEntity) = tripCityIdentityKey(city.cityIdentifier, city.countryCode, city.cityName)
         fun itemKey(item: TripItemEntity): String = when {
             item.sourceFootprintID != null -> "f:${item.sourceFootprintID}"
             item.sourceTransportRecordID != null -> "t:${item.sourceTransportRecordID}"

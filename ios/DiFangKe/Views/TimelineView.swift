@@ -510,11 +510,12 @@ struct TimelineScene<Content: View>: View {
 
     private func handleDeepLinkURL(_ url: URL) {
         guard url.scheme == "difangke" else { return }
-        onRequestRecords()
 
         if url.host == "timeline" {
+            onRequestRecords()
             openTimelineDeepLink(url)
         } else if url.host == "current" {
+            onRequestRecords()
             handleCurrentActivityDeepLink(url)
         }
     }
@@ -761,8 +762,21 @@ struct TimelineScene<Content: View>: View {
 
     private func handleTimelineDetentChange(oldValue: PresentationDetent, newValue: PresentationDetent) {
         visibleMapUpdateTask?.cancel()
-        renderedMapDetentKey = currentMapDetentKey
         let collapsedDetent = PresentationDetent.height(collapsedTimelineDetentHeight)
+
+        // Maximizing the timeline is only a content-viewing action. The map is
+        // almost completely covered, so keep its current camera instead of
+        // spending work reframing content that the user cannot see.
+        if !isSideBySide, newValue == .large {
+            mapCameraTransitionTask?.cancel()
+            return
+        }
+        if !isSideBySide, oldValue == .large {
+            refreshVisibleTimelineMap(for: visibleTimelineDates, delayNanoseconds: 0)
+            return
+        }
+
+        renderedMapDetentKey = currentMapDetentKey
 
         if oldValue == collapsedDetent, newValue == .medium {
             mapInteractionLockedVisibleDates = nil
@@ -1542,6 +1556,7 @@ struct TimelineScene<Content: View>: View {
             let mapDates = targetVisibleDates ?? ((isSideBySide || timelineDetent == .large) ? visibleTimelineDates : (mapInteractionLockedVisibleDates ?? visibleTimelineDates))
             let items = timelineItemsForVisibleDates(visibleDates: mapDates)
             let cameraItems = filteredForVisibleItems(items)
+            let suspendsCameraUpdates = !isSideBySide && timelineDetent == .large
 
             // A detail selection owns the camera. Today is continually
             // reloaded as new raw locations arrive; those reloads still need
@@ -1558,9 +1573,11 @@ struct TimelineScene<Content: View>: View {
             guard !items.isEmpty else {
                 visibleTimelineItems = []
                 renderedMapItemIDs = []
+                renderedSelectedFootprintID = selectedFootprint?.footprintID
+
+                guard !suspendsCameraUpdates else { return }
                 renderedCameraItemIDs = []
                 renderedMapDetentKey = currentMapDetentKey
-                renderedSelectedFootprintID = selectedFootprint?.footprintID
 
                 let region = currentLocationMapRegion()
                 if let region {
@@ -1570,6 +1587,13 @@ struct TimelineScene<Content: View>: View {
                 } else {
                     renderedMapRegion = nil
                 }
+                return
+            }
+
+            if suspendsCameraUpdates {
+                visibleTimelineItems = items
+                renderedMapItemIDs = mapContentIDs(for: items)
+                renderedSelectedFootprintID = selectedFootprint?.footprintID
                 return
             }
 
@@ -5285,9 +5309,12 @@ private struct ContinuousTimelineRow: View {
                     )
                 }
             }
-            .padding(.bottom, bottomSpacing)
+            .padding(.bottom, ContinuousTimelineLayout.minItemSpacing)
         }
-        .frame(minHeight: 52, alignment: .top)
+        // Duration defines the row's minimum total height. Text and photos live
+        // inside that height; they only make the row taller when their actual
+        // content cannot fit. Never add the duration spacing below the photo.
+        .frame(minHeight: durationRowHeight, alignment: .top)
         .task(id: unresolvedFootprintID) {
             await retryUnknownFootprintLocationIfNeeded()
         }
@@ -5498,6 +5525,10 @@ private struct ContinuousTimelineRow: View {
         return ContinuousTimelineLayout.minItemSpacing + (ContinuousTimelineLayout.maxItemSpacing - ContinuousTimelineLayout.minItemSpacing) * progress
     }
 
+    private var durationRowHeight: CGFloat {
+        52 + bottomSpacing - ContinuousTimelineLayout.minItemSpacing
+    }
+
     private var photoAssetIDs: [String] {
         guard case .footprint(let footprint) = item else { return [] }
         return footprint.photoAssetIDs
@@ -5631,12 +5662,19 @@ struct ContinuousTimelinePhotoThumbnail: View {
 
         guard let asset = PhotoService.shared.latestAsset(among: assetIDs) else { return }
 
+        // PHImageManager may return an aspect-fit thumbnail backed by a square
+        // request canvas. Its UIImage size is therefore not reliable layout
+        // metadata. PHAsset pixel dimensions are available synchronously and
+        // let the border take the correct shape on the first presentation.
+        if fitsOriginalAspectRatio, asset.pixelWidth > 0, asset.pixelHeight > 0 {
+            onImageSizeChange?(CGSize(width: CGFloat(asset.pixelWidth), height: CGFloat(asset.pixelHeight)))
+        }
+
         let side = targetSide * (fitsOriginalAspectRatio ? 3 : 2)
         let qualityKey = fitsOriginalAspectRatio ? "high-v2" : "fast"
         let cacheKey = "\(asset.localIdentifier)|\(Int(side.rounded()))|\(fitsOriginalAspectRatio ? "fit" : "fill")|\(qualityKey)"
         if let cached = TimelinePhotoThumbnailCache.shared.image(for: cacheKey) {
             image = cached
-            onImageSizeChange?(cached.size)
             return
         }
         let options = PHImageRequestOptions()
@@ -5659,7 +5697,6 @@ struct ContinuousTimelinePhotoThumbnail: View {
                 if let thumbnail {
                     TimelinePhotoThumbnailCache.shared.setImage(thumbnail, for: cacheKey)
                     self.image = thumbnail
-                    self.onImageSizeChange?(thumbnail.size)
                 }
                 self.requestID = nil
             }
@@ -5869,23 +5906,17 @@ private struct CurrentStayTimelineCard: View {
                     ) {
                         showingOngoingLocationSearch = true
                     } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: 0) {
-                            Text("正在")
-                            Text(resolvedPlaceName)
-                                .overlay(alignment: .bottom) {
-                                    GeometryReader { geometry in
-                                        Path { path in
-                                            path.move(to: .zero)
-                                            path.addLine(to: CGPoint(x: geometry.size.width, y: 0))
-                                        }
-                                        .stroke(style: StrokeStyle(lineWidth: 1, lineCap: .round, dash: [0, 3]))
-                                    }
-                                    .frame(height: 1)
-                                    .offset(y: 3)
-                                }
-                            Text("停留")
+                        Group {
+                            if let resolvedPlaceName {
+                                Text("正在")
+                                    + Text(resolvedPlaceName).underline()
+                                    + Text("停留")
+                            } else {
+                                Text("正在停留")
+                            }
                         }
                         .font(.title3.weight(.bold))
+                        .fixedSize(horizontal: false, vertical: true)
                     }
                     .buttonStyle(.plain)
                     .accessibilityHint("选择当前停留地点")
@@ -5938,22 +5969,30 @@ private struct CurrentStayTimelineCard: View {
             return "正在移动"
         }
 
+        guard let resolvedPlaceName else { return "正在停留" }
         return "正在\(resolvedPlaceName)停留"
     }
 
-    private var resolvedPlaceName: String {
-        if let place = locationManager.matchedPlace, place.isUserDefined, !place.isIgnored {
-            return place.name
+    private var resolvedPlaceName: String? {
+        if let place = locationManager.matchedPlace,
+           place.isUserDefined,
+           !place.isIgnored,
+           let name = displayableOngoingPlaceName(place.name) {
+            return name
         }
 
-          if hasUserDefinedPlaces,
-              let title = locationManager.ongoingTitle,
-              !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if hasUserDefinedPlaces,
+           let title = displayableOngoingPlaceName(locationManager.ongoingTitle) {
             return title
         }
 
-        let address = locationManager.currentAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (address.isEmpty || address == "正在解析位置..." || address == "未知位置") ? "此处" : address
+        return displayableOngoingPlaceName(locationManager.currentAddress)
+    }
+
+    private func displayableOngoingPlaceName(_ value: String?) -> String? {
+        let value = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let unresolvedValues: Set<String> = ["", "未知位置", "未知地点", "地点记录", "正在解析位置...", "此处"]
+        return (unresolvedValues.contains(value) || value.hasPrefix("正在解析位置")) ? nil : value
     }
 
     private var hasUserDefinedPlaces: Bool {

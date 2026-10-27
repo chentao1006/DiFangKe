@@ -5,6 +5,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -54,7 +55,7 @@ fun IgnoredPlacesScreen(
                         trailingContent = {
                             Row {
                                 IconButton(onClick = { viewModel.restoreIgnoredPlace(place) }) {
-                                    Icon(Icons.Default.Undo, contentDescription = "恢复", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                    Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "恢复", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                                 }
                                 IconButton(onClick = { placeToDelete = place }) {
                                     Icon(Icons.Default.Delete, contentDescription = "彻底删除", tint = Color.LightGray, modifier = Modifier.size(20.dp))

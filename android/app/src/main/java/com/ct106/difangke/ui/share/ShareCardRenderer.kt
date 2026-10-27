@@ -373,7 +373,7 @@ internal object ShareCardRenderer {
                 ?.let { text(it, fs(if (isTimeline) 42f else 36f), theme.secondary, regular, textWidth, 2, 0.76f) }
             val textHeight = time.height + 8f + title.height + (detail?.let { 8f + it.height } ?: 0f)
             val topPad = if (isTimeline) 16f else 0f
-            val rowHeight = topPad + max(textHeight.toFloat(), markerSide + connector) + 20f
+            val rowHeight = topPad + max(textHeight, markerSide + connector) + 20f
             blocks += Block(rowHeight) { canvas, top ->
                 val y = top + topPad
                 val color = entry.activityColor ?: theme.accent

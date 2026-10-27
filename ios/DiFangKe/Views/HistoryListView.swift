@@ -1391,7 +1391,7 @@ struct ImportOverlaysModifier: ViewModifier {
                     VStack(spacing: 20) {
                         ProgressView(value: Double(scanProgress), total: max(1, Double(scanTotal))).tint(.white).frame(width: 200)
                         VStack(spacing: 8) {
-                            Text("正在查找照片中的足迹…").foregroundColor(.white).font(.headline)
+                            Text("正在整理可导入的足迹…").foregroundColor(.white).font(.headline)
                             Text("\(scanProgress) / \(scanTotal)").foregroundColor(.white.opacity(0.7)).font(.caption.monospacedDigit())
                         }
                         
@@ -1455,10 +1455,10 @@ struct PhotoImportRangePicker: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 10) {
-                Text("从照片查找足迹")
+                Text("从照片导入足迹")
                     .font(.title2.bold())
 
-                Text("接下来会根据照片的拍摄时间和位置信息，查找这一年中可以导入的足迹。")
+                Text("选择年份后，可预览这一年照片中带有拍摄时间和位置信息的足迹，再确认导入。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1479,7 +1479,7 @@ struct PhotoImportRangePicker: View {
                     let e = Calendar.current.date(from: DateComponents(year: selectedYear, month: 12, day: 31, hour: 23, minute: 59))!
                     onSelect(s, e)
                 } label: {
-                    Text("查找足迹")
+                    Text("导入足迹")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                 }

@@ -197,7 +197,6 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
             is StatisticsRange.CUSTOM_YEAR -> 30 * day
             StatisticsRange.LAST_YEAR -> 30 * day
             StatisticsRange.ALL -> 90 * day
-            else -> 1 * day
         }
     }
 

@@ -106,6 +106,14 @@ class AppConfig {
     var publicServiceUrl: String {
         string(forKey: "PUBLIC_SERVICE_URL")
     }
+
+    var tencentMapKey: String {
+        string(forKey: "TENCENT_MAP_KEY")
+    }
+
+    var tencentMapSecret: String {
+        string(forKey: "TENCENT_MAP_SECRET")
+    }
     
     var habitTimeWindow: Int {
         int(forKey: "HABIT_TIME_WINDOW_MINUTES")
@@ -171,6 +179,10 @@ class AppConfig {
 
     var tripMaximumDurationDays: Int {
         max(1, int(forKey: "TRIP_MAXIMUM_DURATION_DAYS"))
+    }
+
+    var tripPlanArrivalRadiusMeters: Double {
+        double(forKey: "TRIP_PLAN_ARRIVAL_RADIUS_METERS")
     }
 
     var ridiculousAccuracyThreshold: Double {

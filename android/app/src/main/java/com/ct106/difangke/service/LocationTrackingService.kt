@@ -15,7 +15,9 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import com.ct106.difangke.DiFangKeApp
+import com.ct106.difangke.AppConfig
 import com.ct106.difangke.data.db.entity.PlaceEntity
+import com.ct106.difangke.data.db.entity.TripState
 import com.ct106.difangke.data.location.RawLocationStore
 import com.ct106.difangke.data.model.TransportType
 import com.ct106.difangke.service.tracking.DailyStats
@@ -221,6 +223,7 @@ class LocationTrackingService : Service() {
         private var movingSinceMs: Long? = null
         private var lastOngoingUpsertMs = Long.MIN_VALUE
         private var lastOngoingTitleRefreshMs = Long.MIN_VALUE
+        private var lastPlanArrivalCheckMs = Long.MIN_VALUE
         private val notifiedFootprintIDs = HashSet<String>()
 
         private val hysteresis = MovementHysteresis()
@@ -589,6 +592,7 @@ class LocationTrackingService : Service() {
                 val previousLocation = lastLocation
                 if (previousLocation == null || fix.timeMs >= previousLocation.timeMs) lastLocation = fix
                 if (isFresh) lastFreshUpdateMs = now
+                if (isFresh) completeNextPlannedStopIfArrived(fix)
 
                 val isMovingBySensor = motion.isMovingBySensor
                 // Step-counter "stationary" is only trusted to veto noisy GPS
@@ -697,6 +701,38 @@ class LocationTrackingService : Service() {
                         refreshOngoingTitleIfDue(now)
                 }
                 publishState()
+        }
+
+        /** A real, fresh fix may complete only the next destination in the active plan. */
+        private suspend fun completeNextPlannedStopIfArrived(fix: TrackingFix) {
+                if (fix.accuracy < 0 || fix.accuracy > AppConfig.TRIP_PLAN_ARRIVAL_RADIUS_METERS) return
+                if (lastPlanArrivalCheckMs != Long.MIN_VALUE &&
+                        fix.timeMs - lastPlanArrivalCheckMs < (AppConfig.TRIP_PLAN_ARRIVAL_CHECK_INTERVAL_SECONDS * 1000).toLong()) return
+                lastPlanArrivalCheckMs = fix.timeMs
+                val tripDao = db.tripDao()
+                val active = tripDao.getTrips()
+                        .filter { it.state == TripState.ACTIVE }
+                        .maxByOrNull { it.actualStartedAt?.time ?: Long.MIN_VALUE }
+                        ?: return
+                val days = tripDao.getAllDays()
+                        .filter { it.tripID == active.id }
+                        .sortedWith(compareBy({ it.day }, { it.orderIndex }))
+                val dayOrder = days.mapIndexed { index, day -> day.id to index }.toMap()
+                val next = tripDao.getAllItems()
+                        .asSequence()
+                        .filter {
+                                it.tripDayID in dayOrder &&
+                                        it.kindRaw == "stop" &&
+                                        it.stopScopeRaw == "place" &&
+                                        it.planStatusRaw == "planned"
+                        }
+                        .sortedWith(compareBy({ dayOrder[it.tripDayID] ?: Int.MAX_VALUE }, { it.orderIndex }))
+                        .firstOrNull() ?: return
+                val latitude = next.latitude ?: return
+                val longitude = next.longitude ?: return
+                if (GeoMath.distance(fix.latitude, fix.longitude, latitude, longitude) > AppConfig.TRIP_PLAN_ARRIVAL_RADIUS_METERS) return
+                tripDao.upsertItem(next.copy(planStatusRaw = "completed"))
+                tripDao.upsertTrip(active.copy(updatedAt = Date()))
         }
 
         /** Network fixes carry no speed; derive one from displacement in the low-power watch. */

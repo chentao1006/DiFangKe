@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package com.ct106.difangke.ui.screens.main
 
 import android.graphics.Bitmap
@@ -60,13 +62,15 @@ private class TimelineMapHolder {
  * Full-screen Tencent map behind the home timeline sheet (iOS
  * ContinuousTimelineView.mapContent). Redraws only when overlays change, frames
  * the camera per [cameraFit] with the sheet height as bottom padding, and
- * reports user pans so the caller can collapse the sheet.
+ * reports user pans so the caller can collapse the sheet. A maximized timeline
+ * can keep overlays current while [suspendCameraUpdates] freezes the hidden map.
  */
 @Composable
 fun TimelineMapView(
     overlays: TimelineMapOverlays,
     cameraFit: TimelineCameraFit?,
     bottomPaddingPx: Int,
+    suspendCameraUpdates: Boolean,
     userLocation: LatLng?,
     isFollowingUser: Boolean,
     followUserRequest: Int,
@@ -155,15 +159,15 @@ fun TimelineMapView(
         val density = view.context.resources.displayMetrics.density
         holder.lastBottomPadding = bottomPaddingPx
 
-        if (followUserRequest != holder.lastFollowRequest && userLocation != null) {
+        if (!suspendCameraUpdates && followUserRequest != holder.lastFollowRequest && userLocation != null) {
             holder.lastFollowRequest = followUserRequest
             map.animateCamera(CameraUpdateFactory.newLatLngZoom(userLocation, 15f))
-        } else if (isFollowingUser && userLocation != null && needsRedraw) {
+        } else if (!suspendCameraUpdates && isFollowingUser && userLocation != null && needsRedraw) {
             map.animateCamera(CameraUpdateFactory.newLatLng(userLocation))
         }
 
         val fit = cameraFit
-        if (fit != null && fit.key != holder.lastFitKey && fit.points.isNotEmpty()) {
+        if (!suspendCameraUpdates && fit != null && fit.key != holder.lastFitKey && fit.points.isNotEmpty()) {
             holder.lastFitKey = fit.key
             if (!fit.skipMove && !isFollowingUser) {
                 val apply = {

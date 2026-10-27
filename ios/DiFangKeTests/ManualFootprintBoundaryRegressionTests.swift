@@ -605,7 +605,7 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
         XCTAssertEqual(record.averageSpeed, 18_500 / editedEnd.timeIntervalSince(editedStart), accuracy: 0.000_001)
     }
 
-    func testStableStayBoundariesRecoverClippedShortTransportWithoutAcceptingDrift() throws {
+    func testAutomaticTransportRequiresConfiguredDurationAndObservedSpan() throws {
         let base = Date(timeIntervalSince1970: 1_790_207_077)
         func point(
             _ seconds: TimeInterval,
@@ -642,7 +642,7 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
             point(42, 25.09982451, 102.73612879),
             point(54, 25.09984500, 102.73704500, synthetic: true, stableBoundary: true),
         ])
-        XCTAssertTrue(PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan(clippedRealTrip))
+        XCTAssertFalse(PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan(clippedRealTrip))
 
         let stationaryDrift = try record([
             point(0, 25.10008000, 102.73331000, synthetic: true, stableBoundary: true),
@@ -653,6 +653,12 @@ final class ManualFootprintBoundaryRegressionTests: XCTestCase {
             point(54, 25.09984500, 102.73704500, synthetic: true, stableBoundary: true),
         ])
         XCTAssertFalse(PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan(stationaryDrift))
+
+        let syntheticStraightLine = try record([
+            point(0, 25.10008000, 102.73331000, synthetic: true, stableBoundary: true),
+            point(54, 25.09984500, 102.73704500, synthetic: true, stableBoundary: true),
+        ])
+        XCTAssertFalse(PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan(syntheticStraightLine))
     }
 
     func testAutomaticSyncReopensTransportThatEndedAtMidRoutePause() {

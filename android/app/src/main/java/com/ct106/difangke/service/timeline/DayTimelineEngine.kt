@@ -518,16 +518,9 @@ class DayTimelineEngine(
                     val codable = transportPoints.map { RouteCoordinate(it.latitude, it.longitude, it.timestamp.time) }
                     val diameter = GeoMath.maxDiameter(transportPoints.map { it.latLon })
 
-                    val spanEvidence = codable.toMutableList()
-                    lastFp?.let {
-                        spanEvidence.add(0, RouteCoordinate(it.latitude, it.longitude, it.endTime.time, true, true))
-                    }
-                    if (nextStableCluster.isNotEmpty()) {
-                        val c = GeoMath.centroid(nextStableCluster.map { it.latLon })
-                        spanEvidence.add(RouteCoordinate(c.first, c.second, nextStableCluster.first().timestamp.time, true, true))
-                    }
-                    val hasStableBoundaryEvidence = TransportRules.hasStableBoundaryShortTripEvidence(spanEvidence, secs(tStart, tEnd))
-                    if (!(diameter >= AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD || hasStableBoundaryEvidence)) {
+                    if (secs(tStart, tEnd) < AppConfig.TRANSPORT_MIN_DURATION_THRESHOLD ||
+                        diameter < AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD
+                    ) {
                         i = k
                         continue
                     }
@@ -833,14 +826,11 @@ class DayTimelineEngine(
                 actualEnd = gapEnd
             }
 
-            val isLongDistance = pathDist > 50_000
             if (pathDist > AppConfig.TRANSPORT_MIN_DISTANCE_THRESHOLD &&
                 !TransportRules.overlapsDeletedTransportOverride(actualStart, actualEnd, deletedRanges)
             ) {
                 val routeDuration = secs(actualStart, actualEnd)
-                if (routeDuration <= 0) continue
-                val stable = TransportRules.hasStableBoundaryShortTripEvidence(pts, routeDuration)
-                if (!(isLongDistance || routeDuration >= AppConfig.TRANSPORT_MIN_DURATION_THRESHOLD || stable)) continue
+                if (routeDuration < AppConfig.TRANSPORT_MIN_DURATION_THRESHOLD) continue
                 val speed = pathDist / routeDuration
                 val (type, metrics) = classify(speed, actualStart, actualEnd, routeDuration, pathDist, pts.size, pts.count { !it.isSyntheticPadding })
                 val tp = WTransport.create(dayStart, actualStart, actualEnd, current.endName, next.startName, type.raw, pathDist, speed, pts, metrics.steps)
