@@ -3056,7 +3056,6 @@ private struct PlannedTripDetailView: View {
                                         plannedDaySection(day, index: index)
                                     }
                                 }
-                                .padding(.top, 30)
                                 .padding(.horizontal, 16)
                             }
                             .contentMargins(
@@ -6557,6 +6556,9 @@ private struct TripDetailSheet: View {
                                 visibleTimelineItemIDsChanged(settledItemIDs)
                             }
                         }
+                        // Keep timeline rows below the native title band so
+                        // they cannot cover the sheet's glass top rim.
+                        .clipped()
                     }
                 }
             }
@@ -6656,8 +6658,6 @@ private struct TripDetailSheet: View {
             timelineScrollSettleTask?.cancel()
         }
         .toolbar(removing: .sidebarToggle)
-        .background(.ultraThinMaterial, ignoresSafeAreaEdges: .all)
-        .presentationBackground(.clear)
     }
 
     private var detailContent: some View {

@@ -461,7 +461,7 @@ struct LocationSearchSheet: View {
             }
             .overlay {
                 if isSearching {
-                    ProgressView().padding().background(.ultraThinMaterial).cornerRadius(10)
+                    ProgressView().padding().background(.regularMaterial).cornerRadius(10)
                 }
             }
             .onAppear {

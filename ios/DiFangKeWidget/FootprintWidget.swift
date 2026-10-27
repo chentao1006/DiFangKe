@@ -233,7 +233,7 @@ struct DFKFootprintWidgetView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(.ultraThinMaterial)
+            .background(.regularMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .padding(10)
 
@@ -248,7 +248,7 @@ struct DFKFootprintWidgetView: View {
                                 .font(.system(size: isSmall ? 10 : 12, weight: .bold))
                                 .foregroundColor(mainColor)
                                 .frame(width: isSmall ? 28 : 32, height: isSmall ? 28 : 32)
-                                .background(.ultraThinMaterial)
+                                .background(.regularMaterial)
                                 .clipShape(Circle())
                         }
                         .buttonStyle(.plain)
@@ -262,7 +262,7 @@ struct DFKFootprintWidgetView: View {
                                 .font(.system(size: isSmall ? 10 : 12, weight: .bold))
                                 .foregroundColor(mainColor)
                                 .frame(width: isSmall ? 28 : 32, height: isSmall ? 28 : 32)
-                                .background(.ultraThinMaterial)
+                                .background(.regularMaterial)
                                 .clipShape(Circle())
                         }
                         .buttonStyle(.plain)
@@ -277,7 +277,7 @@ struct DFKFootprintWidgetView: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(mainColor)
                     .frame(width: 28, height: 28)
-                    .background(.ultraThinMaterial)
+                    .background(.regularMaterial)
                     .clipShape(Circle())
             }
             .buttonStyle(.plain)
@@ -924,11 +924,23 @@ private struct CurrentTrackingWatchContent: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                     }
-                    Label(state.placeName, systemImage: "mappin.and.ellipse")
+                    if state.kind == .transport {
+                        HStack(spacing: 6) {
+                            Label(formatCurrentDistance(state.distance), systemImage: "ruler")
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Label(formatCurrentSpeed(state.averageSpeed), systemImage: "speedometer")
+                                .lineLimit(1)
+                        }
                         .font(.headline)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .minimumScaleFactor(0.68)
+                    } else {
+                        Label(state.placeName, systemImage: "mappin.and.ellipse")
+                            .font(.headline)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 // Use the host's measured bounds instead of padding. The
                 // remote Watch renderer can compress ordinary padding while

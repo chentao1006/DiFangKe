@@ -76,7 +76,7 @@ struct DataManagerView: View {
                     }
                 }
                 .padding(32)
-                .background(.ultraThinMaterial)
+                .background(.regularMaterial)
                 .cornerRadius(28)
                 .shadow(radius: 20)
                 .transition(.opacity.combined(with: .scale))

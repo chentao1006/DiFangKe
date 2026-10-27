@@ -86,7 +86,7 @@ struct RawPointsListView: View {
                             } label: {
                                 Image(systemName: "scope")
                                     .padding(8)
-                                    .background(.ultraThinMaterial)
+                                    .background(.regularMaterial)
                                     .cornerRadius(8)
                                     .padding(10)
                             }

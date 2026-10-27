@@ -156,6 +156,7 @@ struct HistoryListView: View {
     @State private var showingDate: IdentifiableDate? = nil
     @State private var isPhotoImportRequested = false
     @State private var showingRawPointsDate: IdentifiableDate? = nil
+    @State private var showingReviewCalendar = false
 
     
     enum ViewMode: String, CaseIterable {
@@ -190,7 +191,6 @@ struct HistoryListView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            if !calendarOnly { pickerSection }
             ZStack {
                 if !calendarOnly || isCalendarIndexReady {
                     contentArea
@@ -215,6 +215,25 @@ struct HistoryListView: View {
         .navigationTitle(calendarOnly ? "选择日期" : "回顾")
         .navigationBarTitleDisplayMode(calendarOnly ? .inline : .large)
         .background(Color.dfkBackground)
+        .toolbar {
+            if !calendarOnly && viewMode == .statistics {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingReviewCalendar = true
+                    } label: {
+                        Label("打开日历", systemImage: "calendar")
+                    }
+                }
+            } else if !calendarOnly && viewMode == .favorites {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        viewMode = .statistics
+                    } label: {
+                        Label("返回回顾", systemImage: "chevron.left")
+                    }
+                }
+            }
+        }
         .onAppear {
             if calendarOnly { prepareCalendarIndex() }
             else { activateTabIfNeeded(viewMode) }
@@ -241,21 +260,26 @@ struct HistoryListView: View {
                 .environment(locationManager)
                 .onDisappear { rebuildIndex() }
         }
-        .photoImportFlow(isRequested: $isPhotoImportRequested, onImported: rebuildIndex)
-        .modifier(ImportToolbarModifier(onTapAction: { isPhotoImportRequested = true }))
-    }
-    
-    private var pickerSection: some View {
-        Picker("视图", selection: $viewMode) {
-            ForEach([ViewMode.statistics, .favorites], id: \.self) { mode in
-                Text(mode.rawValue).tag(mode)
+        .sheet(isPresented: $showingReviewCalendar) {
+            NavigationStack {
+                HistoryListView(
+                    initialDate: selectedDate,
+                    calendarOnly: true,
+                    onDateSelected: { date in
+                        showingReviewCalendar = false
+                        onDateSelected?(date)
+                    }
+                )
+                .environment(locationManager)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("完成") { showingReviewCalendar = false }
+                    }
+                }
             }
         }
-        .pickerStyle(.segmented)
-        .padding(.horizontal, 20)
-        .padding(.top, 10)
-        .padding(.bottom, 15)
-        .background(Color.dfkBackground)
+        .photoImportFlow(isRequested: $isPhotoImportRequested, onImported: rebuildIndex)
+        .modifier(ImportToolbarModifier(isVisible: calendarOnly, onTapAction: { isPhotoImportRequested = true }))
     }
     
     private var yearJumpOverlay: some View {
@@ -319,7 +343,17 @@ struct HistoryListView: View {
             }
 
             if hasOpenedStatistics {
-                HistoryStatisticsView()
+                HistoryStatisticsView(
+                    onFootprintSelected: { footprint in
+                        onFootprintPresentationChanged?(footprint)
+                    },
+                    onDateSelected: { date in
+                        onDateSelected?(date)
+                    },
+                    onShowAllFavorites: {
+                        viewMode = .favorites
+                    }
+                )
                     .opacity(viewMode == .statistics ? 1 : 0)
                     .allowsHitTesting(viewMode == .statistics)
                     .accessibilityHidden(viewMode != .statistics)
@@ -1419,9 +1453,18 @@ struct ImportOverlaysModifier: ViewModifier {
 }
 
 struct ImportToolbarModifier: ViewModifier {
+    let isVisible: Bool
     let onTapAction: () -> Void
     func body(content: Content) -> some View {
-        content.toolbar { ToolbarItem(placement: .topBarLeading) { Button { onTapAction() } label: { Image(systemName: "square.and.arrow.down.badge.clock") } } }
+        content.toolbar {
+            if isVisible {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { onTapAction() } label: {
+                        Image(systemName: "square.and.arrow.down.badge.clock")
+                    }
+                }
+            }
+        }
     }
 }
 

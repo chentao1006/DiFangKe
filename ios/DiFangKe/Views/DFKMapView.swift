@@ -2,6 +2,17 @@ import SwiftUI
 import MapKit
 import SwiftData
 import Photos
+
+struct DFKTransportOverviewPoint: Identifiable, Sendable {
+    let id: String
+    let latitude: Double
+    let longitude: Double
+    let intensity: Int
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
 import UIKit
 import CryptoKit
 
@@ -205,6 +216,9 @@ struct DFKMapView: View {
     var allowsGeneratedSnapshot: Bool = true
     var showsStandalonePhotos: Bool = false
     var prefersActivityIcons: Bool = false
+    var condensesTransportOverview: Bool = false
+    var bottomContentInset: CGFloat = 0
+    var transportOverviewPoints: [DFKTransportOverviewPoint] = []
     var isMiniTimelineMode: Bool = false
     var selectedFootprintID: UUID? = nil
     var selectedFootprintCoordinate: CLLocationCoordinate2D? = nil
@@ -269,6 +283,9 @@ struct DFKMapView: View {
         heatmapPoints: [HeatmapPoint] = [],
         showsStandalonePhotos: Bool = false,
         prefersActivityIcons: Bool = false,
+        condensesTransportOverview: Bool = false,
+        bottomContentInset: CGFloat = 0,
+        transportOverviewPoints: [DFKTransportOverviewPoint] = [],
         isMiniTimelineMode: Bool = false,
         selectedFootprintID: UUID? = nil,
         selectedFootprintCoordinate: CLLocationCoordinate2D? = nil,
@@ -294,6 +311,9 @@ struct DFKMapView: View {
         self.heatmapPoints = heatmapPoints
         self.showsStandalonePhotos = showsStandalonePhotos
         self.prefersActivityIcons = prefersActivityIcons
+        self.condensesTransportOverview = condensesTransportOverview
+        self.bottomContentInset = bottomContentInset
+        self.transportOverviewPoints = transportOverviewPoints
         self.isMiniTimelineMode = isMiniTimelineMode
         self.selectedFootprintID = selectedFootprintID
         self.selectedFootprintCoordinate = selectedFootprintCoordinate
@@ -319,6 +339,7 @@ struct DFKMapView: View {
     @State private var interactiveMapReady = false
     @State private var interactiveActivationTask: Task<Void, Never>?
     @State private var liveMapPhotoImages: [String: UIImage] = [:]
+    @State private var transportOverviewVisibleRegion: MKCoordinateRegion?
     @Environment(\.colorScheme) private var colorScheme
 
     private var hasVisibleContent: Bool {
@@ -354,6 +375,156 @@ struct DFKMapView: View {
             guard case .transport(let transport) = item,
                   transport.points.filter(\.isRenderableMapCoordinate).count >= 2 else { return nil }
             return transport
+        }
+    }
+
+    private var renderedTransportSegments: [TransportLineSegment] {
+        let segments = transportItems.flatMap(\.lineSegments)
+        guard condensesTransportOverview else { return segments }
+
+        var seen: Set<String> = []
+        var result: [TransportLineSegment] = []
+        for segment in segments {
+            let coordinates = segment.coordinates.filter(\.isRenderableMapCoordinate)
+            guard coordinates.count >= 2 else { continue }
+            let step = max(1, coordinates.count / 24)
+            var sampled = stride(from: 0, to: coordinates.count, by: step).map { coordinates[$0] }
+            if let last = coordinates.last,
+               sampled.last?.latitude != last.latitude || sampled.last?.longitude != last.longitude {
+                sampled.append(last)
+            }
+            let forward = sampled.map { String(format: "%.3f,%.3f", $0.latitude, $0.longitude) }.joined(separator: ";")
+            let reverse = sampled.reversed().map { String(format: "%.3f,%.3f", $0.latitude, $0.longitude) }.joined(separator: ";")
+            let key = "\(segment.isDashed ? "d" : "s"):\(min(forward, reverse))"
+            guard seen.insert(key).inserted else { continue }
+            result.append(segment)
+        }
+        return result
+    }
+
+    private var renderedTransportAnnotationItems: [Transport] {
+        guard condensesTransportOverview else { return transportItems }
+        return Dictionary(grouping: transportItems, by: \.currentType).compactMap { _, items in
+            items.max { $0.distance < $1.distance }
+        }
+    }
+
+    private var fusedTransportPoints: [DFKTransportOverviewPoint] {
+        guard condensesTransportOverview else { return [] }
+        if !transportOverviewPoints.isEmpty { return transportOverviewPoints }
+        // A fixed, small geographic cell preserves local route geometry even
+        // when the selected period spans several distant cities. Every real
+        // point contributes; only near-identical GPS samples are fused.
+        let cellSize = AppConfig.shared.reviewMapTrajectoryBaseCellDegrees
+
+        struct Bucket {
+            var latitude = 0.0
+            var longitude = 0.0
+            var count = 0
+        }
+        var buckets: [String: Bucket] = [:]
+        for transport in transportItems {
+            for pathPoint in transport.pathPoints where !pathPoint.isSyntheticPadding && pathPoint.coordinate.isRenderableMapCoordinate {
+                let point = pathPoint.coordinate
+                let x = Int((point.longitude / cellSize).rounded())
+                let y = Int((point.latitude / cellSize).rounded())
+                let key = "\(x):\(y)"
+                var bucket = buckets[key, default: Bucket()]
+                bucket.latitude += point.latitude
+                bucket.longitude += point.longitude
+                bucket.count += 1
+                buckets[key] = bucket
+            }
+        }
+        return buckets.map { key, bucket in
+            DFKTransportOverviewPoint(
+                id: key,
+                latitude: bucket.latitude / Double(bucket.count),
+                longitude: bucket.longitude / Double(bucket.count),
+                intensity: bucket.count
+            )
+        }
+    }
+
+    private var displayedTransportOverviewPoints: [DFKTransportOverviewPoint] {
+        let points = fusedTransportPoints
+        guard isInteractive, let region = transportOverviewVisibleRegion, !points.isEmpty else { return points }
+
+        let latitudePadding = region.span.latitudeDelta * 0.08
+        let longitudePadding = region.span.longitudeDelta * 0.08
+        let minLatitude = region.center.latitude - region.span.latitudeDelta / 2 - latitudePadding
+        let maxLatitude = region.center.latitude + region.span.latitudeDelta / 2 + latitudePadding
+        let minLongitude = region.center.longitude - region.span.longitudeDelta / 2 - longitudePadding
+        let maxLongitude = region.center.longitude + region.span.longitudeDelta / 2 + longitudePadding
+        let visible = points.filter {
+            ($0.latitude >= minLatitude && $0.latitude <= maxLatitude) &&
+            ($0.longitude >= minLongitude && $0.longitude <= maxLongitude)
+        }
+
+        let baseCell = AppConfig.shared.reviewMapTrajectoryBaseCellDegrees
+        let adaptiveCell = max(baseCell, max(region.span.latitudeDelta, region.span.longitudeDelta) / 110)
+        guard adaptiveCell > baseCell else { return visible }
+
+        struct Bucket {
+            var latitude = 0.0
+            var longitude = 0.0
+            var intensity = 0
+        }
+        var buckets: [String: Bucket] = [:]
+        for point in visible {
+            let x = Int((point.longitude / adaptiveCell).rounded())
+            let y = Int((point.latitude / adaptiveCell).rounded())
+            let key = "\(x):\(y)"
+            var bucket = buckets[key, default: Bucket()]
+            bucket.latitude += point.latitude * Double(point.intensity)
+            bucket.longitude += point.longitude * Double(point.intensity)
+            bucket.intensity += point.intensity
+            buckets[key] = bucket
+        }
+        return buckets.map { key, bucket in
+            DFKTransportOverviewPoint(
+                id: "adaptive:\(key)",
+                latitude: bucket.latitude / Double(bucket.intensity),
+                longitude: bucket.longitude / Double(bucket.intensity),
+                intensity: bucket.intensity
+            )
+        }
+    }
+
+    private var showsDetailedTransportPaths: Bool {
+        guard condensesTransportOverview,
+              isInteractive,
+              let region = transportOverviewVisibleRegion else { return false }
+        return max(region.span.latitudeDelta, region.span.longitudeDelta)
+            <= AppConfig.shared.reviewMapTrajectoryPathMaxSpan
+    }
+
+    private var visibleDetailedTransportSegments: [TransportLineSegment] {
+        guard let region = transportOverviewVisibleRegion else { return [] }
+        let latitudePadding = region.span.latitudeDelta * 0.08
+        let longitudePadding = region.span.longitudeDelta * 0.08
+        let minLatitude = region.center.latitude - region.span.latitudeDelta / 2 - latitudePadding
+        let maxLatitude = region.center.latitude + region.span.latitudeDelta / 2 + latitudePadding
+        let minLongitude = region.center.longitude - region.span.longitudeDelta / 2 - longitudePadding
+        let maxLongitude = region.center.longitude + region.span.longitudeDelta / 2 + longitudePadding
+
+        return renderedTransportSegments.filter { segment in
+            guard !segment.isDashed else { return false }
+            var segmentMinLatitude = Double.greatestFiniteMagnitude
+            var segmentMaxLatitude = -Double.greatestFiniteMagnitude
+            var segmentMinLongitude = Double.greatestFiniteMagnitude
+            var segmentMaxLongitude = -Double.greatestFiniteMagnitude
+            var hasCoordinate = false
+            for coordinate in segment.coordinates where coordinate.isRenderableMapCoordinate {
+                hasCoordinate = true
+                segmentMinLatitude = min(segmentMinLatitude, coordinate.latitude)
+                segmentMaxLatitude = max(segmentMaxLatitude, coordinate.latitude)
+                segmentMinLongitude = min(segmentMinLongitude, coordinate.longitude)
+                segmentMaxLongitude = max(segmentMaxLongitude, coordinate.longitude)
+            }
+            guard hasCoordinate else { return false }
+            return segmentMaxLatitude >= minLatitude && segmentMinLatitude <= maxLatitude &&
+                segmentMaxLongitude >= minLongitude && segmentMinLongitude <= maxLongitude
         }
     }
 
@@ -603,6 +774,10 @@ struct DFKMapView: View {
                             }
                             .id(timelineUpdateIdentifier ?? 0)
                             .mapStyle(.standard(elevation: .automatic, emphasis: .muted))
+                            .onMapCameraChange(frequency: .onEnd) { context in
+                                guard condensesTransportOverview else { return }
+                                transportOverviewVisibleRegion = context.region
+                            }
                             // Handle taps on the map surface itself. Native map
                             // controls are subviews and must keep their own taps
                             // without forwarding them to the host's collapse action.
@@ -649,8 +824,15 @@ struct DFKMapView: View {
                     interactiveMapReady = true
                 }
             }
-            .task(id: isInteractive ? nil : snapshotCacheKey(for: geometry.size)) {
+            .task(id: isInteractive ? nil : "\(snapshotCacheKey(for: geometry.size))#generate:\(allowsGeneratedSnapshot)") {
                 guard !isInteractive else { return }
+                loadSnapshot(for: geometry.size, forceWidgetRefresh: false)
+            }
+            .onChange(of: colorScheme) { _, _ in
+                guard !isInteractive else { return }
+                snapshotTask?.cancel()
+                snapshotImage = nil
+                snapshotLoadFailed = false
                 loadSnapshot(for: geometry.size, forceWidgetRefresh: false)
             }
             .task(id: liveMapPhotoAssetCacheKey) {
@@ -763,72 +945,20 @@ struct DFKMapView: View {
         let durationTuple = formatDuration(aggregated.totalDuration)
         let fontSize = isInteractive ? 6.5 * constantScale : 5.5 * constantScale
 
-        return ZStack(alignment: .top) {
-            MapPinTeardropShape()
-                .fill(Color(uiColor: .systemBackground))
-                .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
-                .frame(width: size, height: size * 1.2)
-
-            Circle()
-                .fill(
-                    LinearGradient(
-                        gradient: Gradient(colors: [activityColor, activityColor.darker(by: 0.20)]),
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(width: size - 5, height: size - 5)
-                .offset(y: 2.5)
-
-            // 根据 prefersActivityIcons 决定显示活动图标还是照片封面
-            if !prefersActivityIcons, let latestPhotoAssetID = latestPhotoAssetID(for: aggregated) {
-                let photoSize = size - 3
-                if let image = liveMapPhotoImages[latestPhotoAssetID] {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: photoSize, height: photoSize)
-                        .clipShape(Circle())
-                        .overlay(Circle().stroke(activityColor, lineWidth: 1.5))
-                        .offset(y: 1.5)
-                } else {
-                    Image(systemName: iconName)
-                        .font(.system(size: iconSize, weight: .bold))
-                        .foregroundColor(iconColor)
-                        .frame(width: size, height: size)
-                }
-            } else {
-                Image(systemName: iconName)
-                    .font(.system(size: iconSize, weight: .bold))
-                    .foregroundColor(iconColor)
-                    .frame(width: size, height: size)
-            }
-
-            if !isMiniTimelineMode && aggregated.totalDuration >= AppConfig.shared.stayDurationThreshold {
-                HStack(alignment: .lastTextBaseline, spacing: 0) {
-                    Text(durationTuple.number)
-                        .font(.system(size: fontSize, weight: .bold, design: .rounded))
-                    Text(durationTuple.unit)
-                        .font(.system(size: fontSize * 0.75, weight: .bold, design: .rounded))
-                }
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-                .foregroundColor(activityColor.darker(by: 0.30))
-                .padding(.horizontal, 2)
-                .padding(.vertical, 1)
-                .background(
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color(uiColor: .systemBackground))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 3)
-                        .stroke(activityColor, lineWidth: 0.5)
-                )
-                .offset(y: size - 6 * constantScale)
-            }
-        }
-        .padding(2 * constantScale)
-        .frame(width: size + 4 * constantScale, height: size * 1.2 + 4 * constantScale)
+        let photoImage = prefersActivityIcons
+            ? nil
+            : latestPhotoAssetID(for: aggregated).flatMap { liveMapPhotoImages[$0] }
+        return DFKFootprintMapMarker(
+            size: size,
+            constantScale: constantScale,
+            activityColor: activityColor,
+            iconColor: iconColor,
+            iconName: iconName,
+            iconSize: iconSize,
+            photoImage: photoImage,
+            durationTuple: isMiniTimelineMode || aggregated.totalDuration < AppConfig.shared.stayDurationThreshold ? nil : durationTuple,
+            fontSize: fontSize
+        )
         .scaleEffect(isSelected ? 1.5 : 1.0, anchor: .bottom)
         .contentShape(Rectangle())
         .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFootprintID)
@@ -863,29 +993,44 @@ struct DFKMapView: View {
 
     @MapContentBuilder
     private func transportMapContent() -> some MapContent {
-        let foregroundLineWidth: CGFloat = isInteractive ? 3 : 2
-        let dashedOpacity: Double = 0.4
-        let dashedLineWidth: CGFloat = isInteractive ? 1.3 : 1.0
-
-        ForEach(transportItems) { transport in
-            ForEach(transport.lineSegments) { segment in
+        if condensesTransportOverview {
+            if showsDetailedTransportPaths {
+                ForEach(visibleDetailedTransportSegments) { segment in
+                    MapPolyline(coordinates: segment.coordinates)
+                        .stroke(
+                            Color.dfkAccent.opacity(0.68),
+                            style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round)
+                        )
+                }
+            } else {
+                ForEach(displayedTransportOverviewPoints) { point in
+                    MapCircle(
+                        center: point.coordinate,
+                        radius: min(7, 3.5 + log2(Double(max(1, point.intensity))))
+                    )
+                    .foregroundStyle(Color.dfkAccent.opacity(min(0.72, 0.36 + log2(Double(max(1, point.intensity))) * 0.06)))
+                }
+            }
+        } else {
+            ForEach(renderedTransportSegments.filter { !$0.isDashed }) { segment in
                 MapPolyline(coordinates: segment.coordinates)
                     .stroke(
-                        Color.dfkAccent.opacity(segment.isDashed ? dashedOpacity : 0.7),
+                        Color.dfkAccent.opacity(0.7),
                         style: StrokeStyle(
-                            lineWidth: segment.isDashed ? dashedLineWidth : foregroundLineWidth,
+                            lineWidth: isInteractive ? 3 : 2,
                             lineCap: .round,
-                            lineJoin: .round,
-                            dash: segment.isDashed ? [5, 5] : []
+                            lineJoin: .round
                         )
                     )
             }
 
-            let smoothedPoints = transport.lineSegments.flatMap { $0.coordinates }.filter(\.isRenderableMapCoordinate)
-            if let coord = smoothedPoints.distanceMidpoint {
-                Annotation("", coordinate: coord) {
-                    transportAnnotationContent(for: transport)
-                        .zIndex(0)
+            ForEach(renderedTransportAnnotationItems) { transport in
+                let smoothedPoints = transport.lineSegments.flatMap { $0.coordinates }.filter(\.isRenderableMapCoordinate)
+                if let coord = smoothedPoints.distanceMidpoint {
+                    Annotation("", coordinate: coord) {
+                        transportAnnotationContent(for: transport)
+                            .zIndex(0)
+                    }
                 }
             }
         }
@@ -988,6 +1133,24 @@ struct DFKMapView: View {
     }
 
     private func snapshotCacheKey(for size: CGSize) -> String {
+        let w = Int(size.width / 10) * 10
+        let h = Int(size.height / 10) * 10
+        let sizeKey = "\(w)x\(h)"
+        let styleKey = colorScheme == .dark ? "dark" : "light"
+        let insetKey = "inset:\(Int(bottomContentInset.rounded()))"
+        let overviewKey = "overview:\(transportOverviewPoints.count):\(transportOverviewPoints.reduce(0) { $0 + $1.intensity })"
+        if let timelineUpdateIdentifier {
+            return [
+                FootprintIconDefaults.mapSnapshotVersion,
+                sizeKey,
+                styleKey,
+                insetKey,
+                overviewKey,
+                "timeline:\(timelineUpdateIdentifier)",
+                showsUserLocation ? "user" : "nouser"
+            ].joined(separator: "#")
+        }
+
         let footprintKey = timelineItems.compactMap { item -> String? in
             guard case .footprint(let fp) = item else { return nil }
             let isOngoingStay = fp.locationHash == "ONGOING_STAY"
@@ -1027,11 +1190,7 @@ struct DFKMapView: View {
         }.joined(separator: "|")
         let heatmapKey = heatmapPoints.prefix(8).map(\.id).joined(separator: "|")
         let annotationKey = mainAnnotationCoordinate.map { String(format: "%.4f,%.4f", $0.latitude, $0.longitude) } ?? "none"
-        let w = Int(size.width / 10) * 10
-        let h = Int(size.height / 10) * 10
-        let sizeKey = "\(w)x\(h)"
-        let styleKey = colorScheme == .dark ? "dark" : "light"
-        return [FootprintIconDefaults.mapSnapshotVersion, sizeKey, styleKey, annotationKey, pointKey, footprintKey, transportKey, photoKey, footprintPhotoKey, heatmapKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
+        return [FootprintIconDefaults.mapSnapshotVersion, sizeKey, styleKey, insetKey, overviewKey, annotationKey, pointKey, footprintKey, transportKey, photoKey, footprintPhotoKey, heatmapKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
     }
 
     private func loadSnapshot(for size: CGSize, forceWidgetRefresh: Bool = false) {
@@ -1044,6 +1203,15 @@ struct DFKMapView: View {
             return
         }
 
+        let cacheKey = snapshotCacheKey(for: size)
+        if !forceWidgetRefresh, let cached = DFKMapSnapshotCache.shared.image(for: cacheKey) {
+            isSnapshotLoading = false
+            snapshotLoadFailed = false
+            lastSnapshotCacheKey = cacheKey
+            snapshotImage = cached
+            return
+        }
+
         guard allowsGeneratedSnapshot else {
             snapshotTask?.cancel()
             isSnapshotLoading = false
@@ -1052,20 +1220,11 @@ struct DFKMapView: View {
             return
         }
 
-        let cacheKey = snapshotCacheKey(for: size)
-        if !forceWidgetRefresh, let cached = DFKMapSnapshotCache.shared.image(for: cacheKey) {
-            isSnapshotLoading = false
-            snapshotLoadFailed = false
-            snapshotImage = cached
-            return
-        }
-
         snapshotTask?.cancel()
         isSnapshotLoading = true
         snapshotLoadFailed = false
         // 保留上一帧，避免频繁刷新时出现闪白/占位图跳变。
 
-        let oldKey = lastSnapshotCacheKey
         snapshotTask = Task { @MainActor in
             guard let image = await buildSnapshotImageWithTimeout(size: size, timeoutSeconds: 12) else {
                 if Task.isCancelled { return }
@@ -1074,10 +1233,6 @@ struct DFKMapView: View {
                 return
             }
             if Task.isCancelled { return }
-            // 写入新缓存前删除旧版本
-            if let oldKey, oldKey != cacheKey {
-                DFKMapSnapshotCache.shared.removeImage(for: oldKey)
-            }
             DFKMapSnapshotCache.shared.setImage(image, for: cacheKey)
             lastSnapshotCacheKey = cacheKey
             snapshotImage = image
@@ -1124,7 +1279,9 @@ struct DFKMapView: View {
         options.region = region
         options.size = size
         options.scale = UIScreen.main.scale
-        options.traitCollection = UITraitCollection.current
+        options.traitCollection = UITraitCollection(
+            userInterfaceStyle: colorScheme == .dark ? .dark : .light
+        )
 
         let snapshotter = MKMapSnapshotter(options: options)
         guard let snapshot = try? await snapshotter.start() else { return nil }
@@ -1134,6 +1291,31 @@ struct DFKMapView: View {
         let renderer = UIGraphicsImageRenderer(size: snapshot.image.size, format: format)
         let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
         let strokeColor = colorScheme == .dark ? UIColor.black : UIColor.white
+        let renderedFootprintMarkers: [(coordinate: CLLocationCoordinate2D, image: UIImage)] = aggregatedFootprints.compactMap { aggregated in
+            let footprint = aggregated.representative
+            let activity = footprint.getActivityType(from: allActivities)
+            let constantScale: CGFloat = 1.32
+            let size: CGFloat = 20 * constantScale
+            let marker = DFKFootprintMapMarker(
+                size: size,
+                constantScale: constantScale,
+                activityColor: activity?.color ?? .gray,
+                iconColor: .white,
+                iconName: activity?.icon ?? FootprintIconDefaults.card,
+                iconSize: (activity?.icon == nil ? 18 : 10) * constantScale,
+                photoImage: prefersActivityIcons
+                    ? nil
+                    : latestPhotoAssetID(for: aggregated).flatMap { footprintPhotoImages[$0] },
+                durationTuple: aggregated.totalDuration >= AppConfig.shared.stayDurationThreshold
+                    ? formatDuration(aggregated.totalDuration)
+                    : nil,
+                fontSize: 5.5 * constantScale
+            )
+            let imageRenderer = ImageRenderer(content: marker.environment(\.colorScheme, colorScheme))
+            imageRenderer.scale = UIScreen.main.scale
+            guard let image = imageRenderer.uiImage else { return nil }
+            return (aggregated.coordinate, image)
+        }
 
         return renderer.image { ctx in
             snapshot.image.draw(at: .zero)
@@ -1155,11 +1337,23 @@ struct DFKMapView: View {
             ctx.cgContext.setLineCap(.round)
             ctx.cgContext.setLineJoin(.round)
 
-            // Pass 1: Draw all transport lines (bottom layer)
-            for item in timelineItems {
-                guard case .transport(let transport) = item, transport.points.count >= 2 else { continue }
-
-                for segment in transport.lineSegments {
+            if condensesTransportOverview {
+                for fusedPoint in fusedTransportPoints {
+                    let point = snapshot.point(for: fusedPoint.coordinate)
+                    let diameter = min(5.5, 2.5 + CGFloat(log2(Double(max(1, fusedPoint.intensity)))) * 0.7)
+                    let rect = CGRect(
+                        x: point.x - diameter / 2,
+                        y: point.y - diameter / 2,
+                        width: diameter,
+                        height: diameter
+                    )
+                    ctx.cgContext.setFillColor(
+                        themeColor.withAlphaComponent(min(0.72, 0.34 + CGFloat(log2(Double(max(1, fusedPoint.intensity)))) * 0.06)).cgColor
+                    )
+                    ctx.cgContext.fillEllipse(in: rect)
+                }
+            } else {
+                for segment in renderedTransportSegments where !segment.isDashed {
                     let projected = segment.coordinates.map { snapshot.point(for: $0) }
                     guard projected.count >= 2 else { continue }
 
@@ -1168,113 +1362,36 @@ struct DFKMapView: View {
                     for i in 1..<projected.count {
                         ctx.cgContext.addLine(to: projected[i])
                     }
-                    ctx.cgContext.setStrokeColor(
-                        themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
-                    )
-                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.1 : 2.5)
-                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
+                    ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(0.65).cgColor)
+                    ctx.cgContext.setLineWidth(2.5)
                     ctx.cgContext.strokePath()
                 }
-                ctx.cgContext.setLineDash(phase: 0, lengths: [])
-            }
 
-            // Pass 2: Draw all transport icons (middle layer)
-            for item in timelineItems {
-                guard case .transport(let transport) = item, transport.points.count >= 2 else { continue }
+                for transport in renderedTransportAnnotationItems where transport.points.count >= 2 {
+                    let smoothedPoints = transport.lineSegments.flatMap { $0.coordinates }.filter(\.isRenderableMapCoordinate)
+                    if let midCoord = smoothedPoints.distanceMidpoint {
+                        let midPoint = snapshot.point(for: midCoord)
+                        let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
+                        let path = UIBezierPath(ovalIn: rect)
+                        UIColor.systemBackground.setFill()
+                        path.fill()
+                        themeColor.setStroke()
+                        path.lineWidth = 1.2
+                        path.stroke()
 
-                let smoothedPoints = transport.lineSegments.flatMap { $0.coordinates }.filter(\.isRenderableMapCoordinate)
-                if let midCoord = smoothedPoints.distanceMidpoint {
-                    let midPoint = snapshot.point(for: midCoord)
-                    let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
-                    let path = UIBezierPath(ovalIn: rect)
-                    UIColor.systemBackground.setFill()
-                    path.fill()
-                    themeColor.setStroke()
-                    path.lineWidth = 1.2
-                    path.stroke()
-
-                    if let iconImage = UIImage(systemName: transport.currentType.sfSymbol) {
-                        drawImageAspectFit(iconImage.withTintColor(themeColor), in: CGRect(x: midPoint.x - 4, y: midPoint.y - 4, width: 8, height: 8))
+                        if let iconImage = UIImage(systemName: transport.currentType.sfSymbol) {
+                            drawImageAspectFit(iconImage.withTintColor(themeColor), in: CGRect(x: midPoint.x - 4, y: midPoint.y - 4, width: 8, height: 8))
+                        }
                     }
                 }
             }
 
-            for aggregated in aggregatedFootprints {
-                let fp = aggregated.representative
-                let point = snapshot.point(for: aggregated.coordinate)
-                let scale: CGFloat = 1.32
-                let markerSize = 20 * scale
-                let iconSize = 23 * scale * 0.52
-                let radius = markerSize / 2
-                let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
-                let activity = fp.getActivityType(from: allActivities)
-                let activityColor = UIColor(activity?.color ?? Color.gray)
-                let iconColor: UIColor = colorScheme == .dark ? .black : .white
-
-                let pinPath = CGMutablePath()
-                pinPath.addArc(center: center, radius: radius, startAngle: 125 * .pi / 180, endAngle: 55 * .pi / 180, clockwise: false)
-                pinPath.addLine(to: CGPoint(x: center.x, y: center.y + radius * 1.4))
-                pinPath.closeSubpath()
-
-                ctx.cgContext.setFillColor(activityColor.cgColor)
-                ctx.cgContext.addPath(pinPath)
-                ctx.cgContext.fillPath()
-                let rect = CGRect(x: center.x - radius, y: center.y - radius, width: markerSize, height: markerSize)
-                let contentRect = rect.insetBy(dx: markerSize * 0.14, dy: markerSize * 0.14)
-
-                // 快照逻辑同步：若 prefersActivityIcons 为 false 且有照片，则显示封面
-                if !prefersActivityIcons, let latestPhotoAssetID = latestPhotoAssetID(for: aggregated),
-                   let photoImage = footprintPhotoImages[latestPhotoAssetID] {
-                    let clipPath = UIBezierPath(ovalIn: contentRect)
-                    ctx.cgContext.saveGState()
-                    clipPath.addClip()
-                    drawImageAspectFill(photoImage, in: contentRect)
-                    ctx.cgContext.restoreGState()
-                    iconColor.setStroke()
-                    clipPath.lineWidth = 1
-                    clipPath.stroke()
-                } else {
-                    let iconName = activity?.icon ?? FootprintIconDefaults.card
-                    if let iconImage = UIImage(systemName: iconName) {
-                        drawImageAspectFit(iconImage.withTintColor(iconColor), in: CGRect(x: center.x - iconSize / 2, y: center.y - iconSize / 2, width: iconSize, height: iconSize))
-                    }
-                }
-
-                if aggregated.totalDuration >= AppConfig.shared.stayDurationThreshold {
-                    let durationTuple = formatDuration(aggregated.totalDuration)
-                    let numberFont = UIFont.systemFont(ofSize: 5.5 * scale, weight: .bold)
-                    let unitFont = UIFont.systemFont(ofSize: 5.5 * scale * 0.75, weight: .bold)
-                    let darkerActivityColor: UIColor = {
-                        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-                        activityColor.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
-                        return UIColor(hue: h, saturation: min(s * 1.1, 1), brightness: max(b - 0.30, 0), alpha: a)
-                    }()
-                    let attrStr = NSMutableAttributedString(
-                        string: durationTuple.number,
-                        attributes: [.font: numberFont, .foregroundColor: darkerActivityColor]
-                    )
-                    attrStr.append(NSAttributedString(
-                        string: durationTuple.unit,
-                        attributes: [.font: unitFont, .foregroundColor: darkerActivityColor]
-                    ))
-                    let textSize = attrStr.size()
-                    let bannerWidth = textSize.width + 4
-                    let bannerHeight = textSize.height + 2
-                    let bannerY = center.y + radius - bannerHeight / 2 - 6 * scale
-                    let bannerRect = CGRect(x: center.x - bannerWidth / 2, y: bannerY, width: bannerWidth, height: bannerHeight)
-                    let bannerPath = UIBezierPath(roundedRect: bannerRect, cornerRadius: 3)
-                    UIColor.systemBackground.setFill()
-                    bannerPath.fill()
-                    activityColor.setStroke()
-                    bannerPath.lineWidth = 0.5 * scale
-                    bannerPath.stroke()
-                    attrStr.draw(in: CGRect(
-                        x: center.x - textSize.width / 2,
-                        y: bannerY + (bannerHeight - textSize.height) / 2,
-                        width: textSize.width,
-                        height: textSize.height
-                    ))
-                }
+            for marker in renderedFootprintMarkers {
+                let point = snapshot.point(for: marker.coordinate)
+                marker.image.draw(at: CGPoint(
+                    x: point.x - marker.image.size.width / 2,
+                    y: point.y - marker.image.size.height
+                ))
             }
 
             for point in heatmapPoints {
@@ -1399,6 +1516,12 @@ struct DFKMapView: View {
         var region = allCoords.boundingRegion(paddingFactor: 1.6) ?? MKCoordinateRegion(center: allCoords[0], span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
         if size.width > size.height {
             region.span.longitudeDelta *= 1.5
+        }
+        if bottomContentInset > 0, size.height > bottomContentInset {
+            let visibleFraction = (size.height - bottomContentInset) / size.height
+            let originalLatitudeDelta = region.span.latitudeDelta
+            region.span.latitudeDelta = originalLatitudeDelta / visibleFraction
+            region.center.latitude -= region.span.latitudeDelta * (1 - visibleFraction) / 2
         }
         return region
     }
@@ -2172,6 +2295,79 @@ extension Array where Element == CLLocationCoordinate2D {
 extension CLLocationCoordinate2D {
     var isRenderableMapCoordinate: Bool {
         latitude.isFinite && longitude.isFinite && CLLocationCoordinate2DIsValid(self)
+    }
+}
+
+private struct DFKFootprintMapMarker: View {
+    let size: CGFloat
+    let constantScale: CGFloat
+    let activityColor: Color
+    let iconColor: Color
+    let iconName: String
+    let iconSize: CGFloat
+    let photoImage: UIImage?
+    let durationTuple: (number: String, unit: String)?
+    let fontSize: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            MapPinTeardropShape()
+                .fill(Color(uiColor: .systemBackground))
+                .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
+                .frame(width: size, height: size * 1.2)
+
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [activityColor, activityColor.darker(by: 0.20)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: size - 5, height: size - 5)
+                .offset(y: 2.5)
+
+            if let photoImage {
+                Image(uiImage: photoImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size - 3, height: size - 3)
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(activityColor, lineWidth: 1.5))
+                    .offset(y: 1.5)
+            } else {
+                Image(systemName: iconName)
+                    .font(.system(size: iconSize, weight: .bold))
+                    .foregroundStyle(iconColor)
+                    .frame(width: size, height: size)
+            }
+
+            if let durationTuple {
+                HStack(alignment: .lastTextBaseline, spacing: 0) {
+                    Text(durationTuple.number)
+                        .font(.system(size: fontSize, weight: .bold, design: .rounded))
+                    Text(durationTuple.unit)
+                        .font(.system(size: fontSize * 0.75, weight: .bold, design: .rounded))
+                }
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .foregroundStyle(activityColor.darker(by: 0.30))
+                .padding(.horizontal, 2)
+                .padding(.vertical, 1)
+                .background(
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color(uiColor: .systemBackground))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 3)
+                        .stroke(activityColor, lineWidth: 0.5)
+                )
+                .offset(y: size - 6 * constantScale)
+            }
+        }
+        .padding(2 * constantScale)
+        .frame(width: size + 4 * constantScale, height: size * 1.2 + 4 * constantScale)
+        .contentShape(Rectangle())
     }
 }
 

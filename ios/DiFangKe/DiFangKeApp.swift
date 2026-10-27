@@ -27,7 +27,7 @@ extension View {
         if #available(iOS 26.0, *) {
             glassEffect(.regular, in: shape)
         } else {
-            background(.ultraThinMaterial, in: shape)
+            background(.regularMaterial, in: shape)
         }
     }
 }
@@ -729,7 +729,7 @@ struct OnboardingView: View {
                             .background(
                                 RoundedRectangle(cornerRadius: 14)
                                     .fill(Color(UIColor.secondarySystemBackground).opacity(0.5))
-                                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                             )
                     }
                     .padding(.top, 10)

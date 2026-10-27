@@ -364,7 +364,7 @@ struct FootprintModalView: View {
             }
         }
         .toolbar(removing: .sidebarToggle)
-        .background(.ultraThinMaterial, ignoresSafeAreaEdges: .all)
+        .background(.regularMaterial, ignoresSafeAreaEdges: .all)
         // No `selection:` binding: a bound detent only updates when a drag
         // ends, so any view update mid-drag (map flight, timeline jump,
         // location) re-applied the stale `.medium` and snapped the sheet back.
@@ -2887,7 +2887,7 @@ struct PhotoFullscreenView: View {
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
-                        .background(.ultraThinMaterial)
+                        .background(.regularMaterial)
                         .clipShape(Capsule())
                 }
                 
@@ -2900,7 +2900,7 @@ struct PhotoFullscreenView: View {
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(.white)
                         .padding(10)
-                        .background(.ultraThinMaterial)
+                        .background(.regularMaterial)
                         .clipShape(Circle())
                 }
             }
@@ -3009,7 +3009,7 @@ struct FullscreenImageItem: View {
                                     .rotationEffect(.degrees(-90))
                             }
                             .padding(12)
-                            .background(.ultraThinMaterial)
+                            .background(.regularMaterial)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                             .shadow(radius: 5)
                         }

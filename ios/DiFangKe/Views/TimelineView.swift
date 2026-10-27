@@ -2672,7 +2672,7 @@ private struct TimelineView: View {
                         .font(.headline)
                 }
                 .padding(30)
-                .background(.ultraThinMaterial)
+                .background(.regularMaterial)
                 .cornerRadius(16)
             }
         }
@@ -2695,7 +2695,7 @@ private struct TimelineView: View {
     private var initialTimelineLoadingOverlay: some View {
         ZStack {
             Rectangle()
-                .fill(.ultraThinMaterial)
+                .fill(.regularMaterial)
 
             VStack(spacing: 10) {
                 ProgressView()
@@ -5613,12 +5613,38 @@ struct ContinuousTimelinePhotoThumbnail: View {
     let assetIDs: [String]
     var targetSide: CGFloat = ContinuousTimelineLayout.photoThumbnailSize
     var fitsOriginalAspectRatio = false
+    var fillsAvailableSpace = false
+    var usesHighQualityThumbnail = false
     var onImageSizeChange: ((CGSize) -> Void)? = nil
     @State private var image: UIImage?
     @State private var requestID: PHImageRequestID?
     @State private var requestGeneration = UUID()
 
     var body: some View {
+        Group {
+            if fillsAvailableSpace {
+                thumbnailContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            } else {
+                thumbnailContent
+                    .aspectRatio(
+                        fitsOriginalAspectRatio ? originalAspectRatio : 1,
+                        contentMode: .fit
+                    )
+                    .clipped()
+            }
+        }
+        .task(id: assetIDs) {
+            requestThumbnail()
+        }
+        .onDisappear {
+            cancelRequest()
+            image = nil
+        }
+    }
+
+    private var thumbnailContent: some View {
         ZStack {
             Color(uiColor: .systemGray6)
 
@@ -5631,18 +5657,6 @@ struct ContinuousTimelinePhotoThumbnail: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-        }
-        .aspectRatio(
-            fitsOriginalAspectRatio ? originalAspectRatio : 1,
-            contentMode: .fit
-        )
-        .clipped()
-        .task(id: assetIDs) {
-            requestThumbnail()
-        }
-        .onDisappear {
-            cancelRequest()
-            image = nil
         }
     }
 
@@ -5670,16 +5684,17 @@ struct ContinuousTimelinePhotoThumbnail: View {
             onImageSizeChange?(CGSize(width: CGFloat(asset.pixelWidth), height: CGFloat(asset.pixelHeight)))
         }
 
-        let side = targetSide * (fitsOriginalAspectRatio ? 3 : 2)
-        let qualityKey = fitsOriginalAspectRatio ? "high-v2" : "fast"
+        let requestsHighQuality = fitsOriginalAspectRatio || usesHighQualityThumbnail
+        let side = targetSide * (requestsHighQuality ? 3 : 2)
+        let qualityKey = requestsHighQuality ? "high-v3" : "fast"
         let cacheKey = "\(asset.localIdentifier)|\(Int(side.rounded()))|\(fitsOriginalAspectRatio ? "fit" : "fill")|\(qualityKey)"
         if let cached = TimelinePhotoThumbnailCache.shared.image(for: cacheKey) {
             image = cached
             return
         }
         let options = PHImageRequestOptions()
-        options.deliveryMode = fitsOriginalAspectRatio ? .highQualityFormat : .fastFormat
-        options.resizeMode = fitsOriginalAspectRatio ? .exact : .fast
+        options.deliveryMode = requestsHighQuality ? .highQualityFormat : .fastFormat
+        options.resizeMode = requestsHighQuality ? .exact : .fast
         options.isNetworkAccessAllowed = true
 
         let manager = PHImageManager.default()

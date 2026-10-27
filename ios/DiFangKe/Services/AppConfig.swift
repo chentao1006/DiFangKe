@@ -600,6 +600,54 @@ class AppConfig {
         int(forKey: "PAST_MEMORIES_CHECK_HOUR")
     }
 
+    var reviewMemoryLongStayMinDuration: Double {
+        double(forKey: "REVIEW_MEMORY_LONG_STAY_MIN_DURATION")
+    }
+
+    var reviewMemoryPhotoMinCount: Int {
+        int(forKey: "REVIEW_MEMORY_PHOTO_MIN_COUNT")
+    }
+
+    var reviewMemoryFirstVisitPhotoMinCount: Int {
+        int(forKey: "REVIEW_MEMORY_FIRST_VISIT_PHOTO_MIN_COUNT")
+    }
+
+    var reviewMemoryUnusualDurationRatio: Double {
+        double(forKey: "REVIEW_MEMORY_UNUSUAL_DURATION_RATIO")
+    }
+
+    var reviewMemoryMinimumScore: Double {
+        double(forKey: "REVIEW_MEMORY_MINIMUM_SCORE")
+    }
+
+    var reviewMemoryMaximumCount: Int {
+        int(forKey: "REVIEW_MEMORY_MAXIMUM_COUNT")
+    }
+
+    var reviewMemoryTravelDistanceMin: Double {
+        double(forKey: "REVIEW_MEMORY_TRAVEL_DISTANCE_MIN")
+    }
+
+    var reviewMemoryWalkDistanceMin: Double {
+        double(forKey: "REVIEW_MEMORY_WALK_DISTANCE_MIN")
+    }
+
+    var reviewMemoryDiverseTransportMinCount: Int {
+        int(forKey: "REVIEW_MEMORY_DIVERSE_TRANSPORT_MIN_COUNT")
+    }
+
+    var reviewMapTrajectoryBaseCellDegrees: Double {
+        double(forKey: "REVIEW_MAP_TRAJECTORY_BASE_CELL_DEGREES")
+    }
+
+    var reviewMapTrajectoryMaxDrawPoints: Int {
+        int(forKey: "REVIEW_MAP_TRAJECTORY_MAX_DRAW_POINTS")
+    }
+
+    var reviewMapTrajectoryPathMaxSpan: Double {
+        double(forKey: "REVIEW_MAP_TRAJECTORY_PATH_MAX_SPAN")
+    }
+
     // MARK: - TimelineBuilder tuning
 
     var stationaryDetectionMinPoints: Int {

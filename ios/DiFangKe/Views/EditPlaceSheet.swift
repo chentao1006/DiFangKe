@@ -214,7 +214,7 @@ struct EditPlaceSheet: View {
             }
         }
         .padding(10)
-        .background(.ultraThinMaterial)
+        .background(.regularMaterial)
         .cornerRadius(10)
         .shadow(color: .black.opacity(0.1), radius: 5)
     }
@@ -254,7 +254,7 @@ struct EditPlaceSheet: View {
                     }
                     .frame(maxHeight: 280)
                 }
-                .background(.ultraThinMaterial)
+                .background(.regularMaterial)
                 .cornerRadius(12)
                 .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 5)
                 .padding(.horizontal, 16)
@@ -269,14 +269,14 @@ struct EditPlaceSheet: View {
                 .font(.caption2)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(.ultraThinMaterial)
+                .background(.regularMaterial)
                 .clipShape(Capsule())
                 .padding(.leading, 12)
             Spacer()
             Button { shouldSnapToUser = true } label: {
                 Image(systemName: "location.fill")
                     .padding(10)
-                    .background(.ultraThinMaterial)
+                    .background(.regularMaterial)
                     .clipShape(Circle())
                     .shadow(radius: 2)
             }
