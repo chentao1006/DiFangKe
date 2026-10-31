@@ -157,6 +157,10 @@ struct HistoryListView: View {
     @State private var isPhotoImportRequested = false
     @State private var showingRawPointsDate: IdentifiableDate? = nil
     @State private var showingReviewCalendar = false
+    @State private var showingReviewIntroduction = false
+    @State private var showingReviewPhotoImportSuggestion = false
+    @State private var startsPhotoImportAfterSuggestion = false
+    @State private var reviewPhotoImportSuggestionTask: Task<Void, Never>?
 
     
     enum ViewMode: String, CaseIterable {
@@ -214,17 +218,9 @@ struct HistoryListView: View {
         }
         .navigationTitle(calendarOnly ? "选择日期" : "回顾")
         .navigationBarTitleDisplayMode(calendarOnly ? .inline : .large)
-        .background(Color.dfkBackground)
+        .background(Color(uiColor: calendarOnly ? .systemBackground : .systemGroupedBackground))
         .toolbar {
-            if !calendarOnly && viewMode == .statistics {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showingReviewCalendar = true
-                    } label: {
-                        Label("打开日历", systemImage: "calendar")
-                    }
-                }
-            } else if !calendarOnly && viewMode == .favorites {
+            if !calendarOnly && viewMode == .favorites {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         viewMode = .statistics
@@ -236,19 +232,32 @@ struct HistoryListView: View {
         }
         .onAppear {
             if calendarOnly { prepareCalendarIndex() }
-            else { activateTabIfNeeded(viewMode) }
+            else {
+                activateTabIfNeeded(viewMode)
+                if UserDefaults.standard.bool(forKey: "reviewIntroductionCompleted") {
+                    scheduleReviewPhotoImportSuggestionIfNeeded()
+                } else {
+                    reviewPhotoImportSuggestionTask?.cancel()
+                    showingReviewIntroduction = true
+                }
+            }
             onStatisticsVisibilityChanged?(viewMode == .statistics)
         }
         .onChange(of: viewMode) { _, mode in
             onStatisticsVisibilityChanged?(mode == .statistics)
             activateTabIfNeeded(mode)
+            scheduleReviewPhotoImportSuggestionIfNeeded()
         }
         .onDisappear {
             calendarIndexRefreshTask?.cancel()
             tabActivationTask?.cancel()
+            reviewPhotoImportSuggestionTask?.cancel()
             onStatisticsVisibilityChanged?(false)
         }
-        .onChange(of: allFootprints) { scheduleCalendarIndexRefresh() }
+        .onChange(of: allFootprints) {
+            scheduleCalendarIndexRefresh()
+            scheduleReviewPhotoImportSuggestionIfNeeded()
+        }
         .onChange(of: allTransportRecords) { scheduleCalendarIndexRefresh() }
         .sheet(item: $showingDate) { item in
             MainTabView(initialDate: item.date)
@@ -278,8 +287,34 @@ struct HistoryListView: View {
                 }
             }
         }
+        .sheet(isPresented: $showingReviewIntroduction, onDismiss: {
+            scheduleReviewPhotoImportSuggestionIfNeeded()
+        }) {
+            ReviewIntroductionView {
+                UserDefaults.standard.set(true, forKey: "reviewIntroductionCompleted")
+                showingReviewIntroduction = false
+            }
+        }
+        .sheet(isPresented: $showingReviewPhotoImportSuggestion, onDismiss: {
+            guard startsPhotoImportAfterSuggestion else { return }
+            startsPhotoImportAfterSuggestion = false
+            isPhotoImportRequested = true
+        }) {
+            ReviewPhotoImportSuggestionView(
+                onStartImport: {
+                    startsPhotoImportAfterSuggestion = true
+                    showingReviewPhotoImportSuggestion = false
+                },
+                onSkip: {
+                    showingReviewPhotoImportSuggestion = false
+                }
+            )
+        }
         .photoImportFlow(isRequested: $isPhotoImportRequested, onImported: rebuildIndex)
-        .modifier(ImportToolbarModifier(isVisible: calendarOnly, onTapAction: { isPhotoImportRequested = true }))
+        .modifier(ImportToolbarModifier(
+            isVisible: calendarOnly || viewMode == .statistics,
+            onTapAction: { isPhotoImportRequested = true }
+        ))
     }
     
     private var yearJumpOverlay: some View {
@@ -349,9 +384,6 @@ struct HistoryListView: View {
                     },
                     onDateSelected: { date in
                         onDateSelected?(date)
-                    },
-                    onShowAllFavorites: {
-                        viewMode = .favorites
                     }
                 )
                     .opacity(viewMode == .statistics ? 1 : 0)
@@ -373,7 +405,7 @@ struct HistoryListView: View {
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.dfkBackground)
+        .background(Color(uiColor: .systemGroupedBackground))
         .accessibilityElement(children: .combine)
     }
 
@@ -406,6 +438,32 @@ struct HistoryListView: View {
                 hasOpenedStatistics = true
             }
             loadingTab = nil
+        }
+    }
+
+    private func scheduleReviewPhotoImportSuggestionIfNeeded() {
+        reviewPhotoImportSuggestionTask?.cancel()
+        guard !calendarOnly,
+              viewMode == .statistics,
+              UserDefaults.standard.bool(forKey: "reviewIntroductionCompleted"),
+              !showingReviewIntroduction,
+              !UserDefaults.standard.bool(forKey: "reviewPhotoImportSuggestionShown") else { return }
+
+        reviewPhotoImportSuggestionTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled,
+                  viewMode == .statistics,
+                  UserDefaults.standard.bool(forKey: "reviewIntroductionCompleted"),
+                  !showingReviewIntroduction,
+                  !UserDefaults.standard.bool(forKey: "reviewPhotoImportSuggestionShown") else { return }
+
+            let activeFootprintCount = allFootprints.lazy
+                .filter { $0.status != .ignored }
+                .count
+            guard activeFootprintCount <= AppConfig.shared.reviewPhotoImportSuggestionMaxFootprints else { return }
+
+            UserDefaults.standard.set(true, forKey: "reviewPhotoImportSuggestionShown")
+            showingReviewPhotoImportSuggestion = true
         }
     }
     
@@ -1237,6 +1295,275 @@ struct SegmentedPickerModifier: ViewModifier {
 }
 
 // MARK: - Import Helpers
+private struct ReviewIntroductionView: View {
+    let onFinish: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 20) {
+                    VStack(spacing: 10) {
+                        Image(systemName: "chart.bar.xaxis.ascending")
+                            .font(.system(size: 42, weight: .semibold))
+                            .foregroundStyle(Color.dfkAccent)
+                            .frame(width: 82, height: 82)
+                            .background(Color.dfkAccent.opacity(0.12), in: Circle())
+
+                        Text("看见你的生活轨迹")
+                            .font(.title2.bold())
+
+                        Text("在生活地图回看去过的地点与交通轨迹，从真实停留中找到值得记住的片段，再用图表看懂活动和出行方式。")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 12)
+
+                    HStack(spacing: 12) {
+                        ReviewIntroductionSampleCard(title: "足迹节奏", systemImage: "square.grid.3x3.fill") {
+                            ReviewIntroductionBarChart()
+                        }
+                        ReviewIntroductionSampleCard(title: "活动构成", systemImage: "chart.pie.fill") {
+                            ReviewIntroductionDonutChart()
+                        }
+                    }
+
+                    HStack(spacing: 12) {
+                        ReviewIntroductionSampleCard(title: "生活地图", systemImage: "map.fill") {
+                            ReviewIntroductionMapPreview()
+                        }
+                        ReviewIntroductionSampleCard(title: "常用交通", systemImage: "car.fill") {
+                            ReviewIntroductionTransportPreview()
+                        }
+                    }
+
+                    HStack(spacing: 18) {
+                        Label("生活地图", systemImage: "map.fill")
+                        Label("值得记住", systemImage: "sparkles")
+                        Label("数据故事", systemImage: "chart.bar.fill")
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.dfkAccent)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 92)
+            }
+            .navigationTitle("认识回顾")
+            .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .bottom) {
+                Button(action: onFinish) {
+                    Text("开始回顾")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 50)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+                .background(.bar)
+            }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.hidden)
+        .interactiveDismissDisabled()
+    }
+}
+
+private struct ReviewIntroductionSampleCard<Content: View>: View {
+    let title: String
+    let systemImage: String
+    let content: Content
+
+    init(
+        title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.systemImage = systemImage
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+            content
+                .frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76)
+                .accessibilityHidden(true)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+        }
+    }
+}
+
+private struct ReviewIntroductionBarChart: View {
+    private let values: [CGFloat] = [0.35, 0.62, 0.48, 0.82, 0.56, 0.95, 0.72]
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 5) {
+            ForEach(Array(values.enumerated()), id: \.offset) { index, value in
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(Color.dfkAccent.opacity(0.4 + Double(index) * 0.07))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 68 * value)
+            }
+        }
+    }
+}
+
+private struct ReviewIntroductionDonutChart: View {
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.secondary.opacity(0.12), lineWidth: 13)
+            Circle()
+                .trim(from: 0, to: 0.48)
+                .stroke(Color.dfkAccent, style: StrokeStyle(lineWidth: 13, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Circle()
+                .trim(from: 0.53, to: 0.78)
+                .stroke(Color.orange, style: StrokeStyle(lineWidth: 13, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Circle()
+                .trim(from: 0.83, to: 0.96)
+                .stroke(Color.purple, style: StrokeStyle(lineWidth: 13, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Image(systemName: "figure.walk")
+                .font(.headline)
+                .foregroundStyle(Color.dfkAccent)
+        }
+        .padding(4)
+    }
+}
+
+private struct ReviewIntroductionMapPreview: View {
+    var body: some View {
+        GeometryReader { geometry in
+            let points = [
+                CGPoint(x: 0.06, y: 0.72),
+                CGPoint(x: 0.28, y: 0.42),
+                CGPoint(x: 0.52, y: 0.62),
+                CGPoint(x: 0.78, y: 0.24),
+                CGPoint(x: 0.94, y: 0.4)
+            ]
+
+            ZStack {
+                Path { path in
+                    for (index, point) in points.enumerated() {
+                        let resolved = CGPoint(
+                            x: point.x * geometry.size.width,
+                            y: point.y * geometry.size.height
+                        )
+                        if index == 0 {
+                            path.move(to: resolved)
+                        } else {
+                            path.addLine(to: resolved)
+                        }
+                    }
+                }
+                .stroke(
+                    Color.dfkAccent,
+                    style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: [6, 4])
+                )
+
+                ForEach(Array(points.enumerated()), id: \.offset) { index, point in
+                    Image(systemName: index == 1 ? "fork.knife" : (index == 3 ? "building.columns.fill" : "mappin.circle.fill"))
+                        .font(.caption2.bold())
+                        .foregroundStyle(index == 1 ? .orange : Color.dfkAccent)
+                        .padding(4)
+                        .background(Color(uiColor: .secondarySystemBackground), in: Circle())
+                        .position(x: point.x * geometry.size.width, y: point.y * geometry.size.height)
+                }
+            }
+        }
+    }
+}
+
+private struct ReviewIntroductionTransportPreview: View {
+    private let items: [(icon: String, value: String, color: Color)] = [
+        ("car.fill", "18次", .blue),
+        ("figure.walk", "12次", .dfkAccent),
+        ("tram.fill", "5次", .green)
+    ]
+
+    var body: some View {
+        VStack(spacing: 7) {
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(spacing: 7) {
+                    Image(systemName: item.icon)
+                        .foregroundStyle(item.color)
+                        .frame(width: 18)
+                    Capsule()
+                        .fill(item.color.opacity(0.8))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 7)
+                    Text(item.value)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
+private struct ReviewPhotoImportSuggestionView: View {
+    let onStartImport: () -> Void
+    let onSkip: () -> Void
+
+    var body: some View {
+        VStack(spacing: 22) {
+            Spacer(minLength: 8)
+
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.system(size: 50, weight: .semibold))
+                .foregroundStyle(Color.dfkAccent)
+                .frame(width: 92, height: 92)
+                .background(Color.dfkAccent.opacity(0.12), in: Circle())
+
+            VStack(spacing: 10) {
+                Text("把过去也补进回顾")
+                    .font(.title2.bold())
+                Text("如果相册中的照片带有拍摄地点，可以把过去去过的地方整理成足迹，让回顾更完整。导入前可以先预览并选择。")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(spacing: 10) {
+                Button(action: onStartImport) {
+                    Text("开始导入")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 50)
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("暂时跳过", action: onSkip)
+                    .font(.subheadline.weight(.semibold))
+                    .frame(minHeight: 36)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.hidden)
+        .interactiveDismissDisabled()
+    }
+}
+
 struct PhotoImportReviewPayload: Identifiable {
     let id = UUID()
     let results: [Footprint]
@@ -1462,6 +1789,7 @@ struct ImportToolbarModifier: ViewModifier {
                     Button { onTapAction() } label: {
                         Image(systemName: "square.and.arrow.down.badge.clock")
                     }
+                    .accessibilityLabel("从照片导入足迹")
                 }
             }
         }
@@ -1825,13 +2153,17 @@ private struct PhotoImportResultRow: View {
 struct HistoryFavoritesView: View {
     @Query(filter: #Predicate<Footprint> { $0.isHighlight == true && $0.statusValue != "ignored" }, sort: \Footprint.startTime, order: .reverse) private var favoriteFootprints: [Footprint]
     @Query(sort: \Place.name) private var allPlaces: [Place]
+    var includedFootprintIDs: Set<UUID>? = nil
     /// The host presents the detail sheet from the root of the History sheet.
     /// Presented from here, deep inside History's content, dragging the detail
     /// between detents rebuilt it on every drag (new identity each time).
     let onFootprintSelected: (Footprint) -> Void
     
     private var groupedFootprints: [(Date, [Footprint])] {
-        let grouped = Dictionary(grouping: favoriteFootprints) { fp in
+        let visibleFootprints = includedFootprintIDs.map { includedIDs in
+            favoriteFootprints.filter { includedIDs.contains($0.footprintID) }
+        } ?? favoriteFootprints
+        let grouped = Dictionary(grouping: visibleFootprints) { fp in
             Calendar.current.startOfDay(for: fp.startTime)
         }
         return grouped.sorted { $0.key > $1.key }

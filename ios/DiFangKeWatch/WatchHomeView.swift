@@ -102,7 +102,7 @@ private struct GlassCircleBackground: ViewModifier {
         if #available(watchOS 26.0, *) {
             content.glassEffect(.regular, in: Circle())
         } else {
-            content.background(Circle().fill(.thinMaterial))
+            content.background(Circle().fill(.regularMaterial))
         }
     }
 }

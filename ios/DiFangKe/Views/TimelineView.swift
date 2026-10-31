@@ -2833,8 +2833,8 @@ private struct TimelineView: View {
         scrollToDate(date, using: proxy, alignToTop: true, prefersImmediateLoadedTarget: true)
     }
 
-    private func prepareTimelineShare() {
-        let date = Calendar.current.startOfDay(for: activeTimelineDate)
+    private func prepareTimelineShare(for day: Date? = nil) {
+        let date = Calendar.current.startOfDay(for: day ?? activeTimelineDate)
         let items = timelinesByDate[date] ?? []
         let photoAssetIDs = items.flatMap { item -> [String] in
             if case .footprint(let footprint) = item {
@@ -2876,6 +2876,9 @@ private struct TimelineView: View {
                 lightMapImage: media.lightMapImage,
                 darkMapImage: media.darkMapImage
             )
+            payload.heroImageAssetIDs = media.imageAssetIDs
+            payload.templateTallMapImage = media.templateTallMapImage
+            payload.templateWideMapImage = media.templateWideMapImage
             payload.contentMapImage = media.mapImage
             payload.contentMapLightImage = media.lightMapImage
             payload.contentMapDarkImage = media.darkMapImage
@@ -2937,6 +2940,9 @@ private struct TimelineView: View {
                 lightMapImage: media.lightMapImage,
                 darkMapImage: media.darkMapImage
             )
+            payload.heroImageAssetIDs = media.imageAssetIDs
+            payload.templateTallMapImage = media.templateTallMapImage
+            payload.templateWideMapImage = media.templateWideMapImage
             payload.contentMapImage = media.mapImage
             payload.contentMapLightImage = media.lightMapImage
             payload.contentMapDarkImage = media.darkMapImage
@@ -3392,12 +3398,15 @@ private struct TimelineView: View {
             return mixed
         }()
 
+        let dateLineTop: CGFloat = date == currentDates.first ? 1 : 0
+
         VStack(alignment: .leading, spacing: 0) {
             if date == currentDates.first {
                 Color.clear
                     .frame(height: 1)
             }
 
+            // The date title and share button are drawn by the sticky overlay below.
             ZStack(alignment: .leading) {
                 DottedTimelineSeparator()
                     .offset(y: ContinuousTimelineLayout.dateSeparatorOffset)
@@ -3405,12 +3414,6 @@ private struct TimelineView: View {
                     .fill(ContinuousTimelineLayout.lineColor)
                     .frame(width: 2, height: 30)
                     .offset(x: ContinuousTimelineLayout.markerCenterX - 1)
-                Text(date.formatted(.dateTime.month().day()))
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-                    .frame(width: ContinuousTimelineLayout.dateColumnWidth, alignment: .leading)
             }
             .frame(height: 30)
 
@@ -3519,6 +3522,78 @@ private struct TimelineView: View {
             }
 
         }
+        // Sticky date line. Drawn as an overlay moved by a render-only
+        // effect, so the timeline layout, scroll targets and date frames that
+        // drive the header and map stay exactly as they are.
+        .overlay(alignment: .topLeading) {
+            stickyDateLine(for: date, canShare: !items.isEmpty, top: dateLineTop)
+        }
+    }
+
+    private func stickyDateLine(for date: Date, canShare: Bool, top: CGFloat) -> some View {
+        let height: CGFloat = 30
+        // The overlay spans its whole day. The date line slides down by how
+        // far the day has scrolled past the top, stopping where the day ends.
+        return ZStack {
+            // Blur fades out downward instead of ending in a hard band.
+            Rectangle()
+                .fill(.regularMaterial)
+                .mask {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .black.opacity(0.45), location: 0),
+                            .init(color: .black.opacity(0.45), location: 0.55),
+                            .init(color: .clear, location: 1)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+                .padding(.horizontal, -16)
+                .frame(height: height + 24)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .allowsHitTesting(false)
+                .visualEffect { content, proxy in
+                    let frame = proxy.frame(in: .scrollView)
+                    let offset = min(max(0, -frame.minY), max(0, frame.height - height))
+                    return content
+                        .offset(y: offset)
+                        .opacity(offset > 0 ? 1 : 0)
+                }
+
+            HStack(spacing: 0) {
+                Text(date.formatted(.dateTime.month().day()))
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(width: ContinuousTimelineLayout.dateColumnWidth, alignment: .leading)
+                Spacer(minLength: 0)
+                if canShare {
+                    Button {
+                        prepareTimelineShare(for: date)
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 44, height: height, alignment: .trailing)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    // Align the icon with the timeline's right edge; the tap
+                    // area still extends to its left.
+                    .padding(.trailing, 2)
+                    .accessibilityLabel("分享这一天的足迹")
+                }
+            }
+            .frame(height: height)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .visualEffect { content, proxy in
+                let frame = proxy.frame(in: .scrollView)
+                return content.offset(y: min(max(0, -frame.minY), max(0, frame.height - height)))
+            }
+        }
+        .padding(.top, top)
     }
 
     /// An explicit destination supersedes every previously captured viewport.
@@ -5057,11 +5132,13 @@ struct TimelineFootprintMarker: View {
 
 struct TimelineTransportMarker: View {
     let icon: String
+    var travelsWest = false
 
     var body: some View {
         Image(systemName: icon)
             .font(.system(size: 9, weight: .bold))
             .foregroundStyle(Color.dfkAccent)
+            .scaleEffect(x: travelsWest ? -1 : 1, y: 1)
             .frame(width: ContinuousTimelineLayout.markerSize - 4, height: ContinuousTimelineLayout.markerSize - 4)
             .background(Color(uiColor: .systemBackground), in: Circle())
             .overlay(Circle().strokeBorder(Color.dfkAccent, lineWidth: 1.2))
@@ -5290,7 +5367,7 @@ private struct ContinuousTimelineRow: View {
                         if let footprintNote {
                             Text(footprintNote)
                                 .font(footprintNoteFont)
-                                .foregroundStyle(detailStyle)
+                                .foregroundStyle(.primary)
                                 .lineLimit(5)
                                 .truncationMode(.tail)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -5426,8 +5503,11 @@ private struct ContinuousTimelineRow: View {
     private var timelineMarker: some View {
         if case .footprint = item {
             TimelineFootprintMarker(icon: icon, tint: tint)
-        } else {
-            TimelineTransportMarker(icon: icon)
+        } else if case .transport(let transport) = item {
+            TimelineTransportMarker(
+                icon: icon,
+                travelsWest: transport.points.filter(\.isRenderableMapCoordinate).travelsWest
+            )
         }
     }
 
@@ -5615,6 +5695,7 @@ struct ContinuousTimelinePhotoThumbnail: View {
     var fitsOriginalAspectRatio = false
     var fillsAvailableSpace = false
     var usesHighQualityThumbnail = false
+    var prefersEarliestPhoto = false
     var onImageSizeChange: ((CGSize) -> Void)? = nil
     @State private var image: UIImage?
     @State private var requestID: PHImageRequestID?
@@ -5674,7 +5755,10 @@ struct ContinuousTimelinePhotoThumbnail: View {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return }
 
-        guard let asset = PhotoService.shared.latestAsset(among: assetIDs) else { return }
+        let asset = prefersEarliestPhoto
+            ? PhotoService.shared.earliestAsset(among: assetIDs)
+            : PhotoService.shared.latestAsset(among: assetIDs)
+        guard let asset else { return }
 
         // PHImageManager may return an aspect-fit thumbnail backed by a square
         // request canvas. Its UIImage size is therefore not reliable layout
@@ -5698,13 +5782,14 @@ struct ContinuousTimelinePhotoThumbnail: View {
         options.isNetworkAccessAllowed = true
 
         let manager = PHImageManager.default()
-        requestID = manager.requestImage(
+        let newRequestID = manager.requestImage(
             for: asset,
             targetSize: CGSize(width: side, height: side),
             contentMode: fitsOriginalAspectRatio ? .aspectFit : .aspectFill,
             options: options
         ) { thumbnail, info in
             let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+            let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
             guard !cancelled else { return }
 
             DispatchQueue.main.async {
@@ -5713,14 +5798,17 @@ struct ContinuousTimelinePhotoThumbnail: View {
                     TimelinePhotoThumbnailCache.shared.setImage(thumbnail, for: cacheKey)
                     self.image = thumbnail
                 }
-                self.requestID = nil
+                if !degraded {
+                    self.requestID = nil
+                }
             }
         }
+        requestID = newRequestID == PHInvalidImageRequestID ? nil : newRequestID
     }
 
     private func cancelRequest() {
         requestGeneration = UUID()
-        if let requestID {
+        if let requestID, requestID != PHInvalidImageRequestID {
             PHImageManager.default().cancelImageRequest(requestID)
             self.requestID = nil
         }

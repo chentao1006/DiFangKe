@@ -47,103 +47,90 @@ import com.ct106.difangke.ui.components.FootprintCardView
 import com.ct106.difangke.ui.components.getIconForName
 import com.ct106.difangke.ui.screens.statistics.StatisticsContent
 import com.ct106.difangke.ui.screens.statistics.StatisticsViewModel
-import com.ct106.difangke.ui.screens.statistics.shareStatistics
+import com.ct106.difangke.ui.screens.statistics.reviewGroupedBackground
+import com.ct106.difangke.ui.screens.statistics.reviewShareRequest
+import com.ct106.difangke.ui.share.ShareCardPreviewDialog
+import com.ct106.difangke.ui.share.ShareCardRequest
+import com.ct106.difangke.AppConfig
+import com.ct106.difangke.data.model.FootprintStatus
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.launch
 
 /**
- * iOS MainTabView → 回顾 (HistoryListView): statistics and favorites. Days
- * are picked from the timeline's own calendar ([HistoryCalendarSheet]).
+ * iOS MainTabView → 回顾 (ReviewTabView + HistoryListView in statistics mode):
+ * the review home only; favorites open from its memory card. Days are picked
+ * from the timeline's own calendar ([HistoryCalendarSheet]).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReviewScreen(
     onFootprintSelected: (FootprintEntity) -> Unit,
+    onDateSelected: (Date) -> Unit,
     viewModel: HistoryViewModel = viewModel()
 ) {
-    val favoriteFootprints by viewModel.favoriteFootprints.collectAsState()
-    val activityTypes by viewModel.activityTypes.collectAsState()
-    val allPlaces by viewModel.allPlaces.collectAsState()
-    val context = LocalContext.current
     val statisticsViewModel: StatisticsViewModel = viewModel()
     val startPhotoImport = rememberPhotoImportFlow(viewModel)
-
+    val preferences = remember { com.ct106.difangke.DiFangKeApp.instance.preferences }
+    val introductionCompleted by preferences.reviewIntroductionCompleted.collectAsState(initial = true)
+    val suggestionShown by preferences.reviewPhotoImportSuggestionShown.collectAsState(initial = true)
+    var shareRequest by remember { mutableStateOf<ShareCardRequest?>(null) }
+    var showingPhotoImportSuggestion by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val pagerState = rememberPagerState(pageCount = { 2 })
-    val tabs = listOf("统计", "收藏")
-    val isStatisticsActive = pagerState.currentPage == 0
+    val bgColor = reviewGroupedBackground()
 
-    val isDark = isSystemInDarkTheme()
-    val bgColor = if (isDark) Color.Black else Color(0xFFF2F2F7)
+    // iOS scheduleReviewPhotoImportSuggestionIfNeeded: once, after the
+    // introduction, for users who have only a few footprints so far.
+    LaunchedEffect(introductionCompleted, suggestionShown) {
+        if (!introductionCompleted || suggestionShown) return@LaunchedEffect
+        delay(600)
+        val activeFootprintCount = com.ct106.difangke.DiFangKeApp.instance.database.footprintDao().getAll()
+            .count { it.statusValue != FootprintStatus.IGNORED.raw }
+        if (activeFootprintCount > AppConfig.REVIEW_PHOTO_IMPORT_SUGGESTION_MAX_FOOTPRINTS) return@LaunchedEffect
+        preferences.setReviewPhotoImportSuggestionShown(true)
+        showingPhotoImportSuggestion = true
+    }
 
     Scaffold(
         containerColor = bgColor,
         topBar = {
             TopAppBar(
                 title = { Text("回顾", fontWeight = FontWeight.Bold) },
-                actions = {
-                    if (isStatisticsActive) {
-                        IconButton(onClick = { shareStatistics(context, statisticsViewModel) }) {
-                            Icon(Icons.Default.Share, contentDescription = "分享统计")
-                        }
-                    }
+                navigationIcon = {
                     IconButton(onClick = startPhotoImport) {
                         Icon(Icons.Default.AddPhotoAlternate, contentDescription = "从照片导入足迹")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { shareRequest = reviewShareRequest(statisticsViewModel.state.value) }) {
+                        Icon(Icons.Default.Share, contentDescription = "分享统计")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = bgColor)
             )
         }
     ) { padding ->
-        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            PrimaryTabRow(
-                selectedTabIndex = pagerState.currentPage,
-                containerColor = Color.Transparent,
-                divider = {},
-                indicator = {
-                    TabRowDefaults.PrimaryIndicator(
-                        modifier = Modifier.tabIndicatorOffset(pagerState.currentPage),
-                        width = 64.dp,
-                        shape = CircleShape
-                    )
-                }
-            ) {
-                tabs.forEachIndexed { index, title ->
-                    Tab(
-                        selected = pagerState.currentPage == index,
-                        onClick = {
-                            scope.launch { pagerState.animateScrollToPage(index) }
-                        },
-                        text = {
-                            Text(
-                                text = title,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = if (pagerState.currentPage == index) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    )
-                }
-            }
+        StatisticsContent(
+            onFootprintSelected = onFootprintSelected,
+            onDateSelected = onDateSelected,
+            modifier = Modifier.padding(padding),
+            viewModel = statisticsViewModel
+        )
+    }
 
-            HorizontalPager(
-                state = pagerState,
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.Top
-            ) { page ->
-                when (page) {
-                    0 -> StatisticsContent(viewModel = statisticsViewModel)
-                    1 -> HistoryFavoritesView(
-                        favorites = favoriteFootprints,
-                        activityTypes = activityTypes,
-                        allPlaces = allPlaces,
-                        onNavigateToDetail = { id ->
-                            favoriteFootprints.firstOrNull { it.footprintID == id }?.let(onFootprintSelected)
-                        }
-                    )
-                }
-            }
-        }
+    shareRequest?.let { ShareCardPreviewDialog(it, onDismiss = { shareRequest = null }) }
+    if (!introductionCompleted) {
+        ReviewIntroductionDialog(onFinish = { scope.launch { preferences.setReviewIntroductionCompleted(true) } })
+    }
+    if (showingPhotoImportSuggestion) {
+        ReviewPhotoImportSuggestionDialog(
+            onStartImport = {
+                showingPhotoImportSuggestion = false
+                startPhotoImport()
+            },
+            onSkip = { showingPhotoImportSuggestion = false }
+        )
     }
 }
 

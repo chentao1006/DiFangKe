@@ -8,11 +8,16 @@ import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
 import androidx.exifinterface.media.ExifInterface
+import com.ct106.difangke.AppConfig
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.data.db.entity.TransportRecordEntity
+import com.ct106.difangke.data.model.TransportType
+import com.ct106.difangke.service.timeline.RouteCodec
+import com.ct106.difangke.service.timeline.RouteCoordinate
+import com.ct106.difangke.ui.screens.statistics.reviewIntegratedPlaceKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -20,7 +25,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.util.Date
 import kotlin.math.max
-import kotlin.math.pow
 import kotlin.math.roundToLong
 
 /** iOS DFKShareCardFactory + DFKShareImageLoader, reading straight from Room. */
@@ -31,7 +35,7 @@ internal object ShareCardFactory {
         when (request) {
             is ShareCardRequest.Moment -> moment(context, request.footprintId)
             is ShareCardRequest.Timeline -> timeline(context, request.startDate, request.endDate)
-            is ShareCardRequest.Stats -> stats(request.rangeText, request.startDate, request.endDate)
+            is ShareCardRequest.Stats -> stats(context, request)
         }
     }
 
@@ -204,123 +208,229 @@ internal object ShareCardFactory {
         }
     }
 
-    // ── Stats ───────────────────────────────────────────────────────────────
+    // ── Stats (iOS HistoryStatisticsView.prepareStatsShare + statsPayload) ───
 
-    private suspend fun stats(rangeText: String, start: Date, end: Date): SharePayload {
-        val footprints = db.footprintDao().getAll().filter { it.startTime >= start && it.startTime < end }
-        val transports = db.transportRecordDao().getAllSync()
-            .filter { it.statusRaw == "active" && it.startTime >= start && it.startTime < end }
+    private suspend fun stats(context: Context, request: ShareCardRequest.Stats): SharePayload {
+        val start = request.startDate
+        val end = request.endDate
+        val footprints = db.footprintDao().getBetween(start, end)
+            .filter { it.startTime >= start && it.startTime < end }
+        val transports = db.transportRecordDao().getActiveBetween(start, end)
+            .filter { it.startTime >= start && it.startTime < end }
         val places = db.placeDao().getAll()
         val activities = db.activityTypeDao().getAll()
-        val centers = footprints.associateWith { it.shareCenter() }
+        val placesById = places.associateBy { it.placeID }
 
-        val uniquePlaceKeys = footprints.map { it.placeID ?: ShareFormat.displayPlace(it) }.toSet()
-        val recorded = transports.sumOf { max(0.0, it.distance) }
-        val ordered = footprints.sortedBy { it.startTime }.mapNotNull { centers[it]?.takeIf { p -> p.isRenderable } }
-        val inferred = ordered.zipWithNext { a, b -> distanceMeters(a, b) }.sum()
-        val totalMileage = max(recorded, inferred)
-
-        val heat = topLocations(footprints.mapNotNull { centers[it] }, precision = 2)
-        val maxIntensity = heat.maxOfOrNull { it.second } ?: 1
-        val heatPoints = heat.map { ShareHeatPoint(it.first, it.second, maxIntensity) }
-        val map = ShareMapSnapshotter.snapshot(
-            heatPoints.map { it.point },
-            heatPoints = heatPoints,
-            drawsOverlays = false
-        )
+        val review = request.review ?: fallbackReview(footprints, transports, placesById, activities, start, end)
+        val map = reviewMap(footprints, transports, placesById)
+        val memories = loadReviewMemories(context, review.memories.take(4))
         return SharePayload(
             kind = ShareCardKind.STATS,
-            title = "我的生活总结",
-            subtitle = "每一次停留，都成为了生活的一部分",
-            rangeText = rangeText,
-            locationText = ShareFormat.locationText(footprints),
+            title = "我的回顾",
+            subtitle = "这段时间的生活快照",
+            rangeText = request.rangeText,
             contentMap = map,
-            coordinates = footprints.mapNotNull { centers[it] },
-            stats = listOf(
-                ShareStatEntry("足迹", "${footprints.size}", "次记录"),
-                ShareStatEntry("地点", "${uniquePlaceKeys.size}", "个生活节点"),
-                ShareStatEntry("里程", ShareFormat.mileage(totalMileage))
-            ),
-            placeRankings = placeRankings(footprints, places),
-            activityRankings = activityRankings(footprints, activities)
+            coordinates = footprints.mapNotNull { it.shareCenter() },
+            stats = review.stats,
+            placeRankings = review.regionRankings,
+            activityRankings = review.activityRankings,
+            transportRankings = review.transportRankings,
+            reviewRhythmValues = review.rhythmValues,
+            reviewRhythmStartText = review.rhythmStartText,
+            reviewRhythmEndText = review.rhythmEndText,
+            reviewMemories = memories
         )
     }
 
-    /** iOS getTopLocations: grid clustering, top 200. */
-    fun topLocations(points: List<GeoPoint>, precision: Int): List<Pair<GeoPoint, Int>> {
-        val factor = 10.0.pow(precision)
-        val groups = linkedMapOf<String, Pair<GeoPoint, Int>>()
-        points.forEach { p ->
-            val lat = Math.round(p.lat * factor) / factor
-            val lon = Math.round(p.lon * factor) / factor
-            val key = "$lat,$lon"
-            val existing = groups[key]
-            groups[key] = GeoPoint(lat, lon) to ((existing?.second ?: 0) + 1)
+    /** iOS DFKShareImageLoader.loadReviewMapImages: Review-style place counts + transport lines. */
+    private suspend fun reviewMap(
+        footprints: List<FootprintEntity>,
+        transports: List<TransportRecordEntity>,
+        placesById: Map<String, PlaceEntity>
+    ): ShareMapImages? {
+        // iOS aggregatedFootprints keyed by reviewIntegratedPlaceKey, duration-weighted centers.
+        class Bucket(var lat: Double = 0.0, var lon: Double = 0.0, var weight: Double = 0.0)
+        val buckets = linkedMapOf<String, Bucket>()
+        footprints.forEach { footprint ->
+            val center = footprint.shareCenter()?.takeIf { it.isRenderable } ?: return@forEach
+            val weight = max(footprint.duration.toDouble(), 1.0)
+            val bucket = buckets.getOrPut(reviewIntegratedPlaceKey(footprint, placesById)) { Bucket() }
+            bucket.lat += center.lat * weight
+            bucket.lon += center.lon * weight
+            bucket.weight += weight
         }
-        return groups.entries.sortedWith(compareByDescending<Map.Entry<String, Pair<GeoPoint, Int>>> { it.value.second }.thenBy { it.key })
-            .take(200).map { it.value }
+        val placeCenters = buckets.values.map { GeoPoint(it.lat / it.weight, it.lon / it.weight) }
+        return ShareMapSnapshotter.reviewSnapshot(
+            footprintCoordinates = footprints.flatMap { it.sharePoints() },
+            places = placeCenters,
+            transports = transports.mapNotNull(::reviewMapTransport),
+            markerScale = 1.5f
+        )
     }
 
-    private fun placeRankings(footprints: List<FootprintEntity>, places: List<PlaceEntity>): List<ShareRankingEntry> {
-        class Agg(val title: String, var country: String?, var count: Int = 0, var duration: Long = 0)
-        val multipleCountries = footprints.mapNotNull { it.countryCode?.trim()?.takeIf(String::isNotEmpty) }.toSet().size > 1
-        val cityKeys = footprints.mapNotNull { fp ->
-            fp.cityName?.trim()?.takeIf { it.isNotEmpty() }?.let { "${fp.countryCode.orEmpty()}|$it" }
-        }.toSet()
-        val ranksPlaces = cityKeys.size <= 1
-        val placesById = places.associateBy { it.placeID }
-        val groups = linkedMapOf<String, Agg>()
-        footprints.forEach { fp ->
-            val title: String
-            val key: String
-            if (ranksPlaces) {
-                val place = fp.placeID?.let(placesById::get)?.takeIf { it.name.isNotBlank() }
-                if (place != null) {
-                    title = place.name; key = place.placeID
-                } else {
-                    title = ShareFormat.displayPlace(fp); key = title
+    /** iOS WidgetDecodedTransport + widgetTransportLineSegments. */
+    private fun reviewMapTransport(record: TransportRecordEntity): ShareReviewMapTransport? {
+        val type = TransportType.entries.firstOrNull { it.raw == (record.manualTypeRaw ?: record.typeRaw) }
+            ?: TransportType.SLOW
+        val decoded = RouteCodec.decode(record.pointsJson)
+        // Android routes may hold [0,0] separators: each run between them is its own polyline.
+        val runs = mutableListOf<MutableList<RouteCoordinate>>(mutableListOf())
+        decoded.forEach { point ->
+            if (point.isValid && GeoPoint(point.lat, point.lon).isRenderable) runs.last().add(point)
+            else if (runs.last().isNotEmpty()) runs.add(mutableListOf())
+        }
+        val points = runs.flatten().map { GeoPoint(it.lat, it.lon) }
+        if (points.isEmpty()) return null
+        val segments = runs.filter { it.size >= 2 }.flatMap { run ->
+            val result = mutableListOf<ShareReviewMapSegment>()
+            var chunk = mutableListOf(GeoPoint(run[0].lat, run[0].lon))
+            var chunkDashed: Boolean? = null
+            run.zipWithNext().forEach { (current, next) ->
+                val isDashed = when {
+                    current.isSyntheticPadding || next.isSyntheticPadding -> true
+                    current.timestamp != null && next.timestamp != null ->
+                        kotlin.math.abs(next.timestamp - current.timestamp) > REVIEW_ROUTE_TIME_GAP_MILLIS ||
+                            distanceMeters(GeoPoint(current.lat, current.lon), GeoPoint(next.lat, next.lon)) >
+                            AppConfig.WIDGET_INFERRED_ROUTE_DISTANCE_THRESHOLD
+                    // Samples without times are inferred connections.
+                    else -> true
                 }
-                if (title.isEmpty() || title == "一个生活现场") return@forEach
-            } else {
-                val city = fp.cityName?.trim()?.takeIf { it.isNotEmpty() } ?: return@forEach
-                title = city; key = "${fp.countryCode.orEmpty()}|$city"
+                if (chunkDashed == null) chunkDashed = isDashed
+                val nextPoint = GeoPoint(next.lat, next.lon)
+                if (chunkDashed == isDashed) {
+                    chunk += nextPoint
+                } else {
+                    result += ShareReviewMapSegment(chunk, chunkDashed == true)
+                    chunk = mutableListOf(GeoPoint(current.lat, current.lon), nextPoint)
+                    chunkDashed = isDashed
+                }
             }
-            val agg = groups.getOrPut(key) { Agg(title, fp.countryName) }
-            if (agg.country.isNullOrEmpty()) agg.country = fp.countryName
-            agg.count += 1
-            agg.duration += fp.duration
+            if (chunk.size >= 2) result += ShareReviewMapSegment(chunk, chunkDashed == true)
+            result
         }
-        return groups.values
-            .sortedWith(compareByDescending<Agg> { it.count }.thenByDescending { it.duration })
-            .take(3)
-            .map { item ->
-                ShareRankingEntry(
-                    title = if (multipleCountries) listOfNotNull(item.country?.trim(), item.title.trim())
-                        .filter { it.isNotEmpty() }.joinToString(" ") else item.title,
-                    value = "${item.count}个足迹",
-                    icon = "place",
-                    color = SHARE_APP_ACCENT
-                )
-            }
+        return ShareReviewMapTransport(type, points, segments)
     }
 
-    private fun activityRankings(footprints: List<FootprintEntity>, activities: List<ActivityTypeEntity>): List<ShareRankingEntry> {
-        val groups = linkedMapOf<String, Pair<ActivityTypeEntity, Int>>()
+    /** iOS DFKShareImageLoader.loadFirstImage per memory candidate. */
+    private suspend fun loadReviewMemories(
+        context: Context,
+        memories: List<ShareReviewMemory>
+    ): List<ShareReviewMemoryCard> = coroutineScope {
+        memories.mapIndexed { index, memory ->
+            async(Dispatchers.IO) {
+                val photo = memory.photoUri?.takeIf { it.isNotBlank() }?.let { uri ->
+                    // The first memory is the full-width card; the rest are thumbnails.
+                    runCatching { decodeScaled(context, Uri.parse(uri), if (index == 0) 1200 else 600) }.getOrNull()
+                }
+                ShareReviewMemoryCard(memory.id, memory.reason, memory.title, memory.detail, photo)
+            }
+        }.awaitAll()
+    }
+
+    /**
+     * Used only when the caller has no Review data: the same figures the iOS
+     * Review screen passes to statsPayload, derived from the window's records.
+     */
+    private fun fallbackReview(
+        footprints: List<FootprintEntity>,
+        transports: List<TransportRecordEntity>,
+        placesById: Map<String, PlaceEntity>,
+        activities: List<ActivityTypeEntity>,
+        start: Date,
+        end: Date
+    ): ShareStatsReview {
+        // iOS reviewGeographyMetric.
+        val countries = footprints.mapNotNull { it.countryCode?.trim()?.uppercase()?.takeIf(String::isNotEmpty) }.toSet()
+        val cities = footprints.mapNotNull { fp ->
+            fp.cityName?.trim()?.takeIf { it.isNotEmpty() }?.let { "${fp.countryCode?.uppercase().orEmpty()}|$it" }
+        }.toSet()
+        val geography = when {
+            countries.size > 1 -> ShareStatEntry("个国家", "${countries.size}")
+            cities.size > 1 -> ShareStatEntry("座城市", "${cities.size}")
+            else -> ShareStatEntry("个地点", "${footprints.map { reviewIntegratedPlaceKey(it, placesById) }.toSet().size}")
+        }
+        val stats = listOf(
+            geography,
+            ShareStatEntry("路程", rankMileage(transports.sumOf { max(0.0, it.distance) })),
+            ShareStatEntry("段路程", "${transports.size}")
+        )
+
+        class Slice(val title: String, val icon: String, val color: Int, var duration: Double = 0.0, var count: Int = 0, var distance: Double = 0.0)
+        val activitySlices = linkedMapOf<String, Slice>()
         footprints.forEach { fp ->
             val activity = activityFor(fp, activities) ?: return@forEach
-            if (activity.name == "交通") return@forEach
-            val existing = groups[activity.name]
-            groups[activity.name] = activity to ((existing?.second ?: 0) + 1)
+            activitySlices.getOrPut(activity.name) {
+                Slice(activity.name, activity.icon, parseHexColor(activity.colorHex) ?: SHARE_APP_ACCENT)
+            }.duration += fp.duration.toDouble()
         }
-        return groups.entries.sortedByDescending { it.value.second }.take(3).map { (name, agg) ->
-            ShareRankingEntry(
-                title = name,
-                value = "${agg.second}个足迹",
-                icon = agg.first.icon,
-                color = parseHexColor(agg.first.colorHex) ?: SHARE_APP_ACCENT
-            )
+        val sortedActivities = activitySlices.values.sortedByDescending { it.duration }
+        val activityTotal = max(1.0, sortedActivities.sumOf { it.duration })
+        val activityRankings = sortedActivities.take(5).map {
+            ShareRankingEntry(it.title, null, rankDuration(it.duration), it.icon, it.color, it.duration / activityTotal)
         }
+
+        // iOS reviewActivityBuckets: 24 equal slices of the window.
+        val bucketCount = 24
+        val window = max(1L, end.time - start.time).toDouble()
+        val rhythm = IntArray(bucketCount)
+        footprints.forEach { fp ->
+            val progress = (fp.startTime.time - start.time) / window
+            rhythm[(progress * bucketCount).toInt().coerceIn(0, bucketCount - 1)] += 1
+        }
+        val axis = java.text.SimpleDateFormat("M月d日", java.util.Locale.SIMPLIFIED_CHINESE)
+
+        val transportSlices = linkedMapOf<TransportType, Slice>()
+        transports.forEach { t ->
+            val type = TransportType.entries.firstOrNull { it.raw == (t.manualTypeRaw ?: t.typeRaw) } ?: TransportType.SLOW
+            val slice = transportSlices.getOrPut(type) { Slice(type.localizedName, type.icon, SHARE_APP_ACCENT) }
+            slice.count += 1
+            slice.distance += max(0.0, t.distance)
+        }
+        val transportRankings = transportSlices.values
+            .sortedWith(compareByDescending<Slice> { it.distance }.thenByDescending { it.count })
+            .take(3)
+            .map { ShareRankingEntry(it.title, rankMileage(it.distance), "${it.count}次", it.icon, it.color) }
+
+        val regions = linkedMapOf<String, Slice>()
+        footprints.forEach { fp ->
+            val city = fp.cityName?.trim()?.takeIf { it.isNotEmpty() } ?: return@forEach
+            regions.getOrPut("${fp.countryCode.orEmpty()}|$city") { Slice(city, "mappin.and.ellipse", SHARE_APP_ACCENT) }
+                .duration += fp.duration.toDouble()
+        }
+        val regionRankings = regions.values.sortedByDescending { it.duration }.take(3)
+            .map { ShareRankingEntry(it.title, null, rankDuration(it.duration), it.icon, it.color) }
+
+        return ShareStatsReview(
+            stats = stats,
+            memories = emptyList(),
+            activityRankings = activityRankings,
+            rhythmValues = rhythm.toList(),
+            rhythmStartText = axis.format(start),
+            rhythmEndText = axis.format(Date(max(start.time, end.time - 1))),
+            transportRankings = transportRankings,
+            regionRankings = regionRankings
+        )
     }
+
+    /** iOS HistoryStatisticsView.formatRankDuration. */
+    private fun rankDuration(seconds: Double): String {
+        val totalMinutes = (seconds / 60).toInt()
+        if (totalMinutes < 60) return "${totalMinutes}分钟"
+        val totalHours = totalMinutes / 60
+        if (totalHours >= 24) {
+            val days = totalHours / 24
+            return if (seconds > 3 * 24 * 60 * 60) "${days}天" else "${days}天${totalHours % 24}小时"
+        }
+        val hours = totalMinutes / 60.0
+        return if (hours < 10) String.format("%.1f小时", hours) else "${hours.toInt()}小时"
+    }
+
+    /** iOS HistoryStatisticsView.formatRankMileage. */
+    private fun rankMileage(meters: Double): String =
+        if (meters < 1000) "${Math.round(meters)}米" else String.format("%.1f公里", meters / 1000)
+
+    /** iOS widgetTransportLineSegments: a gap longer than 3 minutes is an inferred link. */
+    private const val REVIEW_ROUTE_TIME_GAP_MILLIS = 3 * 60 * 1000L
 
     // ── Photos ──────────────────────────────────────────────────────────────
 

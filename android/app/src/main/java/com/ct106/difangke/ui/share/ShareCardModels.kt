@@ -77,7 +77,39 @@ data class ShareRankingEntry(
     val detail: String? = null,
     val value: String,
     val icon: String,
-    val color: Int
+    val color: Int,
+    /** iOS DFKShareRankingEntry.fraction: share of the activity donut. */
+    val fraction: Double? = null
+)
+
+/** iOS DFKShareReviewMemory; the photo is loaded by the factory. */
+data class ShareReviewMemory(
+    val id: String,
+    val reason: String,
+    val title: String,
+    val detail: String,
+    val photoUri: String?
+)
+
+/** Everything the Review screen already computed for the stats card (iOS statsPayload arguments). */
+data class ShareStatsReview(
+    val stats: List<ShareStatEntry>,              // 3 hero stats, in order
+    val memories: List<ShareReviewMemory>,        // up to 4, first = large card
+    val activityRankings: List<ShareRankingEntry>,// up to 5, with fraction set
+    val rhythmValues: List<Int>,                  // 24 buckets
+    val rhythmStartText: String,
+    val rhythmEndText: String,
+    val transportRankings: List<ShareRankingEntry>, // up to 3
+    val regionRankings: List<ShareRankingEntry>     // up to 3
+)
+
+/** iOS DFKShareReviewMemory with its loaded photo. */
+data class ShareReviewMemoryCard(
+    val id: String,
+    val reason: String,
+    val title: String,
+    val detail: String,
+    val photo: Bitmap?
 )
 
 /** A footprint pin drawn on the map snapshot (iOS DFKShareMapSnapshotMarker). */
@@ -88,8 +120,6 @@ data class ShareMapMarker(
     val durationSeconds: Long,
     val footprintID: String? = null
 )
-
-data class ShareHeatPoint(val point: GeoPoint, val intensity: Int, val maxIntensity: Int)
 
 /** Light and dark variants of one map snapshot. */
 data class ShareMapImages(val light: Bitmap?, val dark: Bitmap?) {
@@ -115,6 +145,11 @@ data class SharePayload(
     val stats: List<ShareStatEntry> = emptyList(),
     val placeRankings: List<ShareRankingEntry> = emptyList(),
     val activityRankings: List<ShareRankingEntry> = emptyList(),
+    val transportRankings: List<ShareRankingEntry> = emptyList(),
+    val reviewRhythmValues: List<Int> = emptyList(),
+    val reviewRhythmStartText: String? = null,
+    val reviewRhythmEndText: String? = null,
+    val reviewMemories: List<ShareReviewMemoryCard> = emptyList(),
     val brandName: String = "地方客",
     val brandSlogan: String = "走过的地方，就是你的生活",
     val version: String = UUID.randomUUID().toString()

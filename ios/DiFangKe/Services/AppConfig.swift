@@ -612,6 +612,10 @@ class AppConfig {
         int(forKey: "REVIEW_MEMORY_FIRST_VISIT_PHOTO_MIN_COUNT")
     }
 
+    var reviewMemoryFrequentVisitMinCount: Int {
+        int(forKey: "REVIEW_MEMORY_FREQUENT_VISIT_MIN_COUNT")
+    }
+
     var reviewMemoryUnusualDurationRatio: Double {
         double(forKey: "REVIEW_MEMORY_UNUSUAL_DURATION_RATIO")
     }
@@ -624,6 +628,14 @@ class AppConfig {
         int(forKey: "REVIEW_MEMORY_MAXIMUM_COUNT")
     }
 
+    var reviewMemoryCarouselInterval: Double {
+        double(forKey: "REVIEW_MEMORY_CAROUSEL_INTERVAL")
+    }
+
+    var reviewMemoryCarouselAnimationDuration: Double {
+        double(forKey: "REVIEW_MEMORY_CAROUSEL_ANIMATION_DURATION")
+    }
+
     var reviewMemoryTravelDistanceMin: Double {
         double(forKey: "REVIEW_MEMORY_TRAVEL_DISTANCE_MIN")
     }
@@ -634,6 +646,10 @@ class AppConfig {
 
     var reviewMemoryDiverseTransportMinCount: Int {
         int(forKey: "REVIEW_MEMORY_DIVERSE_TRANSPORT_MIN_COUNT")
+    }
+
+    var reviewPhotoImportSuggestionMaxFootprints: Int {
+        int(forKey: "REVIEW_PHOTO_IMPORT_SUGGESTION_MAX_FOOTPRINTS")
     }
 
     var reviewMapTrajectoryBaseCellDegrees: Double {

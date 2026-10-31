@@ -212,6 +212,30 @@ object AppConfig {
     const val OVERLAP_MIN_DURATION = 300.0
     const val OVERLAP_MIN_RATIO = 0.3
     const val PAST_MEMORIES_CHECK_HOUR = 10
+
+    // ── 回顾页（iOS Config.plist REVIEW_*） ──────────────────────
+    /** “值得记住”候选：长停留（秒）/照片数/首次到访照片数/高频到访次数/异常停留倍数/最低综合分/最大卡片数 */
+    const val REVIEW_MEMORY_LONG_STAY_MIN_DURATION = 10800.0
+    const val REVIEW_MEMORY_PHOTO_MIN_COUNT = 4
+    const val REVIEW_MEMORY_FIRST_VISIT_PHOTO_MIN_COUNT = 1
+    const val REVIEW_MEMORY_FREQUENT_VISIT_MIN_COUNT = 3
+    const val REVIEW_MEMORY_UNUSUAL_DURATION_RATIO = 2.0
+    const val REVIEW_MEMORY_MINIMUM_SCORE = 3.0
+    const val REVIEW_MEMORY_MAXIMUM_COUNT = 6
+    /** 大卡照片轮播间隔与动画时长（秒） */
+    const val REVIEW_MEMORY_CAROUSEL_INTERVAL = 4.0
+    const val REVIEW_MEMORY_CAROUSEL_ANIMATION_DURATION = 0.8
+    /** 单日远行距离 / 单日步行距离（米）/ 单日交通方式种类数 */
+    const val REVIEW_MEMORY_TRAVEL_DISTANCE_MIN = 10000.0
+    const val REVIEW_MEMORY_WALK_DISTANCE_MIN = 3000.0
+    const val REVIEW_MEMORY_DIVERSE_TRANSPORT_MIN_COUNT = 2
+    /** 回顾页首次进入时，足迹数不超过此值则介绍从照片补充过去足迹 */
+    const val REVIEW_PHOTO_IMPORT_SUGGESTION_MAX_FOOTPRINTS = 10
+    /** 回顾地图轨迹点：初始融合网格（经纬度）与最终最大绘制点数 */
+    const val REVIEW_MAP_TRAJECTORY_BASE_CELL_DEGREES = 0.0003
+    const val REVIEW_MAP_TRAJECTORY_MAX_DRAW_POINTS = 450
+    /** 放大到此经纬跨度以内时，改为显示当前区域内的真实实线路径 */
+    const val REVIEW_MAP_TRAJECTORY_PATH_MAX_SPAN = 0.35
     const val PATH_LOOP_DISPLACEMENT_THRESHOLD = 500.0
     const val PATH_LOOP_DISTANCE_THRESHOLD = 1000.0
     const val PATH_LOOP_RATIO_THRESHOLD = 10.0

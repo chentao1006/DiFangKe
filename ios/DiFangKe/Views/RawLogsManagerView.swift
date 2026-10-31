@@ -12,6 +12,12 @@ struct RawLogsManagerView: View {
     @State private var exportAllURL: URL?
     @State private var showingExportAllShareSheet = false
     @State private var exportAllError: String?
+    @State private var isSelecting = false
+    @State private var selectedFileURLs = Set<URL>()
+    @State private var pendingDeletionURLs: [URL] = []
+    @State private var showingDeleteConfirmation = false
+    @State private var isDeleting = false
+    @State private var deleteError: String?
     
     @Environment(LocationManager.self) private var locationManager
     
@@ -75,10 +81,15 @@ struct RawLogsManagerView: View {
                             }
                         }
                     }
-                    .disabled(isExportingAll)
+                    .disabled(isExportingAll || isSelecting)
 
                     ForEach(files) { file in
                         HStack {
+                            if isSelecting {
+                                Image(systemName: selectedFileURLs.contains(file.url) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selectedFileURLs.contains(file.url) ? Color.dfkAccent : Color.secondary)
+                                    .accessibilityHidden(true)
+                            }
                             VStack(alignment: .leading) {
                                 Text(file.dateString)
                                     .font(.headline)
@@ -88,8 +99,24 @@ struct RawLogsManagerView: View {
                             }
                             Spacer()
                             
-                            ShareLink(item: file.url) {
-                                Image(systemName: "square.and.arrow.up")
+                            if !isSelecting {
+                                ShareLink(item: file.url) {
+                                    Image(systemName: "square.and.arrow.up")
+                                }
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            guard isSelecting else { return }
+                            toggleSelection(for: file.url)
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            if !isSelecting {
+                                Button(role: .destructive) {
+                                    requestDeletion(of: [file.url])
+                                } label: {
+                                    Label("删除", systemImage: "trash")
+                                }
                             }
                         }
                     }
@@ -98,6 +125,35 @@ struct RawLogsManagerView: View {
         }
         .navigationTitle("轨迹文件")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(isSelecting ? "完成" : "选择") {
+                    isSelecting ? endSelection() : beginSelection()
+                }
+                .disabled(files.isEmpty && !isSelecting)
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if isSelecting {
+                Button(role: .destructive) {
+                    requestDeletion(of: Array(selectedFileURLs))
+                } label: {
+                    if isDeleting {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Label("删除 \(selectedFileURLs.count) 个文件", systemImage: "trash")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .rawLogDeleteButtonStyle()
+                .tint(.red)
+                .disabled(selectedFileURLs.isEmpty || isDeleting)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: isSelecting)
         .onAppear(perform: loadFiles)
         .sheet(isPresented: $showingExportAllShareSheet) {
             if let exportAllURL {
@@ -112,12 +168,86 @@ struct RawLogsManagerView: View {
         } message: {
             Text(exportAllError ?? "")
         }
+        .confirmationDialog(
+            pendingDeletionURLs.count == 1 ? "删除这个轨迹文件？" : "删除所选的 \(pendingDeletionURLs.count) 个轨迹文件？",
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("删除", role: .destructive) {
+                deletePendingFiles()
+            }
+            Button("取消", role: .cancel) {
+                pendingDeletionURLs.removeAll()
+            }
+        } message: {
+            Text("只会删除此设备上的原始轨迹文件，不会删除已提取的足迹。如果云端仍有副本，以后同步时可能会再次下载。")
+        }
+        .alert("删除失败", isPresented: Binding(
+            get: { deleteError != nil },
+            set: { if !$0 { deleteError = nil } }
+        )) {
+            Button("确定", role: .cancel) { deleteError = nil }
+        } message: {
+            Text(deleteError ?? "")
+        }
         .onChange(of: isRawTrajectoryICloudSyncEnabled) { _, newValue in
             if !newValue {
                 syncStatus = nil
             }
             Task { @MainActor in
                 await locationManager.refreshForRecordingDeviceChange()
+            }
+        }
+    }
+
+    private func beginSelection() {
+        isSelecting = true
+        selectedFileURLs.removeAll()
+    }
+
+    private func endSelection() {
+        isSelecting = false
+        selectedFileURLs.removeAll()
+    }
+
+    private func toggleSelection(for fileURL: URL) {
+        if selectedFileURLs.contains(fileURL) {
+            selectedFileURLs.remove(fileURL)
+        } else {
+            selectedFileURLs.insert(fileURL)
+        }
+    }
+
+    private func requestDeletion(of fileURLs: [URL]) {
+        guard !fileURLs.isEmpty else { return }
+        pendingDeletionURLs = fileURLs
+        showingDeleteConfirmation = true
+    }
+
+    private func deletePendingFiles() {
+        let fileURLs = pendingDeletionURLs
+        guard !fileURLs.isEmpty else { return }
+        pendingDeletionURLs.removeAll()
+        isDeleting = true
+
+        Task {
+            do {
+                try await RawLocationStore.shared.deleteLocalFiles(at: fileURLs)
+                await MainActor.run {
+                    selectedFileURLs.subtract(fileURLs)
+                    loadFiles()
+                    locationManager.refreshAvailableRawDates()
+                    if files.isEmpty {
+                        endSelection()
+                    }
+                    isDeleting = false
+                }
+            } catch {
+                await MainActor.run {
+                    loadFiles()
+                    deleteError = error.localizedDescription
+                    isDeleting = false
+                }
             }
         }
     }
@@ -244,13 +374,26 @@ struct RawLogsManagerView: View {
 }
 
 struct RawFileItem: Identifiable {
-    let id = UUID()
     let url: URL
     let dateString: String
     let size: Int64
     let pointCount: Int
+
+    var id: URL { url }
     
     var sizeFormatted: String {
         ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func rawLogDeleteButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+        }
     }
 }

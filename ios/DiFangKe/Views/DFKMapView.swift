@@ -13,6 +13,218 @@ struct DFKTransportOverviewPoint: Identifiable, Sendable {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 }
+
+private struct DFKTransportIconPoint: Identifiable {
+    let id: String
+    let coordinate: CLLocationCoordinate2D
+    let type: TransportType
+    let travelsWest: Bool
+}
+
+/// Review-map transport data, exactly as the review map has always drawn it,
+/// but computed in background tasks and only read by the view.
+private struct DFKReviewTransportGeometry {
+    struct Route {
+        let segment: TransportLineSegment
+        let minLatitude: Double
+        let maxLatitude: Double
+        let minLongitude: Double
+        let maxLongitude: Double
+    }
+
+    struct Midpoint {
+        let coordinate: CLLocationCoordinate2D
+        let type: TransportType
+        let travelsWest: Bool
+    }
+
+    var key: String?
+    /// Routes with the same shape drawn once, with their bounds for culling.
+    var routes: [Route] = []
+    var segments: [TransportLineSegment] = []
+    var midpoints: [Midpoint] = []
+    /// Real GPS samples fused on the base cell, used when the review does not
+    /// supply its own trajectory overview points.
+    var fusedPoints: [DFKTransportOverviewPoint] = []
+
+    static func build(key: String, transports: [Transport], baseCell: Double) -> DFKReviewTransportGeometry {
+        var geometry = DFKReviewTransportGeometry(key: key)
+        var seen: Set<String> = []
+        struct Bucket {
+            var latitude = 0.0
+            var longitude = 0.0
+            var count = 0
+        }
+        var fused: [String: Bucket] = [:]
+        for transport in transports {
+            let segments = transport.lineSegments
+            let transportCoordinates = segments.flatMap(\.coordinates).filter(\.isRenderableMapCoordinate)
+            if let midpoint = transportCoordinates.distanceMidpoint {
+                geometry.midpoints.append(.init(coordinate: midpoint, type: transport.currentType, travelsWest: transportCoordinates.travelsWest))
+            }
+            for pathPoint in transport.pathPoints where !pathPoint.isSyntheticPadding && pathPoint.coordinate.isRenderableMapCoordinate {
+                let point = pathPoint.coordinate
+                let fusedKey = "\(Int((point.longitude / baseCell).rounded())):\(Int((point.latitude / baseCell).rounded()))"
+                var bucket = fused[fusedKey, default: Bucket()]
+                bucket.latitude += point.latitude
+                bucket.longitude += point.longitude
+                bucket.count += 1
+                fused[fusedKey] = bucket
+            }
+            for segment in segments {
+                let coordinates = segment.coordinates.filter(\.isRenderableMapCoordinate)
+                guard coordinates.count >= 2 else { continue }
+                let step = max(1, coordinates.count / 24)
+                var sampled = stride(from: 0, to: coordinates.count, by: step).map { coordinates[$0] }
+                if let last = coordinates.last,
+                   sampled.last?.latitude != last.latitude || sampled.last?.longitude != last.longitude {
+                    sampled.append(last)
+                }
+                let forward = sampled.map { String(format: "%.3f,%.3f", $0.latitude, $0.longitude) }.joined(separator: ";")
+                let reverse = sampled.reversed().map { String(format: "%.3f,%.3f", $0.latitude, $0.longitude) }.joined(separator: ";")
+                guard seen.insert("\(segment.isDashed ? "d" : "s"):\(min(forward, reverse))").inserted else { continue }
+                let latitudes = coordinates.map(\.latitude)
+                let longitudes = coordinates.map(\.longitude)
+                geometry.routes.append(.init(
+                    segment: segment,
+                    minLatitude: latitudes.min() ?? 0,
+                    maxLatitude: latitudes.max() ?? 0,
+                    minLongitude: longitudes.min() ?? 0,
+                    maxLongitude: longitudes.max() ?? 0
+                ))
+            }
+        }
+        geometry.segments = geometry.routes.map(\.segment)
+        geometry.fusedPoints = fused.map { key, bucket in
+            DFKTransportOverviewPoint(
+                id: key,
+                latitude: bucket.latitude / Double(bucket.count),
+                longitude: bucket.longitude / Double(bucket.count),
+                intensity: bucket.count
+            )
+        }
+        return geometry
+    }
+
+    /// The visible area grown by 8% on each side.
+    static func paddedBounds(_ region: MKCoordinateRegion) -> (minLatitude: Double, maxLatitude: Double, minLongitude: Double, maxLongitude: Double) {
+        let latitudePadding = region.span.latitudeDelta * 0.08
+        let longitudePadding = region.span.longitudeDelta * 0.08
+        return (
+            region.center.latitude - region.span.latitudeDelta / 2 - latitudePadding,
+            region.center.latitude + region.span.latitudeDelta / 2 + latitudePadding,
+            region.center.longitude - region.span.longitudeDelta / 2 - longitudePadding,
+            region.center.longitude + region.span.longitudeDelta / 2 + longitudePadding
+        )
+    }
+
+    /// Zoomed out: every route, recorded and inferred, intersecting the screen.
+    func visibleSegments(in region: MKCoordinateRegion, includesInferred: Bool) -> [TransportLineSegment] {
+        let bounds = Self.paddedBounds(region)
+        return routes.filter { route in
+            (includesInferred || !route.segment.isDashed) &&
+                route.maxLatitude >= bounds.minLatitude && route.minLatitude <= bounds.maxLatitude &&
+                route.maxLongitude >= bounds.minLongitude && route.minLongitude <= bounds.maxLongitude
+        }.map(\.segment)
+    }
+
+    /// The overview's trajectory points: the visible fused points, re-merged
+    /// on a grid scaled to the view when zoomed out.
+    static func overviewPoints(
+        from points: [DFKTransportOverviewPoint],
+        in region: MKCoordinateRegion,
+        baseCell: Double
+    ) -> [DFKTransportOverviewPoint] {
+        let bounds = paddedBounds(region)
+        let visible = points.filter {
+            ($0.latitude >= bounds.minLatitude && $0.latitude <= bounds.maxLatitude) &&
+            ($0.longitude >= bounds.minLongitude && $0.longitude <= bounds.maxLongitude)
+        }
+
+        let adaptiveCell = max(baseCell, max(region.span.latitudeDelta, region.span.longitudeDelta) / 110)
+        guard adaptiveCell > baseCell else { return visible }
+
+        struct Bucket {
+            var latitude = 0.0
+            var longitude = 0.0
+            var intensity = 0
+        }
+        var buckets: [String: Bucket] = [:]
+        for point in visible {
+            let x = Int((point.longitude / adaptiveCell).rounded())
+            let y = Int((point.latitude / adaptiveCell).rounded())
+            let key = "\(x):\(y)"
+            var bucket = buckets[key, default: Bucket()]
+            bucket.latitude += point.latitude * Double(point.intensity)
+            bucket.longitude += point.longitude * Double(point.intensity)
+            bucket.intensity += point.intensity
+            buckets[key] = bucket
+        }
+        return buckets.map { key, bucket in
+            DFKTransportOverviewPoint(
+                id: "adaptive:\(key)",
+                latitude: bucket.latitude / Double(bucket.intensity),
+                longitude: bucket.longitude / Double(bucket.intensity),
+                intensity: bucket.intensity
+            )
+        }
+    }
+
+    /// Transport icons grouped by type on a grid of a seventh of the view,
+    /// as before; groups off screen are skipped.
+    func iconPoints(in region: MKCoordinateRegion, culls: Bool) -> [DFKTransportIconPoint] {
+        let latitudeCell = max(region.span.latitudeDelta / 7, 0.000_01)
+        let longitudeCell = max(region.span.longitudeDelta / 7, 0.000_01)
+
+        struct Bucket {
+            var latitude = 0.0
+            var longitude = 0.0
+            var count = 0
+            let type: TransportType
+            var westwardCount = 0
+        }
+        var buckets: [String: Bucket] = [:]
+        for midpoint in midpoints {
+            let x = Int((midpoint.coordinate.longitude / longitudeCell).rounded())
+            let y = Int((midpoint.coordinate.latitude / latitudeCell).rounded())
+            let key = "\(midpoint.type.rawValue):\(x):\(y)"
+            if var bucket = buckets[key] {
+                bucket.latitude += midpoint.coordinate.latitude
+                bucket.longitude += midpoint.coordinate.longitude
+                bucket.count += 1
+                if midpoint.travelsWest { bucket.westwardCount += 1 }
+                buckets[key] = bucket
+            } else {
+                buckets[key] = Bucket(
+                    latitude: midpoint.coordinate.latitude,
+                    longitude: midpoint.coordinate.longitude,
+                    count: 1,
+                    type: midpoint.type,
+                    westwardCount: midpoint.travelsWest ? 1 : 0
+                )
+            }
+        }
+
+        let bounds = Self.paddedBounds(region)
+        return buckets.compactMap { key, bucket in
+            let coordinate = CLLocationCoordinate2D(
+                latitude: bucket.latitude / Double(bucket.count),
+                longitude: bucket.longitude / Double(bucket.count)
+            )
+            if culls {
+                guard coordinate.latitude >= bounds.minLatitude, coordinate.latitude <= bounds.maxLatitude,
+                      coordinate.longitude >= bounds.minLongitude, coordinate.longitude <= bounds.maxLongitude else { return nil }
+            }
+            return DFKTransportIconPoint(
+                id: key,
+                coordinate: coordinate,
+                type: bucket.type,
+                travelsWest: bucket.westwardCount * 2 > bucket.count
+            )
+        }
+    }
+}
+
 import UIKit
 import CryptoKit
 
@@ -201,6 +413,28 @@ final class DFKMapSnapshotCache {
     }
 }
 
+func reviewIntegratedPlaceKey(for footprint: Footprint, allPlaces: [Place]) -> String {
+    let placeName = footprint.placeID.flatMap { placeID in
+        allPlaces.first(where: { $0.placeID == placeID })?.name
+    }?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let address = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let displayName = [placeName, address]
+        .compactMap { $0 }
+        .first { !$0.isEmpty }
+        .map(normalizedPlaceSearchKey) ?? ""
+
+    if !displayName.isEmpty {
+        let country = normalizedPlaceSearchKey(footprint.countryCode ?? footprint.countryName ?? "")
+        let city = normalizedPlaceSearchKey(footprint.cityName ?? "")
+        return "named:\(country):\(city):\(displayName)"
+    }
+
+    let factor = 1_000.0
+    let latitude = (footprint.latitude * factor).rounded() / factor
+    let longitude = (footprint.longitude * factor).rounded() / factor
+    return "coordinate:\(latitude),\(longitude)"
+}
+
 /// DiFangKe 统一地图组件，用于确保全应用地图表现一致
 struct DFKMapView: View {
     @Binding var cameraPosition: MapCameraPosition
@@ -217,6 +451,10 @@ struct DFKMapView: View {
     var showsStandalonePhotos: Bool = false
     var prefersActivityIcons: Bool = false
     var condensesTransportOverview: Bool = false
+    var clustersPlacesByMapScale: Bool = false
+    var placeClusterRegion: MKCoordinateRegion? = nil
+    var showsUserDefinedPlaceRadii: Bool = true
+    var topContentInset: CGFloat = 0
     var bottomContentInset: CGFloat = 0
     var transportOverviewPoints: [DFKTransportOverviewPoint] = []
     var isMiniTimelineMode: Bool = false
@@ -253,6 +491,7 @@ struct DFKMapView: View {
         let totalDuration: TimeInterval
         let representative: Footprint
         let footprints: [Footprint]
+        let placeCount: Int
     }
 
 
@@ -284,6 +523,10 @@ struct DFKMapView: View {
         showsStandalonePhotos: Bool = false,
         prefersActivityIcons: Bool = false,
         condensesTransportOverview: Bool = false,
+        clustersPlacesByMapScale: Bool = false,
+        placeClusterRegion: MKCoordinateRegion? = nil,
+        showsUserDefinedPlaceRadii: Bool = true,
+        topContentInset: CGFloat = 0,
         bottomContentInset: CGFloat = 0,
         transportOverviewPoints: [DFKTransportOverviewPoint] = [],
         isMiniTimelineMode: Bool = false,
@@ -312,6 +555,10 @@ struct DFKMapView: View {
         self.showsStandalonePhotos = showsStandalonePhotos
         self.prefersActivityIcons = prefersActivityIcons
         self.condensesTransportOverview = condensesTransportOverview
+        self.clustersPlacesByMapScale = clustersPlacesByMapScale
+        self.placeClusterRegion = placeClusterRegion
+        self.showsUserDefinedPlaceRadii = showsUserDefinedPlaceRadii
+        self.topContentInset = topContentInset
         self.bottomContentInset = bottomContentInset
         self.transportOverviewPoints = transportOverviewPoints
         self.isMiniTimelineMode = isMiniTimelineMode
@@ -328,6 +575,7 @@ struct DFKMapView: View {
     }
 
     @State private var snapshotImage: UIImage?
+    @State private var placeClusterVisibleRegion: MKCoordinateRegion?
     @State private var snapshotTask: Task<Void, Never>?
     @State private var isSnapshotLoading = false
     @State private var snapshotLoadFailed = false
@@ -340,6 +588,14 @@ struct DFKMapView: View {
     @State private var interactiveActivationTask: Task<Void, Never>?
     @State private var liveMapPhotoImages: [String: UIImage] = [:]
     @State private var transportOverviewVisibleRegion: MKCoordinateRegion?
+    // Review transport data, computed in background tasks and only read here.
+    @State private var reviewTransportGeometry = DFKReviewTransportGeometry()
+    @State private var reviewVisibleSegments: [TransportLineSegment] = []
+    @State private var reviewOverviewPoints: [DFKTransportOverviewPoint] = []
+    /// Zoomed in: real paths only. Zoomed out: lines incl. inferred jumps,
+    /// plus trajectory points.
+    @State private var reviewShowsDetailedPaths = false
+    @State private var reviewTransportIcons: [DFKTransportIconPoint] = []
     @Environment(\.colorScheme) private var colorScheme
 
     private var hasVisibleContent: Bool {
@@ -378,154 +634,96 @@ struct DFKMapView: View {
         }
     }
 
-    private var renderedTransportSegments: [TransportLineSegment] {
-        let segments = transportItems.flatMap(\.lineSegments)
-        guard condensesTransportOverview else { return segments }
+    /// The sampled trajectory overview belongs only to Review. The footprint
+    /// map must always render its own Transport records and inferred gaps.
+    private var usesReviewTransportOverview: Bool {
+        condensesTransportOverview && clustersPlacesByMapScale
+    }
 
-        var seen: Set<String> = []
-        var result: [TransportLineSegment] = []
-        for segment in segments {
-            let coordinates = segment.coordinates.filter(\.isRenderableMapCoordinate)
-            guard coordinates.count >= 2 else { continue }
-            let step = max(1, coordinates.count / 24)
-            var sampled = stride(from: 0, to: coordinates.count, by: step).map { coordinates[$0] }
-            if let last = coordinates.last,
-               sampled.last?.latitude != last.latitude || sampled.last?.longitude != last.longitude {
-                sampled.append(last)
-            }
-            let forward = sampled.map { String(format: "%.3f,%.3f", $0.latitude, $0.longitude) }.joined(separator: ";")
-            let reverse = sampled.reversed().map { String(format: "%.3f,%.3f", $0.latitude, $0.longitude) }.joined(separator: ";")
-            let key = "\(segment.isDashed ? "d" : "s"):\(min(forward, reverse))"
-            guard seen.insert(key).inserted else { continue }
-            result.append(segment)
+    private var renderedTransportSegments: [TransportLineSegment] {
+        guard usesReviewTransportOverview else { return transportItems.flatMap(\.lineSegments) }
+        return reviewTransportGeometry.segments
+    }
+
+    private var reviewTransportGeometryKey: String {
+        guard usesReviewTransportOverview else { return "off" }
+        return "\(timelineItems.count)|\(timelineItems.first?.id ?? "")|\(timelineItems.last?.id ?? "")"
+    }
+
+    private var reviewTransportVisibleKey: String {
+        guard let region = transportOverviewVisibleRegion ?? placeClusterRegion else { return "\(reviewTransportGeometry.key ?? "")#none" }
+        // Review's fused points arrive later than the geometry; refresh then too.
+        return String(
+            format: "%@#%d#%.5f,%.5f,%.5f,%.5f",
+            reviewTransportGeometry.key ?? "",
+            transportOverviewPoints.count,
+            region.center.latitude, region.center.longitude, region.span.latitudeDelta, region.span.longitudeDelta
+        )
+    }
+
+    /// Rebuilds the review transport geometry off the main thread whenever
+    /// the timeline items change.
+    private func refreshReviewTransportGeometry() async {
+        let key = reviewTransportGeometryKey
+        guard usesReviewTransportOverview else { return }
+        let transports = timelineItems.compactMap { item -> Transport? in
+            if case .transport(let transport) = item { return transport }
+            return nil
         }
-        return result
+        let baseCell = AppConfig.shared.reviewMapTrajectoryBaseCellDegrees
+        let geometry = await Task.detached(priority: .userInitiated) {
+            DFKReviewTransportGeometry.build(key: key, transports: transports, baseCell: baseCell)
+        }.value
+        guard !Task.isCancelled else { return }
+        reviewTransportGeometry = geometry
+    }
+
+    /// Picks the lines, trajectory points and icons for the area on screen,
+    /// off the main thread; anything off screen is left out.
+    private func refreshReviewVisibleTransport() async {
+        guard usesReviewTransportOverview,
+              reviewTransportGeometry.key != nil,
+              let region = transportOverviewVisibleRegion ?? placeClusterRegion else { return }
+        let geometry = reviewTransportGeometry
+        let baseCell = AppConfig.shared.reviewMapTrajectoryBaseCellDegrees
+        let pathMaxSpan = AppConfig.shared.reviewMapTrajectoryPathMaxSpan
+        let isInteractive = isInteractive
+        let hasVisibleRegion = transportOverviewVisibleRegion != nil
+        let providedOverviewPoints = transportOverviewPoints
+        let result = await Task.detached(priority: .userInitiated) {
+            let showsDetailedPaths = isInteractive && hasVisibleRegion
+                && max(region.span.latitudeDelta, region.span.longitudeDelta) <= pathMaxSpan
+            let points = providedOverviewPoints.isEmpty ? geometry.fusedPoints : providedOverviewPoints
+            return (
+                showsDetailedPaths: showsDetailedPaths,
+                segments: geometry.visibleSegments(in: region, includesInferred: !showsDetailedPaths),
+                overviewPoints: showsDetailedPaths
+                    ? []
+                    : DFKReviewTransportGeometry.overviewPoints(from: points, in: region, baseCell: baseCell),
+                icons: geometry.iconPoints(in: region, culls: isInteractive && hasVisibleRegion)
+            )
+        }.value
+        guard !Task.isCancelled, geometry.key == reviewTransportGeometry.key else { return }
+        reviewShowsDetailedPaths = result.showsDetailedPaths
+        reviewVisibleSegments = result.segments
+        reviewOverviewPoints = result.overviewPoints
+        reviewTransportIcons = result.icons
     }
 
     private var renderedTransportAnnotationItems: [Transport] {
-        guard condensesTransportOverview else { return transportItems }
+        guard usesReviewTransportOverview else { return transportItems }
         return Dictionary(grouping: transportItems, by: \.currentType).compactMap { _, items in
             items.max { $0.distance < $1.distance }
         }
     }
 
     private var fusedTransportPoints: [DFKTransportOverviewPoint] {
-        guard condensesTransportOverview else { return [] }
-        if !transportOverviewPoints.isEmpty { return transportOverviewPoints }
-        // A fixed, small geographic cell preserves local route geometry even
-        // when the selected period spans several distant cities. Every real
-        // point contributes; only near-identical GPS samples are fused.
-        let cellSize = AppConfig.shared.reviewMapTrajectoryBaseCellDegrees
-
-        struct Bucket {
-            var latitude = 0.0
-            var longitude = 0.0
-            var count = 0
-        }
-        var buckets: [String: Bucket] = [:]
-        for transport in transportItems {
-            for pathPoint in transport.pathPoints where !pathPoint.isSyntheticPadding && pathPoint.coordinate.isRenderableMapCoordinate {
-                let point = pathPoint.coordinate
-                let x = Int((point.longitude / cellSize).rounded())
-                let y = Int((point.latitude / cellSize).rounded())
-                let key = "\(x):\(y)"
-                var bucket = buckets[key, default: Bucket()]
-                bucket.latitude += point.latitude
-                bucket.longitude += point.longitude
-                bucket.count += 1
-                buckets[key] = bucket
-            }
-        }
-        return buckets.map { key, bucket in
-            DFKTransportOverviewPoint(
-                id: key,
-                latitude: bucket.latitude / Double(bucket.count),
-                longitude: bucket.longitude / Double(bucket.count),
-                intensity: bucket.count
-            )
-        }
+        guard usesReviewTransportOverview else { return [] }
+        return transportOverviewPoints.isEmpty ? reviewTransportGeometry.fusedPoints : transportOverviewPoints
     }
 
-    private var displayedTransportOverviewPoints: [DFKTransportOverviewPoint] {
-        let points = fusedTransportPoints
-        guard isInteractive, let region = transportOverviewVisibleRegion, !points.isEmpty else { return points }
-
-        let latitudePadding = region.span.latitudeDelta * 0.08
-        let longitudePadding = region.span.longitudeDelta * 0.08
-        let minLatitude = region.center.latitude - region.span.latitudeDelta / 2 - latitudePadding
-        let maxLatitude = region.center.latitude + region.span.latitudeDelta / 2 + latitudePadding
-        let minLongitude = region.center.longitude - region.span.longitudeDelta / 2 - longitudePadding
-        let maxLongitude = region.center.longitude + region.span.longitudeDelta / 2 + longitudePadding
-        let visible = points.filter {
-            ($0.latitude >= minLatitude && $0.latitude <= maxLatitude) &&
-            ($0.longitude >= minLongitude && $0.longitude <= maxLongitude)
-        }
-
-        let baseCell = AppConfig.shared.reviewMapTrajectoryBaseCellDegrees
-        let adaptiveCell = max(baseCell, max(region.span.latitudeDelta, region.span.longitudeDelta) / 110)
-        guard adaptiveCell > baseCell else { return visible }
-
-        struct Bucket {
-            var latitude = 0.0
-            var longitude = 0.0
-            var intensity = 0
-        }
-        var buckets: [String: Bucket] = [:]
-        for point in visible {
-            let x = Int((point.longitude / adaptiveCell).rounded())
-            let y = Int((point.latitude / adaptiveCell).rounded())
-            let key = "\(x):\(y)"
-            var bucket = buckets[key, default: Bucket()]
-            bucket.latitude += point.latitude * Double(point.intensity)
-            bucket.longitude += point.longitude * Double(point.intensity)
-            bucket.intensity += point.intensity
-            buckets[key] = bucket
-        }
-        return buckets.map { key, bucket in
-            DFKTransportOverviewPoint(
-                id: "adaptive:\(key)",
-                latitude: bucket.latitude / Double(bucket.intensity),
-                longitude: bucket.longitude / Double(bucket.intensity),
-                intensity: bucket.intensity
-            )
-        }
-    }
-
-    private var showsDetailedTransportPaths: Bool {
-        guard condensesTransportOverview,
-              isInteractive,
-              let region = transportOverviewVisibleRegion else { return false }
-        return max(region.span.latitudeDelta, region.span.longitudeDelta)
-            <= AppConfig.shared.reviewMapTrajectoryPathMaxSpan
-    }
-
-    private var visibleDetailedTransportSegments: [TransportLineSegment] {
-        guard let region = transportOverviewVisibleRegion else { return [] }
-        let latitudePadding = region.span.latitudeDelta * 0.08
-        let longitudePadding = region.span.longitudeDelta * 0.08
-        let minLatitude = region.center.latitude - region.span.latitudeDelta / 2 - latitudePadding
-        let maxLatitude = region.center.latitude + region.span.latitudeDelta / 2 + latitudePadding
-        let minLongitude = region.center.longitude - region.span.longitudeDelta / 2 - longitudePadding
-        let maxLongitude = region.center.longitude + region.span.longitudeDelta / 2 + longitudePadding
-
-        return renderedTransportSegments.filter { segment in
-            guard !segment.isDashed else { return false }
-            var segmentMinLatitude = Double.greatestFiniteMagnitude
-            var segmentMaxLatitude = -Double.greatestFiniteMagnitude
-            var segmentMinLongitude = Double.greatestFiniteMagnitude
-            var segmentMaxLongitude = -Double.greatestFiniteMagnitude
-            var hasCoordinate = false
-            for coordinate in segment.coordinates where coordinate.isRenderableMapCoordinate {
-                hasCoordinate = true
-                segmentMinLatitude = min(segmentMinLatitude, coordinate.latitude)
-                segmentMaxLatitude = max(segmentMaxLatitude, coordinate.latitude)
-                segmentMinLongitude = min(segmentMinLongitude, coordinate.longitude)
-                segmentMaxLongitude = max(segmentMaxLongitude, coordinate.longitude)
-            }
-            guard hasCoordinate else { return false }
-            return segmentMaxLatitude >= minLatitude && segmentMinLatitude <= maxLatitude &&
-                segmentMaxLongitude >= minLongitude && segmentMinLongitude <= maxLongitude
-        }
+    private var displayedTransportIconPoints: [DFKTransportIconPoint] {
+        reviewTransportIcons
     }
 
     private var validMainAnnotationCoordinate: CLLocationCoordinate2D? {
@@ -606,7 +804,7 @@ struct DFKMapView: View {
             .first
     }
 
-    private var aggregatedFootprints: [AggregatedFootprint] {
+    private var placeAggregatedFootprints: [AggregatedFootprint] {
         struct Bucket {
             var weightedLatitude: Double
             var weightedLongitude: Double
@@ -629,7 +827,9 @@ struct DFKMapView: View {
         for footprint in footprints {
             let durationWeight = max(footprint.duration, 1)
             let key: String
-            if let placeID = footprint.placeID {
+            if clustersPlacesByMapScale {
+                key = reviewIntegratedPlaceKey(for: footprint, allPlaces: allPlaces)
+            } else if let placeID = footprint.placeID {
                 key = "place:\(placeID.uuidString)"
             } else if !footprint.locationHash.isEmpty {
                 key = "hash:\(footprint.locationHash)"
@@ -678,7 +878,55 @@ struct DFKMapView: View {
                 ),
                 totalDuration: bucket.totalDuration,
                 representative: representative,
-                footprints: bucket.footprints.sorted { $0.startTime < $1.startTime }
+                footprints: bucket.footprints.sorted { $0.startTime < $1.startTime },
+                placeCount: 1
+            )
+        }
+    }
+
+    private var aggregatedFootprints: [AggregatedFootprint] {
+        let places = placeAggregatedFootprints
+        guard clustersPlacesByMapScale,
+              let region = placeClusterVisibleRegion ?? placeClusterRegion,
+              places.count > 1 else {
+            return places
+        }
+
+        let latitudeCell = max(region.span.latitudeDelta / 7, 0.000_001)
+        let longitudeCell = max(region.span.longitudeDelta / 7, 0.000_001)
+        let latitudeOrigin = region.center.latitude - region.span.latitudeDelta / 2
+        let longitudeOrigin = region.center.longitude - region.span.longitudeDelta / 2
+        // Only cells on screen plus a one-cell margin get markers. Off-screen
+        // places are invisible anyway; grouping them too made a zoomed-in map
+        // build one marker (and one photo) per place for the whole period,
+        // which starved the map renderer and the app of memory.
+        let visibleCells = -1...7
+        var grouped: [String: [AggregatedFootprint]] = [:]
+        for place in places {
+            let latitudeIndex = Int(floor((place.coordinate.latitude - latitudeOrigin) / latitudeCell))
+            let longitudeIndex = Int(floor((place.coordinate.longitude - longitudeOrigin) / longitudeCell))
+            guard visibleCells.contains(latitudeIndex), visibleCells.contains(longitudeIndex) else { continue }
+            grouped["\(latitudeIndex):\(longitudeIndex)", default: []].append(place)
+        }
+
+        return grouped.keys.sorted().compactMap { key in
+            guard let members = grouped[key], let first = members.first else { return nil }
+            guard members.count > 1 else { return first }
+            let totalWeight = members.reduce(0.0) { $0 + max($1.totalDuration, 1) }
+            let latitude = members.reduce(0.0) {
+                $0 + $1.coordinate.latitude * max($1.totalDuration, 1)
+            } / totalWeight
+            let longitude = members.reduce(0.0) {
+                $0 + $1.coordinate.longitude * max($1.totalDuration, 1)
+            } / totalWeight
+            let representative = members.max { $0.totalDuration < $1.totalDuration }?.representative ?? first.representative
+            return AggregatedFootprint(
+                id: "cluster:\(key):\(members.map(\.id).sorted().joined(separator: "|"))",
+                coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                totalDuration: members.reduce(0) { $0 + $1.totalDuration },
+                representative: representative,
+                footprints: members.flatMap(\.footprints).sorted { $0.startTime < $1.startTime },
+                placeCount: members.reduce(0) { $0 + $1.placeCount }
             )
         }
     }
@@ -714,10 +962,12 @@ struct DFKMapView: View {
                             )
                         } else {
                             Map(position: $cameraPosition) {
-                                ForEach(userDefinedPlaces) { place in
-                                    MapCircle(center: place.coordinate, radius: max(5, min(Double(place.radius), 10_000)))
-                                        .foregroundStyle(Color.orange.opacity(0.1))
-                                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                                if showsUserDefinedPlaceRadii {
+                                    ForEach(userDefinedPlaces) { place in
+                                        MapCircle(center: place.coordinate, radius: max(5, min(Double(place.radius), 10_000)))
+                                            .foregroundStyle(Color.orange.opacity(0.1))
+                                            .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                                    }
                                 }
 
                                 transportMapContent()
@@ -775,8 +1025,12 @@ struct DFKMapView: View {
                             .id(timelineUpdateIdentifier ?? 0)
                             .mapStyle(.standard(elevation: .automatic, emphasis: .muted))
                             .onMapCameraChange(frequency: .onEnd) { context in
-                                guard condensesTransportOverview else { return }
-                                transportOverviewVisibleRegion = context.region
+                                if usesReviewTransportOverview {
+                                    transportOverviewVisibleRegion = context.region
+                                }
+                                if clustersPlacesByMapScale {
+                                    placeClusterVisibleRegion = context.region
+                                }
                             }
                             // Handle taps on the map surface itself. Native map
                             // controls are subviews and must keep their own taps
@@ -834,6 +1088,12 @@ struct DFKMapView: View {
                 snapshotImage = nil
                 snapshotLoadFailed = false
                 loadSnapshot(for: geometry.size, forceWidgetRefresh: false)
+            }
+            .task(id: reviewTransportGeometryKey) {
+                await refreshReviewTransportGeometry()
+            }
+            .task(id: reviewTransportVisibleKey) {
+                await refreshReviewVisibleTransport()
             }
             .task(id: liveMapPhotoAssetCacheKey) {
                 guard isInteractive else { return }
@@ -931,7 +1191,30 @@ struct DFKMapView: View {
         return (formatted, "小时")
     }
 
+    @ViewBuilder
     private func aggregatedAnnotationContent(for aggregated: AggregatedFootprint) -> some View {
+        if clustersPlacesByMapScale {
+            reviewPlaceAnnotationContent(for: aggregated)
+        } else {
+            standardFootprintAnnotationContent(for: aggregated)
+        }
+    }
+
+    @ViewBuilder
+    private func reviewPlaceAnnotationContent(for aggregated: AggregatedFootprint) -> some View {
+        // Zoomed in to a single place, it is just a footprint: show it the
+        // way every footprint map does, with its activity icon.
+        if aggregated.placeCount == 1 {
+            standardFootprintAnnotationContent(for: aggregated, showsPhoto: false)
+        } else {
+            DFKReviewPlaceMapMarker(
+                placeCount: aggregated.placeCount,
+                photoImage: latestPhotoAssetID(for: aggregated).flatMap { liveMapPhotoImages[$0] }
+            )
+        }
+    }
+
+    private func standardFootprintAnnotationContent(for aggregated: AggregatedFootprint, showsPhoto: Bool? = nil) -> some View {
         let fp = aggregated.representative
         let isSelected = aggregated.footprints.contains { $0.footprintID == selectedFootprintID }
         let constantScale: CGFloat = 1.32
@@ -945,9 +1228,9 @@ struct DFKMapView: View {
         let durationTuple = formatDuration(aggregated.totalDuration)
         let fontSize = isInteractive ? 6.5 * constantScale : 5.5 * constantScale
 
-        let photoImage = prefersActivityIcons
-            ? nil
-            : latestPhotoAssetID(for: aggregated).flatMap { liveMapPhotoImages[$0] }
+        let photoImage = (showsPhoto ?? !prefersActivityIcons)
+            ? latestPhotoAssetID(for: aggregated).flatMap { liveMapPhotoImages[$0] }
+            : nil
         return DFKFootprintMapMarker(
             size: size,
             constantScale: constantScale,
@@ -978,6 +1261,7 @@ struct DFKMapView: View {
             Image(systemName: transport.currentType.sfSymbol)
                 .font(.system(size: iconSize, weight: .bold))
                 .foregroundColor(Color.dfkAccent)
+                .scaleEffect(x: transport.lineSegments.flatMap(\.coordinates).filter(\.isRenderableMapCoordinate).travelsWest ? -1 : 1, y: 1)
         }
         .contentShape(Circle())
 
@@ -991,11 +1275,24 @@ struct DFKMapView: View {
         }
     }
 
+    private func transportOverviewIcon(_ point: DFKTransportIconPoint) -> some View {
+        Circle()
+            .fill(Color(uiColor: .systemBackground))
+            .frame(width: 24, height: 24)
+            .overlay(Circle().stroke(Color.dfkAccent, lineWidth: 1.5))
+            .overlay {
+                Image(systemName: point.type.sfSymbol)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color.dfkAccent)
+                    .scaleEffect(x: point.travelsWest ? -1 : 1, y: 1)
+            }
+    }
+
     @MapContentBuilder
     private func transportMapContent() -> some MapContent {
-        if condensesTransportOverview {
-            if showsDetailedTransportPaths {
-                ForEach(visibleDetailedTransportSegments) { segment in
+        if usesReviewTransportOverview {
+            if reviewShowsDetailedPaths {
+                ForEach(reviewVisibleSegments) { segment in
                     MapPolyline(coordinates: segment.coordinates)
                         .stroke(
                             Color.dfkAccent.opacity(0.68),
@@ -1003,7 +1300,20 @@ struct DFKMapView: View {
                         )
                 }
             } else {
-                ForEach(displayedTransportOverviewPoints) { point in
+                ForEach(reviewVisibleSegments) { segment in
+                    MapPolyline(coordinates: segment.coordinates)
+                        .stroke(
+                            Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.65),
+                            style: StrokeStyle(
+                                lineWidth: segment.isDashed ? 1 : 2.5,
+                                lineCap: .round,
+                                lineJoin: .round,
+                                dash: segment.isDashed ? [4, 4] : []
+                            )
+                        )
+                }
+
+                ForEach(reviewOverviewPoints) { point in
                     MapCircle(
                         center: point.coordinate,
                         radius: min(7, 3.5 + log2(Double(max(1, point.intensity))))
@@ -1011,15 +1321,23 @@ struct DFKMapView: View {
                     .foregroundStyle(Color.dfkAccent.opacity(min(0.72, 0.36 + log2(Double(max(1, point.intensity))) * 0.06)))
                 }
             }
+
+            ForEach(displayedTransportIconPoints) { point in
+                Annotation("", coordinate: point.coordinate) {
+                    transportOverviewIcon(point)
+                        .zIndex(5)
+                }
+            }
         } else {
-            ForEach(renderedTransportSegments.filter { !$0.isDashed }) { segment in
+            ForEach(renderedTransportSegments) { segment in
                 MapPolyline(coordinates: segment.coordinates)
                     .stroke(
-                        Color.dfkAccent.opacity(0.7),
+                        Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.7),
                         style: StrokeStyle(
-                            lineWidth: isInteractive ? 3 : 2,
+                            lineWidth: segment.isDashed ? 1 : (isInteractive ? 3 : 2),
                             lineCap: .round,
-                            lineJoin: .round
+                            lineJoin: .round,
+                            dash: segment.isDashed ? [4, 4] : []
                         )
                     )
             }
@@ -1137,8 +1455,11 @@ struct DFKMapView: View {
         let h = Int(size.height / 10) * 10
         let sizeKey = "\(w)x\(h)"
         let styleKey = colorScheme == .dark ? "dark" : "light"
-        let insetKey = "inset:\(Int(bottomContentInset.rounded()))"
+        let insetKey = "inset:\(Int(topContentInset.rounded())):\(Int(bottomContentInset.rounded()))"
         let overviewKey = "overview:\(transportOverviewPoints.count):\(transportOverviewPoints.reduce(0) { $0 + $1.intensity })"
+        let routeStyleKey = usesReviewTransportOverview
+            ? "review-routes-share-style-v1:\(reviewTransportGeometry.key ?? "pending"):\(reviewTransportIcons.count)"
+            : "standard-transport-routes-dashed-v2"
         if let timelineUpdateIdentifier {
             return [
                 FootprintIconDefaults.mapSnapshotVersion,
@@ -1146,6 +1467,7 @@ struct DFKMapView: View {
                 styleKey,
                 insetKey,
                 overviewKey,
+                routeStyleKey,
                 "timeline:\(timelineUpdateIdentifier)",
                 showsUserLocation ? "user" : "nouser"
             ].joined(separator: "#")
@@ -1188,9 +1510,14 @@ struct DFKMapView: View {
             guard let latestPhotoAssetID = latestPhotoAssetID(for: aggregated) else { return nil }
             return "\(aggregated.id):\(latestPhotoAssetID)"
         }.joined(separator: "|")
+        let placeClusterKey = clustersPlacesByMapScale
+            ? aggregatedFootprints.map {
+                "\($0.id):\($0.placeCount):\(String(format: "%.4f,%.4f", $0.coordinate.latitude, $0.coordinate.longitude))"
+            }.joined(separator: "|")
+            : "no-place-clusters"
         let heatmapKey = heatmapPoints.prefix(8).map(\.id).joined(separator: "|")
         let annotationKey = mainAnnotationCoordinate.map { String(format: "%.4f,%.4f", $0.latitude, $0.longitude) } ?? "none"
-        return [FootprintIconDefaults.mapSnapshotVersion, sizeKey, styleKey, insetKey, overviewKey, annotationKey, pointKey, footprintKey, transportKey, photoKey, footprintPhotoKey, heatmapKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
+        return [FootprintIconDefaults.mapSnapshotVersion, sizeKey, styleKey, insetKey, overviewKey, routeStyleKey, showsUserDefinedPlaceRadii ? "place-radii" : "no-place-radii", annotationKey, pointKey, footprintKey, transportKey, photoKey, footprintPhotoKey, placeClusterKey, heatmapKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
     }
 
     private func loadSnapshot(for size: CGSize, forceWidgetRefresh: Bool = false) {
@@ -1296,21 +1623,30 @@ struct DFKMapView: View {
             let activity = footprint.getActivityType(from: allActivities)
             let constantScale: CGFloat = 1.32
             let size: CGFloat = 20 * constantScale
-            let marker = DFKFootprintMapMarker(
-                size: size,
-                constantScale: constantScale,
-                activityColor: activity?.color ?? .gray,
-                iconColor: .white,
-                iconName: activity?.icon ?? FootprintIconDefaults.card,
-                iconSize: (activity?.icon == nil ? 18 : 10) * constantScale,
-                photoImage: prefersActivityIcons
-                    ? nil
-                    : latestPhotoAssetID(for: aggregated).flatMap { footprintPhotoImages[$0] },
-                durationTuple: aggregated.totalDuration >= AppConfig.shared.stayDurationThreshold
-                    ? formatDuration(aggregated.totalDuration)
-                    : nil,
-                fontSize: 5.5 * constantScale
-            )
+            let marker: AnyView
+            if clustersPlacesByMapScale, aggregated.placeCount > 1 {
+                marker = AnyView(DFKReviewPlaceMapMarker(
+                    placeCount: aggregated.placeCount,
+                    photoImage: latestPhotoAssetID(for: aggregated).flatMap { footprintPhotoImages[$0] }
+                ))
+            } else {
+                marker = AnyView(DFKFootprintMapMarker(
+                    size: size,
+                    constantScale: constantScale,
+                    activityColor: activity?.color ?? .gray,
+                    iconColor: .white,
+                    iconName: activity?.icon ?? FootprintIconDefaults.card,
+                    iconSize: (activity?.icon == nil ? 18 : 10) * constantScale,
+                    // A single review place is drawn as its footprint's activity icon.
+                    photoImage: prefersActivityIcons || clustersPlacesByMapScale
+                        ? nil
+                        : latestPhotoAssetID(for: aggregated).flatMap { footprintPhotoImages[$0] },
+                    durationTuple: aggregated.totalDuration >= AppConfig.shared.stayDurationThreshold
+                        ? formatDuration(aggregated.totalDuration)
+                        : nil,
+                    fontSize: 5.5 * constantScale
+                ))
+            }
             let imageRenderer = ImageRenderer(content: marker.environment(\.colorScheme, colorScheme))
             imageRenderer.scale = UIScreen.main.scale
             guard let image = imageRenderer.uiImage else { return nil }
@@ -1320,7 +1656,7 @@ struct DFKMapView: View {
         return renderer.image { ctx in
             snapshot.image.draw(at: .zero)
 
-            for place in allPlaces.filter({ $0.isUserDefined }) {
+            for place in allPlaces.filter({ showsUserDefinedPlaceRadii && $0.isUserDefined }) {
                 let center = snapshot.point(for: place.coordinate)
                 let metersPerDegreeLongitude = 111_320.0 * max(0.2, cos(place.coordinate.latitude * .pi / 180.0))
                 let visibleWidthMeters = max(1, region.span.longitudeDelta * metersPerDegreeLongitude)
@@ -1337,7 +1673,22 @@ struct DFKMapView: View {
             ctx.cgContext.setLineCap(.round)
             ctx.cgContext.setLineJoin(.round)
 
-            if condensesTransportOverview {
+            if usesReviewTransportOverview {
+                for segment in renderedTransportSegments {
+                    let points = segment.coordinates.map { snapshot.point(for: $0) }
+                    guard let first = points.first, points.count >= 2 else { continue }
+                    ctx.cgContext.beginPath()
+                    ctx.cgContext.move(to: first)
+                    for point in points.dropFirst() {
+                        ctx.cgContext.addLine(to: point)
+                    }
+                    ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor)
+                    ctx.cgContext.setLineWidth(segment.isDashed ? 1 : 2.5)
+                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
+                    ctx.cgContext.strokePath()
+                }
+                ctx.cgContext.setLineDash(phase: 0, lengths: [])
+
                 for fusedPoint in fusedTransportPoints {
                     let point = snapshot.point(for: fusedPoint.coordinate)
                     let diameter = min(5.5, 2.5 + CGFloat(log2(Double(max(1, fusedPoint.intensity)))) * 0.7)
@@ -1352,8 +1703,26 @@ struct DFKMapView: View {
                     )
                     ctx.cgContext.fillEllipse(in: rect)
                 }
+
+                for iconPoint in displayedTransportIconPoints {
+                    let point = snapshot.point(for: iconPoint.coordinate)
+                    let circleRect = CGRect(x: point.x - 12, y: point.y - 12, width: 24, height: 24)
+                    UIColor.systemBackground.setFill()
+                    UIBezierPath(ovalIn: circleRect).fill()
+                    themeColor.setStroke()
+                    let outline = UIBezierPath(ovalIn: circleRect)
+                    outline.lineWidth = 1.5
+                    outline.stroke()
+                    if let sourceImage = UIImage(systemName: iconPoint.type.sfSymbol) {
+                        let iconImage = iconPoint.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
+                        drawImageAspectFit(
+                            iconImage.withTintColor(themeColor),
+                            in: CGRect(x: point.x - 6, y: point.y - 6, width: 12, height: 12)
+                        )
+                    }
+                }
             } else {
-                for segment in renderedTransportSegments where !segment.isDashed {
+                for segment in renderedTransportSegments {
                     let projected = segment.coordinates.map { snapshot.point(for: $0) }
                     guard projected.count >= 2 else { continue }
 
@@ -1362,10 +1731,14 @@ struct DFKMapView: View {
                     for i in 1..<projected.count {
                         ctx.cgContext.addLine(to: projected[i])
                     }
-                    ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(0.65).cgColor)
-                    ctx.cgContext.setLineWidth(2.5)
+                    ctx.cgContext.setStrokeColor(
+                        themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
+                    )
+                    ctx.cgContext.setLineWidth(segment.isDashed ? 1 : 2.5)
+                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
                     ctx.cgContext.strokePath()
                 }
+                ctx.cgContext.setLineDash(phase: 0, lengths: [])
 
                 for transport in renderedTransportAnnotationItems where transport.points.count >= 2 {
                     let smoothedPoints = transport.lineSegments.flatMap { $0.coordinates }.filter(\.isRenderableMapCoordinate)
@@ -1379,7 +1752,8 @@ struct DFKMapView: View {
                         path.lineWidth = 1.2
                         path.stroke()
 
-                        if let iconImage = UIImage(systemName: transport.currentType.sfSymbol) {
+                        if let sourceImage = UIImage(systemName: transport.currentType.sfSymbol) {
+                            let iconImage = smoothedPoints.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
                             drawImageAspectFit(iconImage.withTintColor(themeColor), in: CGRect(x: midPoint.x - 4, y: midPoint.y - 4, width: 8, height: 8))
                         }
                     }
@@ -1517,11 +1891,14 @@ struct DFKMapView: View {
         if size.width > size.height {
             region.span.longitudeDelta *= 1.5
         }
-        if bottomContentInset > 0, size.height > bottomContentInset {
-            let visibleFraction = (size.height - bottomContentInset) / size.height
+        let verticalContentInset = topContentInset + bottomContentInset
+        if verticalContentInset > 0, size.height > verticalContentInset {
+            let visibleFraction = (size.height - verticalContentInset) / size.height
             let originalLatitudeDelta = region.span.latitudeDelta
             region.span.latitudeDelta = originalLatitudeDelta / visibleFraction
-            region.center.latitude -= region.span.latitudeDelta * (1 - visibleFraction) / 2
+            region.center.latitude += region.span.latitudeDelta
+                * ((topContentInset - bottomContentInset) / size.height)
+                / 2
         }
         return region
     }
@@ -1582,7 +1959,8 @@ struct DFKMapView: View {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return nil }
 
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+        let resolvedAssetID = PhotoService.shared.resolvedAssetIdentifier(for: assetID)
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [resolvedAssetID], options: nil)
         guard let asset = assets.firstObject else { return nil }
 
         return await withCheckedContinuation { continuation in
@@ -1616,7 +1994,8 @@ struct DFKMapView: View {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return nil }
 
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+        let resolvedAssetID = PhotoService.shared.resolvedAssetIdentifier(for: assetID)
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [resolvedAssetID], options: nil)
         guard let asset = assets.firstObject else { return nil }
 
         return await withCheckedContinuation { continuation in
@@ -1888,7 +2267,10 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 mapView.addAnnotation(MapImageAnnotation(
                     coordinate: midpoint,
                     kind: .transport(transport.id.uuidString),
-                    image: Coordinator.transportImage(symbolName: transport.currentType.sfSymbol)
+                    image: Coordinator.transportImage(
+                        symbolName: transport.currentType.sfSymbol,
+                        travelsWest: smoothedPoints.travelsWest
+                    )
                 ))
             }
         }
@@ -2066,7 +2448,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             }
         }
 
-        static func transportImage(symbolName: String) -> UIImage {
+        static func transportImage(symbolName: String, travelsWest: Bool) -> UIImage {
             let size = CGSize(width: 20, height: 20)
             let renderer = UIGraphicsImageRenderer(size: size)
             return renderer.image { context in
@@ -2078,9 +2460,12 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 path.lineWidth = 1.2
                 path.stroke()
 
-                UIImage(systemName: symbolName)?
-                    .withTintColor(UIColor(Color.dfkAccent), renderingMode: .alwaysOriginal)
-                    .draw(in: CGRect(x: 5, y: 5, width: 10, height: 10))
+                if let sourceImage = UIImage(systemName: symbolName) {
+                    let iconImage = travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
+                    iconImage
+                        .withTintColor(UIColor(Color.dfkAccent), renderingMode: .alwaysOriginal)
+                        .draw(in: CGRect(x: 5, y: 5, width: 10, height: 10))
+                }
             }
         }
 
@@ -2192,6 +2577,17 @@ private final class MapImageAnnotation: NSObject, MKAnnotation {
 }
 
 extension Array where Element == CLLocationCoordinate2D {
+    /// Whether the route's destination is west of its origin. Normalize the
+    /// longitude delta so routes crossing the antimeridian keep their actual
+    /// travel direction.
+    var travelsWest: Bool {
+        guard let first, let last, count >= 2 else { return false }
+        var longitudeDelta = last.longitude - first.longitude
+        if longitudeDelta > 180 { longitudeDelta -= 360 }
+        if longitudeDelta < -180 { longitudeDelta += 360 }
+        return longitudeDelta < 0
+    }
+
     /// 计算包含所有坐标点的最佳矩形区域
     func boundingRegion(paddingFactor: Double = 1.3) -> MKCoordinateRegion? {
         guard !isEmpty else { return nil }
@@ -2306,6 +2702,9 @@ private struct DFKFootprintMapMarker: View {
     let iconName: String
     let iconSize: CGFloat
     let photoImage: UIImage?
+    var centerText: String? = nil
+    /// Small second line under `centerText`, such as "个足迹".
+    var centerCaption: String? = nil
     let durationTuple: (number: String, unit: String)?
     let fontSize: CGFloat
 
@@ -2335,6 +2734,29 @@ private struct DFKFootprintMapMarker: View {
                     .clipShape(Circle())
                     .overlay(Circle().stroke(activityColor, lineWidth: 1.5))
                     .offset(y: 1.5)
+            } else if let centerText, let centerCaption {
+                // Centred in the coloured circle as one two-line block.
+                VStack(spacing: 0) {
+                    Text(centerText)
+                        .font(.system(size: iconSize * 0.8, weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.55)
+                    Text(centerCaption)
+                        .font(.system(size: iconSize * 0.4, weight: .semibold))
+                        .lineLimit(1)
+                        .opacity(0.9)
+                }
+                .foregroundStyle(iconColor)
+                .frame(width: size - 9, height: size - 5)
+                .offset(y: 2.5)
+            } else if let centerText {
+                Text(centerText)
+                    .font(.system(size: iconSize, weight: .bold, design: .rounded))
+                    .foregroundStyle(iconColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.55)
+                    .frame(width: size - 8, height: size - 8)
+                    .offset(y: 4)
             } else {
                 Image(systemName: iconName)
                     .font(.system(size: iconSize, weight: .bold))
@@ -2368,6 +2790,27 @@ private struct DFKFootprintMapMarker: View {
         .padding(2 * constantScale)
         .frame(width: size + 4 * constantScale, height: size * 1.2 + 4 * constantScale)
         .contentShape(Rectangle())
+    }
+}
+
+private struct DFKReviewPlaceMapMarker: View {
+    let placeCount: Int
+    let photoImage: UIImage?
+
+    var body: some View {
+        DFKFootprintMapMarker(
+            size: 36,
+            constantScale: 1.32,
+            activityColor: Color.dfkAccent,
+            iconColor: .white,
+            iconName: "mappin",
+            iconSize: placeCount > 1 ? 15 : 14,
+            photoImage: placeCount == 1 ? photoImage : nil,
+            centerText: placeCount > 1 ? "\(placeCount)" : nil,
+            centerCaption: placeCount > 1 ? "个足迹" : nil,
+            durationTuple: nil,
+            fontSize: 8
+        )
     }
 }
 

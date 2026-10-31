@@ -492,25 +492,35 @@
     <integer>10</integer>
 
     <!-- 回顾页“值得记住”候选：长停留（秒）/照片数/首次到访照片数/
-         异常停留倍数/最低综合分/最大卡片数/单日远行距离（米） -->
+         高频到访次数/异常停留倍数/最低综合分/最大卡片数/轮播秒数/单日远行距离（米） -->
     <key>REVIEW_MEMORY_LONG_STAY_MIN_DURATION</key>
     <real>10800</real>
     <key>REVIEW_MEMORY_PHOTO_MIN_COUNT</key>
     <integer>4</integer>
     <key>REVIEW_MEMORY_FIRST_VISIT_PHOTO_MIN_COUNT</key>
     <integer>1</integer>
+    <key>REVIEW_MEMORY_FREQUENT_VISIT_MIN_COUNT</key>
+    <integer>3</integer>
     <key>REVIEW_MEMORY_UNUSUAL_DURATION_RATIO</key>
     <real>2</real>
     <key>REVIEW_MEMORY_MINIMUM_SCORE</key>
     <real>3</real>
     <key>REVIEW_MEMORY_MAXIMUM_COUNT</key>
     <integer>6</integer>
+    <key>REVIEW_MEMORY_CAROUSEL_INTERVAL</key>
+    <real>4</real>
+    <key>REVIEW_MEMORY_CAROUSEL_ANIMATION_DURATION</key>
+    <real>0.8</real>
     <key>REVIEW_MEMORY_TRAVEL_DISTANCE_MIN</key>
     <real>10000</real>
     <key>REVIEW_MEMORY_WALK_DISTANCE_MIN</key>
     <real>3000</real>
     <key>REVIEW_MEMORY_DIVERSE_TRANSPORT_MIN_COUNT</key>
     <integer>2</integer>
+
+    <!-- 回顾页首次进入时，足迹数不超过此值则介绍从照片补充过去足迹 -->
+    <key>REVIEW_PHOTO_IMPORT_SUGGESTION_MAX_FOOTPRINTS</key>
+    <integer>10</integer>
 
     <!-- 回顾地图轨迹点：初始融合网格（经纬度）与最终最大绘制点数 -->
     <key>REVIEW_MAP_TRAJECTORY_BASE_CELL_DEGREES</key>

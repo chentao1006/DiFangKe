@@ -11,6 +11,35 @@ private struct PhotoGeocodeResult: Sendable {
     let cityName: String?
 }
 
+private struct CrossDevicePhotoRecoverySnapshot: Sendable {
+    let footprintID: UUID
+    let assetIDs: [String]
+    let cloudIdentifierByLocalIdentifier: [String: String]
+}
+
+private final class PhotoIdentifierResolutionCache: @unchecked Sendable {
+    private var storage: [String: String] = [:]
+    private let lock = NSLock()
+
+    func resolvedIdentifier(for storedIdentifier: String) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage[storedIdentifier] ?? storedIdentifier
+    }
+
+    func merge(_ mappings: [String: String]) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        var changed = false
+        for (storedIdentifier, localIdentifier) in mappings
+        where storage[storedIdentifier] != localIdentifier {
+            storage[storedIdentifier] = localIdentifier
+            changed = true
+        }
+        return changed
+    }
+}
+
 private final class PhotoGeocodeCache: @unchecked Sendable {
     private var storage: [String: PhotoGeocodeResult] = [:]
     private let lock = NSLock()
@@ -78,9 +107,12 @@ enum PhotoImportDraftRecovery {
 class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     static let shared = PhotoService()
     private let displayableAssetIDsCache = NSCache<NSString, NSArray>()
+    private let identifierResolutionCache = PhotoIdentifierResolutionCache()
+    private var crossDevicePhotoRecoveryTask: Task<Void, Never>?
     
     @Published var authorizationStatus: PHAuthorizationStatus = .notDetermined
     @Published var isScanCancelled = false
+    @Published private(set) var identifierResolutionRevision = 0
     var modelContext: ModelContext? {
         didSet {
             if let context = modelContext {
@@ -106,7 +138,18 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     }
     
     deinit {
+        crossDevicePhotoRecoveryTask?.cancel()
         PHPhotoLibrary.shared().unregisterChangeObserver(self)
+    }
+
+    private func scheduleCrossDevicePhotoRecovery() {
+        guard let container = modelContext?.container else { return }
+        crossDevicePhotoRecoveryTask?.cancel()
+        crossDevicePhotoRecoveryTask = Task.detached(priority: .background) { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            await self?.recoverCrossDevicePhotoIdentifiers(in: container)
+        }
     }
     
     func checkStatus() {
@@ -120,7 +163,12 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
             DispatchQueue.main.async {
                 self.authorizationStatus = status
-                completion(status == .authorized || status == .limited)
+                let granted = status == .authorized || status == .limited
+                if granted {
+                    PHPhotoLibrary.shared().register(self)
+                    self.scheduleCrossDevicePhotoRecovery()
+                }
+                completion(granted)
             }
         }
     }
@@ -149,25 +197,150 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return false }
         
-        let result = PHAsset.fetchAssets(withLocalIdentifiers: assetIDs, options: nil)
+        let resolvedAssetIDs = assetIDs.map(resolvedAssetIdentifier(for:))
+        let result = PHAsset.fetchAssets(withLocalIdentifiers: resolvedAssetIDs, options: nil)
         return result.count == assetIDs.count
+    }
+
+    func resolvedAssetIdentifier(for storedIdentifier: String) -> String {
+        identifierResolutionCache.resolvedIdentifier(for: storedIdentifier)
+    }
+
+    /// Records device-local resolutions without changing identifiers persisted
+    /// in the shared footprint store. PHAsset local identifiers are not stable
+    /// across devices and must never be written back as a sync repair.
+    func cacheResolvedAssetIdentifiers(_ mappings: [String: String]) {
+        guard identifierResolutionCache.merge(mappings) else { return }
+        displayableAssetIDsCache.removeAllObjects()
+        Task { @MainActor in
+            identifierResolutionRevision &+= 1
+        }
     }
     
     func syncDeletedPhotos(in container: ModelContainer) async {
-        let context = ModelContext(container)
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return }
-        
+        await recoverCrossDevicePhotoIdentifiers(in: container)
+        // Do not delete identifiers that Photos cannot resolve locally. They
+        // may belong to another device and remain necessary for cloud-ID
+        // recovery when the corresponding iCloud photo becomes available.
+    }
+
+    private func recoverCrossDevicePhotoIdentifiers(in container: ModelContainer) async {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return }
+
+        let snapshots: [CrossDevicePhotoRecoverySnapshot] = {
+            let context = ModelContext(container)
+            let descriptor = FetchDescriptor<Footprint>()
+            guard let footprints = try? context.fetch(descriptor) else { return [] }
+            return footprints.compactMap { footprint in
+                let assetIDs = footprint.photoAssetIDs
+                guard !assetIDs.isEmpty else { return nil }
+                let cloudByLocal = Dictionary(
+                    footprint.photoMetadata.compactMap { metadata -> (String, String)? in
+                        guard let cloudIdentifier = metadata.cloudIdentifier else { return nil }
+                        return (metadata.localIdentifier, cloudIdentifier)
+                    },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                return CrossDevicePhotoRecoverySnapshot(
+                    footprintID: footprint.footprintID,
+                    assetIDs: assetIDs,
+                    cloudIdentifierByLocalIdentifier: cloudByLocal
+                )
+            }
+        }()
+        guard !snapshots.isEmpty, !Task.isCancelled else { return }
+
+        let allStoredLocalIDs = Array(Set(snapshots.flatMap(\.assetIDs)))
+        let locallyAvailableAssets = PHAsset.fetchAssets(withLocalIdentifiers: allStoredLocalIDs, options: nil)
+        var locallyAvailableIDs = Set<String>()
+        locallyAvailableAssets.enumerateObjects { asset, _, _ in
+            locallyAvailableIDs.insert(asset.localIdentifier)
+        }
+
+        let localIDsMissingCloudIdentifier = Set(snapshots.flatMap { snapshot in
+            snapshot.assetIDs.filter { localIdentifier in
+                locallyAvailableIDs.contains(localIdentifier)
+                    && snapshot.cloudIdentifierByLocalIdentifier[localIdentifier] == nil
+            }
+        })
+        let cloudIdentifierByLocalIdentifier = await getCloudIdentifiers(
+            for: Array(localIDsMissingCloudIdentifier)
+        )
+
+        let unresolvedCloudIDs = Set(snapshots.flatMap { snapshot in
+            snapshot.cloudIdentifierByLocalIdentifier.compactMap { localIdentifier, cloudIdentifier in
+                locallyAvailableIDs.contains(localIdentifier) ? nil : cloudIdentifier
+            }
+        })
+        let localIdentifierByCloudIdentifier = await getLocalIdentifiers(for: Array(unresolvedCloudIDs))
+        guard (!cloudIdentifierByLocalIdentifier.isEmpty || !localIdentifierByCloudIdentifier.isEmpty),
+              !Task.isCancelled else { return }
+
+        var resolvedIdentifierByStoredIdentifier: [String: String] = [:]
+        for snapshot in snapshots {
+            for (storedIdentifier, cloudIdentifier) in snapshot.cloudIdentifierByLocalIdentifier {
+                if let localIdentifier = localIdentifierByCloudIdentifier[cloudIdentifier] {
+                    resolvedIdentifierByStoredIdentifier[storedIdentifier] = localIdentifier
+                }
+            }
+        }
+        let resolutionChanged = identifierResolutionCache.merge(resolvedIdentifierByStoredIdentifier)
+        if resolutionChanged {
+            displayableAssetIDsCache.removeAllObjects()
+        }
+
+        let snapshotsByID = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.footprintID, $0) })
+        let context = ModelContext(container)
         let descriptor = FetchDescriptor<Footprint>()
-        do {
-            let allFootprints = try context.fetch(descriptor)
-            let footprintsWithPhotos = allFootprints.filter { !$0.photoAssetIDs.isEmpty }
-            if footprintsWithPhotos.isEmpty { return }
-            
-            // 核心修复提示：已禁用自动清理逻辑。
-            // 因为在多设备同步环境下，本地无法获取到的 ID 不代表已被删除。
-        } catch {
-            print("Failed to sync deleted photos: \(error)")
+        guard let footprints = try? context.fetch(descriptor) else { return }
+        var changed = false
+
+        for footprint in footprints {
+            guard let snapshot = snapshotsByID[footprint.footprintID] else { continue }
+            var metadata = footprint.photoMetadata
+            var footprintChanged = false
+
+            for localIdentifier in snapshot.assetIDs {
+                guard let cloudIdentifier = cloudIdentifierByLocalIdentifier[localIdentifier],
+                      !metadata.contains(where: {
+                          $0.localIdentifier == localIdentifier && $0.cloudIdentifier == cloudIdentifier
+                      }) else { continue }
+
+                if let index = metadata.firstIndex(where: { $0.localIdentifier == localIdentifier }) {
+                    metadata[index].cloudIdentifier = cloudIdentifier
+                } else {
+                    metadata.append(
+                        PhotoMetadata(localIdentifier: localIdentifier, cloudIdentifier: cloudIdentifier)
+                    )
+                }
+                footprintChanged = true
+            }
+
+            guard footprintChanged else { continue }
+            footprint.photoMetadata = metadata
+            changed = true
+        }
+
+        if changed {
+            do {
+                try context.save()
+            } catch {
+                print("Failed to enrich cross-device photo identifiers: \(error)")
+            }
+        }
+        let didChangeStoredMetadata = changed
+        if didChangeStoredMetadata || resolutionChanged {
+            await MainActor.run {
+                if resolutionChanged {
+                    self.identifierResolutionRevision &+= 1
+                }
+                if didChangeStoredMetadata {
+                    NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                }
+            }
         }
     }
     
@@ -216,7 +389,40 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.fetchLimit = 1
-        return PHAsset.fetchAssets(withLocalIdentifiers: assetIDs, options: options).firstObject
+        let resolvedAssetIDs = assetIDs.map(resolvedAssetIdentifier(for:))
+        return PHAsset.fetchAssets(withLocalIdentifiers: resolvedAssetIDs, options: options).firstObject
+    }
+
+    /// A review card starts with the earliest photo so the memory reads in
+    /// chronological order. Timeline thumbnails continue to use latestAsset.
+    func earliestAsset(among assetIDs: [String]) -> PHAsset? {
+        guard !assetIDs.isEmpty else { return nil }
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
+        options.fetchLimit = 1
+        let resolvedAssetIDs = assetIDs.map(resolvedAssetIdentifier(for:))
+        return PHAsset.fetchAssets(withLocalIdentifiers: resolvedAssetIDs, options: options).firstObject
+    }
+
+    func assetIDsOldestFirst(_ assetIDs: [String]) -> [String] {
+        let resolvedAssetIDs = assetIDs.map(resolvedAssetIdentifier(for:))
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: resolvedAssetIDs, options: nil)
+        var creationDates: [String: Date] = [:]
+        assets.enumerateObjects { asset, _, _ in
+            creationDates[asset.localIdentifier] = asset.creationDate
+        }
+        return resolvedAssetIDs.sorted {
+            switch (creationDates[$0], creationDates[$1]) {
+            case let (left?, right?) where left != right:
+                return left < right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return $0 < $1
+            }
+        }
     }
 
     /// IDs that Photos can resolve on this device, de-duplicated and ordered
@@ -224,13 +430,14 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     func displayableAssetIDs(_ assetIDs: [String]) -> [String] {
         guard !assetIDs.isEmpty else { return [] }
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        guard status == .authorized || status == .limited else { return assetIDs }
-        let cacheKey = assetIDs.joined(separator: "\u{1F}") as NSString
+        guard status == .authorized || status == .limited else { return [] }
+        let resolvedAssetIDs = assetIDs.map(resolvedAssetIdentifier(for:))
+        let cacheKey = resolvedAssetIDs.joined(separator: "\u{1F}") as NSString
         if let cached = displayableAssetIDsCache.object(forKey: cacheKey) as? [String] {
             return cached
         }
 
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: assetIDs, options: nil)
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: resolvedAssetIDs, options: nil)
         var creationDates: [String: Date] = [:]
         var availableAssetIDs = Set<String>()
         assets.enumerateObjects { asset, _, _ in
@@ -239,7 +446,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
 
         var displayedIdentifiers = Set<String>()
-        let result = assetIDs
+        let result = resolvedAssetIDs
             .filter { availableAssetIDs.contains($0) && displayedIdentifiers.insert($0).inserted }
             .enumerated()
             .sorted { lhs, rhs in
@@ -259,6 +466,29 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             .map(\.element)
         displayableAssetIDsCache.setObject(result as NSArray, forKey: cacheKey)
         return result
+    }
+
+    /// Resolves stored identifiers first, then uses the same time-and-location
+    /// rule as automatic photo linking to recover old records whose Photos
+    /// local identifiers changed before cloud identifier metadata was stored.
+    /// This is display-only recovery and never rewrites the footprint store.
+    func displayableAssetIDs(for footprint: Footprint) async -> [String] {
+        let storedAssetIDs = footprint.photoAssetIDs
+        let resolvedAssetIDs = displayableAssetIDs(storedAssetIDs)
+        guard resolvedAssetIDs.count < Set(storedAssetIDs).count else { return resolvedAssetIDs }
+
+        let matchedAssets: [PHAsset] = await withCheckedContinuation { continuation in
+            fetchAssets(
+                startTime: footprint.startTime,
+                endTime: footprint.endTime,
+                near: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+            ) { assets in
+                continuation.resume(returning: assets)
+            }
+        }
+        var seenIdentifiers = Set<String>()
+        return (resolvedAssetIDs + matchedAssets.map(\.localIdentifier))
+            .filter { seenIdentifiers.insert($0).inserted }
     }
 
     /// Photos taken this long before/after a stay still belong to it.
@@ -330,7 +560,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         fetchOptions.includeHiddenAssets = true
         fetchOptions.includeAllBurstAssets = true
         
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: fetchOptions)
+        let resolvedAssetID = resolvedAssetIdentifier(for: assetID)
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [resolvedAssetID], options: fetchOptions)
 
         guard let asset = assets.firstObject else {
             DispatchQueue.main.async {

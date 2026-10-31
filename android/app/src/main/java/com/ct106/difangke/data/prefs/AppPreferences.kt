@@ -46,6 +46,8 @@ class AppPreferences(private val context: Context) {
         val KEY_LOCATION_ACCURACY_MODE = stringPreferencesKey("locationAccuracyMode")
         val KEY_IS_LIVE_NOTIFICATION_ENABLED = booleanPreferencesKey("isLiveNotificationEnabled")
         val KEY_TRIP_INTRO_COMPLETED = booleanPreferencesKey("tripIntroductionCompleted")
+        val KEY_REVIEW_INTRO_COMPLETED = booleanPreferencesKey("reviewIntroductionCompleted")
+        val KEY_REVIEW_PHOTO_IMPORT_SUGGESTION_SHOWN = booleanPreferencesKey("reviewPhotoImportSuggestionShown")
         val KEY_TRIP_AUTOMATIC_RECOGNITION = booleanPreferencesKey("tripAutomaticRecognitionEnabled")
         val KEY_TRIP_SCAN_RUNNING = booleanPreferencesKey("tripScanRunning")
         val KEY_TRIP_SCAN_CURSOR = longPreferencesKey("tripScanCursor")
@@ -91,6 +93,8 @@ class AppPreferences(private val context: Context) {
         it[KEY_IS_NOTIFICATION_GUIDE_DISMISSED] ?: false
     }
     val tripIntroductionCompleted: Flow<Boolean> = context.dataStore.data.map { it[KEY_TRIP_INTRO_COMPLETED] ?: false }
+    val reviewIntroductionCompleted: Flow<Boolean> = context.dataStore.data.map { it[KEY_REVIEW_INTRO_COMPLETED] ?: false }
+    val reviewPhotoImportSuggestionShown: Flow<Boolean> = context.dataStore.data.map { it[KEY_REVIEW_PHOTO_IMPORT_SUGGESTION_SHOWN] ?: false }
     val tripAutomaticRecognitionEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_TRIP_AUTOMATIC_RECOGNITION] ?: false }
     val tripScanRunning: Flow<Boolean> = context.dataStore.data.map { it[KEY_TRIP_SCAN_RUNNING] ?: false }
 
@@ -144,6 +148,8 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit { it[KEY_IS_NOTIFICATION_GUIDE_DISMISSED] = dismissed }
 
     suspend fun setTripIntroductionCompleted(completed: Boolean) = context.dataStore.edit { it[KEY_TRIP_INTRO_COMPLETED] = completed }
+    suspend fun setReviewIntroductionCompleted(completed: Boolean) = context.dataStore.edit { it[KEY_REVIEW_INTRO_COMPLETED] = completed }
+    suspend fun setReviewPhotoImportSuggestionShown(shown: Boolean) = context.dataStore.edit { it[KEY_REVIEW_PHOTO_IMPORT_SUGGESTION_SHOWN] = shown }
     suspend fun setTripAutomaticRecognitionEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_TRIP_AUTOMATIC_RECOGNITION] = enabled }
     suspend fun setTripScanRunning(running: Boolean) = context.dataStore.edit { it[KEY_TRIP_SCAN_RUNNING] = running }
     suspend fun getTripScanCursor(): Long? = context.dataStore.data.map { it[KEY_TRIP_SCAN_CURSOR] }.first()

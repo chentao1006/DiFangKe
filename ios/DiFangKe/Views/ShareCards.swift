@@ -126,25 +126,60 @@ struct DFKShareCardPayload: Identifiable {
     var locationText: String? = nil
     var heroImage: UIImage?
     var heroImages: [UIImage] = []
+    /// Library IDs of `heroImages`, index for index, when known.
+    var heroImageAssetIDs: [String] = []
+    /// Every photo of the period, for drawing a new random set.
+    var photoAssetPool: [String] = []
+    /// Where each photo was taken, by library ID.
+    var photoCaptionsByAssetID: [String: String] = [:]
     var backgroundMapImage: UIImage?
     var backgroundMapLightImage: UIImage?
     var backgroundMapDarkImage: UIImage?
     var contentMapImage: UIImage?
     var contentMapLightImage: UIImage?
     var contentMapDarkImage: UIImage?
+    /// Portrait map for the map templates, drawn like the content map.
+    var templateTallMapImage: UIImage?
+    var templateWideMapImage: UIImage?
     var coordinates: [CLLocationCoordinate2D] = []
     // Keep the raw map inputs so place toggles can filter pins without deleting transport overlays.
     var mapFootprints: [Footprint] = []
     var mapTransports: [TransportRecord] = []
     var mapActivities: [ActivityType] = []
+    var isTripShare: Bool = false
+    var tripTemplate: DFKTripShareTemplate = .ticket
+    var footprintTemplate: DFKFootprintShareTemplate = .dial
+    var reviewTemplate: DFKReviewShareTemplate = .wrapped
+    var tripSummary: DFKTripShareSummary?
+    /// Draws a new random set of trip photos for every template.
+    var tripPhotoShuffler: (@MainActor (DFKTripShareSummary) async -> DFKTripShareSummary)?
     var entries: [DFKShareEntry] = []
     var stats: [DFKShareStatEntry] = []
     var placeRankings: [DFKShareRankingEntry] = []
     var activityRankings: [DFKShareRankingEntry] = []
+    var transportRankings: [DFKShareRankingEntry] = []
+    var reviewRhythmValues: [Int] = []
+    var reviewRhythmStartText: String?
+    var reviewRhythmEndText: String?
+    var reviewMemoryReason: String?
+    var reviewMemoryTitle: String?
+    var reviewMemoryDetail: String?
+    var reviewMemories: [DFKShareReviewMemory] = []
     var summary: String?
     var isLoading: Bool = false
     var brandName: String = "地方客"
     var brandSlogan: String = "走过的地方，就是你的生活"
+}
+
+struct DFKShareReviewMemory: Identifiable {
+    let id: String
+    var reason: String
+    var title: String
+    var detail: String
+    var image: UIImage?
+    /// More photos of the same moment, so a card is not one picture each.
+    var extraImages: [UIImage] = []
+    var photoAssetIDs: [String] = []
 }
 
 struct DFKShareEntry: Identifiable {
@@ -177,6 +212,7 @@ struct DFKShareRankingEntry: Identifiable {
     var value: String
     var icon: String
     var color: Color
+    var fraction: Double? = nil
 }
 
 /// The sheet item identifies the presentation; the binding supplies subsequent
@@ -198,7 +234,6 @@ struct DFKShareCardPreviewView: View {
 
     @State private var editablePayload: DFKShareCardPayload
     @State private var selectedTheme: DFKShareCardTheme = .light
-    @State private var renderedImage: UIImage?
     @State private var renderedImageURL: URL?
     @State private var isRendering = false
     @State private var showingShareSheet = false
@@ -217,6 +252,10 @@ struct DFKShareCardPreviewView: View {
     @State private var hasRequestedAutomaticShareTitle = false
     @State private var isShareTitleBreathing = false
     @State private var mapRefreshRequest = UUID()
+    @State private var visibleTemplate: DFKShareTemplate?
+    @State private var isShufflingPhotos = false
+    /// Photos reshuffled for one template only; the others keep theirs.
+    @State private var photoPayloadByTemplate: [DFKShareTemplate: DFKShareCardPayload] = [:]
 
     init(payload: DFKShareCardPayload) {
         self.payload = payload
@@ -229,16 +268,6 @@ struct DFKShareCardPreviewView: View {
                 GeometryReader { proxy in
                     let availableWidth = max(1, proxy.size.width - 28)
                     let availableHeight = max(1, proxy.size.height - 12)
-                    let targetSize = DFKShareCardView.pixelSize(for: editablePayload)
-                    let previewScale = availableWidth / targetSize.width
-                    let fullHeightZoom = min(1, (availableHeight / targetSize.height) / previewScale)
-                    let baseZoom = hasInitializedPreviewZoom ? previewZoom : fullHeightZoom
-                    let activeZoom = min(max(baseZoom * magnificationGesture, fullHeightZoom), 1)
-                    let cardScale = previewScale * activeZoom
-                    let cardSize = CGSize(
-                        width: targetSize.width * cardScale,
-                        height: targetSize.height * cardScale
-                    )
 
                     ZStack(alignment: .top) {
                         Color(uiColor: .secondarySystemBackground)
@@ -246,86 +275,38 @@ struct DFKShareCardPreviewView: View {
                             ProgressView("正在生成分享卡片...")
                                 .controlSize(.large)
                                 .foregroundStyle(.secondary)
+                        } else if editablePayload.usesTemplates {
+                            templatePager(
+                                availableSize: CGSize(width: availableWidth, height: availableHeight)
+                            )
                         } else {
-                            ScrollViewReader { scrollProxy in
-                                ScrollView(.vertical) {
-                                    ZStack(alignment: .topLeading) {
-                                        DFKShareCardView(payload: editablePayload, theme: selectedTheme)
-                                            .frame(
-                                                width: targetSize.width,
-                                                height: targetSize.height,
-                                                alignment: .topLeading
-                                            )
-                                            // Scale the finished 1080 pt canvas. Do not rerun the
-                                            // internal layout at preview size, or photos/text reflow.
-                                            .scaleEffect(cardScale, anchor: .topLeading)
-
-                                        // ScrollViewReader needs concrete targets to focus the
-                                        // expanded preview at the point the user tapped.
-                                        VStack(spacing: 0) {
-                                            ForEach(0 ... 100, id: \.self) { index in
-                                                Color.clear
-                                                    .frame(height: cardSize.height / 101)
-                                                    .id("share-card-anchor-\(index)")
-                                            }
-                                        }
-                                    }
-                                    .frame(width: cardSize.width, height: cardSize.height, alignment: .topLeading)
-                                    .id("share-card-preview")
-                                    .shadow(color: .black.opacity(0.16), radius: 18, x: 0, y: 10)
-                                    .frame(maxWidth: .infinity, alignment: .top)
-                                }
-                                .scrollIndicators(.visible)
-                                .simultaneousGesture(
-                                    MagnifyGesture()
-                                        .updating($magnificationGesture) { value, state, _ in
-                                            state = value.magnification
-                                        }
-                                        .onEnded { value in
-                                            previewZoom = min(max(baseZoom * value.magnification, fullHeightZoom), 1)
-                                            hasInitializedPreviewZoom = true
-                                        }
-                                )
-                                .simultaneousGesture(
-                                    SpatialTapGesture()
-                                        .onEnded { value in
-                                            let isExpanding = abs(baseZoom - 1) >= 0.02
-                                            let tapRatio = min(max(value.location.y / max(cardSize.height, 1), 0), 1)
-                                            let targetAnchor = Int((tapRatio * 100).rounded())
-                                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                                                previewZoom = isExpanding ? 1 : fullHeightZoom
-                                        hasInitializedPreviewZoom = true
-                                    }
-                                    // Wait for the expanded canvas to get its new scroll range;
-                                    // resolving earlier makes every anchor collapse to the top.
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                                                scrollProxy.scrollTo(
-                                                    isExpanding ? "share-card-anchor-\(targetAnchor)" : "share-card-preview",
-                                                    anchor: isExpanding ? .center : .top
-                                                )
-                                        }
-                                    }
-                                        }
-                                )
-                            }
+                            zoomableCardPreview(
+                                editablePayload,
+                                availableSize: CGSize(width: availableWidth, height: availableHeight)
+                            )
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
+                    .overlay(alignment: .bottomTrailing) {
+                        photoShuffleButton
+                    }
                 }
                 .background(Color(uiColor: .secondarySystemBackground))
 
                 VStack(spacing: 12) {
                     titleEditorRow
+                    templatePicker
                     shareItemPicker
+                    if !editablePayload.usesTemplates {
 
-                    Picker("主题", selection: $selectedTheme) {
-                        ForEach(DFKShareCardTheme.allCases) { theme in
-                            Text(theme.title).tag(theme)
+                        Picker("主题", selection: $selectedTheme) {
+                            ForEach(DFKShareCardTheme.allCases) { theme in
+                                Text(theme.title).tag(theme)
+                            }
                         }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
 
                     Button {
                         renderAndShare()
@@ -415,6 +396,7 @@ struct DFKShareCardPreviewView: View {
             }
             .onChange(of: payload.version) { _, _ in
                 editablePayload = payload
+                photoPayloadByTemplate = [:]
                 timelineTitleWasEdited = false
                 requestAutomaticShareTitleIfNeeded()
             }
@@ -472,44 +454,326 @@ struct DFKShareCardPreviewView: View {
     }
 
     @ViewBuilder
-    private var shareItemPicker: some View {
-        if editablePayload.kind == .timeline,
-           !editablePayload.entries.isEmpty,
+    private var templatePicker: some View {
+        if editablePayload.usesTemplates,
            !editablePayload.isLoading {
-            List {
-                ForEach($editablePayload.entries) { $entry in
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(entry.title)
-                                .font(.system(size: 15, weight: .semibold))
-                                .lineLimit(1)
-                            Text(entry.time)
-                                .font(.system(size: 12, weight: .medium).monospacedDigit())
-                                .foregroundStyle(.secondary)
+                        ForEach(editablePayload.shareTemplates) { template in
+                            templateThumbnail(template)
+                                .id(template)
                         }
-                        Spacer()
-                        Toggle("", isOn: Binding(
-                            get: { entry.isIncluded },
-                                set: { isIncluded in
-                                    entry.isIncluded = isIncluded
-                                    refreshAutomaticTimelineTitleIfNeeded()
-                                    refreshSelectedMap()
-                            }
-                        ))
-                            .labelsHidden()
                     }
-                    .listRowInsets(.init(top: 8, leading: 12, bottom: 8, trailing: 12))
-                    .listRowBackground(Color.clear)
+                    .padding(.vertical, 2)
+                }
+                .onChange(of: editablePayload.template) { _, template in
+                    withAnimation { proxy.scrollTo(template, anchor: .center) }
                 }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .frame(maxHeight: 156)
         }
     }
 
+    private func templateThumbnail(_ template: DFKShareTemplate) -> some View {
+        let isSelected = editablePayload.template == template
+        let thumbnailWidth: CGFloat = 64
+        let thumbnailHeight = thumbnailWidth * 16 / 9
+        let preview = templatePayload(for: template)
+        return Button {
+            // Scroll the pager itself; its page then becomes the template.
+            withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                visibleTemplate = template
+            }
+        } label: {
+            VStack(spacing: 6) {
+                // Same view as the exported card, scaled down; tall templates
+                // show their top 9:16 portion.
+                DFKShareCardView(payload: preview, theme: selectedTheme, displayScale: thumbnailWidth / 1080)
+                    .frame(width: thumbnailWidth, height: thumbnailHeight, alignment: .top)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(isSelected ? Color.dfkAccent : Color.primary.opacity(0.12), lineWidth: isSelected ? 2 : 1)
+                    )
+                Text(template.title)
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Color.dfkAccent : Color.secondary)
+                    .lineLimit(1)
+            }
+            .padding(2)
+            // The whole thumbnail is the tap target, not just its title.
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(template.title)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private var hasShufflablePhotos: Bool {
+        switch editablePayload.template {
+        case .trip:
+            return editablePayload.tripPhotoShuffler != nil
+                && !(editablePayload.tripSummary?.placePhotos.isEmpty ?? true)
+        case .footprint:
+            return editablePayload.heroImages.count > 1
+        case .review:
+            return editablePayload.photoAssetPool.count > 1
+                || editablePayload.reviewMemories.contains { $0.photoAssetIDs.count > 1 }
+        }
+    }
+
+    /// Floats over the bottom corner of the card preview.
+    @ViewBuilder
+    private var photoShuffleButton: some View {
+        if editablePayload.usesTemplates,
+           hasShufflablePhotos,
+           !editablePayload.isLoading {
+            Button {
+                shufflePhotos()
+            } label: {
+                Group {
+                    if isShufflingPhotos {
+                        ProgressView()
+                    } else {
+                        // Photo with a shuffle badge: "new photos, at random".
+                        Image(systemName: "photo")
+                            .font(.system(size: 19, weight: .semibold))
+                            .overlay(alignment: .bottomTrailing) {
+                                Image(systemName: "shuffle")
+                                    .font(.system(size: 8, weight: .heavy))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 16, height: 16)
+                                    .background(Color.dfkAccent, in: Circle())
+                                    .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1.5))
+                                    .offset(x: 6, y: 5)
+                            }
+                    }
+                }
+                .frame(width: 28, height: 28)
+            }
+            .dfkCircleGlassButtonStyle()
+            .disabled(isShufflingPhotos)
+            .accessibilityLabel("更换照片")
+            .padding(16)
+        }
+    }
+
+    /// Draws a new set of photos for the current template only.
+    private func shufflePhotos() {
+        let template = editablePayload.template
+        let current = templatePayload(for: template)
+        isShufflingPhotos = true
+        Task { @MainActor in
+            var shuffled = current
+            switch template {
+            case .trip:
+                if let summary = current.tripSummary, let shuffler = current.tripPhotoShuffler {
+                    shuffled.tripSummary = await shuffler(summary)
+                }
+            case .footprint:
+                let order = Array(current.heroImages.indices).shuffled()
+                shuffled.heroImages = order.map { current.heroImages[$0] }
+                if current.heroImageAssetIDs.count == current.heroImages.count {
+                    shuffled.heroImageAssetIDs = order.map { current.heroImageAssetIDs[$0] }
+                }
+                shuffled.heroImage = shuffled.heroImages.first
+            case .review:
+                for index in shuffled.reviewMemories.indices {
+                    let assetIDs = shuffled.reviewMemories[index].photoAssetIDs
+                    guard assetIDs.count > 1 else { continue }
+                    let images = await DFKShareImageLoader.loadSampledImages(assetIDs: assetIDs).images
+                    guard let first = images.first else { continue }
+                    shuffled.reviewMemories[index].image = first
+                    shuffled.reviewMemories[index].extraImages = Array(images.dropFirst())
+                }
+                if current.photoAssetPool.count > 1 {
+                    let media = await DFKShareImageLoader.loadSampledImages(assetIDs: current.photoAssetPool, limit: 6)
+                    shuffled.heroImages = media.images
+                    shuffled.heroImageAssetIDs = media.imageAssetIDs
+                }
+                shuffled.heroImage = shuffled.heroImages.first ?? shuffled.reviewMemories.first?.image ?? shuffled.heroImage
+            }
+            photoPayloadByTemplate[template] = shuffled
+            isShufflingPhotos = false
+        }
+    }
+
+    /// The payload one template page shows and exports, with that
+    /// template's own reshuffled photos when it has them.
+    private func templatePayload(for template: DFKShareTemplate) -> DFKShareCardPayload {
+        var payload = editablePayload
+        payload.template = template
+        if let photos = photoPayloadByTemplate[template] {
+            payload.tripSummary = photos.tripSummary
+            payload.heroImage = photos.heroImage
+            payload.heroImages = photos.heroImages
+            payload.heroImageAssetIDs = photos.heroImageAssetIDs
+            payload.reviewMemories = photos.reviewMemories
+        }
+        return payload
+    }
+
+    /// The pinch / tap-to-zoom card preview. Zoom never exceeds fit-width,
+    /// so it stays compatible with the horizontal template pager.
+    private func zoomableCardPreview(_ payload: DFKShareCardPayload, availableSize: CGSize) -> some View {
+        let targetSize = DFKShareCardView.pixelSize(for: payload)
+        let previewScale = availableSize.width / targetSize.width
+        let fullHeightZoom = min(1, (availableSize.height / targetSize.height) / previewScale)
+        let baseZoom = hasInitializedPreviewZoom ? previewZoom : fullHeightZoom
+        let activeZoom = min(max(baseZoom * magnificationGesture, fullHeightZoom), 1)
+        let cardScale = previewScale * activeZoom
+        let cardSize = CGSize(
+            width: targetSize.width * cardScale,
+            height: targetSize.height * cardScale
+        )
+        // Trip templates are laid out proportionally, so they can be laid out
+        // at the fit-width size the zoom never exceeds. A 1080 pt canvas gives
+        // every text and shape layer a full-size bitmap per page, which drove
+        // the pager past the per-process memory limit.
+        let layoutScale = payload.usesTemplates ? previewScale : 1
+
+        return ScrollViewReader { scrollProxy in
+            ScrollView(.vertical) {
+                ZStack(alignment: .topLeading) {
+                    DFKShareCardView(payload: payload, theme: selectedTheme, displayScale: layoutScale)
+                        .frame(
+                            width: targetSize.width * layoutScale,
+                            height: targetSize.height * layoutScale,
+                            alignment: .topLeading
+                        )
+                        // Scale the finished canvas. Do not rerun the internal
+                        // layout while zooming, or photos/text reflow.
+                        .scaleEffect(cardScale / layoutScale, anchor: .topLeading)
+
+                    // ScrollViewReader needs concrete targets to focus the
+                    // expanded preview at the point the user tapped.
+                    VStack(spacing: 0) {
+                        ForEach(0 ... 100, id: \.self) { index in
+                            Color.clear
+                                .frame(height: cardSize.height / 101)
+                                .id("share-card-anchor-\(index)")
+                        }
+                    }
+                }
+                .frame(width: cardSize.width, height: cardSize.height, alignment: .topLeading)
+                .id("share-card-preview")
+                .shadow(color: .black.opacity(0.16), radius: 18, x: 0, y: 10)
+                .frame(maxWidth: .infinity, alignment: .top)
+            }
+            .scrollIndicators(.visible)
+            .simultaneousGesture(
+                MagnifyGesture()
+                    .updating($magnificationGesture) { value, state, _ in
+                        state = value.magnification
+                    }
+                    .onEnded { value in
+                        previewZoom = min(max(baseZoom * value.magnification, fullHeightZoom), 1)
+                        hasInitializedPreviewZoom = true
+                    }
+            )
+            .simultaneousGesture(
+                SpatialTapGesture()
+                    .onEnded { value in
+                        let isExpanding = abs(baseZoom - 1) >= 0.02
+                        let tapRatio = min(max(value.location.y / max(cardSize.height, 1), 0), 1)
+                        let targetAnchor = Int((tapRatio * 100).rounded())
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                            previewZoom = isExpanding ? 1 : fullHeightZoom
+                    hasInitializedPreviewZoom = true
+                }
+                // Wait for the expanded canvas to get its new scroll range;
+                // resolving earlier makes every anchor collapse to the top.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                            scrollProxy.scrollTo(
+                                isExpanding ? "share-card-anchor-\(targetAnchor)" : "share-card-preview",
+                                anchor: isExpanding ? .center : .top
+                            )
+                    }
+                }
+                    }
+            )
+        }
+    }
+
+    /// One real page per template: the horizontal scroll view follows the
+    /// finger and snaps page by page, like browsing photos.
+    private func templatePager(availableSize: CGSize) -> some View {
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 0) {
+                ForEach(editablePayload.shareTemplates) { template in
+                    templatePage(template, availableSize: availableSize)
+                        .containerRelativeFrame(.horizontal)
+                        .id(template)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollIndicators(.hidden)
+        .scrollPosition(id: $visibleTemplate)
+        .onAppear {
+            visibleTemplate = editablePayload.template
+        }
+        .onChange(of: visibleTemplate) { _, template in
+            guard let template, template != editablePayload.template else { return }
+            editablePayload.template = template
+        }
+    }
+
+    private func templatePage(_ template: DFKShareTemplate, availableSize: CGSize) -> some View {
+        zoomableCardPreview(templatePayload(for: template), availableSize: availableSize)
+    }
+
+    @ViewBuilder
+    private var shareItemPicker: some View {
+        // Trip templates are built from the trip itself, not this list.
+        if editablePayload.kind == .timeline,
+           !(editablePayload.isTripShare && editablePayload.usesTemplates),
+           !editablePayload.entries.isEmpty,
+           !editablePayload.isLoading {
+            shareEntryToggleList
+        }
+    }
+
+    private var shareEntryToggleList: some View {
+        List {
+            ForEach($editablePayload.entries) { $entry in
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.title)
+                            .font(.system(size: 15, weight: .semibold))
+                            .lineLimit(1)
+                        if let subtitle = (entry.time.isEmpty ? entry.dayDividerText : entry.time) {
+                            Text(subtitle)
+                                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { entry.isIncluded },
+                        set: { isIncluded in
+                            entry.isIncluded = isIncluded
+                            refreshAutomaticTimelineTitleIfNeeded()
+                            refreshSelectedMap()
+                        }
+                    ))
+                        .labelsHidden()
+                }
+                .listRowInsets(.init(top: 8, leading: 12, bottom: 8, trailing: 12))
+                .listRowBackground(Color.clear)
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .frame(maxHeight: 156)
+    }
+
     private func refreshAutomaticTimelineTitleIfNeeded() {
-        guard editablePayload.kind == .timeline, !timelineTitleWasEdited else { return }
+        guard editablePayload.kind == .timeline,
+              !editablePayload.isTripShare,
+              !timelineTitleWasEdited else { return }
         let includedCount = editablePayload.entries.filter(\.isIncluded).count
         let title = includedCount == 0 ? "这段时间还没有足迹" : "这段时间去了 \(includedCount) 个地方"
         guard editablePayload.title != title else { return }
@@ -699,9 +963,10 @@ struct DFKShareCardPreviewView: View {
         guard !editablePayload.isLoading else { return }
         isRendering = true
         renderedImageURL = nil
-        let targetSize = DFKShareCardView.pixelSize(for: editablePayload)
+        let exportPayload = templatePayload(for: editablePayload.template)
+        let targetSize = DFKShareCardView.pixelSize(for: exportPayload)
         let renderer = ImageRenderer(
-            content: DFKShareCardView(payload: editablePayload, theme: selectedTheme)
+            content: DFKShareCardView(payload: exportPayload, theme: selectedTheme)
                 .frame(width: targetSize.width, height: targetSize.height)
         )
         renderer.proposedSize = ProposedViewSize(targetSize)
@@ -721,7 +986,6 @@ struct DFKShareCardPreviewView: View {
                 UIRectFill(CGRect(origin: .zero, size: image.size))
                 image.draw(at: .zero)
             }
-            renderedImage = flattenedImage
             let temporaryURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("difangke-share-\(UUID().uuidString).jpg")
             if let jpegData = flattenedImage.jpegData(compressionQuality: 0.88) {
@@ -985,12 +1249,16 @@ struct DFKShareCardView: View {
     var onPayloadChange: ((DFKShareCardPayload) -> Void)? = nil
 
     static func pixelSize(for payload: DFKShareCardPayload) -> CGSize {
+        if payload.usesTemplates {
+            return payload.templatePixelSize
+        }
         let width: CGFloat = 1080
         let hasPhoto = payload.heroImages.first != nil || payload.heroImage != nil
         let locationExtraHeight: CGFloat = payload.locationText == nil ? 0 : 64
         if case .stats = payload.kind {
-            let rows = max(2, payload.placeRankings.count + payload.activityRankings.count)
-            return CGSize(width: width, height: max(2_060, 1_160 + CGFloat(rows) * 130) + locationExtraHeight)
+            let titleLineCount = max(1, Int(ceil(CGFloat(payload.title.count) / 10)))
+            let titleExtraHeight = CGFloat(titleLineCount - 1) * 120
+            return CGSize(width: width, height: 2_540 + titleExtraHeight + locationExtraHeight)
         }
         guard case .timeline = payload.kind else {
             return CGSize(width: width, height: (hasPhoto ? 1970 : 1440) + locationExtraHeight)
@@ -1080,12 +1348,42 @@ struct DFKShareCardView: View {
     }
 
     var body: some View {
+        if payload.usesTemplates {
+            switch payload.template {
+            case .trip(let template):
+                if let summary = payload.tripSummary {
+                    DFKTripShareTemplateView(
+                        template: template,
+                        summary: summary,
+                        title: payload.title,
+                        brandName: payload.brandName,
+                        brandSlogan: payload.brandSlogan,
+                        displayScale: displayScale,
+                        qrCode: qrCode
+                    )
+                }
+            case .footprint(let template):
+                DFKFootprintShareTemplateView(template: template, payload: payload, displayScale: displayScale, qrCode: qrCode)
+            case .review(let template):
+                DFKReviewShareTemplateView(template: template, payload: payload, displayScale: displayScale, qrCode: qrCode)
+            }
+        } else {
+            classicBody
+        }
+    }
+
+    @ViewBuilder
+    private var classicBody: some View {
         let canvasSize = Self.pixelSize(for: payload)
         let cardWidth = s(canvasSize.width)
         let cardHeight = s(canvasSize.height)
         let inset: CGFloat = s(68)
         let verticalGap: CGFloat = s(84)
         let qrSide: CGFloat = s(144)
+        let footerClearance: CGFloat = {
+            if case .stats = payload.kind { return s(300) }
+            return s(220)
+        }()
 
         ZStack {
             theme.background
@@ -1102,7 +1400,7 @@ struct DFKShareCardView: View {
             .padding(.top, inset)
             .padding(.horizontal, inset)
             // Keep share content above the footer and QR-code branding area.
-            .padding(.bottom, inset + s(220))
+            .padding(.bottom, inset + footerClearance)
             .frame(width: cardWidth, height: cardHeight, alignment: .topLeading)
             .clipped()
 
@@ -1213,29 +1511,280 @@ struct DFKShareCardView: View {
     }
 
     private var statsContent: some View {
-        VStack(alignment: .leading, spacing: s(30)) {
+        VStack(alignment: .leading, spacing: s(34)) {
             statsMapBlock
             statsSummaryRow
-            rankingSection(title: "最常去的地点", entries: payload.placeRankings, showsIcon: false)
-            rankingSection(title: "最喜欢的活动", entries: payload.activityRankings)
+            reviewMemorySnapshot
+
+            HStack(alignment: .top, spacing: s(24)) {
+                reviewActivitySnapshotCard
+                reviewRhythmSnapshotCard
+            }
+
+            HStack(alignment: .top, spacing: s(24)) {
+                reviewSnapshotRankingCard(
+                    title: "最常用交通",
+                    icon: "car.fill",
+                    entries: payload.transportRankings
+                )
+                reviewSnapshotRankingCard(
+                    title: "最常去的区域",
+                    icon: "map.fill",
+                    entries: payload.placeRankings
+                )
+            }
         }
     }
 
-    private var statsMapBlock: some View {
-        ZStack {
-            if let mapImage = themedContentMapImage {
-                Image(uiImage: mapImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                DFKShareMapFallbackView(coordinates: payload.coordinates, theme: theme)
+    @ViewBuilder
+    private var reviewMemorySnapshot: some View {
+        let memories = payload.reviewMemories.isEmpty
+            ? legacyReviewMemories
+            : Array(payload.reviewMemories.prefix(4))
+        if let first = memories.first {
+            VStack(alignment: .leading, spacing: s(16)) {
+                reviewMemoryCard(first, isLarge: true)
+                    .frame(height: s(280))
+
+                if memories.count > 1 {
+                    HStack(spacing: s(14)) {
+                        ForEach(Array(memories.dropFirst().prefix(3))) { memory in
+                            reviewMemoryCard(memory, isLarge: false)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: s(150))
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    private var legacyReviewMemories: [DFKShareReviewMemory] {
+        guard let title = payload.reviewMemoryTitle else { return [] }
+        return [DFKShareReviewMemory(
+            id: "legacy-review-memory",
+            reason: payload.reviewMemoryReason ?? "值得记住",
+            title: title,
+            detail: payload.reviewMemoryDetail ?? "",
+            image: payload.heroImage
+        )]
+    }
+
+    private func reviewMemoryCard(_ memory: DFKShareReviewMemory, isLarge: Bool) -> some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .bottomLeading) {
+                if let image = memory.image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                } else {
+                    LinearGradient(
+                        colors: [theme.accent.opacity(0.32), theme.card],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                }
+
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.78)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(width: proxy.size.width, height: proxy.size.height)
+
+                VStack(alignment: .leading, spacing: isLarge ? s(7) : s(3)) {
+                    Text(memory.reason)
+                        .font(.system(size: fs(isLarge ? 23 : 14), weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                        .lineLimit(1)
+                    Text(memory.title)
+                        .font(.system(size: fs(isLarge ? 42 : 21), weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    if isLarge, !memory.detail.isEmpty {
+                        Text(memory.detail)
+                            .font(.system(size: fs(23)))
+                            .foregroundStyle(.white.opacity(0.84))
+                            .lineLimit(1)
+                    }
+                }
+                .padding(isLarge ? s(26) : s(13))
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: s(isLarge ? 26 : 18)))
+        }
+    }
+
+    private func reviewSnapshotRankingCard(
+        title: String,
+        icon: String,
+        entries: [DFKShareRankingEntry]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: s(16)) {
+            Label(title, systemImage: icon)
+                .font(.system(size: fs(25), weight: .bold))
+                .foregroundStyle(theme.foreground)
+
+            ForEach(entries.prefix(3)) { entry in
+                HStack(spacing: s(10)) {
+                    Image(systemName: entry.icon)
+                        .font(.system(size: fs(20), weight: .semibold))
+                        .foregroundStyle(entry.color)
+                        .frame(width: s(26))
+                    VStack(alignment: .leading, spacing: s(2)) {
+                        Text(entry.title)
+                            .font(.system(size: fs(21), weight: .semibold))
+                            .foregroundStyle(theme.foreground)
+                            .lineLimit(1)
+                        if let detail = entry.detail {
+                            Text(detail)
+                                .font(.system(size: fs(16)))
+                                .foregroundStyle(theme.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: s(6))
+                    Text(entry.value)
+                        .font(.system(size: fs(18), weight: .semibold))
+                        .foregroundStyle(theme.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(s(24))
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: s(22)).fill(theme.card))
+    }
+
+    private var reviewActivitySnapshotCard: some View {
+        let entries = Array(payload.activityRankings.prefix(5))
+        return VStack(alignment: .leading, spacing: s(16)) {
+            Label("时间花在哪", systemImage: "clock.fill")
+                .font(.system(size: fs(25), weight: .bold))
+                .foregroundStyle(theme.foreground)
+
+            HStack(spacing: s(20)) {
+                Canvas { context, size in
+                    let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                    let radius = min(size.width, size.height) / 2 - s(8)
+                    var start = Angle.degrees(-90)
+                    let suppliedTotal = entries.reduce(0.0) { $0 + max(0, $1.fraction ?? 0) }
+                    let fallbackFraction = entries.isEmpty ? 0 : 1 / Double(entries.count)
+                    for entry in entries {
+                        let fraction = suppliedTotal > 0
+                            ? max(0, entry.fraction ?? 0) / suppliedTotal
+                            : fallbackFraction
+                        let sweep = Angle.degrees(360 * fraction)
+                        var path = Path()
+                        path.addArc(
+                            center: center,
+                            radius: radius,
+                            startAngle: start,
+                            endAngle: start + sweep,
+                            clockwise: false
+                        )
+                        context.stroke(
+                            path,
+                            with: .color(entry.color),
+                            style: StrokeStyle(lineWidth: s(16), lineCap: .butt)
+                        )
+                        start += sweep
+                    }
+                }
+                .frame(width: s(126), height: s(126))
+
+                VStack(alignment: .leading, spacing: s(12)) {
+                    ForEach(entries.prefix(3)) { entry in
+                        HStack(spacing: s(8)) {
+                            Circle()
+                                .fill(entry.color)
+                                .frame(width: s(10), height: s(10))
+                            Text(entry.title)
+                                .font(.system(size: fs(18), weight: .medium))
+                                .foregroundStyle(theme.foreground)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(s(24))
+        .frame(maxWidth: .infinity, minHeight: s(230), alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: s(22)).fill(theme.card))
+    }
+
+    private var reviewRhythmSnapshotCard: some View {
+        VStack(alignment: .leading, spacing: s(16)) {
+            Label("足迹节奏", systemImage: "waveform.path.ecg")
+                .font(.system(size: fs(25), weight: .bold))
+                .foregroundStyle(theme.foreground)
+
+            GeometryReader { proxy in
+                let values = payload.reviewRhythmValues
+                let maximum = max(1, values.max() ?? 1)
+                let spacing = s(3)
+                let spacingWidth = CGFloat(max(0, values.count - 1)) * spacing
+                let availableWidth = proxy.size.width - spacingWidth
+                let barCount = CGFloat(max(1, values.count))
+                let calculatedBarWidth = availableWidth / barCount
+                let minimumBarWidth = s(2)
+                let barWidth = max(minimumBarWidth, calculatedBarWidth)
+                HStack(alignment: .bottom, spacing: spacing) {
+                    ForEach(values.indices, id: \.self) { index in
+                        reviewRhythmSnapshotBar(
+                            value: values[index],
+                            maximum: maximum,
+                            width: barWidth,
+                            availableHeight: proxy.size.height
+                        )
+                    }
+                }
+                .frame(maxHeight: .infinity, alignment: .bottom)
+            }
+            .frame(height: s(126))
+        }
+        .padding(s(24))
+        .frame(maxWidth: .infinity, minHeight: s(230), alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: s(22)).fill(theme.card))
+    }
+
+    private func reviewRhythmSnapshotBar(
+        value: Int,
+        maximum: Int,
+        width: CGFloat,
+        availableHeight: CGFloat
+    ) -> some View {
+        let opacity = value == 0 ? 0.12 : 0.38
+        let color = value == maximum ? theme.accent : theme.accent.opacity(opacity)
+        let height = max(s(6), availableHeight * CGFloat(value) / CGFloat(maximum))
+        return Capsule()
+            .fill(color)
+            .frame(width: width, height: height)
+    }
+
+    private var statsMapBlock: some View {
+        GeometryReader { proxy in
+            ZStack {
+                if let mapImage = themedContentMapImage {
+                    Image(uiImage: mapImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                } else {
+                    DFKShareMapFallbackView(coordinates: payload.coordinates, theme: theme)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: s(26)))
         }
         .frame(maxWidth: .infinity)
         .frame(height: s(460))
-        .clipped()
-        .clipShape(RoundedRectangle(cornerRadius: s(26)))
     }
 
     private var statsSummaryRow: some View {
@@ -1258,49 +1807,6 @@ struct DFKShareCardView: View {
             }
         }
         .padding(.vertical, s(18))
-        .background(RoundedRectangle(cornerRadius: s(22)).fill(theme.card))
-    }
-
-    private func rankingSection(title: String, entries: [DFKShareRankingEntry], showsIcon: Bool = true) -> some View {
-        VStack(alignment: .leading, spacing: s(16)) {
-            Text(title)
-                .font(.system(size: fs(38), weight: .bold))
-                .foregroundStyle(theme.foreground)
-
-            ForEach(Array(entries.prefix(3).enumerated()), id: \.element.id) { index, entry in
-                HStack(spacing: s(18)) {
-                    Text("\(index + 1)")
-                        .font(.system(size: fs(30), weight: .bold))
-                        .foregroundStyle(theme.accent)
-                        .frame(width: s(34), alignment: .leading)
-                    if showsIcon {
-                        Image(systemName: entry.icon)
-                            .font(.system(size: fs(26), weight: .semibold))
-                            .foregroundStyle(entry.color)
-                            .frame(width: s(36))
-                    }
-                    VStack(alignment: .leading, spacing: s(4)) {
-                        Text(entry.title)
-                            .font(.system(size: fs(34), weight: .semibold))
-                            .foregroundStyle(theme.foreground)
-                            .lineLimit(1)
-                        if let detail = entry.detail, !detail.isEmpty {
-                            Text(detail)
-                                .font(.system(size: fs(22)))
-                                .foregroundStyle(theme.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    Spacer(minLength: s(12))
-                    Text(entry.value)
-                        .font(.system(size: fs(28), weight: .bold))
-                        .foregroundStyle(theme.accent)
-                }
-                .padding(.vertical, s(12))
-            }
-        }
-        .padding(s(26))
-        .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: s(22)).fill(theme.card))
     }
 
@@ -1822,9 +2328,10 @@ enum DFKShareCardFactory {
             tag: activity?.name,
             activityIcon: activity?.icon,
             activityColor: activity?.color,
-            coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+            coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude),
+            footprintIDs: [footprint.footprintID]
         )
-        return DFKShareCardPayload(
+        var payload = DFKShareCardPayload(
             kind: .moment,
             title: place,
             subtitle: "这一刻，被认真留了下来",
@@ -1839,6 +2346,8 @@ enum DFKShareCardFactory {
             entries: [entry],
             summary: nil
         )
+        payload.mapFootprints = [footprint]
+        return payload
     }
 
     static func timelinePayload(date: Date, items: [TimelineItem], activities: [ActivityType], images: [UIImage], mapImage: UIImage?, lightMapImage: UIImage? = nil, darkMapImage: UIImage? = nil) -> DFKShareCardPayload {
@@ -1888,32 +2397,40 @@ enum DFKShareCardFactory {
         return "\(dateText(start)) - \(dateText(end))"
     }
 
-    static func statsPayload(rangeText: String, footprints: [Footprint], transports: [TransportRecord], places: [Place], activities: [ActivityType]) -> DFKShareCardPayload {
-        let uniquePlaceKeys = Set(footprints.map { footprint in
-            footprint.placeID?.uuidString ?? displayPlace(for: footprint)
-        })
-        // Use persisted route mileage when it is complete. Older timeline data
-        // can have an incomplete TransportRecord, so the footprint-to-footprint
-        // trip distance is the fallback baseline for a period total.
-        let recordedMileage = transports.reduce(0) { $0 + max(0, $1.distance) }
-        let inferredMileage = footprintTransferDistance(footprints)
-        let totalMileage = max(recordedMileage, inferredMileage)
-
-        return DFKShareCardPayload(
+    static func statsPayload(
+        rangeText: String,
+        coordinates: [CLLocationCoordinate2D],
+        stats: [DFKShareStatEntry],
+        memoryReason: String?,
+        memoryTitle: String?,
+        memoryDetail: String?,
+        memoryImage: UIImage?,
+        memories: [DFKShareReviewMemory] = [],
+        activityRankings: [DFKShareRankingEntry],
+        rhythmValues: [Int],
+        rhythmStartText: String,
+        rhythmEndText: String,
+        transportRankings: [DFKShareRankingEntry],
+        regionRankings: [DFKShareRankingEntry]
+    ) -> DFKShareCardPayload {
+        DFKShareCardPayload(
             kind: .stats,
-            title: "我的生活总结",
-            subtitle: "每一次停留，都成为了生活的一部分",
+            title: "我的回顾",
+            subtitle: "这段时间的生活快照",
             rangeText: rangeText,
-            locationText: locationText(for: footprints),
-            backgroundMapImage: nil,
-            coordinates: footprints.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) },
-            stats: [
-                DFKShareStatEntry(label: "足迹", value: "\(footprints.count)", detail: "次记录"),
-                DFKShareStatEntry(label: "地点", value: "\(uniquePlaceKeys.count)", detail: "个生活节点"),
-                DFKShareStatEntry(label: "里程", value: mileageText(totalMileage), detail: nil)
-            ],
-            placeRankings: placeRankingEntries(footprints: footprints, places: places),
-            activityRankings: activityRankingEntries(footprints: footprints, activities: activities),
+            heroImage: memoryImage,
+            coordinates: coordinates,
+            stats: stats,
+            placeRankings: regionRankings,
+            activityRankings: activityRankings,
+            transportRankings: transportRankings,
+            reviewRhythmValues: rhythmValues,
+            reviewRhythmStartText: rhythmStartText,
+            reviewRhythmEndText: rhythmEndText,
+            reviewMemoryReason: memoryReason,
+            reviewMemoryTitle: memoryTitle,
+            reviewMemoryDetail: memoryDetail,
+            reviewMemories: memories,
             summary: nil
         )
     }
@@ -1953,121 +2470,6 @@ enum DFKShareCardFactory {
         return locations
             .map { "\($0.country)·\($0.cities.joined(separator: "、"))" }
             .joined(separator: " / ")
-    }
-
-    private static func placeRankingEntries(footprints: [Footprint], places: [Place]) -> [DFKShareRankingEntry] {
-        struct Aggregate {
-            var title: String
-            var countryName: String?
-            var count = 0
-            var duration: TimeInterval = 0
-        }
-
-        let hasMultipleCountries = Set(footprints.compactMap { footprint in
-            footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines)
-        }.filter { !$0.isEmpty }).count > 1
-        let cityKeys = Set(footprints.compactMap { footprint -> String? in
-            guard let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines), !city.isEmpty else { return nil }
-            return "\(footprint.countryCode ?? "")|\(city)"
-        })
-        let ranksPlaces = cityKeys.count <= 1
-
-        var groups: [String: Aggregate] = [:]
-        for footprint in footprints {
-            let title: String
-            let key: String
-            if ranksPlaces {
-                if let placeID = footprint.placeID,
-                   let place = places.first(where: { $0.placeID == placeID }),
-                   !place.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    title = place.name
-                    key = placeID.uuidString
-                } else {
-                    title = displayPlace(for: footprint)
-                    key = title
-                }
-                guard !title.isEmpty, title != "一个生活现场" else { continue }
-            } else {
-                guard let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !city.isEmpty else { continue }
-                title = city
-                key = "\(footprint.countryCode ?? "")|\(city)"
-            }
-            var aggregate = groups[key] ?? Aggregate(title: title, countryName: footprint.countryName)
-            if aggregate.countryName?.isEmpty != false {
-                aggregate.countryName = footprint.countryName
-            }
-            aggregate.count += 1
-            aggregate.duration += footprint.duration
-            groups[key] = aggregate
-        }
-
-        return groups.values
-            .sorted {
-                $0.count == $1.count ? $0.duration > $1.duration : $0.count > $1.count
-            }
-            .prefix(3)
-            .map { item in
-                DFKShareRankingEntry(
-                    title: hasMultipleCountries
-                        ? [item.countryName, item.title]
-                            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-                            .filter { !$0.isEmpty }
-                            .joined(separator: " ")
-                        : item.title,
-                    detail: nil,
-                    value: "\(item.count)个足迹",
-                    icon: "mappin.and.ellipse",
-                    color: .dfkAccent
-                )
-            }
-    }
-
-    private static func activityRankingEntries(footprints: [Footprint], activities: [ActivityType]) -> [DFKShareRankingEntry] {
-        var groups: [String: (activity: ActivityType?, count: Int)] = [:]
-        for footprint in footprints {
-            guard let activity = footprint.getActivityType(from: activities) else { continue }
-            let name = activity.name
-            // The share card's activity ranking is about life activities;
-            // transport has its own statistic and must not occupy a rank.
-            guard name != "交通" else { continue }
-            var aggregate = groups[name] ?? (activity, 0)
-            aggregate.count += 1
-            groups[name] = aggregate
-        }
-
-        return groups
-            .sorted { $0.value.count > $1.value.count }
-            .prefix(3)
-            .map { name, aggregate in
-                DFKShareRankingEntry(
-                    title: name,
-                    detail: nil,
-                    value: "\(aggregate.count)个足迹",
-                    icon: aggregate.activity?.icon ?? "figure.walk",
-                    color: aggregate.activity?.color ?? .dfkAccent
-                )
-            }
-    }
-
-    private static func durationText(_ duration: TimeInterval) -> String {
-        let hours = Int(duration / 3600)
-        return hours > 0 ? "\(hours)小时" : "\(max(1, Int(duration / 60)))分钟"
-    }
-
-    private static func mileageText(_ meters: Double) -> String {
-        meters >= 1_000 ? "\(Int((meters / 1_000).rounded()))公里" : "\(Int(meters.rounded()))米"
-    }
-
-    private static func footprintTransferDistance(_ footprints: [Footprint]) -> Double {
-        let ordered = footprints
-            .sorted { $0.startTime < $1.startTime }
-            .map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
-            .filter { CLLocationCoordinate2DIsValid($0.coordinate) && $0.coordinate.latitude != 0 && $0.coordinate.longitude != 0 }
-        guard ordered.count >= 2 else { return 0 }
-        return zip(ordered, ordered.dropFirst()).reduce(0) { partial, pair in
-            partial + pair.0.distance(from: pair.1)
-        }
     }
 
     private static func displayPlace(for footprint: Footprint) -> String {
@@ -2179,7 +2581,7 @@ enum DFKShareCardFactory {
         }
     }
 
-    private static func formattedDayDivider(for date: Date) -> String {
+    static func formattedDayDivider(for date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_Hans_CN")
         formatter.dateFormat = "M月d日 EEEE"
@@ -2247,12 +2649,15 @@ enum DFKShareCardFactory {
 
 struct DFKShareMedia {
     var images: [UIImage]
+    var imageAssetIDs: [String] = []
     var mapImage: UIImage?
     var lightMapImage: UIImage?
     var darkMapImage: UIImage?
     var backgroundMapImage: UIImage?
     var backgroundLightMapImage: UIImage?
     var backgroundDarkMapImage: UIImage?
+    var templateTallMapImage: UIImage?
+    var templateWideMapImage: UIImage?
 }
 
 private struct DFKShareMapSnapshotMarker {
@@ -2301,6 +2706,7 @@ enum DFKShareImageLoader {
         widgetDate: Date? = nil,
         activities: [ActivityType] = [],
         markerScale: CGFloat = 1,
+        photoTargetSize: CGSize = CGSize(width: 1200, height: 1200),
         completion: @escaping (DFKShareMedia) -> Void
     ) {
         let selectedAssetIDs = Array(NSOrderedSet(array: assetIDs).array.compactMap { $0 as? String }.shuffled().prefix(20))
@@ -2313,11 +2719,12 @@ enum DFKShareImageLoader {
         var backgroundMapImage: UIImage?
         var backgroundLightMapImage: UIImage?
         var backgroundDarkMapImage: UIImage?
+        var templateMapImages: (tall: UIImage?, wide: UIImage?) = (nil, nil)
 
         for assetID in selectedAssetIDs {
             group.enter()
             var didFinish = false
-            PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 1200, height: 1200)) { image, _, _, isDegraded in
+            PhotoService.shared.loadImage(for: assetID, targetSize: photoTargetSize) { image, _, _, isDegraded in
                 guard !isDegraded, !didFinish else { return }
                 didFinish = true
                 if let image {
@@ -2344,6 +2751,30 @@ enum DFKShareImageLoader {
             group.leave()
         }
 
+        if !footprints.isEmpty || !transports.isEmpty {
+            group.enter()
+            Task {
+                let tall = await WidgetDataSyncManager.shared.makeShareMapSnapshots(
+                    footprints: footprints,
+                    transports: transports,
+                    activities: activities,
+                    markerScale: markerScale * DFKShareTemplateStyle.portraitMapMarkerBoost,
+                    size: DFKShareTemplateStyle.tallMapSize
+                )
+                let wide = await WidgetDataSyncManager.shared.makeShareMapSnapshots(
+                    footprints: footprints,
+                    transports: transports,
+                    activities: activities,
+                    markerScale: markerScale * DFKShareTemplateStyle.portraitMapMarkerBoost,
+                    size: DFKShareTemplateStyle.wideMapSize
+                )
+                await MainActor.run {
+                    templateMapImages = (tall.light, wide.dark)
+                    group.leave()
+                }
+            }
+        }
+
         group.enter()
         loadBackgroundMapImages(coordinates: coordinates) { images in
             backgroundLightMapImage = images.light
@@ -2354,15 +2785,18 @@ enum DFKShareImageLoader {
 
         group.notify(queue: .main) {
             let imagesByID = Dictionary(uniqueKeysWithValues: loadedImages)
-            let orderedImages = selectedAssetIDs.compactMap { imagesByID[$0] }
+            let orderedAssetIDs = selectedAssetIDs.filter { imagesByID[$0] != nil }
             completion(DFKShareMedia(
-                images: orderedImages,
+                images: orderedAssetIDs.compactMap { imagesByID[$0] },
+                imageAssetIDs: orderedAssetIDs,
                 mapImage: mapImage,
                 lightMapImage: lightMapImage,
                 darkMapImage: darkMapImage,
                 backgroundMapImage: backgroundMapImage,
                 backgroundLightMapImage: backgroundLightMapImage,
-                backgroundDarkMapImage: backgroundDarkMapImage
+                backgroundDarkMapImage: backgroundDarkMapImage,
+                templateTallMapImage: templateMapImages.tall,
+                templateWideMapImage: templateMapImages.wide
             ))
         }
     }
@@ -2436,6 +2870,30 @@ enum DFKShareImageLoader {
         )
     }
 
+    static func loadReviewMapImages(
+        footprints: [Footprint],
+        transports: [TransportRecord],
+        activities: [ActivityType],
+        places: [Place],
+        size: CGSize = CGSize(width: 329, height: 119),
+        markerScale: CGFloat = 1.5,
+        completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
+    ) {
+        Task {
+            let images = await WidgetDataSyncManager.shared.makeShareMapSnapshots(
+                footprints: footprints,
+                transports: transports,
+                activities: activities,
+                markerScale: markerScale,
+                reviewPlaces: places,
+                size: size
+            )
+            await MainActor.run {
+                completion(images)
+            }
+        }
+    }
+
     static func loadSelectedTimelineMapImages(
         entries: [DFKShareEntry],
         completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
@@ -2501,6 +2959,27 @@ enum DFKShareImageLoader {
     static func loadHeroImage(assetIDs: [String], coordinates: [CLLocationCoordinate2D], completion: @escaping (UIImage?) -> Void) {
         loadShareMedia(assetIDs: assetIDs, coordinates: coordinates) { media in
             completion(media.images.first ?? media.mapImage)
+        }
+    }
+
+    /// Card-sized photos for small template slots; a full 1200 px load per
+    /// slot adds up quickly across a review's many photos.
+    static let sampledPhotoTargetSize = CGSize(width: 720, height: 720)
+
+    /// A few randomly chosen photos from `assetIDs`, loaded together.
+    static func loadSampledImages(assetIDs: [String], limit: Int = 3, completion: @escaping (DFKShareMedia) -> Void) {
+        let sampled = Array(NSOrderedSet(array: assetIDs).array.compactMap { $0 as? String }.shuffled().prefix(limit))
+        guard !sampled.isEmpty else {
+            completion(DFKShareMedia(images: []))
+            return
+        }
+        loadShareMedia(assetIDs: sampled, coordinates: [], photoTargetSize: sampledPhotoTargetSize, completion: completion)
+    }
+
+    @MainActor
+    static func loadSampledImages(assetIDs: [String], limit: Int = 3) async -> DFKShareMedia {
+        await withCheckedContinuation { continuation in
+            loadSampledImages(assetIDs: assetIDs, limit: limit) { continuation.resume(returning: $0) }
         }
     }
 

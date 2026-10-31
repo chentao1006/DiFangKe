@@ -926,10 +926,10 @@ private struct CurrentTrackingWatchContent: View {
                     }
                     if state.kind == .transport {
                         HStack(spacing: 6) {
-                            Label(formatCurrentDistance(state.distance), systemImage: "ruler")
+                            Text(formatCurrentDistance(state.distance))
                                 .lineLimit(1)
                             Spacer(minLength: 4)
-                            Label(formatCurrentSpeed(state.averageSpeed), systemImage: "speedometer")
+                            Text(formatCurrentSpeed(state.averageSpeed))
                                 .lineLimit(1)
                         }
                         .font(.headline)

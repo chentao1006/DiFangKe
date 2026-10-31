@@ -17,7 +17,7 @@ struct TripView: View {
     @State private var showingCreate = false
     @State private var showingCreatePurpose = false
     @State private var createPurpose: TripCreationPurpose?
-    @State private var createdTripToOpen: Trip?
+    @State private var createdTripToArrange: Trip?
     @State private var showingOptions = false
     @State private var showingIntroduction = false
     @State private var selectedTrip: Trip?
@@ -55,61 +55,71 @@ struct TripView: View {
             "\($0.id)|\($0.kindRaw)|\($0.stateRaw)|\($0.plannedStartDay.timeIntervalSinceReferenceDate)|\($0.plannedEndDay.timeIntervalSinceReferenceDate)"
         }.joined(separator: ";")
     }
+    private var tripGridColumns: [GridItem] {
+        Array(
+            repeating: GridItem(.flexible(), spacing: 14, alignment: .top),
+            count: UIDevice.current.userInterfaceIdiom == .pad ? 3 : 1
+        )
+    }
 
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 14, pinnedViews: [.sectionHeaders]) {
                 if let activeTrip {
-                    TripListCard(
-                        trip: activeTrip,
-                        homeCity: homeCities.first,
-                        activityStyle: activityStyle(for: activeTrip),
-                        allDays: tripDays,
-                        allCities: tripCities,
-                        allItems: tripItems,
-                        prominent: true,
-                        isSelecting: isSelecting,
-                        isSelected: selectedTripIDs.contains(activeTrip.id)
-                    ) {
-                        selectOrOpen(activeTrip)
-                    } onSelectionTap: {
-                        toggleSelection(activeTrip)
-                    }
-                    .padding(.horizontal)
-                    .contextMenu {
-                        tripContextMenu(for: activeTrip)
-                    }
-                    .background {
-                        GeometryReader { proxy in
-                            Color.clear.preference(
-                                key: ActiveTripBottomPreferenceKey.self,
-                                value: proxy.frame(in: .named("tripScroll")).maxY
-                            )
+                    LazyVGrid(columns: tripGridColumns, alignment: .leading, spacing: 14) {
+                        TripListCard(
+                            trip: activeTrip,
+                            homeCity: homeCities.first,
+                            activityStyle: activityStyle(for: activeTrip),
+                            allDays: tripDays,
+                            allCities: tripCities,
+                            allItems: tripItems,
+                            prominent: true,
+                            isSelecting: isSelecting,
+                            isSelected: selectedTripIDs.contains(activeTrip.id)
+                        ) {
+                            selectOrOpen(activeTrip)
+                        } onSelectionTap: {
+                            toggleSelection(activeTrip)
+                        }
+                        .contextMenu {
+                            tripContextMenu(for: activeTrip)
+                        }
+                        .background {
+                            GeometryReader { proxy in
+                                Color.clear.preference(
+                                    key: ActiveTripBottomPreferenceKey.self,
+                                    value: proxy.frame(in: .named("tripScroll")).maxY
+                                )
+                            }
                         }
                     }
+                    .padding(.horizontal)
                 }
 
                 if !plannedTrips.isEmpty {
                     Section {
-                        ForEach(plannedTrips) { trip in
-                            TripListCard(
-                                trip: trip,
-                                homeCity: homeCities.first,
-                                activityStyle: activityStyle(for: trip),
-                                allDays: tripDays,
-                                allCities: tripCities,
-                                allItems: tripItems,
-                                prominent: false,
-                                isSelecting: isSelecting,
-                                isSelected: selectedTripIDs.contains(trip.id)
-                            ) {
-                                selectOrOpen(trip)
-                            } onSelectionTap: {
-                                toggleSelection(trip)
+                        LazyVGrid(columns: tripGridColumns, alignment: .leading, spacing: 14) {
+                            ForEach(plannedTrips) { trip in
+                                TripListCard(
+                                    trip: trip,
+                                    homeCity: homeCities.first,
+                                    activityStyle: activityStyle(for: trip),
+                                    allDays: tripDays,
+                                    allCities: tripCities,
+                                    allItems: tripItems,
+                                    prominent: false,
+                                    isSelecting: isSelecting,
+                                    isSelected: selectedTripIDs.contains(trip.id)
+                                ) {
+                                    selectOrOpen(trip)
+                                } onSelectionTap: {
+                                    toggleSelection(trip)
+                                }
+                                .contextMenu { tripContextMenu(for: trip) }
                             }
-                            .padding(.horizontal)
-                            .contextMenu { tripContextMenu(for: trip) }
                         }
+                        .padding(.horizontal)
                     } header: {
                         Text("计划行程")
                             .font(.title2.bold())
@@ -124,27 +134,29 @@ struct TripView: View {
 
                 ForEach(yearSections) { section in
                     Section {
-                        ForEach(section.trips) { trip in
-                            TripListCard(
-                                trip: trip,
-                                homeCity: homeCities.first,
-                                activityStyle: activityStyle(for: trip),
-                                allDays: tripDays,
-                                allCities: tripCities,
-                                allItems: tripItems,
-                                prominent: false,
-                                isSelecting: isSelecting,
-                                isSelected: selectedTripIDs.contains(trip.id)
-                            ) {
-                                selectOrOpen(trip)
-                            } onSelectionTap: {
-                                toggleSelection(trip)
-                            }
-                            .padding(.horizontal)
-                            .contextMenu {
-                                tripContextMenu(for: trip)
+                        LazyVGrid(columns: tripGridColumns, alignment: .leading, spacing: 14) {
+                            ForEach(section.trips) { trip in
+                                TripListCard(
+                                    trip: trip,
+                                    homeCity: homeCities.first,
+                                    activityStyle: activityStyle(for: trip),
+                                    allDays: tripDays,
+                                    allCities: tripCities,
+                                    allItems: tripItems,
+                                    prominent: false,
+                                    isSelecting: isSelecting,
+                                    isSelected: selectedTripIDs.contains(trip.id)
+                                ) {
+                                    selectOrOpen(trip)
+                                } onSelectionTap: {
+                                    toggleSelection(trip)
+                                }
+                                .contextMenu {
+                                    tripContextMenu(for: trip)
+                                }
                             }
                         }
+                        .padding(.horizontal)
                     } header: {
                         Text(verbatim: "\(section.year)年")
                             .font(.title2.bold())
@@ -273,13 +285,13 @@ struct TripView: View {
         }
         .sheet(isPresented: $showingCreate, onDismiss: {
             createPurpose = nil
-            if let trip = createdTripToOpen {
-                createdTripToOpen = nil
-                selectedTrip = trip
+            if let trip = createdTripToArrange {
+                createdTripToArrange = nil
+                editorPresentation = TripEditorPresentation(trip: trip, mode: .itinerary)
             }
         }) {
             if createPurpose == .planned {
-                PlanTripCreateView { createdTripToOpen = $0 }
+                PlanTripCreateView { createdTripToArrange = $0 }
             } else {
                 CreateTripView(activityStyles: createActivityStyles, forcesHistorical: true)
             }
@@ -405,6 +417,7 @@ struct TripView: View {
         guard let value = trip.activityTypeValue else { return nil }
         return activityStyles.first { $0.id == value || $0.name == value }
     }
+
 
     private func activeTripDayText(_ trip: Trip) -> String {
         let start = Calendar.current.startOfDay(for: trip.actualStartedAt ?? trip.plannedStartDay)
@@ -1177,6 +1190,7 @@ private struct TripListCardHero: View {
     let cardColor: Color
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject private var photoService = PhotoService.shared
     @State private var mapImage: UIImage?
     @State private var photos: [UIImage] = []
     @State private var renderSize: CGSize = .zero
@@ -1235,62 +1249,21 @@ private struct TripListCardHero: View {
             }
             .onChange(of: proxy.size) { _, size in updateRenderSize(size) }
         }
-        .task(id: "\(signature)|\(colorScheme)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))") {
+        .task(id: "\(signature)|\(colorScheme)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))|photos:\(photoService.identifierResolutionRevision)") {
             guard renderSize.width > 1, renderSize.height > 1 else { return }
             let actualSnapshots: [TripActualItemSnapshot]
             if actualDayRequests.isEmpty { actualSnapshots = [] }
             else { actualSnapshots = await TripScanManager.shared.actualItems(for: actualDayRequests) }
-            let footprintIDs: [UUID]
-            let transportIDs: Set<UUID>
-            let itemStops: [TripMapStopCoordinate]
-            if actualDayRequests.isEmpty {
-                footprintIDs = items.compactMap(\.sourceFootprintID)
-                transportIDs = Set(items.compactMap(\.sourceTransportRecordID))
-                var stopNumber = 0
-                itemStops = items.compactMap { item in
-                    guard item.kindRaw == TripItemKind.stop.rawValue else { return nil }
-                    stopNumber += 1
-                    guard let latitude = item.latitude, let longitude = item.longitude else { return nil }
-                    return TripMapStopCoordinate(
-                        cityName: item.cityName,
-                        countryCode: item.countryCode,
-                        latitude: latitude,
-                        longitude: longitude,
-                        activityTypeValue: item.activityTypeValue,
-                        sequenceNumber: usesPlannedStopMarkers ? stopNumber : nil
-                    )
-                }
-            } else {
-                footprintIDs = actualSnapshots.compactMap(\.sourceFootprintID)
-                transportIDs = Set(actualSnapshots.compactMap(\.sourceTransportRecordID))
-                itemStops = actualSnapshots.compactMap { item in
-                    guard item.kind == .stop, let latitude = item.latitude, let longitude = item.longitude else { return nil }
-                    return TripMapStopCoordinate(cityName: item.cityName, countryCode: item.countryCode, latitude: latitude, longitude: longitude, activityTypeValue: item.activityTypeValue, sequenceNumber: nil)
-                }
-            }
-            let itemCoordinates = itemStops.compactMap { stop -> CLLocationCoordinate2D? in
-                let coordinate = CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)
-                guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
-                return coordinate
-            }
-            let nonHomeItemCoordinates = itemStops.compactMap { stop -> CLLocationCoordinate2D? in
-                let coordinate = CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)
-                guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
-                return tripCityMatchesHome(cityName: stop.cityName, countryCode: stop.countryCode, homeCity: homeCity) ? nil : coordinate
-            }
-            let nonHomeCityCoordinates = cities.compactMap { city -> CLLocationCoordinate2D? in
-                guard let latitude = city.latitude, let longitude = city.longitude else { return nil }
-                let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
-                guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
-                return tripCityMatchesHome(cityName: city.cityName, countryCode: city.countryCode, homeCity: homeCity) ? nil : coordinate
-            }
-            // Planned trips must show the actual itinerary extent. Historical
-            // cards retain their city-level framing and home-city filtering.
-            let stopCoordinates = usesPlannedStopMarkers
-                ? itemCoordinates
-                : (nonHomeCityCoordinates.isEmpty ? nonHomeItemCoordinates : nonHomeCityCoordinates)
-            async let routes = TripScanManager.shared.transportRoutes(for: transportIDs)
-            async let activityStyles = TripScanManager.shared.activityStyles()
+            let footprintIDs = actualDayRequests.isEmpty
+                ? items.compactMap(\.sourceFootprintID)
+                : actualSnapshots.compactMap(\.sourceFootprintID)
+            let mapContent = await loadTripCardMapContent(
+                items: items,
+                cities: cities,
+                homeCity: homeCity,
+                usesPlannedStopMarkers: usesPlannedStopMarkers,
+                actualSnapshots: actualDayRequests.isEmpty ? nil : actualSnapshots
+            )
             let loadedAssetIDs: [String]
             if actualDayRequests.isEmpty {
                 loadedAssetIDs = await TripScanManager.shared.tripCardPhotoAssetIDs(
@@ -1316,52 +1289,12 @@ private struct TripListCardHero: View {
             let displayableAssetIDs = PhotoService.shared.displayableAssetIDs(loadedAssetIDs)
             let sampledAssetIDs = sampledPhotoAssetIDs(from: displayableAssetIDs, limit: 5)
             async let loadedPhotos = TripListPhotoLoader.images(for: sampledAssetIDs)
-            let routeDictionary = await routes
-            let loadedStyles = await activityStyles
-            var styleByValue: [String: TripActivityStyle] = [:]
-            for style in loadedStyles {
-                styleByValue[style.id] = style
-                styleByValue[style.name] = style
-            }
-            let stopMarkers = itemStops.compactMap { stop -> TripCardMapStopMarker? in
-                let coordinate = CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)
-                guard coordinate.isRenderableMapCoordinate,
-                      usesPlannedStopMarkers || !tripCityMatchesHome(cityName: stop.cityName, countryCode: stop.countryCode, homeCity: homeCity) else { return nil }
-                let style = usesPlannedStopMarkers ? nil : stop.activityTypeValue.flatMap { styleByValue[$0] }
-                return TripCardMapStopMarker(
-                    coordinate: coordinate,
-                    icon: usesPlannedStopMarkers ? FootprintIconDefaults.map : (style?.icon ?? FootprintIconDefaults.card),
-                    tint: usesPlannedStopMarkers ? Color.dfkAccent : (Color(hex: style?.colorHex ?? "") ?? .gray),
-                    sequenceNumber: stop.sequenceNumber
-                )
-            }
-            let routeSegments = routeDictionary.flatMap { sourceID, points in
-                TripMapRouteSegment.make(sourceID: sourceID, points: points)
-            }
-            var transportTypeByID: [UUID: String] = [:]
-            if actualDayRequests.isEmpty {
-                for item in items {
-                    if let sourceID = item.sourceTransportRecordID { transportTypeByID[sourceID] = item.transportTypeRaw ?? "" }
-                }
-            } else {
-                for item in actualSnapshots {
-                    if let sourceID = item.sourceTransportRecordID { transportTypeByID[sourceID] = item.transportTypeRaw ?? "" }
-                }
-            }
-            let transportMarkers = routeDictionary.compactMap { sourceID, points -> TripCardMapTransportMarker? in
-                let coordinates = TripMapRouteSegment.make(sourceID: sourceID, points: points)
-                    .flatMap(\.coordinates)
-                    .filter(\.isRenderableMapCoordinate)
-                guard let midpoint = coordinates.distanceMidpoint else { return nil }
-                let icon = TransportType(rawValue: transportTypeByID[sourceID] ?? "")?.icon ?? "arrow.triangle.swap"
-                return TripCardMapTransportMarker(coordinate: midpoint, icon: icon)
-            }
             async let renderedMap = TripListCardMapRenderer.image(
                 signature: signature,
-                stopCoordinates: stopCoordinates,
-                stopMarkers: stopMarkers,
-                routeSegments: routeSegments,
-                transportMarkers: transportMarkers,
+                stopCoordinates: mapContent.stopCoordinates,
+                stopMarkers: mapContent.stopMarkers,
+                routeSegments: mapContent.routeSegments,
+                transportMarkers: mapContent.transportMarkers,
                 renderSize: renderSize,
                 colorScheme: colorScheme
             )
@@ -1415,16 +1348,155 @@ private struct TripMapStopCoordinate {
     let sequenceNumber: Int?
 }
 
-private struct TripCardMapStopMarker {
+struct TripCardMapStopMarker {
+    let itemID: UUID?
     let coordinate: CLLocationCoordinate2D
     let icon: String
     let tint: Color
     let sequenceNumber: Int?
+    let isHome: Bool
 }
 
-private struct TripCardMapTransportMarker {
+struct TripCardMapTransportMarker {
     let coordinate: CLLocationCoordinate2D
     let icon: String
+    let travelsWest: Bool
+}
+
+struct TripCardMapContent {
+    let stopCoordinates: [CLLocationCoordinate2D]
+    let stopMarkers: [TripCardMapStopMarker]
+    let routeSegments: [TripMapRouteSegment]
+    let transportMarkers: [TripCardMapTransportMarker]
+}
+
+/// Shared by the trip list card and trip share so both draw the same map.
+/// `actualSnapshots` is non-nil for historical trips, matching the list card.
+@MainActor
+private func loadTripCardMapContent(
+    items: [TripItem],
+    cities: [TripDayCity],
+    homeCity: HomeCity?,
+    usesPlannedStopMarkers: Bool,
+    actualSnapshots: [TripActualItemSnapshot]?
+) async -> TripCardMapContent {
+    let transportIDs: Set<UUID>
+    let itemStops: [TripMapStopCoordinate]
+    if let actualSnapshots {
+        transportIDs = Set(actualSnapshots.compactMap(\.sourceTransportRecordID))
+        itemStops = actualSnapshots.compactMap { item in
+            guard item.kind == .stop, let latitude = item.latitude, let longitude = item.longitude else { return nil }
+            return TripMapStopCoordinate(cityName: item.cityName, countryCode: item.countryCode, latitude: latitude, longitude: longitude, activityTypeValue: item.activityTypeValue, sequenceNumber: nil)
+        }
+    } else {
+        transportIDs = Set(items.compactMap(\.sourceTransportRecordID))
+        var stopNumber = 0
+        itemStops = items.compactMap { item in
+            guard item.kindRaw == TripItemKind.stop.rawValue else { return nil }
+            stopNumber += 1
+            guard let latitude = item.latitude, let longitude = item.longitude else { return nil }
+            return TripMapStopCoordinate(
+                cityName: item.cityName,
+                countryCode: item.countryCode,
+                latitude: latitude,
+                longitude: longitude,
+                activityTypeValue: item.activityTypeValue,
+                sequenceNumber: usesPlannedStopMarkers ? stopNumber : nil
+            )
+        }
+    }
+    let cityStops = cities.compactMap { city -> TripMapStopCoordinate? in
+        guard let latitude = city.latitude, let longitude = city.longitude else { return nil }
+        let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        guard coordinate.isRenderableMapCoordinate else { return nil }
+        return TripMapStopCoordinate(
+            cityName: city.cityName,
+            countryCode: city.countryCode,
+            latitude: latitude,
+            longitude: longitude,
+            activityTypeValue: nil,
+            sequenceNumber: nil
+        )
+    }
+    // Match the detail map: a newly created plan has city coordinates
+    // before it has arranged stops, so its list card must use those
+    // cities instead of falling through to the empty-map placeholder.
+    let displayedStops = usesPlannedStopMarkers && itemStops.isEmpty ? cityStops : itemStops
+    let itemCoordinates = displayedStops.compactMap { stop -> CLLocationCoordinate2D? in
+        let coordinate = CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)
+        guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+        return coordinate
+    }
+    let nonHomeItemCoordinates = displayedStops.compactMap { stop -> CLLocationCoordinate2D? in
+        let coordinate = CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)
+        guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+        return tripCityMatchesHome(cityName: stop.cityName, countryCode: stop.countryCode, homeCity: homeCity) ? nil : coordinate
+    }
+    let nonHomeCityCoordinates = cities.compactMap { city -> CLLocationCoordinate2D? in
+        guard let latitude = city.latitude, let longitude = city.longitude else { return nil }
+        let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+        return tripCityMatchesHome(cityName: city.cityName, countryCode: city.countryCode, homeCity: homeCity) ? nil : coordinate
+    }
+    // Planned trips must show the actual itinerary extent. Historical
+    // cards retain their city-level framing and home-city filtering.
+    let stopCoordinates = usesPlannedStopMarkers
+        ? itemCoordinates
+        : (nonHomeCityCoordinates.isEmpty ? nonHomeItemCoordinates : nonHomeCityCoordinates)
+    async let routes = TripScanManager.shared.transportRoutes(for: transportIDs)
+    async let activityStyles = TripScanManager.shared.activityStyles()
+    let routeDictionary = await routes
+    let loadedStyles = await activityStyles
+    var styleByValue: [String: TripActivityStyle] = [:]
+    for style in loadedStyles {
+        styleByValue[style.id] = style
+        styleByValue[style.name] = style
+    }
+    let stopMarkers = displayedStops.compactMap { stop -> TripCardMapStopMarker? in
+        let coordinate = CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)
+        guard coordinate.isRenderableMapCoordinate,
+              usesPlannedStopMarkers || !tripCityMatchesHome(cityName: stop.cityName, countryCode: stop.countryCode, homeCity: homeCity) else { return nil }
+        let style = usesPlannedStopMarkers ? nil : stop.activityTypeValue.flatMap { styleByValue[$0] }
+        return TripCardMapStopMarker(
+            itemID: nil,
+            coordinate: coordinate,
+            icon: usesPlannedStopMarkers ? FootprintIconDefaults.map : (style?.icon ?? FootprintIconDefaults.card),
+            tint: usesPlannedStopMarkers ? Color.dfkAccent : (Color(hex: style?.colorHex ?? "") ?? .gray),
+            sequenceNumber: stop.sequenceNumber,
+            isHome: tripCityMatchesHome(cityName: stop.cityName, countryCode: stop.countryCode, homeCity: homeCity)
+        )
+    }
+    let routeSegments = routeDictionary.flatMap { sourceID, points in
+        TripMapRouteSegment.make(sourceID: sourceID, points: points)
+    }
+    var transportTypeByID: [UUID: String] = [:]
+    if let actualSnapshots {
+        for item in actualSnapshots {
+            if let sourceID = item.sourceTransportRecordID { transportTypeByID[sourceID] = item.transportTypeRaw ?? "" }
+        }
+    } else {
+        for item in items {
+            if let sourceID = item.sourceTransportRecordID { transportTypeByID[sourceID] = item.transportTypeRaw ?? "" }
+        }
+    }
+    let transportMarkers = routeDictionary.compactMap { sourceID, points -> TripCardMapTransportMarker? in
+        let coordinates = TripMapRouteSegment.make(sourceID: sourceID, points: points)
+            .flatMap(\.coordinates)
+            .filter(\.isRenderableMapCoordinate)
+        guard let midpoint = coordinates.distanceMidpoint else { return nil }
+        let icon = TransportType(rawValue: transportTypeByID[sourceID] ?? "")?.icon ?? "arrow.triangle.swap"
+        return TripCardMapTransportMarker(
+            coordinate: midpoint,
+            icon: icon,
+            travelsWest: coordinates.travelsWest
+        )
+    }
+    return TripCardMapContent(
+        stopCoordinates: stopCoordinates,
+        stopMarkers: stopMarkers,
+        routeSegments: routeSegments,
+        transportMarkers: transportMarkers
+    )
 }
 
 private func tripCityMatchesHome(cityName: String?, countryCode: String?, homeCity: HomeCity?) -> Bool {
@@ -1529,8 +1601,10 @@ private enum TripListPhotoLoader {
         return result
     }
 
-    private static func image(for assetID: String, targetSize: CGSize) async -> UIImage? {
-        let cacheKey = "\(assetID)|\(Int(targetSize.width.rounded()))x\(Int(targetSize.height.rounded()))"
+    /// `allowsDegraded: false` waits for the full-quality image, as share
+    /// cards do; list cards take the first (possibly degraded) delivery.
+    static func image(for assetID: String, targetSize: CGSize, allowsDegraded: Bool = true) async -> UIImage? {
+        let cacheKey = "\(assetID)|\(Int(targetSize.width.rounded()))x\(Int(targetSize.height.rounded()))|\(allowsDegraded)"
         if let cached = imageCache.object(forKey: cacheKey as NSString) {
             return cached
         }
@@ -1542,7 +1616,7 @@ private enum TripListPhotoLoader {
                 contentMode: .aspectFit
             ) { image, exists, _, isDegraded in
                 guard !hasResumed else { return }
-                if let image {
+                if let image, allowsDegraded || !isDegraded {
                     let cost = (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0)
                     imageCache.setObject(image, forKey: cacheKey as NSString, cost: cost)
                     hasResumed = true
@@ -1556,7 +1630,7 @@ private enum TripListPhotoLoader {
     }
 }
 
-private enum TripListCardMapRenderer {
+enum TripListCardMapRenderer {
     @MainActor
     static func image(
         signature: String,
@@ -1565,9 +1639,10 @@ private enum TripListCardMapRenderer {
         routeSegments: [TripMapRouteSegment],
         transportMarkers: [TripCardMapTransportMarker],
         renderSize: CGSize,
-        colorScheme: ColorScheme
+        colorScheme: ColorScheme,
+        focusesContentLeft: Bool = true
     ) async -> UIImage? {
-        let key = "trip-record-map-style-wide-left-focus-marker-padding-v3|\(signature)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))|\(colorScheme)"
+        let key = "trip-record-map-style-v4|\(focusesContentLeft)|\(signature)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))|\(colorScheme)"
         if let cached = DFKMapSnapshotCache.shared.image(for: key) { return cached }
         let routeCoordinates = routeSegments.flatMap(\.coordinates)
         let cameraCoordinates = stopCoordinates.isEmpty ? routeCoordinates : stopCoordinates
@@ -1583,7 +1658,9 @@ private enum TripListCardMapRenderer {
         mapRect = mapRect.insetBy(dx: -mapRect.width * 0.26, dy: -mapRect.height * 0.32)
         // Photos occupy the right side of the card, so place the geographic
         // content in the unobscured left side of the rendered snapshot.
-        mapRect = mapRect.offsetBy(dx: mapRect.width * 0.14, dy: 0)
+        if focusesContentLeft {
+            mapRect = mapRect.offsetBy(dx: mapRect.width * 0.14, dy: 0)
+        }
         let options = MKMapSnapshotter.Options()
         options.mapRect = mapRect
         options.size = renderSize
@@ -1612,6 +1689,7 @@ private enum TripListCardMapRenderer {
         let renderedTransportMarkers = transportMarkers.compactMap { marker -> (CLLocationCoordinate2D, UIImage)? in
             let renderer = ImageRenderer(
                 content: TimelineTransportMarker(icon: marker.icon)
+                    .scaleEffect(x: marker.travelsWest ? -1 : 1, y: 1)
                     .padding(6)
                     .environment(\.colorScheme, colorScheme)
             )
@@ -1917,6 +1995,454 @@ private func tripAutomaticTitle(cityNames: [String], dayCount: Int) -> String {
     return "\(destinations)\(days)日行"
 }
 
+struct TripShareHistory {
+    var ordinal = 1
+    var newCityCount = 0
+}
+
+/// Trip order and first-visit cities, read from the trip store only.
+@MainActor
+private func tripShareHistory(
+    for trip: Trip,
+    cities: [TripDayCity],
+    homeCity: HomeCity?,
+    context: ModelContext
+) -> TripShareHistory {
+    let trips = (try? context.fetch(FetchDescriptor<Trip>())) ?? []
+    let ordered = trips.sorted {
+        $0.plannedStartDay == $1.plannedStartDay ? $0.createdAt < $1.createdAt : $0.plannedStartDay < $1.plannedStartDay
+    }
+    let ordinal = (ordered.firstIndex { $0.id == trip.id } ?? max(0, ordered.count - 1)) + 1
+    let earlierTripIDs = Set(ordered.prefix(ordinal - 1).map(\.id))
+    let earlierDayIDs = Set(((try? context.fetch(FetchDescriptor<TripDay>())) ?? [])
+        .filter { earlierTripIDs.contains($0.tripID) }
+        .map(\.id))
+    func key(_ city: TripDayCity) -> String {
+        city.cityIdentifier ?? "\(city.countryCode.uppercased())|\(city.cityName.lowercased())"
+    }
+    let visitedKeys = Set(((try? context.fetch(FetchDescriptor<TripDayCity>())) ?? [])
+        .filter { earlierDayIDs.contains($0.tripDayID) }
+        .map(key))
+    let newKeys = Set(cities
+        .filter { !tripCityMatchesHome(cityName: $0.cityName, countryCode: $0.countryCode, homeCity: homeCity) }
+        .map(key))
+        .subtracting(visitedKeys)
+    return TripShareHistory(ordinal: ordinal, newCityCount: newKeys.count)
+}
+
+@MainActor
+private func buildTripShareSummary(
+    trip: Trip,
+    days sortedDays: [TripDay],
+    cities: [TripDayCity],
+    items sortedItems: [TripItem],
+    homeCity: HomeCity?,
+    history: TripShareHistory
+) async -> DFKTripShareSummary {
+    func isTransport(_ item: TripItem) -> Bool { item.kindRaw == TripItemKind.transport.rawValue }
+    // Placeholder names from unresolved geocoding are not worth sharing.
+    func resolvedName(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let unresolvedValues: Set<String> = ["", "未知位置", "未知地点", "地点记录", "正在解析位置...", "此处"]
+        return unresolvedValues.contains(trimmed) ? nil : trimmed
+    }
+    func name(_ item: TripItem) -> String {
+        resolvedName(item.placeName) ?? resolvedName(item.cityName) ?? "行程地点"
+    }
+    func coordinate(_ item: TripItem) -> CLLocationCoordinate2D? {
+        guard let latitude = item.latitude, let longitude = item.longitude else { return nil }
+        let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        return coordinate.isRenderableMapCoordinate ? coordinate : nil
+    }
+    func isHome(_ item: TripItem) -> Bool {
+        tripCityMatchesHome(cityName: item.cityName, countryCode: item.countryCode, homeCity: homeCity)
+    }
+    func dayCalendar(_ day: TripDay) -> Calendar {
+        var calendar = Calendar.current
+        calendar.timeZone = TimeZone(identifier: day.timeZoneIdentifier) ?? .current
+        return calendar
+    }
+
+    var summary = DFKTripShareSummary(
+        startDate: sortedDays.first?.day ?? trip.plannedStartDay,
+        endDate: sortedDays.last?.day ?? trip.plannedEndDay,
+        dayCount: max(1, sortedDays.count),
+        homeCityName: homeCity?.cityName
+    )
+    summary.tripOrdinal = history.ordinal
+    summary.newCityCount = history.newCityCount
+
+    // Cities in visiting order, with the number of days each appears.
+    let citiesByDayID = Dictionary(grouping: cities, by: \.tripDayID)
+    var cityIndexByKey: [String: Int] = [:]
+    for day in sortedDays {
+        for city in (citiesByDayID[day.id] ?? []).sorted(by: { $0.orderIndex < $1.orderIndex }) {
+            // Same city may carry different identifiers across days; group
+            // by what the card shows so a city is never listed twice.
+            let key = "\(city.countryCode.uppercased())|\(city.cityName.lowercased())"
+            if let index = cityIndexByKey[key] {
+                summary.cities[index].dayCount += 1
+            } else {
+                cityIndexByKey[key] = summary.cities.count
+                summary.cities.append(DFKTripShareSummary.City(
+                    name: city.cityName,
+                    latinName: DFKTripShareSummary.latinName(for: city.cityName),
+                    countryCode: city.countryCode,
+                    countryName: city.countryName,
+                    firstDay: day.day,
+                    dayCount: 1,
+                    isHome: tripCityMatchesHome(cityName: city.cityName, countryCode: city.countryCode, homeCity: homeCity)
+                ))
+            }
+        }
+    }
+
+    // Transport legs: distance comes from the recorded route geometry.
+    let transportItems = sortedItems.filter(isTransport)
+    let routeDictionary = await TripScanManager.shared.transportRoutes(
+        for: Set(transportItems.compactMap(\.sourceTransportRecordID))
+    )
+    var legByItemID: [UUID: DFKTripShareSummary.Leg] = [:]
+    for item in transportItems {
+        let type = item.transportTypeRaw.flatMap(TransportType.init(rawValue:))
+        let segments = item.sourceTransportRecordID
+            .flatMap { sourceID in routeDictionary[sourceID].map { TripMapRouteSegment.make(sourceID: sourceID, points: $0) } } ?? []
+        var distance: Double = 0
+        for segment in segments {
+            let renderable = segment.coordinates.filter(\.isRenderableMapCoordinate)
+            for index in renderable.indices.dropFirst() {
+                distance += CLLocation(latitude: renderable[index - 1].latitude, longitude: renderable[index - 1].longitude)
+                    .distance(from: CLLocation(latitude: renderable[index].latitude, longitude: renderable[index].longitude))
+            }
+        }
+        let duration: TimeInterval? = {
+            guard let start = item.startTime, let end = item.endTime, end > start else { return nil }
+            return end.timeIntervalSince(start)
+        }()
+        let leg = DFKTripShareSummary.Leg(
+            type: type,
+            distanceMeters: distance,
+            duration: duration,
+            startName: resolvedName(item.startLocationName),
+            endName: resolvedName(item.endLocationName),
+            startTime: item.startTime
+        )
+        legByItemID[item.id] = leg
+        summary.legs.append(leg)
+        summary.totalDistanceMeters += distance
+        if type?.category == 1 { summary.walkingDistanceMeters += distance }
+    }
+
+    // Stops, camera and photos.
+    let placeItems = sortedItems.filter { !isTransport($0) }
+    summary.stopCount = placeItems.count
+    summary.firstPlaceName = placeItems.first.map(name)
+    summary.lastPlaceName = placeItems.last.map(name)
+    let stopCoordinates = placeItems.compactMap(coordinate)
+    let awayStopCoordinates = placeItems.filter { !isHome($0) }.compactMap(coordinate)
+    let awayCityCoordinates = cities.compactMap { city -> CLLocationCoordinate2D? in
+        guard let latitude = city.latitude, let longitude = city.longitude,
+              !tripCityMatchesHome(cityName: city.cityName, countryCode: city.countryCode, homeCity: homeCity) else { return nil }
+        let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        return coordinate.isRenderableMapCoordinate ? coordinate : nil
+    }
+    let cameraCoordinates = !awayStopCoordinates.isEmpty
+        ? awayStopCoordinates
+        : (awayCityCoordinates.isEmpty ? stopCoordinates : awayCityCoordinates)
+
+    // Route map: the trip page's card map, framed away from the home city.
+    let actualDayRequests = trip.kind == .historical
+        ? sortedDays.map { TripActualDayRequest(id: $0.id, day: $0.day, timeZoneIdentifier: $0.timeZoneIdentifier) }
+        : []
+    let actualSnapshots = actualDayRequests.isEmpty
+        ? nil
+        : await TripScanManager.shared.actualItems(for: actualDayRequests)
+    let mapContent = await loadTripCardMapContent(
+        items: sortedItems,
+        cities: cities,
+        homeCity: homeCity,
+        usesPlannedStopMarkers: trip.kind == .planned,
+        actualSnapshots: actualSnapshots
+    )
+    summary.routeMapImage = await TripListCardMapRenderer.image(
+        signature: "trip-share|\(trip.id)|\(sortedItems.map(\.id.uuidString).joined(separator: ","))|\(cities.map(\.id.uuidString).joined(separator: ","))",
+        stopCoordinates: cameraCoordinates.isEmpty ? mapContent.stopCoordinates : cameraCoordinates,
+        stopMarkers: mapContent.stopMarkers,
+        routeSegments: mapContent.routeSegments,
+        transportMarkers: mapContent.transportMarkers,
+        // Markers are drawn at a fixed point size. Render at half the card's
+        // 936×1140 map area; the snapshot's 2× scale restores full pixels, so
+        // pins and labels keep the same proportion as on the trip list card.
+        renderSize: CGSize(width: 468, height: 570),
+        colorScheme: .dark,
+        focusesContentLeft: false
+    )
+
+    var assetIDsByItemID: [UUID: [String]] = [:]
+    var seenAssetIDs = Set<String>()
+    for item in placeItems {
+        var assetIDs = item.actualPhotoAssetIDs
+        if assetIDs.isEmpty, let footprintID = item.sourceFootprintID {
+            assetIDs = await TripScanManager.shared.tripCardPhotoAssetIDs(
+                for: [footprintID],
+                perFootprintLimit: .max,
+                totalLimit: .max
+            )
+        }
+        assetIDs = PhotoService.shared.displayableAssetIDs(assetIDs)
+        assetIDsByItemID[item.id] = assetIDs
+        seenAssetIDs.formUnion(assetIDs)
+    }
+    summary.photoCount = seenAssetIDs.count
+    let dayIndexByID = Dictionary(uniqueKeysWithValues: sortedDays.enumerated().map { ($0.element.id, $0.offset) })
+    summary.placePhotos = placeItems.compactMap { item in
+        guard let assetIDs = assetIDsByItemID[item.id], !assetIDs.isEmpty,
+              let dayIndex = dayIndexByID[item.tripDayID] else { return nil }
+        return DFKTripShareSummary.PlacePhotos(
+            caption: name(item),
+            assetIDs: assetIDs,
+            dayIndex: dayIndex,
+            isPinCandidate: coordinate(item) != nil && !isHome(item)
+        )
+    }
+    summary.defaultCoverAssetID = trip.coverPhotoIdentifier.flatMap { seenAssetIDs.contains($0) ? $0 : nil }
+        ?? placeItems
+            .filter { !(assetIDsByItemID[$0.id] ?? []).isEmpty }
+            .max { lhs, rhs in
+                let left = (lhs.endTime ?? .distantPast).timeIntervalSince(lhs.startTime ?? .distantPast)
+                let right = (rhs.endTime ?? .distantPast).timeIntervalSince(rhs.startTime ?? .distantPast)
+                return left < right
+            }
+            .flatMap { assetIDsByItemID[$0.id]?.first }
+
+    // Per-day film frames and hourly movement for the ticket barcode.
+    let timedLegs = sortedItems.compactMap { item -> (leg: DFKTripShareSummary.Leg, start: Date, end: Date)? in
+        guard let leg = legByItemID[item.id], let start = item.startTime, let end = item.endTime, end > start else { return nil }
+        return (leg, start, end)
+    }
+    for day in sortedDays {
+        let dayStart = dayCalendar(day).startOfDay(for: day.day)
+        let dayItems = sortedItems.filter { $0.tripDayID == day.id }
+        let dayPlaces = dayItems.filter { !isTransport($0) }
+
+        let longestDayLeg = dayItems.compactMap { legByItemID[$0.id] }.max { $0.distanceMeters < $1.distanceMeters }
+        let transportSummary = longestDayLeg.flatMap { leg -> String? in
+            guard let type = leg.type else { return nil }
+            return leg.distanceMeters > 0
+                ? "\(type.localizedName) \(DFKTripShareSummary.distanceText(leg.distanceMeters))"
+                : type.localizedName
+        }
+        // The home city is where the trip starts and ends, not a day's destination.
+        let dayCities = (citiesByDayID[day.id] ?? []).sorted(by: { $0.orderIndex < $1.orderIndex })
+        let awayDayCities = dayCities.filter {
+            !tripCityMatchesHome(cityName: $0.cityName, countryCode: $0.countryCode, homeCity: homeCity)
+        }
+        var dayCityNames: [String] = []
+        for city in (awayDayCities.isEmpty ? dayCities : awayDayCities)
+        where dayCityNames.last != city.cityName {
+            dayCityNames.append(city.cityName)
+        }
+        let arrivalTime = dayPlaces.first { $0.cityName == dayCityNames.last }?.startTime
+            ?? dayPlaces.first?.startTime
+        summary.days.append(DFKTripShareSummary.Day(
+            date: day.day,
+            cityNames: dayCityNames,
+            placeNames: dayPlaces.map(name),
+            transportSummary: transportSummary,
+            arrivalTime: arrivalTime,
+            photos: [],
+            photoCaptions: []
+        ))
+
+        for hour in 0..<24 {
+            let hourStart = dayStart.addingTimeInterval(TimeInterval(hour) * 3_600)
+            let hourEnd = hourStart.addingTimeInterval(3_600)
+            let movedMeters = timedLegs.reduce(0.0) { total, timed in
+                let overlap = min(hourEnd, timed.end).timeIntervalSince(max(hourStart, timed.start))
+                guard overlap > 0 else { return total }
+                return total + timed.leg.distanceMeters * overlap / timed.end.timeIntervalSince(timed.start)
+            }
+            summary.hourlyDistances.append(movedMeters)
+        }
+    }
+    return await loadTripSharePhotos(summary, shuffled: false)
+}
+
+/// Fills every photo slot of the share cards from `placePhotos`. The first
+/// load follows the itinerary; `shuffled` draws a fresh random set.
+@MainActor
+private func loadTripSharePhotos(_ input: DFKTripShareSummary, shuffled: Bool) async -> DFKTripShareSummary {
+    var summary = input
+    let tileSize = CGSize(width: 480, height: 480)
+    func pick(_ assetIDs: [String]) -> String? { shuffled ? assetIDs.randomElement() : assetIDs.first }
+    // Indices to use, kept in itinerary order: random or evenly spread.
+    func chosenIndices(_ count: Int, from total: Int) -> [Int] {
+        guard total > 0 else { return [] }
+        if shuffled { return Array(Array(0..<total).shuffled().prefix(count)).sorted() }
+        let step = max(1, Int(ceil(Double(total) / Double(count))))
+        return Array(stride(from: 0, to: total, by: step).prefix(count))
+    }
+    func load(_ assetID: String, size: CGSize) async -> UIImage? {
+        await TripListPhotoLoader.image(for: assetID, targetSize: size, allowsDegraded: false)
+    }
+
+    var seen = Set<String>()
+    let allAssetIDs = summary.placePhotos.flatMap(\.assetIDs).filter { seen.insert($0).inserted }
+
+    let coverAssetID = shuffled ? allAssetIDs.randomElement() : summary.defaultCoverAssetID
+    summary.coverImage = nil
+    if let coverAssetID {
+        summary.coverImage = await load(coverAssetID, size: CGSize(width: 1080, height: 1920))
+    }
+
+    summary.photoPins = []
+    let pinCandidates = summary.placePhotos.filter(\.isPinCandidate)
+    for index in chosenIndices(4, from: pinCandidates.count) {
+        let place = pinCandidates[index]
+        guard let assetID = pick(place.assetIDs), let image = await load(assetID, size: tileSize) else { continue }
+        summary.photoPins.append(DFKTripShareSummary.PhotoPin(image: image, caption: place.caption))
+    }
+
+    summary.galleryImages = []
+    let galleryCandidates = allAssetIDs.filter { $0 != coverAssetID }
+    for index in chosenIndices(6, from: galleryCandidates.count) {
+        if let image = await load(galleryCandidates[index], size: tileSize) {
+            summary.galleryImages.append(image)
+        }
+    }
+
+    for dayIndex in summary.days.indices {
+        let places = summary.placePhotos.filter { $0.dayIndex == dayIndex }
+        let orderedPlaces = shuffled ? places.shuffled() : places
+        // One photo per place first, then the rest, so frames vary.
+        let primary = orderedPlaces.compactMap { place in pick(place.assetIDs).map { ($0, place.caption) } }
+        let primaryIDs = Set(primary.map(\.0))
+        let rest = orderedPlaces.flatMap { place in
+            place.assetIDs.filter { !primaryIDs.contains($0) }.map { ($0, place.caption) }
+        }
+        var photos: [UIImage] = []
+        var captions: [String] = []
+        for (assetID, caption) in primary + (shuffled ? rest.shuffled() : rest) {
+            guard photos.count < 3 else { break }
+            if let image = await load(assetID, size: tileSize) {
+                photos.append(image)
+                captions.append(caption)
+            }
+        }
+        summary.days[dayIndex].photos = photos
+        summary.days[dayIndex].photoCaptions = captions
+    }
+    return summary
+}
+
+@MainActor
+private func presentTripShare(
+    trip: Trip,
+    days: [TripDay],
+    cities: [TripDayCity],
+    items: [TripItem],
+    homeCity: HomeCity?,
+    activityStyles: [TripActivityStyle],
+    history: TripShareHistory,
+    payload: Binding<DFKShareCardPayload?>
+) {
+    let sortedDays = days.sorted {
+        $0.day == $1.day ? $0.orderIndex < $1.orderIndex : $0.day < $1.day
+    }
+    let dayByID = Dictionary(uniqueKeysWithValues: sortedDays.map { ($0.id, $0) })
+    let dayIndexByID = Dictionary(uniqueKeysWithValues: sortedDays.enumerated().map { ($0.element.id, $0.offset) })
+    let sortedItems = items.sorted {
+        let leftDay = dayIndexByID[$0.tripDayID] ?? .max
+        let rightDay = dayIndexByID[$1.tripDayID] ?? .max
+        if leftDay != rightDay { return leftDay < rightDay }
+        let leftTime = $0.startTime ?? .distantPast
+        let rightTime = $1.startTime ?? .distantPast
+        return leftTime == rightTime ? $0.orderIndex < $1.orderIndex : leftTime < rightTime
+    }
+    let itemCoordinates = sortedItems.compactMap { item -> CLLocationCoordinate2D? in
+        guard let latitude = item.latitude, let longitude = item.longitude else { return nil }
+        let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        return latitude.isFinite && longitude.isFinite && CLLocationCoordinate2DIsValid(coordinate) ? coordinate : nil
+    }
+    let cityCoordinates = cities.compactMap { city -> CLLocationCoordinate2D? in
+        guard let latitude = city.latitude, let longitude = city.longitude else { return nil }
+        let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        return latitude.isFinite && longitude.isFinite && CLLocationCoordinate2DIsValid(coordinate) ? coordinate : nil
+    }
+    let coordinates = itemCoordinates.isEmpty ? cityCoordinates : itemCoordinates
+    let rangeText = DFKShareCardFactory.rangeText(from: trip.plannedStartDay, to: trip.plannedEndDay)
+    let loadingPayload = DFKShareCardFactory.loadingPayload(
+        kind: .timeline,
+        rangeText: rangeText,
+        coordinates: coordinates
+    )
+    payload.wrappedValue = loadingPayload
+
+    let placeItems = sortedItems.filter { $0.kindRaw != TripItemKind.transport.rawValue }
+    var seenPlaceDayIDs = Set<UUID>()
+    // Entries feed the AI share title with the trip's places, in the same
+    // shape as footprint share entries.
+    let placeEntries = placeItems.map { item -> DFKShareEntry in
+        let activityStyle = item.activityTypeValue.flatMap { value in
+            activityStyles.first { $0.id == value || $0.name == value }
+        }
+        let dayDividerText: String? = seenPlaceDayIDs.insert(item.tripDayID).inserted
+            ? dayByID[item.tripDayID].map { DFKShareCardFactory.formattedDayDivider(for: $0.day) }
+            : nil
+        return DFKShareEntry(
+            time: item.startTime?.formatted(date: .omitted, time: .shortened) ?? "",
+            title: item.placeName?.nilIfEmpty ?? item.cityName?.nilIfEmpty ?? "行程地点",
+            detail: item.notes.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                ?? item.address?.nilIfEmpty,
+            tag: activityStyle?.name,
+            activityIcon: activityStyle?.icon,
+            activityColor: activityStyle.flatMap { Color(hex: $0.colorHex) },
+            dayDividerText: dayDividerText
+        )
+    }
+    let citiesByDayID = Dictionary(grouping: cities, by: \.tripDayID)
+    let cityEntries = sortedDays.flatMap { day -> [DFKShareEntry] in
+        (citiesByDayID[day.id] ?? []).sorted { $0.orderIndex < $1.orderIndex }.enumerated().map { index, city in
+            DFKShareEntry(
+                time: "",
+                title: city.cityName,
+                detail: city.countryName.nilIfEmpty,
+                dayDividerText: index == 0 ? DFKShareCardFactory.formattedDayDivider(for: day.day) : nil
+            )
+        }
+    }
+    let locationNames = (sortedItems.compactMap { $0.cityName } + cities.map(\.cityName))
+        .compactMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty }
+    var seenLocations = Set<String>()
+    let locationText = locationNames.filter { seenLocations.insert($0.lowercased()).inserted }.joined(separator: " · ").nilIfEmpty
+    var sharePayload = DFKShareCardPayload(
+        id: loadingPayload.id,
+        kind: .timeline,
+        title: trip.title,
+        subtitle: "我的行程",
+        rangeText: rangeText,
+        locationText: locationText,
+        coordinates: coordinates,
+        isTripShare: true,
+        entries: placeEntries.isEmpty ? cityEntries : placeEntries
+    )
+    Task { @MainActor in
+        let summary = await buildTripShareSummary(
+            trip: trip,
+            days: sortedDays,
+            cities: cities,
+            items: sortedItems,
+            homeCity: homeCity,
+            history: history
+        )
+        guard payload.wrappedValue?.id == loadingPayload.id else { return }
+        sharePayload.tripSummary = summary
+        sharePayload.tripPhotoShuffler = { await loadTripSharePhotos($0, shuffled: true) }
+        sharePayload.version = UUID()
+        payload.wrappedValue = sharePayload
+    }
+}
+
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }
@@ -2153,10 +2679,11 @@ private struct TripIntroductionView: View {
         NavigationStack {
             Form {
                 Section {
-                    Label("把去过的城市和沿途记录整理成行程。", systemImage: "map.fill")
-                    Text("以后可以按旅程查看地图、足迹和照片。")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                } header: { Text("你的旅程，一目了然") }
+                    TripIntroductionHeroView()
+                }
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+
                 Section("设置常居地") {
                     Button { showingCitySearch = true } label: {
                         HStack {
@@ -2176,16 +2703,24 @@ private struct TripIntroductionView: View {
             .navigationTitle("设置出行")
             .navigationBarTitleDisplayMode(.inline)
             .safeAreaInset(edge: .bottom) {
-                Button {
-                    finishIntroduction()
-                } label: {
-                    Text("完成设置")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 50)
+                VStack(spacing: 8) {
+                    Button {
+                        finishIntroduction()
+                    } label: {
+                        Text("完成设置")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 50)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selectedCity == nil)
+
+                    Button("跳过") {
+                        skipIntroduction()
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(minHeight: 36)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(selectedCity == nil)
                 .padding(.horizontal)
                 .padding(.vertical, 10)
                 .background(.bar)
@@ -2214,6 +2749,115 @@ private struct TripIntroductionView: View {
         UserDefaults.standard.set(true, forKey: "tripIntroductionCompleted")
         dismiss()
         onFinished()
+    }
+
+    private func skipIntroduction() {
+        UserDefaults.standard.set(true, forKey: "tripIntroductionCompleted")
+        dismiss()
+    }
+}
+
+private struct TripIntroductionHeroView: View {
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.regularMaterial)
+
+            ZStack {
+                TripIntroductionBackgroundIcon(
+                    "airplane",
+                    color: .blue,
+                    size: 38,
+                    rotation: -18
+                )
+                .offset(x: 118, y: -54)
+
+                TripIntroductionBackgroundIcon(
+                    "car.side.fill",
+                    color: .orange,
+                    size: 28,
+                    rotation: 8
+                )
+                .offset(x: -132, y: 54)
+
+                TripIntroductionBackgroundIcon(
+                    "tram.fill",
+                    color: .purple,
+                    size: 24,
+                    rotation: -7
+                )
+                .offset(x: 142, y: 57)
+
+                TripIntroductionBackgroundIcon(
+                    "bicycle",
+                    color: .green,
+                    size: 32,
+                    rotation: 13
+                )
+                .offset(x: -124, y: -55)
+
+                TripIntroductionBackgroundIcon(
+                    "ferry.fill",
+                    color: .cyan,
+                    size: 20,
+                    rotation: -12
+                )
+                .offset(x: 72, y: -72)
+            }
+            .accessibilityHidden(true)
+            .allowsHitTesting(false)
+
+            VStack(spacing: 12) {
+                Image(systemName: "map.fill")
+                    .font(.system(size: 32, weight: .semibold))
+                    .foregroundStyle(Color.dfkAccent)
+
+                Text("过去的旅程，未来的计划")
+                    .font(.title2.bold())
+
+                Text("自动识别历史行程，也能辅助规划下一次出行。")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 18) {
+                    Label("自动整理", systemImage: "clock.arrow.circlepath")
+                    Label("轻松规划", systemImage: "calendar.badge.plus")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.dfkAccent)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 24)
+        }
+        .frame(maxWidth: .infinity, minHeight: 190)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+        }
+    }
+}
+
+private struct TripIntroductionBackgroundIcon: View {
+    let systemName: String
+    let color: Color
+    let size: CGFloat
+    let rotation: Double
+
+    init(_ systemName: String, color: Color, size: CGFloat, rotation: Double) {
+        self.systemName = systemName
+        self.color = color
+        self.size = size
+        self.rotation = rotation
+    }
+
+    var body: some View {
+        Image(systemName: systemName)
+            .font(.system(size: size, weight: .bold))
+            .foregroundStyle(color.opacity(0.2))
+            .rotationEffect(.degrees(rotation))
     }
 }
 
@@ -2800,8 +3444,20 @@ private struct PlannedTripDetailView: View {
     @State private var visiblePlanMapUpdateTask: Task<Void, Never>?
     @State private var latestVisiblePlanItemIDs = Set<UUID>()
     @State private var followsVisiblePlanTimelineContent = false
+    @State private var sharePayload: DFKShareCardPayload?
 
     private var plannedTimelineDetentHeight: CGFloat { collapsedTimelineDetentHeight + 82 }
+
+    private var usesSidebarLayout: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad
+    }
+
+    private var planSheetPresentation: Binding<Bool> {
+        Binding(
+            get: { showingPlanSheet && !usesSidebarLayout },
+            set: { showingPlanSheet = $0 }
+        )
+    }
 
     private var days: [TripDay] {
         allDays.filter { $0.tripID == trip.id }.sorted {
@@ -2821,8 +3477,15 @@ private struct PlannedTripDetailView: View {
     }
 
     var body: some View {
-        GeometryReader { detailViewport in
-            ZStack(alignment: .bottom) {
+        HStack(spacing: 0) {
+            if usesSidebarLayout {
+                plannedTripSheet
+                    .frame(minWidth: 380, idealWidth: 440, maxWidth: 520)
+                Divider()
+            }
+
+            GeometryReader { detailViewport in
+                ZStack(alignment: .bottom) {
                 Map(position: $mapPosition) {
                     UserAnnotation()
                     if plannedMapStops.isEmpty {
@@ -2890,9 +3553,9 @@ private struct PlannedTripDetailView: View {
                     .allowsHitTesting(false)
                 }
 
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                }
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                    }
                     .tripCloseButtonStyle()
                     .padding(.leading, 16)
                     .padding(
@@ -2901,14 +3564,15 @@ private struct PlannedTripDetailView: View {
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .zIndex(20)
+                }
+                .onChange(of: plannedMapCoordinateKey) { _, _ in fitPlannedMap() }
             }
-            .onChange(of: plannedMapCoordinateKey) { _, _ in fitPlannedMap() }
+            .ignoresSafeArea()
         }
-        .ignoresSafeArea()
         .background {
             TripDetailEdgeDismissGesture(onDismiss: onClose)
         }
-        .sheet(isPresented: $showingPlanSheet) {
+        .sheet(isPresented: planSheetPresentation) {
             plannedTripSheet
                 .presentationDetents(
                     [.height(plannedTimelineDetentHeight), .medium, .large],
@@ -3108,27 +3772,7 @@ private struct PlannedTripDetailView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(action: showPlannedTripActivityTypePicker) {
-                        Image(systemName: plannedTripActivityStyle?.icon ?? FootprintIconDefaults.card)
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(
-                                plannedTripActivityStyle.flatMap { Color(hex: $0.colorHex) } ?? .secondary
-                            )
-                    }
-                    .accessibilityLabel("修改行程类型")
-                    .accessibilityValue(plannedTripActivityStyle?.name ?? "未设置")
-                }
-                ToolbarItem(placement: .principal) {
-                    VStack(spacing: 1) {
-                        Text(trip.title).font(.headline).lineLimit(1)
-                        Text(plannedSheetSubtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-                ToolbarItemGroup(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .topBarLeading) {
                     Button {
                         editorMode = .itinerary
                     } label: {
@@ -3142,6 +3786,21 @@ private struct PlannedTripDetailView: View {
                         Image(systemName: "info.circle")
                     }
                     .accessibilityLabel("编辑基本信息")
+                }
+                ToolbarItem(placement: .principal) {
+                    VStack(spacing: 1) {
+                        Text(trip.title).font(.headline).lineLimit(1)
+                        Text(plannedSheetSubtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: prepareTripShare) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .accessibilityLabel("分享行程")
                 }
             }
         }
@@ -3159,6 +3818,9 @@ private struct PlannedTripDetailView: View {
                         : [.fraction(0.72)]
                 )
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $sharePayload) { _ in
+            DFKShareCardSheet(payload: $sharePayload)
         }
         .popover(item: $activityPickerPresentation) { value in
             StableActivityPickerPopover(
@@ -3256,6 +3918,24 @@ private struct PlannedTripDetailView: View {
         try? context.save()
     }
 
+    private func prepareTripShare() {
+        presentTripShare(
+            trip: trip,
+            days: days,
+            cities: days.flatMap { cities(for: $0) },
+            items: orderedPlanItems,
+            homeCity: homeCities.first,
+            activityStyles: activityStyles,
+            history: tripShareHistory(
+                for: trip,
+                cities: days.flatMap { cities(for: $0) },
+                homeCity: homeCities.first,
+                context: context
+            ),
+            payload: $sharePayload
+        )
+    }
+
     @ViewBuilder
     private func plannedDaySection(_ day: TripDay, index: Int) -> some View {
         let dayItems = items(for: day)
@@ -3351,7 +4031,7 @@ private struct PlannedTripDetailView: View {
                         if !item.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             Text(item.notes)
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.primary)
                                 .lineLimit(2)
                         }
                     }
@@ -3365,7 +4045,7 @@ private struct PlannedTripDetailView: View {
         .frame(minHeight: 76)
         .background {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(.thinMaterial)
+                .fill(.regularMaterial)
                 .overlay {
                     if isNext {
                         RoundedRectangle(cornerRadius: 22, style: .continuous)
@@ -3599,7 +4279,7 @@ private struct PlannedTripDetailView: View {
         .frame(width: 220, height: 62, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.thinMaterial)
+                .fill(.regularMaterial)
                 .overlay {
                     if isNext {
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -3718,7 +4398,7 @@ private struct PlannedTripDetailView: View {
     }
 
     private func fitPlannedMap(to itemIDs: Set<UUID> = []) {
-        guard isPlanSheetCollapsed || isPlanSheetMedium else { return }
+        guard usesSidebarLayout || isPlanSheetCollapsed || isPlanSheetMedium else { return }
         let coordinates: [CLLocationCoordinate2D]
         if itemIDs.isEmpty {
             coordinates = plannedMapCoordinates + plannedCameraRoutes.flatMap(\.coordinates)
@@ -3735,18 +4415,28 @@ private struct PlannedTripDetailView: View {
         let valid = coordinates.filter { CLLocationCoordinate2DIsValid($0) }
         guard !valid.isEmpty, mapViewportSize.width > 1, mapViewportSize.height > 1 else { return }
 
-        let visibleHeight = isPlanSheetCollapsed
-            ? max(1, mapViewportSize.height - plannedTimelineDetentHeight)
-            : max(1, mapViewportSize.height * 0.5)
-        let topChromeHeight = currentTopSafeAreaInset + 60
-        let unobscuredTop = min(topChromeHeight, visibleHeight * 0.15)
-        let unobscuredHeight = max(1, visibleHeight - unobscuredTop)
-        let visibleRect = CGRect(
-            x: mapViewportSize.width * 0.08,
-            y: unobscuredTop,
-            width: mapViewportSize.width * 0.84,
-            height: unobscuredHeight * 0.72
-        )
+        let visibleRect: CGRect
+        if usesSidebarLayout {
+            visibleRect = CGRect(
+                x: mapViewportSize.width * 0.08,
+                y: mapViewportSize.height * 0.10,
+                width: mapViewportSize.width * 0.84,
+                height: mapViewportSize.height * 0.80
+            )
+        } else {
+            let visibleHeight = isPlanSheetCollapsed
+                ? max(1, mapViewportSize.height - plannedTimelineDetentHeight)
+                : max(1, mapViewportSize.height * 0.5)
+            let topChromeHeight = currentTopSafeAreaInset + 60
+            let unobscuredTop = min(topChromeHeight, visibleHeight * 0.15)
+            let unobscuredHeight = max(1, visibleHeight - unobscuredTop)
+            visibleRect = CGRect(
+                x: mapViewportSize.width * 0.08,
+                y: unobscuredTop,
+                width: mapViewportSize.width * 0.84,
+                height: unobscuredHeight * 0.72
+            )
+        }
         guard let rect = FootprintCameraFraming.mapRect(
             coordinates: valid,
             viewport: mapViewportSize,
@@ -3757,7 +4447,7 @@ private struct PlannedTripDetailView: View {
             .map { String(format: "%.5f,%.5f", $0.latitude, $0.longitude) }
             .sorted()
             .joined(separator: "|")
-            + (isPlanSheetCollapsed ? "#collapsed" : "#medium")
+            + (usesSidebarLayout ? "#sidebar" : isPlanSheetCollapsed ? "#collapsed" : "#medium")
             + String(format: "#%.0fx%.0f", mapViewportSize.width, mapViewportSize.height)
         guard coordinateKey != renderedPlanCameraCoordinateKey else { return }
         renderedPlanCameraCoordinateKey = coordinateKey
@@ -4746,7 +5436,7 @@ private struct TripPlaceDetailSheet: View {
                         }
                         .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                         if let lookAroundScene {
                             VStack(alignment: .leading, spacing: 10) {
@@ -4762,7 +5452,7 @@ private struct TripPlaceDetailSheet: View {
                             }
                             .padding(16)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                         }
 
                         if isLoadingPublicInfo {
@@ -5884,9 +6574,34 @@ struct TripDetailView: View {
             .joined(separator: ";")
     }
 
+    private var usesSidebarLayout: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad
+    }
+
+    private var detailSheetPresentation: Binding<Bool> {
+        Binding(
+            get: { showingSheet && !usesSidebarLayout },
+            set: { showingSheet = $0 }
+        )
+    }
+
     var body: some View {
-        GeometryReader { detailViewport in
-            ZStack(alignment: .bottom) {
+        HStack(spacing: 0) {
+            if usesSidebarLayout {
+                Group {
+                    if showingSheet {
+                        tripDetailSheet
+                    } else {
+                        ProgressView()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+                .frame(minWidth: 380, idealWidth: 440, maxWidth: 520)
+                Divider()
+            }
+
+            GeometryReader { detailViewport in
+                ZStack(alignment: .bottom) {
                 Map(position: $cameraPosition) {
             if stopItemsWithCoordinates.isEmpty {
                 ForEach(cities) { city in
@@ -5922,7 +6637,11 @@ struct TripDetailView: View {
             }
             ForEach(transportMapMarkers) { marker in
                 Annotation("", coordinate: marker.coordinate) {
-                    TripTransportMapMarker(icon: marker.icon, isSelected: selectedTimelineItemID == marker.itemID)
+                    TripTransportMapMarker(
+                        icon: marker.icon,
+                        travelsWest: marker.travelsWest,
+                        isSelected: selectedTimelineItemID == marker.itemID
+                    )
                 }
             }
         }
@@ -5942,20 +6661,21 @@ struct TripDetailView: View {
             .allowsHitTesting(false)
         }
 
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                    }
+                    .tripCloseButtonStyle()
+                    .padding(.leading, 16)
+                    .padding(
+                        .top,
+                        max(detailViewport.safeAreaInsets.top, currentTopSafeAreaInset) + 8
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .zIndex(20)
                 }
-                .tripCloseButtonStyle()
-                .padding(.leading, 16)
-                .padding(
-                    .top,
-                    max(detailViewport.safeAreaInsets.top, currentTopSafeAreaInset) + 8
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .zIndex(20)
             }
+            .ignoresSafeArea()
         }
-        .ignoresSafeArea()
         .background {
             TripDetailEdgeDismissGesture(onDismiss: onClose)
         }
@@ -5963,7 +6683,7 @@ struct TripDetailView: View {
             fitCamera(to: mapCoordinates)
         }
         .onChange(of: selectedTimelineItemID) { _, selectedID in
-            guard detailDetent != .large else { return }
+            guard usesSidebarLayout || detailDetent != .large else { return }
             guard let selectedID, let item = displayedItems.first(where: { $0.id == selectedID }) else { return }
             if let sourceID = item.sourceTransportRecordID, let route = transportRoutes[sourceID] {
                 fitCamera(to: route.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) })
@@ -5972,7 +6692,7 @@ struct TripDetailView: View {
             }
         }
         .onChange(of: detailDetent) { _, _ in
-            guard detailDetent != .large else { return }
+            guard usesSidebarLayout || detailDetent != .large else { return }
             if let selectedID = selectedTimelineItemID,
                let item = displayedItems.first(where: { $0.id == selectedID }) {
                 if let sourceID = item.sourceTransportRecordID, let route = transportRoutes[sourceID] {
@@ -6027,20 +6747,8 @@ struct TripDetailView: View {
             fitCamera(to: mapCoordinates)
             showingSheet = true
         }
-        .sheet(isPresented: $showingSheet) {
-            TripDetailSheet(
-                trip: trip,
-                days: days,
-                cities: cities,
-                items: displayedItems,
-                transportRoutes: transportRoutes,
-                showsLifecycleActions: showsLifecycleActions,
-                detent: $detailDetent,
-                selectedTimelineItemID: $selectedTimelineItemID,
-                mapRequestedTimelineItemID: $mapRequestedTimelineItemID,
-                visibleTimelineItemIDsChanged: { visibleTimelineItemIDs = $0 },
-                onRecordChanged: { recordRefreshVersion &+= 1 }
-            )
+        .sheet(isPresented: detailSheetPresentation) {
+            tripDetailSheet
             .presentationDetents(
                 [.height(collapsedTimelineDetentHeight), .medium, .large],
                 selection: $detailDetent
@@ -6053,6 +6761,22 @@ struct TripDetailView: View {
         .onDisappear {
             visibleMapUpdateTask?.cancel()
         }
+    }
+
+    private var tripDetailSheet: some View {
+        TripDetailSheet(
+            trip: trip,
+            days: days,
+            cities: cities,
+            items: displayedItems,
+            transportRoutes: transportRoutes,
+            showsLifecycleActions: showsLifecycleActions,
+            detent: $detailDetent,
+            selectedTimelineItemID: $selectedTimelineItemID,
+            mapRequestedTimelineItemID: $mapRequestedTimelineItemID,
+            visibleTimelineItemIDsChanged: { visibleTimelineItemIDs = $0 },
+            onRecordChanged: { recordRefreshVersion &+= 1 }
+        )
     }
 
     private var currentTopSafeAreaInset: CGFloat {
@@ -6206,31 +6930,46 @@ struct TripDetailView: View {
                 .filter(\.isRenderableMapCoordinate)
             guard let midpoint = displayedCoordinates.distanceMidpoint else { return nil }
             let icon = TransportType(rawValue: item.transportTypeRaw ?? "")?.icon ?? "arrow.triangle.swap"
-            return TripTransportMapMarkerData(itemID: item.id, coordinate: midpoint, icon: icon)
+            return TripTransportMapMarkerData(
+                itemID: item.id,
+                coordinate: midpoint,
+                icon: icon,
+                travelsWest: displayedCoordinates.travelsWest
+            )
         }
     }
 
     private func fitCamera(to coordinates: [CLLocationCoordinate2D]) {
-        guard detailDetent != .large else { return }
+        guard usesSidebarLayout || detailDetent != .large else { return }
         let valid = coordinates.filter { CLLocationCoordinate2DIsValid($0) }
         guard !valid.isEmpty, mapViewportSize.width > 1, mapViewportSize.height > 1 else { return }
-        let visibleHeight: CGFloat
-        if detailDetent == .height(collapsedTimelineDetentHeight) {
-            visibleHeight = mapViewportSize.height - collapsedTimelineDetentHeight
-        } else if detailDetent == .medium {
-            visibleHeight = mapViewportSize.height * 0.5
+        let visibleRect: CGRect
+        if usesSidebarLayout {
+            visibleRect = CGRect(
+                x: mapViewportSize.width * 0.08,
+                y: mapViewportSize.height * 0.10,
+                width: mapViewportSize.width * 0.84,
+                height: mapViewportSize.height * 0.80
+            )
         } else {
-            visibleHeight = max(1, mapViewportSize.height * 0.12)
+            let visibleHeight: CGFloat
+            if detailDetent == .height(collapsedTimelineDetentHeight) {
+                visibleHeight = mapViewportSize.height - collapsedTimelineDetentHeight
+            } else if detailDetent == .medium {
+                visibleHeight = mapViewportSize.height * 0.5
+            } else {
+                visibleHeight = max(1, mapViewportSize.height * 0.12)
+            }
+            let topChromeHeight = currentTopSafeAreaInset + 60
+            let unobscuredTop = min(topChromeHeight, visibleHeight * 0.15)
+            let unobscuredHeight = max(1, visibleHeight - unobscuredTop)
+            visibleRect = CGRect(
+                x: mapViewportSize.width * 0.08,
+                y: unobscuredTop,
+                width: mapViewportSize.width * 0.84,
+                height: unobscuredHeight * 0.72
+            )
         }
-        let topChromeHeight = currentTopSafeAreaInset + 60
-        let unobscuredTop = min(topChromeHeight, visibleHeight * 0.15)
-        let unobscuredHeight = max(1, visibleHeight - unobscuredTop)
-        let visibleRect = CGRect(
-            x: mapViewportSize.width * 0.08,
-            y: unobscuredTop,
-            width: mapViewportSize.width * 0.84,
-            height: unobscuredHeight * 0.72
-        )
         if let rect = FootprintCameraFraming.mapRect(
             coordinates: valid,
             viewport: mapViewportSize,
@@ -6323,19 +7062,8 @@ private final class EdgeGestureHostView: UIView {
 }
 
 private extension View {
-    @ViewBuilder
     func tripCloseButtonStyle() -> some View {
-        if #available(iOS 26.0, *) {
-            self.font(.body.weight(.semibold))
-                .controlSize(.large)
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-        } else {
-            self.font(.body.weight(.semibold))
-                .controlSize(.large)
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.circle)
-        }
+        dfkCircleGlassButtonStyle()
     }
 
     @ViewBuilder
@@ -6372,7 +7100,7 @@ private struct TripAggregatedStop: Identifiable {
     let photoAssetIDs: [String]
 }
 
-private struct TripMapRouteSegment: Identifiable {
+struct TripMapRouteSegment: Identifiable {
     let id: String
     let coordinates: [CLLocationCoordinate2D]
     let isDashed: Bool
@@ -6413,16 +7141,21 @@ private struct TripTransportMapMarkerData: Identifiable {
     let itemID: UUID
     let coordinate: CLLocationCoordinate2D
     let icon: String
+    let travelsWest: Bool
     var id: UUID { itemID }
 }
 
 private struct TripTransportMapMarker: View {
     let icon: String
+    let travelsWest: Bool
     let isSelected: Bool
     var body: some View {
         ZStack {
             Circle().fill(Color(uiColor: .systemBackground)).overlay(Circle().stroke(Color.dfkAccent, lineWidth: 1.2))
-            Image(systemName: icon).font(.system(size: 9, weight: .bold)).foregroundStyle(Color.dfkAccent)
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Color.dfkAccent)
+                .scaleEffect(x: travelsWest ? -1 : 1, y: 1)
         }
         .frame(width: 18, height: 18)
         .scaleEffect(isSelected ? 1.5 : 1, anchor: .center)
@@ -6486,6 +7219,7 @@ private struct TripFootprintMapMarker: View {
 
 private struct TripDetailSheet: View {
     @Environment(\.modelContext) private var context
+    @Query private var homeCities: [HomeCity]
     let trip: Trip
     let days: [TripDay]
     let cities: [TripDayCity]
@@ -6508,6 +7242,7 @@ private struct TripDetailSheet: View {
     @State private var detentBeforeFootprintDetail: PresentationDetent?
     @State private var activityPickerPresentation: ActivityPickerPresentation?
     @State private var showingEndConfirmation = false
+    @State private var sharePayload: DFKShareCardPayload?
 
     private var isCollapsed: Bool {
         detent == .height(collapsedTimelineDetentHeight)
@@ -6572,16 +7307,9 @@ private struct TripDetailSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(action: showActivityTypePicker) {
-                        Image(systemName: tripActivityStyle?.icon ?? FootprintIconDefaults.card)
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(
-                                tripActivityStyle.flatMap { Color(hex: $0.colorHex) } ?? .secondary
-                            )
-                    }
-                    .accessibilityLabel("修改行程类型")
-                    .accessibilityValue(tripActivityStyle?.name ?? "未设置")
+                ToolbarItemGroup(placement: .topBarLeading) {
+                    Button { showingEditor = true } label: { Image(systemName: "pencil") }
+                        .accessibilityLabel("编辑行程")
                 }
                 ToolbarItem(placement: .principal) {
                     VStack(spacing: 1) {
@@ -6590,13 +7318,20 @@ private struct TripDetailSheet: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button { showingEditor = true } label: { Image(systemName: "pencil") }
-                        .accessibilityLabel("编辑行程")
+                    Button(action: prepareTripShare) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .accessibilityLabel("分享行程")
                 }
             }
         }
-        .fullScreenCover(isPresented: $showingEditor) {
+        .sheet(isPresented: $showingEditor) {
             IsolatedTripEditorHost(container: context.container, tripID: trip.id)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $sharePayload) { _ in
+            DFKShareCardSheet(payload: $sharePayload)
         }
         .popover(item: $activityPickerPresentation) { value in
             StableActivityPickerPopover(
@@ -6672,6 +7407,13 @@ private struct TripDetailSheet: View {
                                 item: item,
                                 activityStyle: activityStyle(for: item),
                                 transportDistance: transportDistance(for: item),
+                                travelsWest: item.sourceTransportRecordID
+                                    .flatMap { transportRoutes[$0] }
+                                    .map { route in
+                                        route.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                                            .filter(\.isRenderableMapCoordinate)
+                                            .travelsWest
+                                    } ?? false,
                                 photoAssetIDs: item.actualPhotoAssetIDs,
                                 onSelect: { openRecordDetail(for: item) },
                                 onShowAllPhotos: { openRecordDetail(for: item, startsExpanded: true) }
@@ -6845,6 +7587,23 @@ private struct TripDetailSheet: View {
         trip.activityTypeValue = id?.uuidString
         trip.updatedAt = Date()
         try? context.save()
+    }
+    private func prepareTripShare() {
+        presentTripShare(
+            trip: trip,
+            days: days,
+            cities: cities,
+            items: items,
+            homeCity: homeCities.first,
+            activityStyles: activityStyles,
+            history: tripShareHistory(
+                for: trip,
+                cities: cities,
+                homeCity: homeCities.first,
+                context: context
+            ),
+            payload: $sharePayload
+        )
     }
     private func startTrip() {
         trip.state = .active; trip.actualStartedAt = Date(); trip.updatedAt = Date(); try? context.save()
@@ -7504,6 +8263,15 @@ private struct TripEditorView: View {
                         selectionEnabled: selectionEnabled,
                         onSelect: { placeTarget = PlaceTarget(day: day, item: stop) }
                     )
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear
+                                .onAppear { updateItemDragFrame(stop.id, frame: proxy.frame(in: .global)) }
+                                .onChange(of: proxy.frame(in: .global)) { _, frame in
+                                    updateItemDragFrame(stop.id, frame: frame)
+                                }
+                        }
+                    }
                 }
             }
             .background {
@@ -7517,15 +8285,6 @@ private struct TripEditorView: View {
         }
         .zIndex(isDragging ? 100 : 0)
         .animation(.snappy(duration: 0.18), value: isDragging)
-        .background {
-            GeometryReader { proxy in
-                Color.clear
-                    .onAppear { updateItemDragFrame(stop.id, frame: proxy.frame(in: .global)) }
-                    .onChange(of: proxy.frame(in: .global)) { _, frame in
-                        updateItemDragFrame(stop.id, frame: frame)
-                    }
-            }
-        }
     }
 
     private var itemDropPlaceholder: some View {
@@ -7623,6 +8382,7 @@ private struct TripEditorView: View {
                 .overlay {
                     TripReorderDragSource(
                         isEnabled: swipingItemID == nil && (draggedItemID == nil || draggedItemID == stop.id),
+                        isActive: draggedItemID == stop.id,
                         itemID: stop.id,
                         previewFrame: itemDragFrames[stop.id] ?? .zero,
                         onBegan: { beginSystemItemDrag(stop) },
@@ -8248,6 +9008,7 @@ private struct TripItemDropDelegate: DropDelegate {
 
 private struct TripReorderDragSource: UIViewRepresentable {
     let isEnabled: Bool
+    let isActive: Bool
     let itemID: UUID
     let previewFrame: CGRect
     let onBegan: () -> Bool
@@ -8256,6 +9017,7 @@ private struct TripReorderDragSource: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(
             isEnabled: isEnabled,
+            isActive: isActive,
             itemID: itemID,
             previewFrame: previewFrame,
             onBegan: onBegan,
@@ -8273,10 +9035,15 @@ private struct TripReorderDragSource: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.isEnabled = isEnabled
+        context.coordinator.updateActiveState(isActive)
         context.coordinator.itemID = itemID
         context.coordinator.previewFrame = previewFrame
         context.coordinator.onBegan = onBegan
         context.coordinator.onEnded = onEnded
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.viewWasDismantled()
     }
 
     func sizeThatFits(
@@ -8290,6 +9057,7 @@ private struct TripReorderDragSource: UIViewRepresentable {
 
     final class Coordinator: NSObject, UIDragInteractionDelegate {
         var isEnabled: Bool
+        var isActive: Bool
         var itemID: UUID
         var previewFrame: CGRect
         var onBegan: () -> Bool
@@ -8302,12 +9070,14 @@ private struct TripReorderDragSource: UIViewRepresentable {
 
         init(
             isEnabled: Bool,
+            isActive: Bool,
             itemID: UUID,
             previewFrame: CGRect,
             onBegan: @escaping () -> Bool,
             onEnded: @escaping () -> Void
         ) {
             self.isEnabled = isEnabled
+            self.isActive = isActive
             self.itemID = itemID
             self.previewFrame = previewFrame
             self.onBegan = onBegan
@@ -8459,6 +9229,27 @@ private struct TripReorderDragSource: UIViewRepresentable {
             floatingPreview = nil
             previewWindow = nil
             previewCenterOffset = .zero
+        }
+
+        func updateActiveState(_ isActive: Bool) {
+            self.isActive = isActive
+            guard ownsDragState, !isActive else { return }
+            // A successful drop clears the SwiftUI state before UIKit always
+            // delivers didEnd. Remove the owned overlay immediately so the
+            // source card and a stale floating copy can never coexist.
+            removeFloatingPreview()
+            ownsDragState = false
+        }
+
+        func viewWasDismantled() {
+            let shouldEnd = ownsDragState
+            removeFloatingPreview()
+            ownsDragState = false
+            guard shouldEnd else { return }
+            let onEnded = onEnded
+            DispatchQueue.main.async {
+                onEnded()
+            }
         }
 
         private func finishOwnedDrag() {
@@ -8628,6 +9419,7 @@ private struct TripTimelineRow: View {
     let item: TripItem
     let activityStyle: TripActivityStyle?
     let transportDistance: Double?
+    let travelsWest: Bool
     let photoAssetIDs: [String]
     let onSelect: () -> Void
     let onShowAllPhotos: () -> Void
@@ -8681,7 +9473,7 @@ private struct TripTimelineRow: View {
                             if !item.notes.isEmpty {
                                 Text(item.notes)
                                     .font(.footnote)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.primary)
                                     .lineLimit(5)
                             }
                         }
@@ -8714,7 +9506,7 @@ private struct TripTimelineRow: View {
     @ViewBuilder
     private var marker: some View {
         if isTransport {
-            TimelineTransportMarker(icon: icon)
+            TimelineTransportMarker(icon: icon, travelsWest: travelsWest)
         } else {
             TimelineFootprintMarker(icon: icon, tint: tint)
         }

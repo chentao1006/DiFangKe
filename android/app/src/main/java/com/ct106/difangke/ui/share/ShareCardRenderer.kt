@@ -15,7 +15,12 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextUtils
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MonitorHeart
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.ui.graphics.vector.ImageVector
 import com.ct106.difangke.R
+import com.ct106.difangke.ui.components.getIconForName
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -31,6 +36,7 @@ internal object ShareCardRenderer {
     private const val GAP = 84f
     private const val QR_SIDE = 144f
     private const val FOOTER_RESERVE = 220f
+    private const val STATS_FOOTER_RESERVE = 300f
     private const val MAX_EXPORT_HEIGHT = 8192f
     private val contentWidth = WIDTH - INSET * 2
 
@@ -106,12 +112,14 @@ internal object ShareCardRenderer {
             ShareCardKind.STATS -> statsBlocks(payload, theme)
         }
         val contentHeight = content.sumOf { it.height.toDouble() }.toFloat()
-        val measured = INSET + header.height + GAP + contentHeight + INSET + FOOTER_RESERVE
+        // iOS footerClearance: the stats card keeps more room above the footer.
+        val footerReserve = if (payload.kind == ShareCardKind.STATS) STATS_FOOTER_RESERVE else FOOTER_RESERVE
+        val measured = INSET + header.height + GAP + contentHeight + INSET + footerReserve
         val locationExtra = if (payload.locationText == null) 0f else 64f
         val minimum = when (payload.kind) {
             ShareCardKind.STATS -> {
-                val rows = max(2, payload.placeRankings.size + payload.activityRankings.size)
-                max(2060f, 1160f + rows * 130f) + locationExtra
+                val titleLines = max(1, ceil(payload.title.codePointCount(0, payload.title.length) / 10.0).toInt())
+                2540f + (titleLines - 1) * 120f + locationExtra
             }
             ShareCardKind.MOMENT -> (if (payload.photos.isNotEmpty()) 1970f else 1440f) + locationExtra
             ShareCardKind.TIMELINE -> 1080f + locationExtra
@@ -132,7 +140,7 @@ internal object ShareCardRenderer {
         drawSubtleBackground(canvas, theme, h)
 
         canvas.save()
-        canvas.clipRect(0f, 0f, WIDTH.toFloat(), h - INSET - FOOTER_RESERVE)
+        canvas.clipRect(0f, 0f, WIDTH.toFloat(), h - INSET - footerReserve)
         var y = INSET
         header.draw(canvas, y)
         y += header.height + GAP
@@ -252,15 +260,20 @@ internal object ShareCardRenderer {
         spacer(28f)
     ) + entryBlocks(payload.includedEntries, theme, isTimeline = true)
 
-    private fun statsBlocks(payload: SharePayload, theme: ShareCardTheme): List<Block> = listOf(
-        statsMapBlock(payload, theme),
-        spacer(30f),
-        statsSummaryBlock(payload, theme),
-        spacer(30f),
-        rankingBlock("最常去的地点", payload.placeRankings, theme, showsIcon = false),
-        spacer(30f),
-        rankingBlock("最喜欢的活动", payload.activityRankings, theme, showsIcon = true)
-    )
+    /** iOS statsContent: VStack(spacing: 34). */
+    private fun statsBlocks(payload: SharePayload, theme: ShareCardTheme): List<Block> {
+        val sections = listOfNotNull(
+            statsMapBlock(payload, theme),
+            statsSummaryBlock(payload, theme),
+            reviewMemoryBlock(payload, theme),
+            pairBlock(reviewActivityCard(payload, theme), reviewRhythmCard(payload, theme)),
+            pairBlock(
+                reviewRankingCard("最常用交通", getIconForName("car.fill"), payload.transportRankings, theme),
+                reviewRankingCard("最常去的区域", getIconForName("map.fill"), payload.placeRankings, theme)
+            )
+        )
+        return sections.flatMapIndexed { index, block -> if (index == 0) listOf(block) else listOf(spacer(34f), block) }
+    }
 
     private fun spacer(height: Float) = Block(height) { _, _ -> }
 
@@ -427,45 +440,215 @@ internal object ShareCardRenderer {
         }
     }
 
-    private fun rankingBlock(title: String, entries: List<ShareRankingEntry>, theme: ShareCardTheme, showsIcon: Boolean): Block {
-        val inner = contentWidth - 52f
-        val heading = text(title, fs(38f), theme.foreground, bold, inner)
-        class Row(val index: StaticLayout, val title: StaticLayout, val detail: StaticLayout?, val value: StaticLayout, val entry: ShareRankingEntry) {
-            val height: Float get() = max(max(index.height, value.height).toFloat(), this.title.height + (this.detail?.let { 4f + it.height } ?: 0f))
+    // ── Review snapshot (iOS reviewMemorySnapshot / review*SnapshotCard) ─────
+
+    /** A card drawn at (left, top) with a fixed width; `height` is its own laid-out height. */
+    private class Card(val height: Float, val draw: (Canvas, Float, Float) -> Unit)
+
+    private const val PAIR_SPACING = 24f
+    private val pairCardWidth = (contentWidth - PAIR_SPACING) / 2f
+
+    /** iOS HStack(alignment: .top, spacing: 24) of two equal-width cards. */
+    private fun pairBlock(leading: Card, trailing: Card): Block = Block(max(leading.height, trailing.height)) { canvas, top ->
+        leading.draw(canvas, INSET, top)
+        trailing.draw(canvas, INSET + pairCardWidth + PAIR_SPACING, top)
+    }
+
+    private fun drawCardBackground(canvas: Canvas, theme: ShareCardTheme, left: Float, top: Float, width: Float, height: Float) {
+        canvas.drawRoundRect(RectF(left, top, left + width, top + height), 22f, 22f,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply { color = theme.card })
+    }
+
+    /** iOS Label(title, systemImage:) at fs(25) bold in the foreground color. */
+    private class CardLabel(val icon: ImageVector, val title: StaticLayout, val iconSize: Float) {
+        val height: Float get() = max(title.height.toFloat(), iconSize)
+    }
+
+    private fun drawLabel(canvas: Canvas, label: CardLabel, color: Int, left: Float, top: Float) {
+        val mid = top + label.height / 2f
+        ShareIconPainter.drawVector(canvas, label.icon, left, mid - label.iconSize / 2f, label.iconSize, color)
+        label.title.drawAt(canvas, left + label.iconSize + LABEL_SPACING, mid - label.title.height / 2f)
+    }
+
+    private const val LABEL_SPACING = 8f
+
+    private fun cardLabel(title: String, icon: ImageVector, theme: ShareCardTheme, width: Float): CardLabel {
+        val iconSize = fs(25f) * 1.2f
+        return CardLabel(icon, text(title, fs(25f), theme.foreground, bold, width - iconSize - LABEL_SPACING, 1), iconSize)
+    }
+
+    private fun reviewMemoryBlock(payload: SharePayload, theme: ShareCardTheme): Block? {
+        val memories = payload.reviewMemories.take(4)
+        val first = memories.firstOrNull() ?: return null
+        val others = memories.drop(1).take(3)
+        val largeHeight = 280f
+        val smallHeight = 150f
+        val height = largeHeight + if (others.isEmpty()) 0f else 16f + smallHeight
+        return Block(height) { canvas, top ->
+            drawMemoryCard(canvas, first, theme, RectF(INSET, top, INSET + contentWidth, top + largeHeight), isLarge = true)
+            if (others.isNotEmpty()) {
+                val spacing = 14f
+                val width = (contentWidth - spacing * (others.size - 1)) / others.size
+                val y = top + largeHeight + 16f
+                others.forEachIndexed { index, memory ->
+                    val left = INSET + index * (width + spacing)
+                    drawMemoryCard(canvas, memory, theme, RectF(left, y, left + width, y + smallHeight), isLarge = false)
+                }
+            }
         }
-        val rows = entries.take(3).mapIndexed { i, entry ->
-            val value = text(entry.value, fs(28f), theme.accent, bold, inner / 2, 1)
-            val titleWidth = inner - 34f - 18f - (if (showsIcon) 36f + 18f else 0f) - lineWidth(value) - 12f
+    }
+
+    private fun drawMemoryCard(canvas: Canvas, memory: ShareReviewMemoryCard, theme: ShareCardTheme, rect: RectF, isLarge: Boolean) {
+        val radius = if (isLarge) 26f else 18f
+        canvas.save()
+        canvas.clipPath(Path().apply { addRoundRect(rect, radius, radius, Path.Direction.CW) })
+        val photo = memory.photo
+        if (photo != null) {
+            drawImageFill(canvas, photo, rect)
+        } else {
+            canvas.drawRect(rect, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = LinearGradient(rect.left, rect.top, rect.right, rect.bottom,
+                    withAlpha(theme.accent, 0.32), theme.card, Shader.TileMode.CLAMP)
+            })
+        }
+        canvas.drawRect(rect, Paint().apply {
+            shader = LinearGradient(rect.left, rect.top, rect.left, rect.bottom,
+                0, withAlpha(0xFF000000.toInt(), 0.78), Shader.TileMode.CLAMP)
+        })
+        val padding = if (isLarge) 26f else 13f
+        val spacing = if (isLarge) 7f else 3f
+        val width = rect.width() - padding * 2
+        val lines = listOfNotNull(
+            text(memory.reason, fs(if (isLarge) 23f else 14f), theme.accent, medium, width, 1),
+            text(memory.title, fs(if (isLarge) 42f else 21f), 0xFFFFFFFF.toInt(), bold, width, 1),
+            memory.detail.takeIf { isLarge && it.isNotEmpty() }
+                ?.let { text(it, fs(23f), withAlpha(0xFFFFFFFF.toInt(), 0.84), regular, width, 1) }
+        )
+        val textHeight = lines.sumOf { it.height.toDouble() }.toFloat() + spacing * (lines.size - 1)
+        var y = rect.bottom - padding - textHeight
+        lines.forEach { line ->
+            line.drawAt(canvas, rect.left + padding, y)
+            y += line.height + spacing
+        }
+        canvas.restore()
+    }
+
+    /** iOS reviewActivitySnapshotCard: "时间花在哪" donut + top-3 legend. */
+    private fun reviewActivityCard(payload: SharePayload, theme: ShareCardTheme): Card {
+        val width = pairCardWidth
+        val inner = width - 48f
+        val label = cardLabel("时间花在哪", Icons.Filled.Schedule, theme, inner)
+        val entries = payload.activityRankings.take(5)
+        val donut = 126f
+        val legendWidth = inner - donut - 20f
+        val legend = entries.take(3).map { entry ->
+            entry to text(entry.title, fs(18f), theme.foreground, medium, legendWidth - 18f, 1)
+        }
+        val legendHeight = legend.sumOf { it.second.height.toDouble() }.toFloat() + 12f * max(0, legend.size - 1)
+        val rowHeight = max(donut, legendHeight)
+        val height = max(230f, 24f + label.height + 16f + rowHeight + 24f)
+        return Card(height) { canvas, left, top ->
+            drawCardBackground(canvas, theme, left, top, width, height)
+            val x = left + 24f
+            drawLabel(canvas, label, theme.foreground, x, top + 24f)
+            val rowTop = top + 24f + label.height + 16f
+            val donutTop = rowTop + (rowHeight - donut) / 2f
+            val cx = x + donut / 2f
+            val cy = donutTop + donut / 2f
+            val radius = donut / 2f - 8f
+            val suppliedTotal = entries.sumOf { max(0.0, it.fraction ?: 0.0) }
+            val fallback = if (entries.isEmpty()) 0.0 else 1.0 / entries.size
+            val arc = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = 16f
+                strokeCap = Paint.Cap.BUTT
+            }
+            var start = -90f
+            entries.forEach { entry ->
+                val fraction = if (suppliedTotal > 0) max(0.0, entry.fraction ?: 0.0) / suppliedTotal else fallback
+                val sweep = (360.0 * fraction).toFloat()
+                arc.color = entry.color
+                canvas.drawArc(RectF(cx - radius, cy - radius, cx + radius, cy + radius), start, sweep, false, arc)
+                start += sweep
+            }
+            var ly = rowTop + (rowHeight - legendHeight) / 2f
+            val lx = x + donut + 20f
+            val dot = Paint(Paint.ANTI_ALIAS_FLAG)
+            legend.forEach { (entry, title) ->
+                dot.color = entry.color
+                canvas.drawCircle(lx + 5f, ly + title.height / 2f, 5f, dot)
+                title.drawAt(canvas, lx + 18f, ly)
+                ly += title.height + 12f
+            }
+        }
+    }
+
+    /** iOS reviewRhythmSnapshotCard: "足迹节奏" capsule bars, the busiest bar in full accent. */
+    private fun reviewRhythmCard(payload: SharePayload, theme: ShareCardTheme): Card {
+        val width = pairCardWidth
+        val inner = width - 48f
+        val label = cardLabel("足迹节奏", Icons.Filled.MonitorHeart, theme, inner)
+        val chartHeight = 126f
+        val height = max(230f, 24f + label.height + 16f + chartHeight + 24f)
+        return Card(height) { canvas, left, top ->
+            drawCardBackground(canvas, theme, left, top, width, height)
+            val x = left + 24f
+            drawLabel(canvas, label, theme.foreground, x, top + 24f)
+            val values = payload.reviewRhythmValues
+            if (values.isEmpty()) return@Card
+            val chartBottom = top + 24f + label.height + 16f + chartHeight
+            val maximum = max(1, values.maxOrNull() ?: 1)
+            val spacing = 3f
+            val barWidth = max(2f, (inner - spacing * (values.size - 1)) / values.size)
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            values.forEachIndexed { index, value ->
+                paint.color = if (value == maximum) theme.accent
+                else withAlpha(theme.accent, if (value == 0) 0.12 else 0.38)
+                val barHeight = max(6f, chartHeight * value / maximum)
+                val bx = x + index * (barWidth + spacing)
+                val r = min(barWidth, barHeight) / 2f
+                canvas.drawRoundRect(RectF(bx, chartBottom - barHeight, bx + barWidth, chartBottom), r, r, paint)
+            }
+        }
+    }
+
+    /** iOS reviewSnapshotRankingCard: titled card with up to three icon rows. */
+    private fun reviewRankingCard(title: String, icon: ImageVector, entries: List<ShareRankingEntry>, theme: ShareCardTheme): Card {
+        val width = pairCardWidth
+        val inner = width - 48f
+        val label = cardLabel(title, icon, theme, inner)
+        class Row(val entry: ShareRankingEntry, val title: StaticLayout, val detail: StaticLayout?, val value: StaticLayout) {
+            val textHeight: Float get() = this.title.height + (detail?.let { 2f + it.height } ?: 0f)
+            val height: Float get() = max(max(textHeight, value.height.toFloat()), fs(20f) * 1.2f)
+        }
+        val iconFrame = 26f
+        val rows = entries.take(3).map { entry ->
+            val value = text(entry.value, fs(18f), theme.secondary, medium, inner / 2f, 1)
+            // HStack(spacing: 10): icon | texts | Spacer(minLength: 6) | value.
+            val textWidth = inner - iconFrame - 10f * 3 - 6f - lineWidth(value)
             Row(
-                text("${i + 1}", fs(30f), theme.accent, bold, 60f, 1),
-                text(entry.title, fs(34f), theme.foreground, medium, titleWidth, 1),
-                entry.detail?.takeIf { it.isNotEmpty() }?.let { text(it, fs(22f), theme.secondary, regular, titleWidth, 1) },
-                value,
-                entry
+                entry,
+                text(entry.title, fs(21f), theme.foreground, medium, textWidth, 1),
+                entry.detail?.let { text(it, fs(16f), theme.secondary, regular, textWidth, 1) },
+                value
             )
         }
-        val height = 26f + heading.height + 16f + rows.sumOf { (24f + it.height).toDouble() }.toFloat() +
-            (if (rows.isNotEmpty()) 0f else 0f) + 26f
-        return Block(height) { canvas, top ->
-            canvas.drawRoundRect(RectF(INSET, top, INSET + contentWidth, top + height), 22f, 22f,
-                Paint(Paint.ANTI_ALIAS_FLAG).apply { color = theme.card })
-            val left = INSET + 26f
-            heading.drawAt(canvas, left, top + 26f)
-            var y = top + 26f + heading.height + 16f
+        val height = 24f + label.height + rows.sumOf { (16f + it.height).toDouble() }.toFloat() + 24f
+        return Card(height) { canvas, left, top ->
+            drawCardBackground(canvas, theme, left, top, width, height)
+            val x = left + 24f
+            drawLabel(canvas, label, theme.foreground, x, top + 24f)
+            var y = top + 24f + label.height
             rows.forEach { row ->
-                val rowTop = y + 12f
-                val mid = rowTop + row.height / 2f
-                row.index.drawAt(canvas, left, mid - row.index.height / 2f)
-                var x = left + 34f + 18f
-                if (showsIcon) {
-                    ShareIconPainter.draw(canvas, row.entry.icon, x + 18f, mid, fs(26f) * 1.2f, row.entry.color)
-                    x += 36f + 18f
-                }
-                val textBlock = row.title.height + (row.detail?.let { 4f + it.height } ?: 0f)
-                row.title.drawAt(canvas, x, mid - textBlock / 2f)
-                row.detail?.drawAt(canvas, x, mid - textBlock / 2f + row.title.height + 4f)
-                row.value.drawAt(canvas, INSET + contentWidth - 26f - lineWidth(row.value), mid - row.value.height / 2f)
-                y += 24f + row.height
+                y += 16f
+                val mid = y + row.height / 2f
+                ShareIconPainter.draw(canvas, row.entry.icon, x + iconFrame / 2f, mid, fs(20f) * 1.2f, row.entry.color)
+                val tx = x + iconFrame + 10f
+                val textTop = mid - row.textHeight / 2f
+                row.title.drawAt(canvas, tx, textTop)
+                row.detail?.drawAt(canvas, tx, textTop + row.title.height + 2f)
+                row.value.drawAt(canvas, x + inner - lineWidth(row.value), mid - row.value.height / 2f)
+                y += row.height
             }
         }
     }

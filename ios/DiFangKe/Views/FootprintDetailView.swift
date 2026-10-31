@@ -40,7 +40,8 @@ struct FootprintModalView: View {
     @AppStorage("hasSeenPhotoPermissionGuide") private var hasSeenPhotoPermissionGuide = false
     
     @State private var showingPhotoDeleteAlert = false
-    @State private var photoToDelete: String? = nil
+    @State private var selectedPhotoIDsForRemoval: Set<String> = []
+    @State private var isSelectingPhotosForRemoval = false
     @State private var showingSearchSheet = false
     @State private var activityPickerPresentation: ActivityPickerPresentation?
     @State private var showingActivityTypeEditor = false
@@ -113,7 +114,7 @@ struct FootprintModalView: View {
     }
 
     private var photoOrderTaskKey: String {
-        "\(photoService.authorizationStatus.rawValue)|\(footprint.photoAssetIDs.joined(separator: "|"))"
+        "\(photoService.authorizationStatus.rawValue)|\(photoService.identifierResolutionRevision)|\(footprint.photoAssetIDs.joined(separator: "|"))"
     }
 
     private var displayedPhotoAssetIDs: [String] {
@@ -333,10 +334,12 @@ struct FootprintModalView: View {
                 AddToFavoriteModal(footprint: footprint)
             }
             .alert("确认移除照片？", isPresented: $showingPhotoDeleteAlert) {
-                Button("移除", role: .destructive) { deletePhoto() }
-                Button("取消", role: .cancel) { photoToDelete = nil }
+                Button("移除", role: .destructive) { deleteSelectedPhotos() }
+                Button("取消", role: .cancel) { }
             } message: {
-                Text("这张照片将从该足迹中移除。")
+                Text(selectedPhotoIDsForRemoval.count > 1
+                     ? "这 \(selectedPhotoIDsForRemoval.count) 张照片将从当前足迹中移除，不会删除本地相册中的照片。"
+                     : "这张照片将从当前足迹中移除，不会删除本地相册中的照片。")
             }
             .alert("开启 AI 智能助手", isPresented: $showingAINotEnabledAlert) {
                 Button("立刻开启") { 
@@ -418,7 +421,11 @@ extension FootprintModalView {
                         }
                     }
 
-                    Spacer().frame(height: 30)
+                    Spacer().frame(
+                        height: isSelectingPhotosForRemoval
+                            ? 80
+                            : 30
+                    )
                 }
             }
             .task {
@@ -430,6 +437,42 @@ extension FootprintModalView {
                 }
             }
         }
+        .overlay(alignment: .bottom) {
+            if isSelectingPhotosForRemoval {
+                photoRemovalActionBar
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: isSelectingPhotosForRemoval)
+    }
+
+    private var photoRemovalActionBar: some View {
+        HStack(spacing: 16) {
+            Button(selectedPhotoIDsForRemoval.count == displayedPhotoAssetIDs.count ? "取消全选" : "全选") {
+                if selectedPhotoIDsForRemoval.count == displayedPhotoAssetIDs.count {
+                    selectedPhotoIDsForRemoval.removeAll()
+                } else {
+                    selectedPhotoIDsForRemoval = Set(displayedPhotoAssetIDs)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            Button("取消") {
+                cancelPhotoRemovalSelection()
+            }
+
+            Button("移除 \(selectedPhotoIDsForRemoval.count) 张", role: .destructive) {
+                showingPhotoDeleteAlert = !selectedPhotoIDsForRemoval.isEmpty
+            }
+            .disabled(selectedPhotoIDsForRemoval.isEmpty)
+        }
+        .font(.subheadline.bold())
+        .padding(.horizontal, 18)
+        .frame(minHeight: 54)
+        .dfkDetailMaterial(in: Capsule())
     }
 
     private func prepareMomentShare() {
@@ -456,6 +499,9 @@ extension FootprintModalView {
                 lightMapImage: media.lightMapImage,
                 darkMapImage: media.darkMapImage
             )
+            payload.heroImageAssetIDs = media.imageAssetIDs
+            payload.templateTallMapImage = media.templateTallMapImage
+            payload.templateWideMapImage = media.templateWideMapImage
             payload.contentMapImage = media.mapImage
             payload.contentMapLightImage = media.lightMapImage
             payload.contentMapDarkImage = media.darkMapImage
@@ -507,23 +553,42 @@ extension FootprintModalView {
 
         ensureFootprintManaged()
 
-        let existingIdentifiers = Set(footprint.photoAssetIDs)
-        let newIdentifiers = resolvedIdentifiers.filter { !existingIdentifiers.contains($0) }
-        guard !newIdentifiers.isEmpty else { return }
-
         Task {
             // Eagerly fetch cloud identifiers for sync
-            let mappings = await PhotoService.shared.getCloudIdentifiers(for: newIdentifiers)
+            let mappings = await PhotoService.shared.getCloudIdentifiers(for: resolvedIdentifiers)
             
             await MainActor.run {
                 withAnimation {
-                    footprint.photoAssetIDs.append(contentsOf: newIdentifiers)
-                    
-                    for id in newIdentifiers {
-                        if let cloudID = mappings[id] {
-                            footprint.photoMetadata.append(PhotoMetadata(localIdentifier: id, cloudIdentifier: cloudID))
+                    var storedIDs = footprint.photoAssetIDs
+                    var metadata = footprint.photoMetadata
+
+                    for localIdentifier in resolvedIdentifiers {
+                        if storedIDs.contains(localIdentifier) { continue }
+
+                        if let cloudIdentifier = mappings[localIdentifier],
+                           let existingMetadata = metadata.first(where: { $0.cloudIdentifier == cloudIdentifier }) {
+                            // The same iCloud photo may have a different local ID
+                            // on this device. Reuse its persisted identity instead
+                            // of creating a visible/blank duplicate pair.
+                            if !storedIDs.contains(existingMetadata.localIdentifier) {
+                                storedIDs.append(existingMetadata.localIdentifier)
+                            }
+                            photoService.cacheResolvedAssetIdentifiers([
+                                existingMetadata.localIdentifier: localIdentifier
+                            ])
+                        } else {
+                            storedIDs.append(localIdentifier)
+                            if let cloudIdentifier = mappings[localIdentifier] {
+                                metadata.append(PhotoMetadata(
+                                    localIdentifier: localIdentifier,
+                                    cloudIdentifier: cloudIdentifier
+                                ))
+                            }
                         }
                     }
+
+                    footprint.photoAssetIDs = storedIDs
+                    footprint.photoMetadata = metadata
                     
                     footprint.markManualMetadataEdit()
                     hasChanged = true
@@ -534,18 +599,82 @@ extension FootprintModalView {
         }
     }
 
-    private func deletePhoto() {
-        guard let assetID = photoToDelete else { return }
+    private func deleteSelectedPhotos() {
+        let selectedIDs = selectedPhotoIDsForRemoval
+        guard !selectedIDs.isEmpty else { return }
         ensureFootprintManaged()
+        let footprintID = footprint.footprintID
         withAnimation {
-            var ids = footprint.photoAssetIDs
-            ids.removeAll(where: { $0 == assetID })
-            footprint.photoAssetIDs = ids
+            var metadata = footprint.photoMetadata
+            for localIdentifier in selectedIDs
+            where !metadata.contains(where: { $0.localIdentifier == localIdentifier }) {
+                metadata.append(PhotoMetadata(localIdentifier: localIdentifier, cloudIdentifier: nil))
+            }
+            footprint.photoMetadata = metadata
+            footprint.photoAssetIDs.removeAll { storedIdentifier in
+                selectedIDs.contains(storedIdentifier)
+                    || selectedIDs.contains(photoService.resolvedAssetIdentifier(for: storedIdentifier))
+            }
+            orderedPhotoAssetIDs = photoService.displayableAssetIDs(footprint.photoAssetIDs)
             footprint.markManualMetadataEdit()
             hasChanged = true
             if !isDraft { try? modelContext.save() }
         }
-        photoToDelete = nil
+        Task {
+            let cloudIdentifiers = await photoService.getCloudIdentifiers(for: Array(selectedIDs))
+            guard !cloudIdentifiers.isEmpty else { return }
+            await MainActor.run {
+                let target: Footprint?
+                if isDraft {
+                    target = footprint
+                } else {
+                    let descriptor = FetchDescriptor<Footprint>(
+                        predicate: #Predicate { $0.footprintID == footprintID }
+                    )
+                    target = try? modelContext.fetch(descriptor).first
+                }
+                guard let target else { return }
+                var metadata = target.photoMetadata
+                for (localIdentifier, cloudIdentifier) in cloudIdentifiers {
+                    if let index = metadata.firstIndex(where: { $0.localIdentifier == localIdentifier }) {
+                        metadata[index].cloudIdentifier = cloudIdentifier
+                    } else {
+                        metadata.append(PhotoMetadata(
+                            localIdentifier: localIdentifier,
+                            cloudIdentifier: cloudIdentifier
+                        ))
+                    }
+                }
+                target.photoMetadata = metadata
+                if !isDraft { try? modelContext.save() }
+            }
+        }
+        cancelPhotoRemovalSelection()
+    }
+
+    private func cancelPhotoRemovalSelection() {
+        selectedPhotoIDsForRemoval.removeAll()
+        isSelectingPhotosForRemoval = false
+    }
+
+    private func beginPhotoRemovalSelection(with assetID: String) {
+        isSelectingPhotosForRemoval = true
+        selectedPhotoIDsForRemoval.insert(assetID)
+    }
+
+    private func handlePhotoTap(_ assetID: String) {
+        if isSelectingPhotosForRemoval {
+            if selectedPhotoIDsForRemoval.contains(assetID) {
+                selectedPhotoIDsForRemoval.remove(assetID)
+                if selectedPhotoIDsForRemoval.isEmpty {
+                    isSelectingPhotosForRemoval = false
+                }
+            } else {
+                selectedPhotoIDsForRemoval.insert(assetID)
+            }
+        } else {
+            selectedPhotoID = assetID
+        }
     }
     
     
@@ -983,18 +1112,21 @@ extension FootprintModalView {
                 let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
                 LazyVGrid(columns: columns, spacing: 8) {
                     ForEach(displayedPhotoAssetIDs, id: \.self) { assetID in
-                        AssetThumbnailView(assetID: assetID, showsTime: true)
-                            .aspectRatio(1, contentMode: .fit)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                            .onTapGesture { selectedPhotoID = assetID }
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    photoToDelete = assetID
-                                    showingPhotoDeleteAlert = true
-                                } label: {
-                                    Label("移除照片", systemImage: "trash")
-                                }
+                        ZStack(alignment: .topTrailing) {
+                            AssetThumbnailView(assetID: assetID, showsTime: true)
+                                .aspectRatio(1, contentMode: .fit)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                            if isSelectingPhotosForRemoval {
+                                Image(systemName: selectedPhotoIDsForRemoval.contains(assetID) ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, selectedPhotoIDsForRemoval.contains(assetID) ? Color.dfkAccent : Color.black.opacity(0.35))
+                                    .padding(6)
                             }
+                        }
+                            .contentShape(Rectangle())
+                            .onTapGesture { handlePhotoTap(assetID) }
+                            .onLongPressGesture { beginPhotoRemovalSelection(with: assetID) }
                     }
                 }
             }
@@ -2716,6 +2848,7 @@ private struct MiniMapView: View {
 struct AssetThumbnailView: View {
     let assetID: String
     var showsTime: Bool = true
+    var showsDate: Bool = false
     var onAssetMissing: (() -> Void)? = nil
     var targetSize: CGSize = CGSize(width: 300, height: 300)
     @State private var image: UIImage?
@@ -2761,8 +2894,19 @@ struct AssetThumbnailView: View {
         }
         .clipped()
         .overlay(alignment: .bottomLeading) {
-            if showsTime, let date = creationDate {
-                Text(date, format: .dateTime.hour(.twoDigits(amPM: .abbreviated)).minute(.twoDigits))
+                if let date = creationDate, showsTime || showsDate {
+                    Group {
+                        if showsDate {
+                            Text(date, format: .dateTime.month().day())
+                        } else {
+                            Text(
+                                date,
+                                format: .dateTime
+                                    .hour(.twoDigits(amPM: .abbreviated))
+                                    .minute(.twoDigits)
+                            )
+                        }
+                    }
                     .font(.system(size: 8, weight: .bold))
                     .foregroundColor(.white)
                     .padding(.horizontal, 4)
@@ -2812,7 +2956,8 @@ struct AssetThumbnailView: View {
             self.authStatus = status
             
             if exists {
-                let result = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+                let localIdentifier = PhotoService.shared.resolvedAssetIdentifier(for: assetID)
+                let result = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
                 self.creationDate = result.firstObject?.creationDate
             }
             
@@ -2906,6 +3051,7 @@ struct PhotoFullscreenView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 16)
+            .environment(\.colorScheme, .dark)
             .opacity(max(0, 1 - abs(verticalDismissOffset) / 100))
         }
         .offset(y: verticalDismissOffset)
@@ -2975,7 +3121,8 @@ struct PhotoFullscreenView: View {
     private func fetchCurrentDate() {
         guard currentIndex < assetIDs.count else { return }
         let assetID = assetIDs[currentIndex]
-        let result = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+        let localIdentifier = PhotoService.shared.resolvedAssetIdentifier(for: assetID)
+        let result = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
         currentCreationDate = result.firstObject?.creationDate
     }
 }
@@ -3053,7 +3200,8 @@ struct FullscreenImageItem: View {
             }
         }) { img, exists, _, degraded in
             if exists {
-                let result = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+                let localIdentifier = PhotoService.shared.resolvedAssetIdentifier(for: assetID)
+                let result = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
                 self.creationDate = result.firstObject?.creationDate
             }
 

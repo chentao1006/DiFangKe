@@ -22,6 +22,22 @@ extension View {
         }
     }
 
+    /// Round floating icon button: native glass on iOS 26, bordered before.
+    @ViewBuilder
+    func dfkCircleGlassButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.font(.body.weight(.semibold))
+                .controlSize(.large)
+                .buttonStyle(.glass)
+                .buttonBorderShape(.circle)
+        } else {
+            self.font(.body.weight(.semibold))
+                .controlSize(.large)
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+        }
+    }
+
     @ViewBuilder
     func dfkDetailMaterial<S: Shape>(in shape: S) -> some View {
         if #available(iOS 26.0, *) {

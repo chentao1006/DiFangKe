@@ -87,6 +87,10 @@ fun MainTabScreen(
                     onFootprintSelected = { footprint ->
                         destination = TimelineDestination(footprint.startTime, footprint.footprintID)
                         selectedTab = MainTab.RECORDS
+                    },
+                    onDateSelected = { date ->
+                        destination = TimelineDestination(date)
+                        selectedTab = MainTab.RECORDS
                     }
                 )
                 MainTab.SETTINGS -> SettingsScreen(onNavigate = onNavigate)

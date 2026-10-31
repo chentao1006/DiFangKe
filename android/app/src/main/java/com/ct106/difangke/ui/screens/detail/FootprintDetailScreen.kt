@@ -571,7 +571,7 @@ private fun rememberPhotosByDate(uris: List<String>): List<Pair<String, Date?>> 
     return result
 }
 
-private fun photoTakenDate(context: android.content.Context, uri: String): Date? = runCatching {
+internal fun photoTakenDate(context: android.content.Context, uri: String): Date? = runCatching {
     context.contentResolver.query(Uri.parse(uri), arrayOf(MediaStore.Images.Media.DATE_TAKEN), null, null, null)?.use { c ->
         if (c.moveToFirst()) c.getLong(0).takeIf { it > 0 }?.let { Date(it) } else null
     }

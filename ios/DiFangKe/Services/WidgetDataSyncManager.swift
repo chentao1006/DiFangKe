@@ -27,6 +27,17 @@ final class WidgetDataSyncManager {
         let latestPhotoAssetID: String?
     }
 
+    private struct ReviewPlaceClusterSnapshot {
+        let coordinate: CLLocationCoordinate2D
+        let placeCount: Int
+    }
+
+    private struct ReviewTransportIconCluster {
+        let coordinate: CLLocationCoordinate2D
+        let type: TransportType
+        let travelsWest: Bool
+    }
+
     private struct CurrentActivityMapOverlays {
         let footprints: [CurrentActivityFootprintOverlay]
         let transports: [CurrentActivityTransportOverlay]
@@ -443,7 +454,8 @@ final class WidgetDataSyncManager {
                 markerPath.stroke()
 
                 let type = TransportType(rawValue: transport.typeRaw) ?? .slow
-                if let icon = UIImage(systemName: type.sfSymbol) {
+                if let sourceIcon = UIImage(systemName: type.sfSymbol) {
+                    let icon = transport.coordinates.travelsWest ? sourceIcon.withHorizontallyFlippedOrientation() : sourceIcon
                     icon.withTintColor(routeColor, renderingMode: .alwaysTemplate).drawAspectFit(
                         in: CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
                     )
@@ -692,6 +704,7 @@ final class WidgetDataSyncManager {
         transports: [TransportRecord],
         activities: [ActivityType],
         markerScale: CGFloat = 1,
+        reviewPlaces: [Place]? = nil,
         size: CGSize = CGSize(width: 329, height: 119)
     ) async -> (light: UIImage?, dark: UIImage?) {
         await withExclusiveMapSnapshotWork {
@@ -700,6 +713,7 @@ final class WidgetDataSyncManager {
                 transports: transports,
                 activities: activities,
                 markerScale: markerScale,
+                reviewPlaces: reviewPlaces,
                 size: size
             )
         }
@@ -710,9 +724,13 @@ final class WidgetDataSyncManager {
         transports: [TransportRecord],
         activities: [ActivityType],
         markerScale: CGFloat,
+        reviewPlaces: [Place]?,
         size: CGSize
     ) async -> (light: UIImage?, dark: UIImage?) {
-        let aggregatedFootprints = aggregatedFootprints(from: footprints)
+        let aggregatedFootprints = aggregatedFootprints(from: footprints) { footprint in
+            guard let reviewPlaces else { return nil }
+            return reviewIntegratedPlaceKey(for: footprint, allPlaces: reviewPlaces)
+        }
         let decodedTransports = transports.compactMap { transport -> WidgetDecodedTransport? in
             guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
                   !decoded.isEmpty else {
@@ -761,6 +779,7 @@ final class WidgetDataSyncManager {
             activitiesByID: activitiesByID,
             activitiesByName: activitiesByName,
             markerScale: markerScale,
+            usesReviewPlaceCounts: reviewPlaces != nil,
             style: .light,
             size: size
         )
@@ -772,6 +791,7 @@ final class WidgetDataSyncManager {
             activitiesByID: activitiesByID,
             activitiesByName: activitiesByName,
             markerScale: markerScale,
+            usesReviewPlaceCounts: reviewPlaces != nil,
             style: .dark,
             size: size
         )
@@ -786,6 +806,7 @@ final class WidgetDataSyncManager {
         activitiesByID: [String: ActivityType],
         activitiesByName: [String: ActivityType],
         markerScale: CGFloat,
+        usesReviewPlaceCounts: Bool = false,
         style: UIUserInterfaceStyle,
         size: CGSize
     ) async -> UIImage? {
@@ -847,7 +868,9 @@ final class WidgetDataSyncManager {
                 }
                 ctx.cgContext.setLineDash(phase: 0, lengths: [])
 
-                if clCoords.count >= 2, let midCoord = clCoords.widgetMidpoint {
+                if !usesReviewPlaceCounts,
+                   clCoords.count >= 2,
+                   let midCoord = clCoords.widgetMidpoint {
                     let midPoint = snapshot.point(for: midCoord)
                     let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
                     let path = UIBezierPath(ovalIn: rect)
@@ -859,7 +882,8 @@ final class WidgetDataSyncManager {
                     path.stroke()
 
                     let transportType = TransportType(rawValue: transportSnapshot.record.manualTypeRaw ?? transportSnapshot.record.typeRaw) ?? .slow
-                    if let iconImage = UIImage(systemName: transportType.sfSymbol) {
+                    if let sourceImage = UIImage(systemName: transportType.sfSymbol) {
+                        let iconImage = clCoords.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
                         let symbolSize: CGFloat = 8
                         let symbolRect = CGRect(
                             x: midPoint.x - symbolSize / 2,
@@ -870,6 +894,35 @@ final class WidgetDataSyncManager {
                         iconImage.withTintColor(themeColor).drawAspectFit(in: symbolRect)
                     }
                 }
+            }
+
+            if usesReviewPlaceCounts {
+                let transportClusters = reviewTransportIconClusters(
+                    from: decodedTransports,
+                    region: region
+                )
+                drawReviewTransportIconClusters(
+                    transportClusters,
+                    snapshot: snapshot,
+                    style: style,
+                    in: ctx.cgContext
+                )
+            }
+
+            if usesReviewPlaceCounts {
+                let clusters = reviewPlaceClusters(
+                    from: aggregatedFootprints,
+                    latitudeSpan: region.span.latitudeDelta,
+                    longitudeSpan: region.span.longitudeDelta
+                )
+                drawReviewPlaceClusters(
+                    clusters,
+                    snapshot: snapshot,
+                    markerScale: markerScale,
+                    style: style,
+                    in: ctx.cgContext
+                )
+                return
             }
 
             let sortedFootprints = aggregatedFootprints.sorted { $0.coordinate.latitude > $1.coordinate.latitude }
@@ -939,6 +992,215 @@ final class WidgetDataSyncManager {
         }
     }
 
+    private func reviewPlaceClusters(
+        from places: [AggregatedFootprintSnapshot],
+        latitudeSpan: CLLocationDegrees,
+        longitudeSpan: CLLocationDegrees
+    ) -> [ReviewPlaceClusterSnapshot] {
+        struct Bucket {
+            var latitude: Double
+            var longitude: Double
+            var count: Int
+        }
+
+        let latitudeStep = max(latitudeSpan / 7, 0.000_01)
+        let longitudeStep = max(longitudeSpan / 7, 0.000_01)
+        var buckets: [String: Bucket] = [:]
+
+        for place in places {
+            let latitudeCell = Int((place.coordinate.latitude / latitudeStep).rounded())
+            let longitudeCell = Int((place.coordinate.longitude / longitudeStep).rounded())
+            let key = "\(latitudeCell):\(longitudeCell)"
+            if var bucket = buckets[key] {
+                bucket.latitude += place.coordinate.latitude
+                bucket.longitude += place.coordinate.longitude
+                bucket.count += 1
+                buckets[key] = bucket
+            } else {
+                buckets[key] = Bucket(
+                    latitude: place.coordinate.latitude,
+                    longitude: place.coordinate.longitude,
+                    count: 1
+                )
+            }
+        }
+
+        return buckets.values.map { bucket in
+            ReviewPlaceClusterSnapshot(
+                coordinate: CLLocationCoordinate2D(
+                    latitude: bucket.latitude / Double(bucket.count),
+                    longitude: bucket.longitude / Double(bucket.count)
+                ),
+                placeCount: bucket.count
+            )
+        }
+    }
+
+    private func drawReviewPlaceClusters(
+        _ clusters: [ReviewPlaceClusterSnapshot],
+        snapshot: MKMapSnapshotter.Snapshot,
+        markerScale: CGFloat,
+        style: UIUserInterfaceStyle,
+        in context: CGContext
+    ) {
+        let accent = UIColor(named: "AccentColor") ?? .systemTeal
+        let outline = Self.mapMarkerOutlineColor(for: style)
+        let radius = 9 * markerScale
+
+        for cluster in clusters {
+            let point = snapshot.point(for: cluster.coordinate)
+            let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
+            let tipRadius = 1.5 * markerScale
+            let bottomY = point.y - tipRadius
+            let pinPath = CGMutablePath()
+            pinPath.addArc(
+                center: center,
+                radius: radius,
+                startAngle: 140 * .pi / 180,
+                endAngle: 40 * .pi / 180,
+                clockwise: false
+            )
+            pinPath.addLine(to: CGPoint(x: center.x + tipRadius, y: bottomY))
+            pinPath.addArc(
+                center: CGPoint(x: center.x, y: bottomY),
+                radius: tipRadius,
+                startAngle: 0,
+                endAngle: .pi,
+                clockwise: false
+            )
+            pinPath.closeSubpath()
+
+            context.saveGState()
+            context.setShadow(
+                offset: CGSize(width: 0, height: 1.5),
+                blur: 1.5,
+                color: UIColor.black.withAlphaComponent(0.15).cgColor
+            )
+            context.setFillColor(outline.cgColor)
+            context.addPath(pinPath)
+            context.fillPath()
+            context.restoreGState()
+
+            let innerRadius = radius - tipRadius
+            context.setFillColor(accent.cgColor)
+            context.fillEllipse(in: CGRect(
+                x: center.x - innerRadius,
+                y: center.y - innerRadius,
+                width: innerRadius * 2,
+                height: innerRadius * 2
+            ))
+
+            // Large pins (share cards) say "8 / 个足迹" on two lines; small
+            // ones (widget) only have room for the number.
+            let showsUnit = innerRadius * 2 >= 30
+            let numberFont = UIFont.systemFont(ofSize: (showsUnit ? 6.5 : 11) * markerScale, weight: .bold)
+            let unitFont = UIFont.systemFont(ofSize: 3.3 * markerScale, weight: .semibold)
+            let number = NSAttributedString(
+                string: String(cluster.placeCount),
+                attributes: [.font: numberFont, .foregroundColor: UIColor.white]
+            )
+            let unit = NSAttributedString(
+                string: "个足迹",
+                attributes: [.font: unitFont, .foregroundColor: UIColor.white.withAlphaComponent(0.9)]
+            )
+            // Centre on glyph heights (cap height), not line boxes, which
+            // carry extra leading and pushed the number low.
+            let lineGap = 0.6 * markerScale
+            let blockHeight = numberFont.capHeight + (showsUnit ? lineGap + unitFont.capHeight : 0)
+            let numberBaseline = center.y - blockHeight / 2 + numberFont.capHeight
+            number.draw(at: CGPoint(
+                x: center.x - number.size().width / 2,
+                y: numberBaseline - numberFont.ascender
+            ))
+            if showsUnit {
+                let unitBaseline = numberBaseline + lineGap + unitFont.capHeight
+                unit.draw(at: CGPoint(
+                    x: center.x - unit.size().width / 2,
+                    y: unitBaseline - unitFont.ascender
+                ))
+            }
+        }
+    }
+
+    private func reviewTransportIconClusters(
+        from transports: [WidgetDecodedTransport],
+        region: MKCoordinateRegion
+    ) -> [ReviewTransportIconCluster] {
+        struct Bucket {
+            var latitude = 0.0
+            var longitude = 0.0
+            var count = 0
+            let type: TransportType
+            var westwardCount = 0
+        }
+
+        let latitudeCell = max(region.span.latitudeDelta / 7, 0.000_01)
+        let longitudeCell = max(region.span.longitudeDelta / 7, 0.000_01)
+        var buckets: [String: Bucket] = [:]
+        for transport in transports {
+            guard let midpoint = transport.coordinates.widgetMidpoint else { continue }
+            let type = TransportType(
+                rawValue: transport.record.manualTypeRaw ?? transport.record.typeRaw
+            ) ?? .slow
+            let x = Int((midpoint.longitude / longitudeCell).rounded())
+            let y = Int((midpoint.latitude / latitudeCell).rounded())
+            let key = "\(type.rawValue):\(x):\(y)"
+            if var bucket = buckets[key] {
+                bucket.latitude += midpoint.latitude
+                bucket.longitude += midpoint.longitude
+                bucket.count += 1
+                if transport.coordinates.travelsWest { bucket.westwardCount += 1 }
+                buckets[key] = bucket
+            } else {
+                buckets[key] = Bucket(
+                    latitude: midpoint.latitude,
+                    longitude: midpoint.longitude,
+                    count: 1,
+                    type: type,
+                    westwardCount: transport.coordinates.travelsWest ? 1 : 0
+                )
+            }
+        }
+
+        return buckets.values.map { bucket in
+            ReviewTransportIconCluster(
+                coordinate: CLLocationCoordinate2D(
+                    latitude: bucket.latitude / Double(bucket.count),
+                    longitude: bucket.longitude / Double(bucket.count)
+                ),
+                type: bucket.type,
+                travelsWest: bucket.westwardCount * 2 > bucket.count
+            )
+        }
+    }
+
+    private func drawReviewTransportIconClusters(
+        _ clusters: [ReviewTransportIconCluster],
+        snapshot: MKMapSnapshotter.Snapshot,
+        style: UIUserInterfaceStyle,
+        in context: CGContext
+    ) {
+        let accent = UIColor(named: "AccentColor") ?? .systemTeal
+        let outline = Self.mapMarkerOutlineColor(for: style)
+        for cluster in clusters {
+            let point = snapshot.point(for: cluster.coordinate)
+            let circleRect = CGRect(x: point.x - 9, y: point.y - 9, width: 18, height: 18)
+            context.setFillColor(outline.cgColor)
+            context.fillEllipse(in: circleRect)
+            context.setStrokeColor(accent.cgColor)
+            context.setLineWidth(1.2)
+            context.strokeEllipse(in: circleRect)
+
+            if let sourceIcon = UIImage(systemName: cluster.type.sfSymbol) {
+                let icon = cluster.travelsWest ? sourceIcon.withHorizontallyFlippedOrientation() : sourceIcon
+                icon.withTintColor(accent, renderingMode: .alwaysOriginal).drawAspectFit(
+                    in: CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10)
+                )
+            }
+
+        }
+    }
+
     private func readSnapshotImagesForOffset(_ offset: Int) -> (light: UIImage?, dark: UIImage?) {
         (
             readSnapshotImage(forOffset: offset, themeName: "light"),
@@ -972,7 +1234,10 @@ final class WidgetDataSyncManager {
         }
     }
 
-    private func aggregatedFootprints(from footprints: [Footprint]) -> [AggregatedFootprintSnapshot] {
+    private func aggregatedFootprints(
+        from footprints: [Footprint],
+        keyProvider: ((Footprint) -> String?)? = nil
+    ) -> [AggregatedFootprintSnapshot] {
         struct Bucket {
             var weightedLatitude: Double
             var weightedLongitude: Double
@@ -988,7 +1253,9 @@ final class WidgetDataSyncManager {
         for footprint in footprints {
             let durationWeight = max(footprint.duration, 1)
             let key: String
-            if let placeID = footprint.placeID {
+            if let providedKey = keyProvider?(footprint) {
+                key = providedKey
+            } else if let placeID = footprint.placeID {
                 key = "place:\(placeID.uuidString)"
             } else if !footprint.locationHash.isEmpty {
                 key = "hash:\(footprint.locationHash)"
@@ -1048,7 +1315,8 @@ final class WidgetDataSyncManager {
         // the retain-cycle warning seen during Live Activity refreshes.
         let encoded = await Task.detached(priority: .utility) {
             autoreleasepool {
-                let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
+                let resolvedAssetID = PhotoService.shared.resolvedAssetIdentifier(for: assetID)
+                let assets = PHAsset.fetchAssets(withLocalIdentifiers: [resolvedAssetID], options: nil)
                 guard let asset = assets.firstObject else { return SendableImageData(data: nil) }
 
                 let options = PHImageRequestOptions()
@@ -1397,7 +1665,8 @@ final class WidgetDataSyncManager {
                                     path.stroke()
 
                                     let transportType = TransportType(rawValue: transportSnapshot.record.manualTypeRaw ?? transportSnapshot.record.typeRaw) ?? .slow
-                                    if let iconImage = UIImage(systemName: transportType.sfSymbol) {
+                                    if let sourceImage = UIImage(systemName: transportType.sfSymbol) {
+                                        let iconImage = clCoords.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
                                         let symbolSize: CGFloat = 8
                                         let symbolRect = CGRect(x: midPoint.x - symbolSize/2, y: midPoint.y - symbolSize/2, width: symbolSize, height: symbolSize)
                                         iconImage.withTintColor(themeColor).drawAspectFit(in: symbolRect)

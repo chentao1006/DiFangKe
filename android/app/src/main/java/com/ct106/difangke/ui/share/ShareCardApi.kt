@@ -26,10 +26,17 @@ sealed class ShareCardRequest {
     data class Timeline(val startDate: Date, val endDate: Date) : ShareCardRequest()
 
     /**
-     * Statistics card ("我的生活总结") over [startDate, endDate). `rangeText` is the
-     * header text, e.g. "最近30天" / "2025年".
+     * Review card ("我的回顾") over [startDate, endDate). `rangeText` is the
+     * header text, e.g. "最近30天" / "2025年". `review` carries what the Review
+     * screen already computed (iOS statsPayload arguments); when null the
+     * factory derives an equivalent summary from Room.
      */
-    data class Stats(val rangeText: String, val startDate: Date, val endDate: Date) : ShareCardRequest()
+    data class Stats(
+        val rangeText: String,
+        val startDate: Date,
+        val endDate: Date,
+        val review: ShareStatsReview? = null
+    ) : ShareCardRequest()
 }
 
 /** Full-screen share preview: themes, editable/AI title, per-entry toggles, "分享给朋友". */

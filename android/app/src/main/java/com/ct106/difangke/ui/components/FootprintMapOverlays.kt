@@ -39,7 +39,9 @@ data class FootprintMapMarker(
     /** Latest linked photo; rendered inside the pin instead of the icon (iOS photo pins). */
     val photoUri: String? = null,
     /** 1.5 for the item selected from the timeline (iOS selected marker). */
-    val scale: Float = 1f
+    val scale: Float = 1f,
+    /** Short text drawn in the pin head instead of the icon, e.g. a cluster's place count (iOS centerText). */
+    val centerText: String? = null
 )
 
 fun TencentMap.addFootprintMarkers(
@@ -308,6 +310,18 @@ private fun createFootprintMarkerBitmap(marker: FootprintMapMarker, isDark: Bool
         val dst = RectF(center - photoRadius, pinTopCenterY - photoRadius, center + photoRadius, pinTopCenterY + photoRadius)
         canvas.drawBitmap(photo, src, dst, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
         canvas.restoreToCount(save)
+    } else if (!marker.centerText.isNullOrEmpty()) {
+        // iOS DFKFootprintMapMarker centerText: bold rounded count, shrunk (min 0.55) to fit the head.
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = iconPaint.color
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textSize = radius * 0.84f
+        }
+        val maxWidth = radius * 1.35f
+        val measured = textPaint.measureText(marker.centerText)
+        if (measured > maxWidth) textPaint.textSize *= maxOf(0.55f, maxWidth / measured)
+        canvas.drawText(marker.centerText, center, pinTopCenterY - (textPaint.descent() + textPaint.ascent()) / 2f, textPaint)
     } else {
         drawActivityIcon(canvas, marker.icon, center, pinTopCenterY, radius * 0.95f, iconPaint)
     }
@@ -376,6 +390,40 @@ private fun createFootprintMarkerBitmap(marker: FootprintMapMarker, isDark: Bool
     canvas.drawText(unitText, startX + numberWidth, textY, unitPaint)
     } // end duration threshold check
 
+    return bitmap
+}
+
+/**
+ * iOS transportOverviewIcon: a background-colored circle with an accent outline
+ * and the accent transport glyph, mirrored horizontally when travelling west.
+ */
+fun createTransportOverviewIconBitmap(
+    icon: String?,
+    isDark: Boolean,
+    flipped: Boolean,
+    diameterPx: Int,
+    iconSizePx: Float,
+    strokeWidthPx: Float,
+    accentColor: Int
+): Bitmap {
+    val size = diameterPx.coerceAtLeast(1)
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val center = size / 2f
+    val radius = center - strokeWidthPx / 2f
+    canvas.drawCircle(center, center, radius, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = if (isDark) Color.BLACK else Color.WHITE
+        style = Paint.Style.FILL
+    })
+    canvas.drawCircle(center, center, radius, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = accentColor
+        style = Paint.Style.STROKE
+        strokeWidth = strokeWidthPx
+    })
+    val save = canvas.save()
+    if (flipped) canvas.scale(-1f, 1f, center, center)
+    drawImageVectorIcon(canvas, getIconForName(icon), center, center, iconSizePx, accentColor)
+    canvas.restoreToCount(save)
     return bitmap
 }
 

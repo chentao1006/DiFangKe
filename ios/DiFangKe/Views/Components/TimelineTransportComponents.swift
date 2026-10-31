@@ -2,7 +2,6 @@ import SwiftUI
 import CoreLocation
 import MapKit
 import SwiftData
-import Photos
 import Aptabase
 
 // MARK: - TransportModalView
@@ -22,9 +21,6 @@ struct TransportModalView: View {
     @State private var showingSearchSheet: LocationType? = nil
     @State private var localStartOverride: String? = nil
     @State private var localEndOverride: String? = nil
-    @State private var mapPhotos: [PHAsset] = []
-    @State private var mapPhotoImages: [String: UIImage] = [:]
-    @State private var selectedPhotoAsset: IdentifiableString?
     @State private var interactiveMapReady = false
     @State private var showingTimeAdjustment = false
     @State private var localStartTime: Date? = nil
@@ -49,20 +45,6 @@ struct TransportModalView: View {
         }
     }
 
-    private var validMapPhotos: [(asset: PHAsset, coordinate: CLLocationCoordinate2D)] {
-        mapPhotos.compactMap { asset in
-            guard let coordinate = asset.location?.gcj02.coordinate,
-                  coordinate.latitude.isFinite,
-                  coordinate.longitude.isFinite,
-                  CLLocationCoordinate2DIsValid(coordinate) else { return nil }
-            return (asset, coordinate)
-        }
-    }
-
-    private var mapPhotoAssetCacheKey: String {
-        validMapPhotos.map { $0.asset.localIdentifier }.sorted().joined(separator: "|")
-    }
-    
     // Use the effective type for display
     private var displayType: TransportType {
         localManualType ?? displayedTransport.currentType
@@ -129,31 +111,6 @@ struct TransportModalView: View {
                                     )
                             }
                             
-                            // Photos along the route
-                            ForEach(validMapPhotos, id: \.asset.localIdentifier) { entry in
-                                Annotation("", coordinate: entry.coordinate) {
-                                    ZStack {
-                                        Color(uiColor: .systemGray6)
-                                        if let image = mapPhotoImages[entry.asset.localIdentifier] {
-                                            Image(uiImage: image)
-                                                .resizable()
-                                                .scaledToFill()
-                                        } else {
-                                            Image(systemName: "photo")
-                                                .font(.caption)
-                                                .foregroundColor(Color(uiColor: .systemGray))
-                                        }
-                                    }
-                                    .frame(width: 56, height: 56)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white, lineWidth: 1.5))
-                                    .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 2)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        selectedPhotoAsset = IdentifiableString(value: entry.asset.localIdentifier)
-                                    }
-                                }
-                            }
                         }
                         .mapStyle(.standard(elevation: .automatic, emphasis: .muted, pointsOfInterest: .excludingAll))
                         .mapControls {
@@ -296,20 +253,6 @@ struct TransportModalView: View {
                     position = .region(region)
                 }
 
-                // 为交通路线地图获取照片，同样限制显示 10 张，避免图标堆叠
-                PhotoService.shared.fetchAssets(startTime: transport.startTime, endTime: transport.endTime) { assets in
-                    let filtered = assets.filter { $0.location != nil }
-                    self.mapPhotos = Array(filtered.suffix(10))
-                }
-            }
-            .task(id: mapPhotoAssetCacheKey) {
-                await loadMapPhotoImages()
-            }
-
-            .fullScreenCover(item: $selectedPhotoAsset) { item in
-                let assetIDs = mapPhotos.map { $0.localIdentifier }
-                let index = assetIDs.firstIndex(of: item.value) ?? 0
-                PhotoFullscreenView(assetIDs: assetIDs, currentIndex: index)
             }
         }
     }
@@ -347,66 +290,6 @@ struct TransportModalView: View {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
-    @MainActor
-    private func loadMapPhotoImages() async {
-        let assetIDs = validMapPhotos.map { $0.asset.localIdentifier }
-        guard !assetIDs.isEmpty else {
-            mapPhotoImages = [:]
-            return
-        }
-
-        let neededIDs = assetIDs.filter { mapPhotoImages[$0] == nil }
-        if !neededIDs.isEmpty {
-            var loadedImages: [String: UIImage] = [:]
-            for assetID in neededIDs {
-                if Task.isCancelled { return }
-                if let image = await loadMapAssetImage(assetID: assetID, targetSize: CGSize(width: 112, height: 112)) {
-                    loadedImages[assetID] = image
-                }
-            }
-            if !loadedImages.isEmpty {
-                mapPhotoImages.merge(loadedImages, uniquingKeysWith: { _, latest in latest })
-            }
-        }
-
-        let visibleIDs = Set(assetIDs)
-        mapPhotoImages = mapPhotoImages.filter { visibleIDs.contains($0.key) }
-    }
-
-    private func loadMapAssetImage(assetID: String, targetSize: CGSize) async -> UIImage? {
-        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        guard status == .authorized || status == .limited else { return nil }
-
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil)
-        guard let asset = assets.firstObject else { return nil }
-
-        return await withCheckedContinuation { continuation in
-            let lock = NSLock()
-            var didResume = false
-            func resumeOnce(with image: UIImage?) {
-                lock.lock()
-                defer { lock.unlock() }
-                guard !didResume else { return }
-                didResume = true
-                continuation.resume(returning: image)
-            }
-
-            let options = PHImageRequestOptions()
-            options.isNetworkAccessAllowed = false
-            options.deliveryMode = .fastFormat
-            options.resizeMode = .fast
-
-            PHImageManager.default().requestImage(
-                for: asset,
-                targetSize: targetSize,
-                contentMode: .aspectFill,
-                options: options
-            ) { image, _ in
-                resumeOnce(with: image)
-            }
-        }
-    }
-    
     private var distanceString: String {
         if displayedTransport.distance < 1000 {
             return String(format: "%.0f 米", displayedTransport.distance)

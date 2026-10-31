@@ -454,6 +454,31 @@ final class RawLocationStore {
         }
     }
 
+    /// Delete complete local raw-trajectory files on the same serial queue as
+    /// location writes, so deleting today's file cannot race with an append.
+    func deleteLocalFiles(at fileURLs: [URL]) async throws {
+        let directory = baseDirectory.standardizedFileURL
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            saveQueue.async {
+                do {
+                    for fileURL in fileURLs {
+                        let standardizedURL = fileURL.standardizedFileURL
+                        guard standardizedURL.deletingLastPathComponent() == directory,
+                              standardizedURL.pathExtension.lowercased() == "csv" else {
+                            throw CocoaError(.fileWriteInvalidFileName)
+                        }
+                        if FileManager.default.fileExists(atPath: standardizedURL.path) {
+                            try FileManager.default.removeItem(at: standardizedURL)
+                        }
+                    }
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     /// 核心算法：识别并剔除轨迹中的突发性漂移点（Spike Filter）
     /// 几分钟内跨越数公里又回到附近，属于典型的坐标跳变 (支持连续多点跳转检测)
     static func filterRidiculousSpikes(_ points: [CLLocation]) -> [CLLocation] {
@@ -4039,7 +4064,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     }
                 }
                 
-                // 2. 同步云端 -> 本地 (后台执行)
+                // 2. 云端 -> 本机只写入设备内解析缓存。PHAsset 的
+                // localIdentifier 在不同设备上不同，绝不能回写共享数据。
                 let invalidLocalWithCloud = workingMetadata.filter { meta in
                     meta.cloudIdentifier != nil && !PhotoService.shared.validateAssetIDs([meta.localIdentifier])
                 }
@@ -4047,21 +4073,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 if !invalidLocalWithCloud.isEmpty {
                     let cloudIDs = invalidLocalWithCloud.compactMap { $0.cloudIdentifier }
                     let mappings = await PhotoService.shared.getLocalIdentifiers(for: cloudIDs)
+                    var resolvedByStoredIdentifier: [String: String] = [:]
                     for (cloudID, localID) in mappings {
                         if let meta = invalidLocalWithCloud.first(where: { $0.cloudIdentifier == cloudID }) {
-                            let oldID = meta.localIdentifier
-                            if let idx = workingIDs.firstIndex(of: oldID) {
-                                workingIDs[idx] = localID
-                            } else {
-                                workingIDs.append(localID)
-                            }
-                            if let metaIdx = workingMetadata.firstIndex(where: { $0.localIdentifier == oldID }) {
-                                workingMetadata[metaIdx].localIdentifier = localID
-                            }
-                            hasChanged = true
-                            print("[\(Date())] PhotoLinker: Resolved cloud ID \(cloudID) to local ID \(localID)")
+                            resolvedByStoredIdentifier[meta.localIdentifier] = localID
                         }
                     }
+                    PhotoService.shared.cacheResolvedAssetIdentifiers(resolvedByStoredIdentifier)
                 }
                 
                 // 3. 自动关联补充与基于云端 ID 的去重
@@ -4072,16 +4090,15 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     
                     for (localID, cloudID) in autoMappings {
                         // 检查这个云端 ID 是否已经存在于我们的元数据中（即使本地 ID 不同）
-                        if let existingMetaIdx = workingMetadata.firstIndex(where: { $0.cloudIdentifier == cloudID }) {
+                        if let existingMetaIdx = workingMetadata.firstIndex(where: {
+                            $0.cloudIdentifier == cloudID || $0.localIdentifier == localID
+                        }) {
                             let oldLocalID = workingMetadata[existingMetaIdx].localIdentifier
                             if oldLocalID != localID {
-                                // 找到了匹配！将旧的无效 ID 替换为新的有效本地 ID
-                                if let idIdx = workingIDs.firstIndex(of: oldLocalID) {
-                                    workingIDs[idIdx] = localID
-                                }
-                                workingMetadata[existingMetaIdx].localIdentifier = localID
-                                hasChanged = true
-                                print("[\(Date())] PhotoLinker: Scanned photo \(localID) matches existing cloud ID \(cloudID). Updated local reference.")
+                                // 已有云端身份可能是另一台设备的本地 ID，
+                                // 仅缓存本机映射。若该 ID 已被用户从列表移除，
+                                // metadata 作为排除标记可阻止自动关联把它加回来。
+                                PhotoService.shared.cacheResolvedAssetIdentifiers([oldLocalID: localID])
                             }
                         } else {
                             // 这是一个全新的照片
@@ -4106,6 +4123,40 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                             workingMetadata.append(PhotoMetadata(localIdentifier: localID, cloudIdentifier: cloudID))
                         }
                     }
+                }
+
+                // Repair duplicate references left by the old cross-device
+                // mechanism. The same iCloud photo can have several device-
+                // local IDs; keep the first persisted identity for each cloud
+                // ID and let PhotoService resolve it per device.
+                let cloudIdentifierByStoredID = Dictionary(
+                    workingMetadata.compactMap { metadata in
+                        metadata.cloudIdentifier.map { (metadata.localIdentifier, $0) }
+                    },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                var seenStoredIDs = Set<String>()
+                var seenCloudIDs = Set<String>()
+                let deduplicatedIDs = workingIDs.filter { storedID in
+                    guard seenStoredIDs.insert(storedID).inserted else { return false }
+                    guard let cloudID = cloudIdentifierByStoredID[storedID] else { return true }
+                    return seenCloudIDs.insert(cloudID).inserted
+                }
+                if deduplicatedIDs != workingIDs {
+                    workingIDs = deduplicatedIDs
+                    hasChanged = true
+                }
+
+                var seenMetadataLocalIDs = Set<String>()
+                var seenMetadataCloudIDs = Set<String>()
+                let deduplicatedMetadata = workingMetadata.filter { metadata in
+                    guard seenMetadataLocalIDs.insert(metadata.localIdentifier).inserted else { return false }
+                    guard let cloudID = metadata.cloudIdentifier else { return true }
+                    return seenMetadataCloudIDs.insert(cloudID).inserted
+                }
+                if deduplicatedMetadata != workingMetadata {
+                    workingMetadata = deduplicatedMetadata
+                    hasChanged = true
                 }
                 
                 // 3.5 清理仍然无效且没有云端 ID 的残留 ID（可选，增加鲁棒性）

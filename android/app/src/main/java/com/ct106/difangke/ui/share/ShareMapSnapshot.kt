@@ -4,15 +4,16 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.graphics.DashPathEffect
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
-import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import com.ct106.difangke.AppConfig
+import com.ct106.difangke.data.model.TransportType
 import com.ct106.difangke.service.GeocodeService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -62,7 +63,8 @@ internal class MercatorProjection(
             logicalHeight: Int,
             scale: Int,
             spanMultiplier: Double = 2.2,
-            minimumSpan: Double = 0.012
+            minimumSpan: Double = 0.012,
+            latitudeShift: Double = 0.0
         ): MercatorProjection? {
             if (points.isEmpty()) return null
             val minLat = points.minOf { it.lat }
@@ -71,7 +73,8 @@ internal class MercatorProjection(
             val maxLon = points.maxOf { it.lon }
             val latDelta = max(minimumSpan, (maxLat - minLat) * spanMultiplier)
             val lonDelta = max(minimumSpan, (maxLon - minLon) * spanMultiplier)
-            val centerLat = (minLat + maxLat) / 2
+            // iOS makeWidgetMapSnapshot moves the camera north by a share of the span.
+            val centerLat = (minLat + maxLat) / 2 + latDelta * latitudeShift
             val centerLon = (minLon + maxLon) / 2
             fun normY(lat: Double): Double {
                 val r = lat.coerceIn(-85.0, 85.0) * PI / 180.0
@@ -89,12 +92,20 @@ internal class MercatorProjection(
 /**
  * Builds map snapshots for share cards: a Tencent static-map base (or a drawn
  * fallback when the static-map service is unavailable) plus iOS-style overlays
- * (route, activity pins with duration badges, heatmap).
+ * (route, activity pins with duration badges) and the condensed Review map.
  */
 internal object ShareMapSnapshotter {
     private const val LOGICAL_W = 600
     private const val LOGICAL_H = 360
     private const val SCALE = 2 // output 1200 x 720, same as iOS snapshot points
+
+    // Review map block of the stats card is 944 x 460 px (iOS statsMapBlock).
+    private const val REVIEW_LOGICAL_W = 472
+    private const val REVIEW_LOGICAL_H = 230
+    // iOS makeShareMapSnapshots default size (points) and minimum region span.
+    private const val IOS_REVIEW_SNAPSHOT_W = 329f
+    private const val IOS_REVIEW_SNAPSHOT_H = 119f
+    private const val REVIEW_MIN_SPAN = 0.005
 
     private val baseCache = object : android.util.LruCache<String, Bitmap>(6) {}
 
@@ -102,43 +113,256 @@ internal object ShareMapSnapshotter {
         coordinates: List<GeoPoint>,
         markers: List<ShareMapMarker> = emptyList(),
         routes: List<List<GeoPoint>> = emptyList(),
-        heatPoints: List<ShareHeatPoint> = emptyList(),
         drawsPath: Boolean = true,
-        drawsOverlays: Boolean = true,
         markerScale: Float = 2.2f
     ): ShareMapImages? = withContext(Dispatchers.Default) {
         val valid = coordinates.filter { it.isRenderable }
         if (valid.isEmpty()) return@withContext null
         val projection = MercatorProjection.fitting(valid, LOGICAL_W, LOGICAL_H, SCALE) ?: return@withContext null
-        val key = "${"%.5f".format(projection.centerLat)},${"%.5f".format(projection.centerLon)},${projection.zoom}"
-        val base = baseCache.get(key) ?: GeocodeService.shared.staticMap(
-            projection.centerLat, projection.centerLon, projection.zoom, LOGICAL_W, LOGICAL_H, SCALE
-        )?.also { baseCache.put(key, it) }
+        val base = baseMap(projection)
 
         fun compose(dark: Boolean): Bitmap {
-            val bitmap = Bitmap.createBitmap(LOGICAL_W * SCALE, LOGICAL_H * SCALE, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bitmap)
-            if (base != null) {
-                val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-                if (dark) paint.colorFilter = ColorMatrixColorFilter(darkMapMatrix())
-                canvas.drawBitmap(base, null, RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat()), paint)
+            val (bitmap, canvas) = baseCanvas(projection, base, dark)
+            routes.filter { it.size > 1 }.forEach { drawPath(canvas, projection, it) }
+            if (drawsPath && routes.isEmpty() && markers.isEmpty()) drawPath(canvas, projection, valid)
+            if (markers.isEmpty()) {
+                if (routes.isEmpty()) drawEndpointMarkers(canvas, projection, valid)
             } else {
-                drawFallbackBase(canvas, bitmap.width, bitmap.height, dark)
+                drawFootprintMarkers(canvas, projection, markers, markerScale, dark)
             }
-            if (drawsOverlays) {
-                routes.filter { it.size > 1 }.forEach { drawPath(canvas, projection, it) }
-                if (drawsPath && routes.isEmpty() && markers.isEmpty()) drawPath(canvas, projection, valid)
-                if (markers.isEmpty()) {
-                    if (routes.isEmpty() && heatPoints.isEmpty()) drawEndpointMarkers(canvas, projection, valid)
-                } else {
-                    drawFootprintMarkers(canvas, projection, markers, markerScale, dark)
-                }
-            }
-            drawHeatmap(canvas, projection, heatPoints)
             return bitmap
         }
         ShareMapImages(light = compose(false), dark = compose(true))
     }
+
+    private suspend fun baseMap(projection: MercatorProjection): Bitmap? {
+        val key = "${"%.5f".format(projection.centerLat)},${"%.5f".format(projection.centerLon)},${projection.zoom}," +
+            "${projection.logicalWidth}x${projection.logicalHeight}"
+        return baseCache.get(key) ?: GeocodeService.shared.staticMap(
+            projection.centerLat, projection.centerLon, projection.zoom,
+            projection.logicalWidth, projection.logicalHeight, projection.scale
+        )?.also { baseCache.put(key, it) }
+    }
+
+    private fun baseCanvas(projection: MercatorProjection, base: Bitmap?, dark: Boolean): Pair<Bitmap, Canvas> {
+        val bitmap = Bitmap.createBitmap(
+            projection.logicalWidth * projection.scale,
+            projection.logicalHeight * projection.scale,
+            Bitmap.Config.ARGB_8888
+        )
+        val canvas = Canvas(bitmap)
+        if (base != null) {
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+            if (dark) paint.colorFilter = ColorMatrixColorFilter(darkMapMatrix())
+            canvas.drawBitmap(base, null, RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat()), paint)
+        } else {
+            drawFallbackBase(canvas, bitmap.width, bitmap.height, dark)
+        }
+        return bitmap to canvas
+    }
+
+    // ── Review map (iOS WidgetDataSyncManager.makeShareMapSnapshots with reviewPlaces) ──
+
+    /**
+     * Condensed Review-style map for the stats card: transport lines (solid for
+     * recorded samples, dashed for inferred links), one transport icon per type
+     * and grid cell, and accent pins carrying the number of places per cell.
+     * The output matches the card's 944 x 460 map block 1:1.
+     */
+    suspend fun reviewSnapshot(
+        footprintCoordinates: List<GeoPoint>,
+        places: List<GeoPoint>,
+        transports: List<ShareReviewMapTransport>,
+        markerScale: Float = 1.5f
+    ): ShareMapImages? = withContext(Dispatchers.Default) {
+        // iOS: the camera follows the footprints; transport-only ranges fall back to routes.
+        val camera = footprintCoordinates.filter { it.isRenderable }
+            .ifEmpty { transports.flatMap { it.points }.filter { it.isRenderable } }
+        if (camera.isEmpty()) return@withContext null
+        val minLat = camera.minOf { it.lat }; val maxLat = camera.maxOf { it.lat }
+        val minLon = camera.minOf { it.lon }; val maxLon = camera.maxOf { it.lon }
+        // iOS region span (before MapKit fits it to the 329 x 119 snapshot).
+        val spanLat = max(REVIEW_MIN_SPAN, (maxLat - minLat) * 2.0)
+        val spanLon = max(REVIEW_MIN_SPAN, (maxLon - minLon) * 2.8)
+        val projection = MercatorProjection.fitting(
+            camera, REVIEW_LOGICAL_W, REVIEW_LOGICAL_H, SCALE,
+            spanMultiplier = 2.0, minimumSpan = REVIEW_MIN_SPAN, latitudeShift = 0.17
+        ) ?: return@withContext null
+        val base = baseMap(projection)
+        // One iOS snapshot point in output pixels: the iOS image is scaledToFill into the card block.
+        val pt = max(REVIEW_LOGICAL_W * SCALE / IOS_REVIEW_SNAPSHOT_W, REVIEW_LOGICAL_H * SCALE / IOS_REVIEW_SNAPSHOT_H)
+        val placeClusters = reviewPlaceClusters(places, spanLat, spanLon)
+        val transportClusters = reviewTransportClusters(transports, spanLat, spanLon)
+
+        fun compose(dark: Boolean): Bitmap {
+            val (bitmap, canvas) = baseCanvas(projection, base, dark)
+            drawReviewTransportLines(canvas, projection, transports, pt)
+            drawReviewTransportClusters(canvas, projection, transportClusters, pt, dark)
+            drawReviewPlaceClusters(canvas, projection, placeClusters, pt, markerScale, dark)
+            return bitmap
+        }
+        ShareMapImages(light = compose(false), dark = compose(true))
+    }
+
+    private class Cluster(var lat: Double, var lon: Double, var count: Int, val type: TransportType? = null, var westward: Int = 0)
+
+    private fun reviewPlaceClusters(places: List<GeoPoint>, spanLat: Double, spanLon: Double): List<Cluster> {
+        val latStep = max(spanLat / 7, 0.00001)
+        val lonStep = max(spanLon / 7, 0.00001)
+        val buckets = linkedMapOf<String, Cluster>()
+        places.filter { it.isRenderable }.forEach { p ->
+            val key = "${Math.round(p.lat / latStep)}:${Math.round(p.lon / lonStep)}"
+            val bucket = buckets[key]
+            if (bucket == null) buckets[key] = Cluster(p.lat, p.lon, 1)
+            else { bucket.lat += p.lat; bucket.lon += p.lon; bucket.count += 1 }
+        }
+        return buckets.values.map { Cluster(it.lat / it.count, it.lon / it.count, it.count) }
+    }
+
+    private fun reviewTransportClusters(
+        transports: List<ShareReviewMapTransport>,
+        spanLat: Double,
+        spanLon: Double
+    ): List<Cluster> {
+        val latStep = max(spanLat / 7, 0.00001)
+        val lonStep = max(spanLon / 7, 0.00001)
+        val buckets = linkedMapOf<String, Cluster>()
+        transports.forEach { transport ->
+            val mid = midpoint(transport.points) ?: return@forEach
+            val west = if (travelsWest(transport.points)) 1 else 0
+            val key = "${transport.type.raw}:${Math.round(mid.lon / lonStep)}:${Math.round(mid.lat / latStep)}"
+            val bucket = buckets[key]
+            if (bucket == null) buckets[key] = Cluster(mid.lat, mid.lon, 1, transport.type, west)
+            else { bucket.lat += mid.lat; bucket.lon += mid.lon; bucket.count += 1; bucket.westward += west }
+        }
+        return buckets.values.map {
+            Cluster(it.lat / it.count, it.lon / it.count, it.count, it.type, if (it.westward * 2 > it.count) 1 else 0)
+        }
+    }
+
+    /** iOS widgetMidpoint: the point halfway along the route by distance. */
+    private fun midpoint(points: List<GeoPoint>): GeoPoint? {
+        if (points.isEmpty()) return null
+        if (points.size == 1) return points[0]
+        val cumulative = DoubleArray(points.size)
+        for (i in 1 until points.size) cumulative[i] = cumulative[i - 1] + distanceMeters(points[i - 1], points[i])
+        val total = cumulative.last()
+        if (total == 0.0) return points[points.size / 2]
+        val half = total / 2
+        for (i in 0 until points.size - 1) {
+            if (half >= cumulative[i] && half <= cumulative[i + 1]) {
+                val ratio = (half - cumulative[i]) / (cumulative[i + 1] - cumulative[i])
+                return GeoPoint(
+                    points[i].lat + (points[i + 1].lat - points[i].lat) * ratio,
+                    points[i].lon + (points[i + 1].lon - points[i].lon) * ratio
+                )
+            }
+        }
+        return points[points.size / 2]
+    }
+
+    /** iOS travelsWest: the route's net longitude change is westward. */
+    private fun travelsWest(points: List<GeoPoint>): Boolean {
+        if (points.size < 2) return false
+        var delta = points.last().lon - points.first().lon
+        if (delta > 180) delta -= 360
+        if (delta < -180) delta += 360
+        return delta < 0
+    }
+
+    private fun drawReviewTransportLines(
+        canvas: Canvas,
+        projection: MercatorProjection,
+        transports: List<ShareReviewMapTransport>,
+        pt: Float
+    ) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        transports.forEach { transport ->
+            transport.segments.forEach { segment ->
+                if (segment.points.size < 2) return@forEach
+                val points = segment.points.map(projection::point)
+                val path = Path().apply {
+                    moveTo(points[0].x, points[0].y)
+                    points.drop(1).forEach { lineTo(it.x, it.y) }
+                }
+                paint.color = withAlpha(SHARE_APP_ACCENT, if (segment.isDashed) 0.4 else 0.65)
+                paint.strokeWidth = (if (segment.isDashed) 1.0f else 2.5f) * pt
+                paint.pathEffect = if (segment.isDashed) DashPathEffect(floatArrayOf(4f * pt, 4f * pt), 0f) else null
+                canvas.drawPath(path, paint)
+            }
+        }
+    }
+
+    private fun drawReviewTransportClusters(
+        canvas: Canvas,
+        projection: MercatorProjection,
+        clusters: List<Cluster>,
+        pt: Float,
+        dark: Boolean
+    ) {
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = markerOutlineColor(dark) }
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 1.2f * pt
+            color = SHARE_APP_ACCENT
+        }
+        clusters.forEach { cluster ->
+            val p = projection.point(GeoPoint(cluster.lat, cluster.lon))
+            canvas.drawCircle(p.x, p.y, 9f * pt, fill)
+            canvas.drawCircle(p.x, p.y, 9f * pt, stroke)
+            canvas.save()
+            if (cluster.westward == 1) canvas.scale(-1f, 1f, p.x, p.y)
+            ShareIconPainter.draw(canvas, (cluster.type ?: TransportType.SLOW).icon, p.x, p.y, 10f * pt, SHARE_APP_ACCENT)
+            canvas.restore()
+        }
+    }
+
+    private fun drawReviewPlaceClusters(
+        canvas: Canvas,
+        projection: MercatorProjection,
+        clusters: List<Cluster>,
+        pt: Float,
+        markerScale: Float,
+        dark: Boolean
+    ) {
+        val radius = 9f * markerScale * pt
+        val tipRadius = 1.5f * markerScale * pt
+        val outline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = markerOutlineColor(dark)
+            setShadowLayer(1.5f * pt, 0f, 1.5f * pt, withAlpha(0xFF000000.toInt(), 0.15))
+        }
+        val inner = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = SHARE_APP_ACCENT }
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFFFFF.toInt()
+            textSize = 11f * markerScale * pt
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        clusters.forEach { cluster ->
+            val point = projection.point(GeoPoint(cluster.lat, cluster.lon))
+            val cx = point.x
+            val cy = point.y - radius * 1.4f
+            val bottomY = point.y - tipRadius
+            val pin = Path().apply {
+                arcTo(RectF(cx - radius, cy - radius, cx + radius, cy + radius), 140f, 260f, true)
+                lineTo(cx + tipRadius, bottomY)
+                arcTo(RectF(cx - tipRadius, bottomY - tipRadius, cx + tipRadius, bottomY + tipRadius), 0f, 180f, false)
+                close()
+            }
+            canvas.drawPath(pin, outline)
+            canvas.drawCircle(cx, cy, radius - tipRadius, inner)
+            val text = cluster.count.toString()
+            val fm = textPaint.fontMetrics
+            val textWidth = textPaint.measureText(text)
+            val textHeight = fm.descent - fm.ascent
+            canvas.drawText(text, cx - textWidth / 2f, cy - textHeight / 2f + markerScale * pt - fm.ascent, textPaint)
+        }
+    }
+
+    private fun markerOutlineColor(dark: Boolean): Int = if (dark) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
 
     /** Invert lightness while keeping hue: a usable "dark map" from the light tiles. */
     private fun darkMapMatrix(): ColorMatrix {
@@ -283,21 +507,14 @@ internal object ShareMapSnapshotter {
         canvas.drawRoundRect(rect, 4f, 4f, stroke)
         canvas.drawText(text, cx - textWidth / 2f, badgeY + (badgeHeight - textHeight) / 2f - fm.ascent, textPaint)
     }
-
-    private fun drawHeatmap(canvas: Canvas, projection: MercatorProjection, points: List<ShareHeatPoint>) {
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        points.forEach { heat ->
-            val p = projection.point(heat.point)
-            val ratio = (heat.intensity.toDouble() / max(1, heat.maxIntensity)).pow(0.4)
-            val base = when {
-                ratio < 0.25 -> 0xFFFF9500.toInt()
-                ratio < 0.85 -> 0xFFFF3B30.toInt()
-                else -> rgb(0.7, 0.0, 0.0)
-            }
-            val radius = (18 + ratio * 24).toFloat()
-            paint.shader = RadialGradient(p.x, p.y, radius, withAlpha(base, 0.48), withAlpha(base, 0.04), Shader.TileMode.CLAMP)
-            canvas.drawCircle(p.x, p.y, radius, paint)
-        }
-        paint.shader = null
-    }
 }
+
+/** One polyline run of a transport route; dashed runs are inferred links (iOS WidgetTransportLineSegment). */
+internal data class ShareReviewMapSegment(val points: List<GeoPoint>, val isDashed: Boolean)
+
+/** A decoded transport for the review map (iOS WidgetDecodedTransport). */
+internal data class ShareReviewMapTransport(
+    val type: TransportType,
+    val points: List<GeoPoint>,
+    val segments: List<ShareReviewMapSegment>
+)

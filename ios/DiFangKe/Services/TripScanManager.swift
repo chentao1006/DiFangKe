@@ -421,6 +421,30 @@ final class TripScanManager {
         }.value
     }
 
+    /// Every day of a recorded (active or finished) trip that has an activity
+    /// type, keyed by start of day, from `start` through `end`.
+    func tripActivityDays(from start: Date, through end: Date) async -> [Date: String] {
+        guard let tripContainer else { return [:] }
+        return await Task.detached(priority: .utility) {
+            let context = ModelContext(tripContainer)
+            let trips = (try? context.fetch(FetchDescriptor<Trip>())) ?? []
+            let calendar = Calendar.autoupdatingCurrent
+            var days: [Date: String] = [:]
+            for trip in trips where trip.state == .active || trip.state == .historical {
+                guard let value = trip.activityTypeValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !value.isEmpty else { continue }
+                var day = calendar.startOfDay(for: max(trip.plannedStartDay, start))
+                let lastDay = calendar.startOfDay(for: min(trip.plannedEndDay, end))
+                while day <= lastDay {
+                    days[day] = value
+                    guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+                    day = next
+                }
+            }
+            return days
+        }.value
+    }
+
     func activityStyles() async -> [TripActivityStyle] {
         guard let legacyContainer else { return [] }
         return await Task.detached(priority: .utility) {
@@ -436,8 +460,10 @@ final class TripScanManager {
 
     func actualItems(for days: [TripActualDayRequest]) async -> [TripActualItemSnapshot] {
         guard !days.isEmpty, let legacyContainer else { return [] }
+        let tripContainer = tripContainer
         return await Task.detached(priority: .utility) {
             let context = ModelContext(legacyContainer)
+            let home = tripContainer.flatMap { try? ModelContext($0).fetch(FetchDescriptor<HomeCity>()).first }
             let intervals = days.map { request -> (TripActualDayRequest, Date, Date) in
                 var calendar = Calendar(identifier: .gregorian)
                 calendar.timeZone = TimeZone(identifier: request.timeZoneIdentifier) ?? .autoupdatingCurrent
@@ -457,12 +483,33 @@ final class TripScanManager {
                 intervals.first { start >= $0.1 && start < $0.2 }?.0.id
                     ?? intervals.first { start < $0.2 && end > $0.1 }?.0.id
             }
+            // A trip covers the time away from home: home-city stops are not part of it,
+            // and neither is a move whose two ends both sit nearest to a home-city stop.
+            var homeReferences: [(location: CLLocation, isHome: Bool)] = footprints.map { footprint in
+                let isHome = home.map { Self.footprintMatchesHome(footprint, home: $0) } ?? false
+                return (CLLocation(latitude: footprint.latitude, longitude: footprint.longitude), isHome)
+            }
+            if let latitude = home?.latitude, let longitude = home?.longitude {
+                homeReferences.append((CLLocation(latitude: latitude, longitude: longitude), true))
+            }
+            func isHomeEndpoint(_ point: CodableCoordinate?) -> Bool {
+                guard let point else { return false }
+                let location = CLLocation(latitude: point.lat, longitude: point.lon)
+                return homeReferences.min { $0.location.distance(from: location) < $1.location.distance(from: location) }?.isHome ?? false
+            }
+            func staysInHomeCity(_ transport: TransportRecord) -> Bool {
+                guard home != nil,
+                      let points = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData) else { return false }
+                return isHomeEndpoint(points.first) && isHomeEndpoint(points.last)
+            }
             let stops = footprints.compactMap { footprint -> TripActualItemSnapshot? in
-                guard let dayID = dayID(for: footprint.startTime, end: footprint.endTime) else { return nil }
+                guard home.map({ !Self.footprintMatchesHome(footprint, home: $0) }) ?? true,
+                      let dayID = dayID(for: footprint.startTime, end: footprint.endTime) else { return nil }
                 return .init(dayID: dayID, kind: .stop, countryCode: footprint.countryCode, countryName: footprint.countryName, cityName: footprint.cityName, placeID: footprint.placeID, placeName: footprint.address ?? footprint.cityName, address: footprint.address, latitude: footprint.latitude, longitude: footprint.longitude, startTime: footprint.startTime, endTime: footprint.endTime, activityTypeValue: footprint.activityTypeValue, transportTypeRaw: nil, startLocationName: nil, endLocationName: nil, notes: footprint.reason ?? "", sourceFootprintID: footprint.footprintID, sourceTransportRecordID: nil, photoAssetIDs: footprint.photoAssetIDs)
             }
             let moves = transports.compactMap { transport -> TripActualItemSnapshot? in
-                guard let dayID = dayID(for: transport.startTime, end: transport.endTime) else { return nil }
+                guard !staysInHomeCity(transport),
+                      let dayID = dayID(for: transport.startTime, end: transport.endTime) else { return nil }
                 return .init(dayID: dayID, kind: .transport, countryCode: nil, countryName: nil, cityName: nil, placeID: nil, placeName: nil, address: nil, latitude: nil, longitude: nil, startTime: transport.startTime, endTime: transport.endTime, activityTypeValue: nil, transportTypeRaw: transport.manualTypeRaw ?? transport.typeRaw, startLocationName: transport.startLocation, endLocationName: transport.endLocation, notes: "", sourceFootprintID: nil, sourceTransportRecordID: transport.recordID, photoAssetIDs: [])
             }
             return (stops + moves).sorted { $0.startTime < $1.startTime }

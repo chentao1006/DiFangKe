@@ -4541,10 +4541,14 @@ extension PersistentTimelineBuilder {
         // Fetch all assets once to know their creation dates
         var assetCreationDates: [String: Date] = [:]
         if !originalPhotoAssetIDs.isEmpty {
-            let result = PHAsset.fetchAssets(withLocalIdentifiers: originalPhotoAssetIDs, options: nil)
-            result.enumerateObjects { asset, _, _ in
-                if let date = asset.creationDate {
-                    assetCreationDates[asset.localIdentifier] = date
+            for storedIdentifier in originalPhotoAssetIDs {
+                // TimelineBuilder is shared with the Live Activity extension, while
+                // PhotoService belongs to the main app target. Stored identifiers
+                // created on this device can be queried directly here; cross-device
+                // identifier resolution remains an app/UI responsibility.
+                let result = PHAsset.fetchAssets(withLocalIdentifiers: [storedIdentifier], options: nil)
+                if let date = result.firstObject?.creationDate {
+                    assetCreationDates[storedIdentifier] = date
                 }
             }
         }
