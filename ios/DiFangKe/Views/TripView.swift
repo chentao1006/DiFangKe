@@ -7906,6 +7906,7 @@ private struct TripDetailMapModel: Sendable {
 
 struct TripDetailView: View {
     @Environment(\.modelContext) private var context
+    @ObservedObject private var photoService = PhotoService.shared
     let trip: Trip
     var showsLifecycleActions = true
     let onClose: () -> Void
@@ -8238,7 +8239,7 @@ struct TripDetailView: View {
         }
         .task(id: rowIndexKey) { await rebuildRowIndex() }
         .onReceive(tripStoreDidSave) { _ in rowSaveRevision &+= 1 }
-        .task(id: "\(rowIndex.daySignature)#\(recordRefreshVersion)#\(isRowIndexLoaded)") {
+        .task(id: "\(rowIndex.daySignature)#\(recordRefreshVersion)#\(isRowIndexLoaded)#photos:\(photoService.authorizationStatus.rawValue):\(photoService.identifierResolutionRevision)") {
             guard isRowIndexLoaded else { return }
             if trip.state != .planned {
                 let requests = rowIndex.actualDayRequests
@@ -8246,10 +8247,28 @@ struct TripDetailView: View {
                     for: requests,
                     includingHomeCity: trip.originRaw == TripOrigin.manual.rawValue
                 )
-                // Photos lookups run off the main thread; only the item copies are made here.
-                let displayableAssetIDs = await Task.detached(priority: .userInitiated) {
-                    snapshots.map { PhotoService.shared.displayableAssetIDs($0.photoAssetIDs) }
-                }.value
+                // Reuse the footprint photo recovery path here instead of
+                // waiting for FootprintDetailView to trigger photo linking.
+                // Every Photos query and its time/location matching run off main.
+                var displayableAssetIDs: [[String]] = []
+                displayableAssetIDs.reserveCapacity(snapshots.count)
+                for snapshot in snapshots {
+                    let resolved: [String]
+                    if snapshot.kind == .stop,
+                       let latitude = snapshot.latitude,
+                       let longitude = snapshot.longitude {
+                        resolved = await photoService.displayableAssetIDs(
+                            storedAssetIDs: snapshot.photoAssetIDs,
+                            startTime: snapshot.startTime,
+                            endTime: snapshot.endTime,
+                            coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+                        )
+                    } else {
+                        resolved = await photoService.displayableAssetIDsAsync(snapshot.photoAssetIDs)
+                    }
+                    displayableAssetIDs.append(resolved)
+                    if Task.isCancelled { return }
+                }
                 guard !Task.isCancelled else { return }
                 actualItems = snapshots.enumerated().map { index, snapshot in
                     let item = TripItem(tripDayID: snapshot.dayID, kind: snapshot.kind, orderIndex: index)

@@ -474,7 +474,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     }
 
     /// IDs that Photos can resolve on this device, de-duplicated and ordered
-    /// newest first. Stored cross-device IDs remain untouched in the model.
+    /// oldest first. Stored cross-device IDs remain untouched in the model.
     func displayableAssetIDs(_ assetIDs: [String]) -> [String] {
         guard !assetIDs.isEmpty else { return [] }
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -502,7 +502,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 let rhsDate = creationDates[rhs.element]
                 switch (lhsDate, rhsDate) {
                 case let (left?, right?) where left != right:
-                    return left > right
+                    return left < right
                 case (_?, nil):
                     return true
                 case (nil, _?):
@@ -553,8 +553,9 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 maxDistance: Self.defaultAssetMatchDistance
             ).map(\.localIdentifier)
             var seenIdentifiers = Set<String>()
-            return (resolvedAssetIDs + matchedAssetIDs)
+            let combinedAssetIDs = (resolvedAssetIDs + matchedAssetIDs)
                 .filter { seenIdentifiers.insert($0).inserted }
+            return assetIDsOldestFirst(combinedAssetIDs)
         }.value
     }
 

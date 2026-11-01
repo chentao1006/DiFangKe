@@ -5693,6 +5693,7 @@ private struct ContinuousTimelineRow: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.modelContext) private var modelContext
     @Environment(LocationManager.self) private var locationManager
+    @ObservedObject private var photoService = PhotoService.shared
 
     let item: TimelineItem
     let nextStartTime: Date?
@@ -5830,9 +5831,9 @@ private struct ContinuousTimelineRow: View {
         .task(id: unresolvedFootprintID) {
             await retryUnknownFootprintLocationIfNeeded()
         }
-        .task(id: photoAssetIDs) {
+        .task(id: photoResolutionTaskKey) {
             didResolvePhotoAssetIDs = false
-            let resolved = await PhotoService.shared.displayableAssetIDsAsync(photoAssetIDs)
+            let resolved = await photoService.displayableAssetIDsAsync(photoAssetIDs)
             guard !Task.isCancelled else { return }
             displayablePhotoAssetIDs = resolved
             didResolvePhotoAssetIDs = true
@@ -6058,6 +6059,14 @@ private struct ContinuousTimelineRow: View {
     private var photoAssetIDs: [String] {
         guard case .footprint(let footprint) = item else { return [] }
         return footprint.photoAssetIDs
+    }
+
+    private var photoResolutionTaskKey: Int {
+        var hasher = Hasher()
+        hasher.combine(photoService.authorizationStatus.rawValue)
+        hasher.combine(photoService.identifierResolutionRevision)
+        hasher.combine(photoAssetIDs)
+        return hasher.finalize()
     }
 
     /// LazyVStack may recreate an off-screen row. Keep its photo layout present

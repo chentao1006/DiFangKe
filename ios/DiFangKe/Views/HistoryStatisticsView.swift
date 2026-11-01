@@ -1671,7 +1671,7 @@ private enum ReviewDataBuilder {
             id: id,
             title: representative[keyPath: titleKeyPath],
             visitIDs: orderedVisits.map(\.footprintID),
-            photoAssetIDs: photoAssetIDs,
+            photoAssetIDs: await PhotoService.shared.assetIDsOldestFirstAsync(photoAssetIDs),
             stats: placeStats(for: orderedVisits)
         )
     }
@@ -1734,7 +1734,7 @@ private enum ReviewDataBuilder {
     // MARK: Memories
 
     static func memoryCacheKey(for range: StatisticsRange) -> String {
-        "review.memory.v8.\(range.rawValue)"
+        "review.memory.v9.\(range.rawValue)"
     }
 
     static func loadCachedMemories(for range: StatisticsRange) -> [ReviewMemoryCandidate] {
@@ -1839,6 +1839,7 @@ private enum ReviewDataBuilder {
         }?.footprintID
         var previousVisitByID: [UUID: Date] = [:]
         var firstVisitIDByPlace: [String: UUID] = [:]
+        var firstVisitIDByPlaceName: [String: UUID] = [:]
         var averageDurationByPlace: [String: TimeInterval] = [:]
         for (placeKey, placeHistory) in historyByPlace {
             let ordered = placeHistory.sorted {
@@ -1852,6 +1853,20 @@ private enum ReviewDataBuilder {
                 previousDate = footprint.startTime
             }
             averageDurationByPlace[placeKey] = placeHistory.reduce(0) { $0 + $1.duration } / Double(max(1, placeHistory.count))
+        }
+        // A saved-place association can be added years after an older visit.
+        // In that case the integrated keys differ even though both records
+        // have the same visible place name. Keep the earliest record for that
+        // normalized name as the conservative source of the “first visit”
+        // claim, so a later association never makes an old visit disappear.
+        for footprint in history.sorted(by: {
+            if $0.startTime != $1.startTime { return $0.startTime < $1.startTime }
+            return $0.footprintID.uuidString < $1.footprintID.uuidString
+        }) {
+            let placeNameKey = normalizedPlaceSearchKey(footprint.placeName)
+            if !placeNameKey.isEmpty, firstVisitIDByPlaceName[placeNameKey] == nil {
+                firstVisitIDByPlaceName[placeNameKey] = footprint.footprintID
+            }
         }
         if Task.isCancelled { return [] }
 
@@ -1880,8 +1895,10 @@ private enum ReviewDataBuilder {
             let previousVisit = previousVisitByID[footprint.footprintID]
             let averageDuration = averageDurationByPlace[placeKey] ?? 0
             // “第一次来到这里”只属于该地点全部历史记录中的最早一次，
-            // 不能因为当前统计周期或候选顺序改变而重新产生。
+            // 不能因为当前统计周期、候选顺序或后补的地点关联改变而重新产生。
+            let placeNameKey = normalizedPlaceSearchKey(footprint.placeName)
             let firstVisit = firstVisitIDByPlace[placeKey] == footprint.footprintID
+                && firstVisitIDByPlaceName[placeNameKey] == footprint.footprintID
             let daysSincePrevious = previousVisit.map {
                 calendar.dateComponents([.day], from: $0, to: footprint.startTime).day ?? 0
             } ?? 0
@@ -3160,7 +3177,23 @@ struct HistoryStatisticsView: View {
         let footprintIDs: [UUID]
         switch query.source {
         case .placeKeys(let keys):
-            footprintIDs = keys.flatMap { derived.footprintIDsByPlaceKey[$0] ?? [] }
+            let matchingIDs = keys.flatMap { derived.footprintIDsByPlaceKey[$0] ?? [] }
+            if matchingIDs.isEmpty {
+                // Older visits can represent the same visible place without
+                // the saved-place association used by newer visits, so their
+                // integrated keys differ. Keep the exact key as the primary
+                // identity, then reuse the displayed place title to resolve
+                // that same place after the sheet changes to another range.
+                let titleKeyPath: KeyPath<ReviewFootprintSnapshot, String> = query.usesMapTitle ? \.mapTitle : \.placeName
+                let normalizedTitle = normalizedPlaceSearchKey(query.title)
+                footprintIDs = derived.rangeSnapshotsByID.values.compactMap { snapshot in
+                    normalizedPlaceSearchKey(snapshot[keyPath: titleKeyPath]) == normalizedTitle
+                        ? snapshot.footprintID
+                        : nil
+                }
+            } else {
+                footprintIDs = matchingIDs
+            }
         case .rankItem(let scope, let itemID):
             footprintIDs = derived.frequentPlaces[scope]?.first(where: { $0.id == itemID })?.footprintIDs ?? []
         }
@@ -5173,7 +5206,7 @@ private struct ReviewPlaceView: View {
                                     .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.bordered)
-                            .tint(Color.dfkAccent)
+                            .tint(.gray)
                         }
                     }
                     .padding(.horizontal, 18)
