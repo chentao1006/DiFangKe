@@ -831,21 +831,27 @@ private struct DFKMapSnapshotDrawing {
                 }
                 ctx.cgContext.setLineDash(phase: 0, lengths: [])
 
-                for display in annotationTransports where display.transport.points.count >= 2 {
-                    if let midCoord = display.midpoint {
-                        let midPoint = snapshot.point(for: midCoord)
-                        let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
-                        let path = UIBezierPath(ovalIn: rect)
-                        UIColor.systemBackground.setFill()
-                        path.fill()
-                        themeColor.setStroke()
-                        path.lineWidth = 1.2
-                        path.stroke()
+                let placedTransports = annotationTransports.compactMap { display -> (display: DFKMapTransportDisplay, point: CGPoint)? in
+                    guard display.transport.points.count >= 2, let midCoord = display.midpoint else { return nil }
+                    return (display, snapshot.point(for: midCoord))
+                }
+                let keptTransports = MapTransportIconMerge.keptIndices(
+                    points: placedTransports.map(\.point),
+                    types: placedTransports.map(\.display.transport.currentType.rawValue),
+                    diameter: 14
+                )
+                for (display, midPoint) in keptTransports.map({ placedTransports[$0] }) {
+                    let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
+                    let path = UIBezierPath(ovalIn: rect)
+                    UIColor.systemBackground.setFill()
+                    path.fill()
+                    themeColor.setStroke()
+                    path.lineWidth = 1.2
+                    path.stroke()
 
-                        if let sourceImage = UIImage(systemName: display.transport.currentType.sfSymbol) {
-                            let iconImage = display.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
-                            Self.drawImageAspectFit(iconImage.withTintColor(themeColor), in: CGRect(x: midPoint.x - 4, y: midPoint.y - 4, width: 8, height: 8))
-                        }
+                    if let sourceImage = UIImage(systemName: display.transport.currentType.sfSymbol) {
+                        let iconImage = display.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
+                        Self.drawImageAspectFit(iconImage.withTintColor(themeColor), in: CGRect(x: midPoint.x - 4, y: midPoint.y - 4, width: 8, height: 8))
                     }
                 }
             }
@@ -1383,6 +1389,9 @@ struct DFKMapView: View {
     /// Transport icon positions mid-way along the on-screen part of each
     /// route, computed off the main thread after each camera move.
     @State private var visibleTransportMidpoints: [UUID: CLLocationCoordinate2D] = [:]
+    /// Transport icons hidden because they touch a same-type icon on screen.
+    @State private var mergedTransportIconIDs: Set<UUID> = []
+    @State private var transportMapWidth: CGFloat = 0
     // Review transport data, computed in background tasks and only read here.
     @State private var reviewTransportGeometry = DFKReviewTransportGeometry()
     @State private var reviewVisibleSegments: [TransportLineSegment] = []
@@ -1499,29 +1508,47 @@ struct DFKMapView: View {
     private var visibleTransportMidpointKey: String {
         guard isInteractive, !usesReviewTransportOverview, let region = transportVisibleRegion else { return "\(mapContent.key ?? 0)#none" }
         return String(
-            format: "%ld#%.5f,%.5f,%.5f,%.5f",
+            format: "%ld#%.5f,%.5f,%.5f,%.5f#%.0f",
             mapContent.key ?? 0,
-            region.center.latitude, region.center.longitude, region.span.latitudeDelta, region.span.longitudeDelta
+            region.center.latitude, region.center.longitude, region.span.latitudeDelta, region.span.longitudeDelta,
+            transportMapWidth
         )
     }
 
     /// Moves each transport icon to the middle of the visible part of its
-    /// route, off the main thread.
+    /// route and merges touching same-type icons, off the main thread.
     private func refreshVisibleTransportMidpoints() async {
         guard isInteractive, !usesReviewTransportOverview, let region = transportVisibleRegion else {
             visibleTransportMidpoints = [:]
+            mergedTransportIconIDs = []
             return
         }
-        let routes = renderedTransportAnnotationItems.map { (id: $0.id, coordinates: $0.coordinates) }
-        let midpoints = await Task.detached(priority: .userInitiated) {
-            var result: [UUID: CLLocationCoordinate2D] = [:]
+        let routes = renderedTransportAnnotationItems.map {
+            (id: $0.id, coordinates: $0.coordinates, midpoint: $0.midpoint, type: $0.transport.currentType.rawValue)
+        }
+        let viewWidth = transportMapWidth
+        let diameter = transportIconSize
+        let result = await Task.detached(priority: .userInitiated) {
+            var midpoints: [UUID: CLLocationCoordinate2D] = [:]
             for route in routes {
-                result[route.id] = route.coordinates.visibleDistanceMidpoint(in: region)
+                midpoints[route.id] = route.coordinates.visibleDistanceMidpoint(in: region)
             }
-            return result
+            let placed = routes.compactMap { route in
+                (midpoints[route.id] ?? route.midpoint).map { (id: route.id, coordinate: $0, type: route.type) }
+            }
+            let kept = MapTransportIconMerge.keptIndices(
+                coordinates: placed.map(\.coordinate),
+                types: placed.map(\.type),
+                region: region,
+                viewWidth: viewWidth,
+                diameter: diameter
+            )
+            let keptIDs = Set(kept.map { placed[$0].id })
+            return (midpoints: midpoints, merged: Set(placed.map(\.id)).subtracting(keptIDs))
         }.value
         guard !Task.isCancelled else { return }
-        visibleTransportMidpoints = midpoints
+        visibleTransportMidpoints = result.midpoints
+        mergedTransportIconIDs = result.merged
     }
 
     private var displayedTransportIconPoints: [DFKTransportIconPoint] {
@@ -1877,7 +1904,7 @@ struct DFKMapView: View {
                                 ForEach(validAggregatedFootprints) { aggregated in
                                     Annotation("", coordinate: aggregated.coordinate, anchor: .bottom) {
                                         aggregatedAnnotationContent(for: aggregated)
-                                            .zIndex(10)
+                                            .mapAnnotationLayer(MapAnnotationLayer.footprint)
                                             .onTapGesture {
                                                 handleFootprintTap(for: aggregated)
                                             }
@@ -1890,7 +1917,7 @@ struct DFKMapView: View {
                                             onPhotoTap?(entry.asset)
                                         } label: {
                                             photoAnnotationContent(for: entry.asset)
-                                                .zIndex(100)
+                                                .mapAnnotationLayer(MapAnnotationLayer.photo)
                                         }
                                         .buttonStyle(.plain)
                                     }
@@ -2021,6 +2048,9 @@ struct DFKMapView: View {
             }
             .task(id: visibleTransportMidpointKey) {
                 await refreshVisibleTransportMidpoints()
+            }
+            .onChange(of: geometry.size.width, initial: true) { _, width in
+                transportMapWidth = width
             }
             .task(id: liveMapPhotoAssetKey) {
                 guard isInteractive else { return }
@@ -2174,10 +2204,14 @@ struct DFKMapView: View {
         .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFootprintID)
     }
 
+    private var transportIconSize: CGFloat {
+        isMiniTimelineMode ? 7 : (isInteractive ? 18 : 14)
+    }
+
     @ViewBuilder
     private func transportAnnotationContent(for display: DFKMapTransportDisplay) -> some View {
         let transport = display.transport
-        let size: CGFloat = isMiniTimelineMode ? 7 : (isInteractive ? 18 : 14)
+        let size = transportIconSize
         let iconSize: CGFloat = isMiniTimelineMode ? 4 : (isInteractive ? 9 : 7)
         
         let transportIcon = ZStack {
@@ -2236,7 +2270,7 @@ struct DFKMapView: View {
             ForEach(displayedTransportIconPoints) { point in
                 Annotation("", coordinate: point.coordinate) {
                     transportOverviewIcon(point)
-                        .zIndex(5)
+                        .mapAnnotationLayer(MapAnnotationLayer.transport)
                 }
             }
         } else {
@@ -2254,10 +2288,11 @@ struct DFKMapView: View {
             }
 
             ForEach(renderedTransportAnnotationItems) { display in
-                if let coord = visibleTransportMidpoints[display.id] ?? display.midpoint {
+                if !mergedTransportIconIDs.contains(display.id),
+                   let coord = visibleTransportMidpoints[display.id] ?? display.midpoint {
                     Annotation("", coordinate: coord) {
                         transportAnnotationContent(for: display)
-                            .zIndex(0)
+                            .mapAnnotationLayer(MapAnnotationLayer.transport)
                     }
                 }
             }
@@ -2896,11 +2931,11 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                         )
                     }
                 )
-                context.coordinator.transportIconRoutes.append((annotation, display.coordinates, midpoint))
+                context.coordinator.transportIconRoutes.append((annotation, display.coordinates, midpoint, display.transport.currentType.rawValue))
                 mapView.addAnnotation(annotation)
             }
         }
-        context.coordinator.refreshTransportIconPositions(in: mapView.region)
+        context.coordinator.refreshTransportIconPositions(in: mapView)
 
         let iconColor: UIColor = colorScheme == .dark ? .black : .white
         for aggregated in aggregatedFootprints {
@@ -2982,8 +3017,9 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         var lastContentToken: Int?
         var selectedTimeAnnotation: MapImageAnnotation?
         /// Transport icons with their routes, moved to the middle of the
-        /// visible part of each route after every camera move.
-        var transportIconRoutes: [(annotation: MapImageAnnotation, coordinates: [CLLocationCoordinate2D], midpoint: CLLocationCoordinate2D)] = []
+        /// visible part of each route after every camera move; touching
+        /// same-type icons are merged into one.
+        var transportIconRoutes: [(annotation: MapImageAnnotation, coordinates: [CLLocationCoordinate2D], midpoint: CLLocationCoordinate2D, type: String)] = []
         var transportIconTask: Task<Void, Never>?
         private var imageCache: [String: UIImage] = [:]
 
@@ -3012,24 +3048,39 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
-            refreshTransportIconPositions(in: mapView.region)
+            refreshTransportIconPositions(in: mapView)
         }
 
-        /// Computes the visible midpoints off the main thread, then only
-        /// moves the existing annotations.
-        func refreshTransportIconPositions(in region: MKCoordinateRegion) {
+        /// Computes the visible midpoints and merges off the main thread,
+        /// then only moves and hides the existing annotations.
+        func refreshTransportIconPositions(in mapView: MKMapView) {
             transportIconTask?.cancel()
             let entries = transportIconRoutes
             guard !entries.isEmpty else { return }
-            let routes = entries.map { (coordinates: $0.coordinates, midpoint: $0.midpoint) }
-            transportIconTask = Task { @MainActor in
-                let positions = await Task.detached(priority: .userInitiated) {
-                    routes.map { $0.coordinates.visibleDistanceMidpoint(in: region) ?? $0.midpoint }
+            let region = mapView.region
+            let viewWidth = mapView.bounds.width
+            let routes = entries.map { (coordinates: $0.coordinates, midpoint: $0.midpoint, type: $0.type) }
+            let diameter = Coordinator.transportImageSize
+            transportIconTask = Task { @MainActor [weak mapView] in
+                let result = await Task.detached(priority: .userInitiated) {
+                    let positions = routes.map { $0.coordinates.visibleDistanceMidpoint(in: region) ?? $0.midpoint }
+                    let kept = Set(MapTransportIconMerge.keptIndices(
+                        coordinates: positions,
+                        types: routes.map(\.type),
+                        region: region,
+                        viewWidth: viewWidth,
+                        diameter: diameter
+                    ))
+                    return (positions: positions, kept: kept)
                 }.value
                 guard !Task.isCancelled else { return }
-                for (entry, position) in zip(entries, positions)
-                where entry.annotation.coordinate.latitude != position.latitude || entry.annotation.coordinate.longitude != position.longitude {
-                    entry.annotation.coordinate = position
+                for (index, (entry, position)) in zip(entries, result.positions).enumerated() {
+                    if entry.annotation.coordinate.latitude != position.latitude || entry.annotation.coordinate.longitude != position.longitude {
+                        entry.annotation.coordinate = position
+                    }
+                    let isMerged = !result.kept.contains(index)
+                    entry.annotation.isMerged = isMerged
+                    mapView?.view(for: entry.annotation)?.isHidden = isMerged
                 }
             }
         }
@@ -3068,19 +3119,20 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             
             // zPriority only controls annotation decluttering. Use the view layer
             // itself to enforce the visual stack: transport < footprint < photo.
+            view.isHidden = annotation.isMerged
             switch annotation.kind {
             case .transport:
                 view.zPriority = .min
                 view.displayPriority = .defaultLow
-                view.layer.zPosition = 0
+                view.layer.zPosition = MapAnnotationLayer.transport
             case .footprint:
                 view.zPriority = .max
                 view.displayPriority = .required
-                view.layer.zPosition = 10
+                view.layer.zPosition = MapAnnotationLayer.footprint
             case .photo, .heatmap, .main, .selectedTime:
                 view.zPriority = .max
                 view.displayPriority = .required
-                view.layer.zPosition = 20
+                view.layer.zPosition = MapAnnotationLayer.photo
             }
             
             return view
@@ -3129,8 +3181,10 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             }
         }
 
+        static let transportImageSize: CGFloat = 20
+
         static func transportImage(symbolName: String, travelsWest: Bool) -> UIImage {
-            let size = CGSize(width: 20, height: 20)
+            let size = CGSize(width: transportImageSize, height: transportImageSize)
             let renderer = UIGraphicsImageRenderer(size: size)
             return renderer.image { context in
                 let rect = CGRect(origin: .zero, size: size)
@@ -3248,12 +3302,105 @@ private final class MapImageAnnotation: NSObject, MKAnnotation {
     dynamic var coordinate: CLLocationCoordinate2D
     let image: UIImage
     let centerOffset: CGPoint
+    /// A transport icon hidden behind a touching same-type icon.
+    var isMerged = false
 
     init(coordinate: CLLocationCoordinate2D, kind: Kind, image: UIImage, centerOffset: CGPoint = .zero) {
         self.coordinate = coordinate
         self.kind = kind
         self.image = image
         self.centerOffset = centerOffset
+    }
+}
+
+/// Map annotation stacking shared by every map: transport < footprint < photo.
+enum MapAnnotationLayer {
+    static let transport: CGFloat = 0
+    static let footprint: CGFloat = 10
+    static let photo: CGFloat = 20
+}
+
+/// SwiftUI `Annotation` has no z-order control and MapKit stacks annotation
+/// views by screen position, so set the hosting annotation view's layer
+/// zPosition the same way the UIKit map does.
+private struct MapAnnotationLayerSetter: UIViewRepresentable {
+    let zPosition: CGFloat
+
+    func makeUIView(context: Context) -> LayerView {
+        let view = LayerView()
+        view.isUserInteractionEnabled = false
+        view.zPosition = zPosition
+        return view
+    }
+
+    func updateUIView(_ view: LayerView, context: Context) {
+        view.zPosition = zPosition
+        view.apply()
+    }
+
+    final class LayerView: UIView {
+        var zPosition: CGFloat = 0
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            apply()
+        }
+
+        func apply() {
+            var ancestor = superview
+            while let view = ancestor {
+                if view is MKAnnotationView {
+                    view.layer.zPosition = zPosition
+                    return
+                }
+                ancestor = view.superview
+            }
+        }
+    }
+}
+
+extension View {
+    func mapAnnotationLayer(_ zPosition: CGFloat) -> some View {
+        background(MapAnnotationLayerSetter(zPosition: zPosition))
+    }
+}
+
+/// Same-type transport icons whose on-screen circles touch are shown as one.
+enum MapTransportIconMerge {
+    /// Indices of the icons to draw, in input order: an icon is dropped when
+    /// it touches an already kept icon of the same type.
+    static func keptIndices(points: [CGPoint], types: [String], diameter: CGFloat) -> [Int] {
+        var kept: [Int] = []
+        for index in points.indices {
+            let touches = kept.contains { other in
+                types[other] == types[index] &&
+                    hypot(points[other].x - points[index].x, points[other].y - points[index].y) < diameter
+            }
+            if !touches { kept.append(index) }
+        }
+        return kept
+    }
+
+    /// The same for a live map showing `region` across `viewWidth` points.
+    /// Pure map-point math, so it runs off the main thread.
+    static func keptIndices(
+        coordinates: [CLLocationCoordinate2D],
+        types: [String],
+        region: MKCoordinateRegion,
+        viewWidth: CGFloat,
+        diameter: CGFloat
+    ) -> [Int] {
+        let west = MKMapPoint(CLLocationCoordinate2D(latitude: region.center.latitude, longitude: region.center.longitude - region.span.longitudeDelta / 2))
+        let east = MKMapPoint(CLLocationCoordinate2D(latitude: region.center.latitude, longitude: region.center.longitude + region.span.longitudeDelta / 2))
+        var mapWidth = east.x - west.x
+        if mapWidth <= 0 { mapWidth += MKMapSize.world.width }
+        guard mapWidth > 0, viewWidth > 0 else { return Array(coordinates.indices) }
+        let scale = Double(viewWidth) / mapWidth
+        let points = coordinates.map { coordinate -> CGPoint in
+            let point = MKMapPoint(coordinate)
+            return CGPoint(x: point.x * scale, y: point.y * scale)
+        }
+        return keptIndices(points: points, types: types, diameter: diameter)
     }
 }
 

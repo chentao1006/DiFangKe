@@ -2039,7 +2039,7 @@ enum TripListCardMapRenderer {
             renderer.scale = UIScreen.main.scale * stopMarkerScale
             return renderer.uiImage.map { (marker.coordinate, $0) }
         }
-        let renderedTransportMarkers = transportMarkers.compactMap { marker -> (CLLocationCoordinate2D, UIImage)? in
+        let renderedTransportMarkers = transportMarkers.compactMap { marker -> (CLLocationCoordinate2D, UIImage, String)? in
             let renderer = ImageRenderer(
                 content: TimelineTransportMarker(icon: marker.icon)
                     .scaleEffect(x: marker.travelsWest ? -1 : 1, y: 1)
@@ -2047,7 +2047,7 @@ enum TripListCardMapRenderer {
                     .environment(\.colorScheme, colorScheme)
             )
             renderer.scale = UIScreen.main.scale
-            return renderer.uiImage.map { (marker.coordinate, $0) }
+            return renderer.uiImage.map { (marker.coordinate, $0, marker.icon) }
         }
         let dashedRouteColor = UIColor(Color.dfkAccent.opacity(0.4))
         let solidRouteColor = UIColor(Color.dfkAccent.opacity(0.65))
@@ -2096,7 +2096,7 @@ enum TripListCardMapRenderer {
     private static func composite(
         snapshot: MKMapSnapshotter.Snapshot,
         routeSegments: [TripMapRouteSegment],
-        renderedTransportMarkers: [(CLLocationCoordinate2D, UIImage)],
+        renderedTransportMarkers: [(CLLocationCoordinate2D, UIImage, String)],
         renderedStopMarkers: [(CLLocationCoordinate2D, UIImage)],
         stopMarkerScale: CGFloat,
         dashedRouteColor: UIColor,
@@ -2119,8 +2119,17 @@ enum TripListCardMapRenderer {
                 path.stroke()
             }
             context.cgContext.setLineDash(phase: 0, lengths: [])
-            for (coordinate, markerImage) in renderedTransportMarkers {
-                let point = snapshot.point(for: coordinate)
+            // Transport icons go under the stops; touching same-type icons
+            // are drawn once. Marker images carry 6pt padding on each side.
+            let transportPoints = renderedTransportMarkers.map { snapshot.point(for: $0.0) }
+            let keptTransports = MapTransportIconMerge.keptIndices(
+                points: transportPoints,
+                types: renderedTransportMarkers.map(\.2),
+                diameter: ContinuousTimelineLayout.markerSize - 4
+            )
+            for index in keptTransports {
+                let markerImage = renderedTransportMarkers[index].1
+                let point = transportPoints[index]
                 markerImage.draw(at: CGPoint(x: point.x - markerImage.size.width / 2, y: point.y - markerImage.size.height / 2))
             }
             for (coordinate, markerImage) in renderedStopMarkers {
@@ -7782,6 +7791,8 @@ struct TripDetailView: View {
     /// Transport icons mid-way along the on-screen part of each route,
     /// computed off the main thread after each camera move.
     @State private var visibleTransportMidpoints: [UUID: CLLocationCoordinate2D] = [:]
+    /// Transport icons hidden because they touch a same-type icon on screen.
+    @State private var mergedTransportMarkerIDs: Set<UUID> = []
 
     private func liveRow<Model: PersistentModel>(_ object: Model?) -> Model? {
         guard let object, object.modelContext != nil else { return nil }
@@ -7865,27 +7876,39 @@ struct TripDetailView: View {
     private var visibleTransportMidpointKey: String {
         guard let region = mapVisibleRegion else { return "\(appliedMapModelRevision)#none" }
         return String(
-            format: "%ld#%.5f,%.5f,%.5f,%.5f",
+            format: "%ld#%.5f,%.5f,%.5f,%.5f#%.0f",
             appliedMapModelRevision,
-            region.center.latitude, region.center.longitude, region.span.latitudeDelta, region.span.longitudeDelta
+            region.center.latitude, region.center.longitude, region.span.latitudeDelta, region.span.longitudeDelta,
+            mapViewportSize.width
         )
     }
 
     /// Moves each transport icon to the middle of the visible part of its
-    /// route, off the main thread.
+    /// route and merges touching same-type icons, off the main thread.
     @MainActor
     private func refreshVisibleTransportMidpoints() async {
         guard let region = mapVisibleRegion else { return }
-        let routes = mapModel.transportMarkers.map { (id: $0.id, coordinates: $0.coordinates) }
-        let midpoints = await Task.detached(priority: .userInitiated) {
-            var result: [UUID: CLLocationCoordinate2D] = [:]
+        let routes = mapModel.transportMarkers.map { (id: $0.id, coordinates: $0.coordinates, midpoint: $0.coordinate, icon: $0.icon) }
+        let viewWidth = mapViewportSize.width
+        let diameter = TripTransportMapMarker.diameter
+        let result = await Task.detached(priority: .userInitiated) {
+            var midpoints: [UUID: CLLocationCoordinate2D] = [:]
             for route in routes {
-                result[route.id] = route.coordinates.visibleDistanceMidpoint(in: region)
+                midpoints[route.id] = route.coordinates.visibleDistanceMidpoint(in: region)
             }
-            return result
+            let kept = MapTransportIconMerge.keptIndices(
+                coordinates: routes.map { midpoints[$0.id] ?? $0.midpoint },
+                types: routes.map(\.icon),
+                region: region,
+                viewWidth: viewWidth,
+                diameter: diameter
+            )
+            let keptIDs = Set(kept.map { routes[$0].id })
+            return (midpoints: midpoints, merged: Set(routes.map(\.id)).subtracting(keptIDs))
         }.value
         guard !Task.isCancelled else { return }
-        visibleTransportMidpoints = midpoints
+        visibleTransportMidpoints = result.midpoints
+        mergedTransportMarkerIDs = result.merged
     }
 
     private var usesSidebarLayout: Bool {
@@ -7925,6 +7948,20 @@ struct TripDetailView: View {
                     }
                 }
             }
+            // Transport icons sit below footprints; touching same-type icons
+            // show as one, unless one of them is selected.
+            ForEach(mapModel.transportMarkers) { marker in
+                if !mergedTransportMarkerIDs.contains(marker.id) || selectedTimelineItemID == marker.itemID {
+                    Annotation("", coordinate: visibleTransportMidpoints[marker.id] ?? marker.coordinate) {
+                        TripTransportMapMarker(
+                            icon: marker.icon,
+                            travelsWest: marker.travelsWest,
+                            isSelected: selectedTimelineItemID == marker.itemID
+                        )
+                        .mapAnnotationLayer(MapAnnotationLayer.transport)
+                    }
+                }
+            }
             ForEach(aggregatedStopItems) { group in
                 Annotation("", coordinate: group.coordinate) {
                     Button {
@@ -7941,6 +7978,7 @@ struct TripDetailView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .mapAnnotationLayer(MapAnnotationLayer.footprint)
                 }
             }
             ForEach(mapModel.routeSegments) { segment in
@@ -7949,15 +7987,6 @@ struct TripDetailView: View {
                         Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.7),
                         style: StrokeStyle(lineWidth: segment.isDashed ? 1.3 : 3, lineCap: .round, lineJoin: .round, dash: segment.isDashed ? [5, 5] : [])
                     )
-            }
-            ForEach(mapModel.transportMarkers) { marker in
-                Annotation("", coordinate: visibleTransportMidpoints[marker.id] ?? marker.coordinate) {
-                    TripTransportMapMarker(
-                        icon: marker.icon,
-                        travelsWest: marker.travelsWest,
-                        isSelected: selectedTimelineItemID == marker.itemID
-                    )
-                }
             }
         }
         .mapStyle(.standard(elevation: .realistic))
@@ -8381,6 +8410,7 @@ private struct TripTransportMapMarkerData: Identifiable {
 }
 
 private struct TripTransportMapMarker: View {
+    static let diameter: CGFloat = 18
     let icon: String
     let travelsWest: Bool
     let isSelected: Bool
@@ -8392,7 +8422,7 @@ private struct TripTransportMapMarker: View {
                 .foregroundStyle(Color.dfkAccent)
                 .scaleEffect(x: travelsWest ? -1 : 1, y: 1)
         }
-        .frame(width: 18, height: 18)
+        .frame(width: Self.diameter, height: Self.diameter)
         .scaleEffect(isSelected ? 1.5 : 1, anchor: .center)
     }
 }

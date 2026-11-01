@@ -7,9 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		B941AA120000000000000001 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA120000000000000002 /* Views/MainTabView.swift */; };
-		B941AA130000000000000001 /* TripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA130000000000000002 /* TripView.swift */; };
-		B941AA140000000000000001 /* TripScanManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA140000000000000002 /* TripScanManager.swift */; };
 		06A904412C0FBE70CFD67936 /* HistoryListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C2C5158B30717A490546E3 /* HistoryListView.swift */; };
 		134DBA94706ABB8ACD8C6EF5 /* ExportManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FAF51D5207C3CFEFBEB0667 /* ExportManager.swift */; };
 		167F3466A9C607E0782581EB /* DiFangKeWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */; };
@@ -29,8 +26,6 @@
 		8EDC80C32DCF8D059D548DB7 /* DiFangKeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C84EEA3EDC02DA770FA555B /* DiFangKeApp.swift */; };
 		8F4D2C9E6A1B43D0A6C7E2B1 /* FutureTrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */; };
 		8F4D2CA46A1B43D0A6C7E2B1 /* ShareCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2CA36A1B43D0A6C7E2B1 /* ShareCards.swift */; };
-		A7D3E1C20000000000000001 /* TripShareTemplates.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D3E1C20000000000000002 /* TripShareTemplates.swift */; };
-		A7D3E1C20000000000000003 /* ShareCardTemplates.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D3E1C20000000000000004 /* ShareCardTemplates.swift */; };
 		923B7C1655C4BB80D929DDCF /* Aptabase in Frameworks */ = {isa = PBXBuildFile; productRef = 68EA130148C5349D5CF940EE /* Aptabase */; };
 		93AB9A1A347A786C40F60D26 /* MapPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D750760587987B7CCDAB5FF /* MapPickerView.swift */; };
 		986B8BEFFA27A2D1458D6808 /* WatchAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7B718C7D98A9A3EE8FC38DC /* WatchAppDelegate.swift */; };
@@ -41,9 +36,14 @@
 		A1D3F502AA001001AA001001 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = A1D3F503AA001001AA001001 /* AppIcon.icon */; };
 		A1D3F511AA001001AA001011 /* WatchMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D3F510AA001001AA001010 /* WatchMapView.swift */; };
 		A71100000000000000000001 /* DiFangKeWatchWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A71100000000000000000002 /* DiFangKeWatchWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A7D3E1C20000000000000001 /* TripShareTemplates.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D3E1C20000000000000002 /* TripShareTemplates.swift */; };
+		A7D3E1C20000000000000003 /* ShareCardTemplates.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D3E1C20000000000000004 /* ShareCardTemplates.swift */; };
 		AA4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */; };
 		AC19D6437C18A309FE001E29 /* Views/TimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */; };
 		B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */; };
+		B941AA120000000000000001 /* Views/MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA120000000000000002 /* Views/MainTabView.swift */; };
+		B941AA130000000000000001 /* TripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA130000000000000002 /* TripView.swift */; };
+		B941AA140000000000000001 /* TripScanManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA140000000000000002 /* TripScanManager.swift */; };
 		BB95F1637D3ABD303156926C /* EditPlaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D7A089B6F99853042F8B6A1 /* EditPlaceSheet.swift */; };
 		C199604340369E777F064D7B /* Config.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8406ACF5012D1DB8F428AB9C /* Config.plist */; };
 		C1A2B3C4D5E6F70123456789 /* trip_major_cities.json in Resources */ = {isa = PBXBuildFile; fileRef = C1A2B3C4D5E6F70123456788 /* trip_major_cities.json */; };
@@ -168,9 +168,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		B941AA120000000000000002 /* Views/MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MainTabView.swift; sourceTree = "<group>"; };
-		B941AA130000000000000002 /* TripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripView.swift; sourceTree = "<group>"; };
-		B941AA140000000000000002 /* TripScanManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripScanManager.swift; sourceTree = "<group>"; };
 		0109B5C3A46C595F984A0148 /* 地方客.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "地方客.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		0DA88C94F7EAC66D28F00A84 /* FootprintDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FootprintDetailView.swift; sourceTree = "<group>"; };
 		0F466FD610098E71DB17C54D /* LocationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationManager.swift; sourceTree = "<group>"; };
@@ -190,13 +187,10 @@
 		77C2C5158B30717A490546E3 /* HistoryListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryListView.swift; sourceTree = "<group>"; };
 		7D750760587987B7CCDAB5FF /* MapPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapPickerView.swift; sourceTree = "<group>"; };
 		8406ACF5012D1DB8F428AB9C /* Config.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Config.plist; sourceTree = "<group>"; };
-		C1A2B3C4D5E6F70123456788 /* trip_major_cities.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = trip_major_cities.json; path = ../../config/trip_major_cities.json; sourceTree = "<group>"; };
 		8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataDeduplicationService.swift; sourceTree = "<group>"; };
 		8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiFangKeSchema.swift; sourceTree = "<group>"; };
 		8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTrip.swift; sourceTree = "<group>"; };
 		8F4D2CA36A1B43D0A6C7E2B1 /* ShareCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareCards.swift; sourceTree = "<group>"; };
-		A7D3E1C20000000000000002 /* TripShareTemplates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripShareTemplates.swift; sourceTree = "<group>"; };
-		A7D3E1C20000000000000004 /* ShareCardTemplates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareCardTemplates.swift; sourceTree = "<group>"; };
 		8FECD1239FE04DF703FFB1E6 /* DataManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataManagerView.swift; sourceTree = "<group>"; };
 		97D09C072C5681826463BD99 /* PlacesManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacesManagerView.swift; sourceTree = "<group>"; };
 		9F3945441A99914928D9C615 /* DiFangKeWatch.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = DiFangKeWatch.entitlements; sourceTree = "<group>"; };
@@ -206,10 +200,16 @@
 		A49FF8D1053B68159E4D2EEC /* Footprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Footprint.swift; sourceTree = "<group>"; };
 		A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/TimelineView.swift; sourceTree = "<group>"; };
 		A71100000000000000000002 /* DiFangKeWatchWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = DiFangKeWatchWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A7D3E1C20000000000000002 /* TripShareTemplates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripShareTemplates.swift; sourceTree = "<group>"; };
+		A7D3E1C20000000000000004 /* ShareCardTemplates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareCardTemplates.swift; sourceTree = "<group>"; };
 		AA55D128BD63CB08D5888227 /* Secrets.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Secrets.plist; sourceTree = "<group>"; };
 		B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TimelineEditView.swift; sourceTree = "<group>"; };
+		B941AA120000000000000002 /* Views/MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MainTabView.swift; sourceTree = "<group>"; };
+		B941AA130000000000000002 /* TripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripView.swift; sourceTree = "<group>"; };
+		B941AA140000000000000002 /* TripScanManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripScanManager.swift; sourceTree = "<group>"; };
 		BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoService.swift; sourceTree = "<group>"; };
 		C0E6E94F0AB674372B9577B9 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/WatchOS.platform/Developer/SDKs/WatchOS11.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		C1A2B3C4D5E6F70123456788 /* trip_major_cities.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = trip_major_cities.json; path = ../../config/trip_major_cities.json; sourceTree = "<group>"; };
 		C641B0502FE2720C009DC763 /* SafeMKMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeMKMapView.swift; sourceTree = "<group>"; };
 		C64D3D9D2F80058600BB3C3F /* IgnoredPlacesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IgnoredPlacesView.swift; sourceTree = "<group>"; };
 		C64D3D9F2F8111A800BB3C3F /* RawLogsManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawLogsManagerView.swift; sourceTree = "<group>"; };
@@ -724,7 +724,7 @@
 				A7D3E1C20000000000000003 /* ShareCardTemplates.swift in Sources */,
 				C67848582FA3A082002DF823 /* WidgetDataSyncManager.swift in Sources */,
 				AC19D6437C18A309FE001E29 /* Views/TimelineView.swift in Sources */,
-				B941AA120000000000000001 /* MainTabView.swift in Sources */,
+				B941AA120000000000000001 /* Views/MainTabView.swift in Sources */,
 				7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */,
 				8EDC80C32DCF8D059D548DB7 /* DiFangKeApp.swift in Sources */,
 				C68544332F84E84200C605E9 /* TimelineComponents.swift in Sources */,
@@ -914,7 +914,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.6.7;
+				MARKETING_VERSION = 1.7.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1045,7 +1045,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.6.7;
+				MARKETING_VERSION = 1.7.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
