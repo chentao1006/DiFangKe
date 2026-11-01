@@ -1629,12 +1629,20 @@ private enum ReviewDataBuilder {
     static func placeGroups(
         from footprints: [ReviewFootprintSnapshot],
         titleKeyPath: KeyPath<ReviewFootprintSnapshot, String>
-    ) -> [ReviewPlaceGroup] {
-        Dictionary(grouping: footprints, by: \.placeKey)
-            .compactMap { key, visits in
-                placeGroup(id: key, visits: visits, titleKeyPath: titleKeyPath, resolvedPhotoAssetIDs: nil)
+    ) async -> [ReviewPlaceGroup] {
+        var groups: [ReviewPlaceGroup] = []
+        for (key, visits) in Dictionary(grouping: footprints, by: \.placeKey) {
+            if let group = await placeGroup(
+                id: key,
+                visits: visits,
+                titleKeyPath: titleKeyPath,
+                resolvedPhotoAssetIDs: nil
+            ) {
+                groups.append(group)
             }
-            .sorted { $0.stats.totalDuration > $1.stats.totalDuration }
+            if Task.isCancelled { return [] }
+        }
+        return groups.sorted { $0.stats.totalDuration > $1.stats.totalDuration }
     }
 
     static func placeGroup(
@@ -1642,15 +1650,23 @@ private enum ReviewDataBuilder {
         visits: [ReviewFootprintSnapshot],
         titleKeyPath: KeyPath<ReviewFootprintSnapshot, String>,
         resolvedPhotoAssetIDs: [String]?
-    ) -> ReviewPlaceGroup? {
+    ) async -> ReviewPlaceGroup? {
         let orderedVisits = visits.sorted { $0.startTime > $1.startTime }
         guard let representative = orderedVisits.first else { return nil }
 
-        var seenPhotoIDs: Set<String> = []
-        let storedPhotoAssetIDs = orderedVisits
-            .flatMap(\.photoAssetIDs)
-            .filter { seenPhotoIDs.insert($0).inserted }
-        let photoAssetIDs = resolvedPhotoAssetIDs ?? PhotoService.shared.displayableAssetIDs(storedPhotoAssetIDs)
+        let photoAssetIDs: [String]
+        if let resolvedPhotoAssetIDs {
+            photoAssetIDs = resolvedPhotoAssetIDs
+        } else {
+            var seenPhotoIDs: Set<String> = []
+            var recoveredPhotoAssetIDs: [String] = []
+            for visit in orderedVisits {
+                let visitPhotoAssetIDs = await displayablePhotoAssetIDs(for: visit)
+                recoveredPhotoAssetIDs.append(contentsOf: visitPhotoAssetIDs.filter { seenPhotoIDs.insert($0).inserted })
+                if Task.isCancelled { return nil }
+            }
+            photoAssetIDs = recoveredPhotoAssetIDs
+        }
         return ReviewPlaceGroup(
             id: id,
             title: representative[keyPath: titleKeyPath],
@@ -2679,14 +2695,12 @@ struct HistoryStatisticsView: View {
         let rangeText = statisticsRangeText
         let resolvedPhotoAssetIDs = candidate.photoAssetIDs
         Task { @MainActor in
-            let group = await reviewDetached(priority: .userInitiated) {
-                ReviewDataBuilder.placeGroup(
-                    id: placeKey,
-                    visits: (derived.footprintIDsByPlaceKey[placeKey] ?? []).compactMap { derived.rangeSnapshotsByID[$0] },
-                    titleKeyPath: \.placeName,
-                    resolvedPhotoAssetIDs: resolvedPhotoAssetIDs
-                )
-            }
+            let group = await ReviewDataBuilder.placeGroup(
+                id: placeKey,
+                visits: (derived.footprintIDsByPlaceKey[placeKey] ?? []).compactMap { derived.rangeSnapshotsByID[$0] },
+                titleKeyPath: \.placeName,
+                resolvedPhotoAssetIDs: resolvedPhotoAssetIDs
+            )
             if let group,
                let selection = ReviewPlaceSelection(group: group, rangeText: rangeText, footprintsByID: rangeFootprintsByID) {
                 presentedSheet = .places(
@@ -2704,12 +2718,10 @@ struct HistoryStatisticsView: View {
         let rangeText = statisticsRangeText
         let footprintIDs = item.footprintIDs
         Task { @MainActor in
-            let groups = await reviewDetached(priority: .userInitiated) {
-                ReviewDataBuilder.placeGroups(
-                    from: footprintIDs.compactMap { derived.rangeSnapshotsByID[$0] },
-                    titleKeyPath: \.placeName
-                )
-            }
+            let groups = await ReviewDataBuilder.placeGroups(
+                from: footprintIDs.compactMap { derived.rangeSnapshotsByID[$0] },
+                titleKeyPath: \.placeName
+            )
             let places = groups.compactMap {
                 ReviewPlaceSelection(group: $0, rangeText: rangeText, footprintsByID: rangeFootprintsByID)
             }
@@ -3145,20 +3157,18 @@ struct HistoryStatisticsView: View {
         guard reviewRoutesReady, sheetPlacesRange != range else { return }
         let derived = reviewDerived
         let rangeText = statisticsRangeText
-        let groups = await reviewDetached(priority: .userInitiated) {
-            let footprintIDs: [UUID]
-            switch query.source {
-            case .placeKeys(let keys):
-                footprintIDs = keys.flatMap { derived.footprintIDsByPlaceKey[$0] ?? [] }
-            case .rankItem(let scope, let itemID):
-                footprintIDs = derived.frequentPlaces[scope]?.first(where: { $0.id == itemID })?.footprintIDs ?? []
-            }
-            let titleKeyPath: KeyPath<ReviewFootprintSnapshot, String> = query.usesMapTitle ? \.mapTitle : \.placeName
-            return ReviewDataBuilder.placeGroups(
-                from: footprintIDs.compactMap { derived.rangeSnapshotsByID[$0] },
-                titleKeyPath: titleKeyPath
-            )
+        let footprintIDs: [UUID]
+        switch query.source {
+        case .placeKeys(let keys):
+            footprintIDs = keys.flatMap { derived.footprintIDsByPlaceKey[$0] ?? [] }
+        case .rankItem(let scope, let itemID):
+            footprintIDs = derived.frequentPlaces[scope]?.first(where: { $0.id == itemID })?.footprintIDs ?? []
         }
+        let titleKeyPath: KeyPath<ReviewFootprintSnapshot, String> = query.usesMapTitle ? \.mapTitle : \.placeName
+        let groups = await ReviewDataBuilder.placeGroups(
+            from: footprintIDs.compactMap { derived.rangeSnapshotsByID[$0] },
+            titleKeyPath: titleKeyPath
+        )
         guard !Task.isCancelled, range == appliedRange, reviewRoutesReady else { return }
         sheetPlaces = groups.compactMap {
             ReviewPlaceSelection(group: $0, rangeText: rangeText, footprintsByID: rangeFootprintsByID)
@@ -5508,9 +5518,7 @@ struct FullReviewMapView: View {
         let footprintsByID = Dictionary(footprints.map { ($0.footprintID, $0) }, uniquingKeysWith: { first, _ in first })
         let rangeText = self.rangeText
         Task { @MainActor in
-            let groups = await reviewDetached(priority: .userInitiated) {
-                ReviewDataBuilder.placeGroups(from: snapshots, titleKeyPath: \.mapTitle)
-            }
+            let groups = await ReviewDataBuilder.placeGroups(from: snapshots, titleKeyPath: \.mapTitle)
             let places = groups.compactMap {
                 ReviewPlaceSelection(group: $0, rangeText: rangeText, footprintsByID: footprintsByID)
             }
@@ -5534,9 +5542,12 @@ struct FullReviewMapView: View {
         let rangeText = self.rangeText
         let placeKey = snapshot.placeKey
         Task { @MainActor in
-            let group = await reviewDetached(priority: .userInitiated) {
-                ReviewDataBuilder.placeGroup(id: placeKey, visits: [snapshot], titleKeyPath: \.mapTitle, resolvedPhotoAssetIDs: nil)
-            }
+            let group = await ReviewDataBuilder.placeGroup(
+                id: placeKey,
+                visits: [snapshot],
+                titleKeyPath: \.mapTitle,
+                resolvedPhotoAssetIDs: nil
+            )
             guard let place = group.flatMap({
                 ReviewPlaceSelection(group: $0, rangeText: rangeText, footprintsByID: footprintsByID)
             }) else { return }

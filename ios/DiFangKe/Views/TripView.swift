@@ -19,6 +19,7 @@ struct TripView: View {
     @State private var showingCreatePurpose = false
     @State private var createPurpose: TripCreationPurpose?
     @State private var createdTripToArrange: Trip?
+    @State private var createdTripToScrollID: UUID?
     @State private var showingOptions = false
     @State private var showingIntroduction = false
     @State private var selectedTrip: Trip?
@@ -82,6 +83,7 @@ struct TripView: View {
     var body: some View {
         let lookup = tripLookup
         let plannedList = plannedTrips(in: lookup)
+        ScrollViewReader { listProxy in
         ScrollView {
             LazyVStack(spacing: 14, pinnedViews: [.sectionHeaders]) {
                 if let activeTrip {
@@ -102,6 +104,7 @@ struct TripView: View {
                         .contextMenu {
                             tripContextMenu(for: activeTrip)
                         }
+                        .id(activeTrip.id)
                         .background {
                             GeometryReader { proxy in
                                 Color.clear.preference(
@@ -132,6 +135,7 @@ struct TripView: View {
                                     toggleSelection(trip)
                                 }
                                 .contextMenu { tripContextMenu(for: trip) }
+                                .id(trip.id)
                             }
                         }
                         .padding(.horizontal)
@@ -167,6 +171,7 @@ struct TripView: View {
                                 .contextMenu {
                                     tripContextMenu(for: trip)
                                 }
+                                .id(trip.id)
                             }
                         }
                         .padding(.horizontal)
@@ -214,6 +219,18 @@ struct TripView: View {
             // list on every scroll frame.
             let scrolledAway = bottom < 12
             if isActiveCardScrolledAway != scrolledAway { isActiveCardScrolledAway = scrolledAway }
+        }
+        .onChange(of: listIndex.tripIDsKey) { _, _ in
+            guard let tripID = createdTripToScrollID,
+                  tripLookup[tripID] != nil else { return }
+            Task { @MainActor in
+                await Task.yield()
+                withAnimation(.easeInOut) {
+                    listProxy.scrollTo(tripID, anchor: .center)
+                }
+                createdTripToScrollID = nil
+            }
+        }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             if let activeTrip, isActiveCardScrolledAway, !isSelecting {
@@ -309,9 +326,14 @@ struct TripView: View {
             }
         }) {
             if createPurpose == .planned {
-                PlanTripCreateView { createdTripToArrange = $0 }
+                PlanTripCreateView {
+                    createdTripToScrollID = $0.id
+                    createdTripToArrange = $0
+                }
             } else {
-                CreateTripView(activityStyles: createActivityStyles, forcesHistorical: true)
+                CreateTripView(activityStyles: createActivityStyles, forcesHistorical: true) {
+                    createdTripToScrollID = $0.id
+                }
             }
         }
         .sheet(isPresented: $showingOptions) { TripOptionsView() }
@@ -972,6 +994,7 @@ struct TripCardModel: Sendable {
     let mapCities: [TripCardMapInput.City]
     let footprintIDs: [UUID]
     let actualDayRequests: [TripActualDayRequest]
+    let includesHomeCityActualItems: Bool
     let usesPlannedStopMarkers: Bool
     let nextStop: TripCardStop?
     let previousStop: TripCardStop?
@@ -1004,6 +1027,7 @@ private struct TripListSnapshot: Sendable {
         let stateRaw: String
         let plannedStartDay: Date
         let plannedEndDay: Date
+        let originRaw: String
         let datesUserEdited: Bool
     }
 
@@ -1058,6 +1082,7 @@ private struct TripListSnapshot: Sendable {
                 stateRaw: $0.stateRaw,
                 plannedStartDay: $0.plannedStartDay,
                 plannedEndDay: $0.plannedEndDay,
+                originRaw: $0.originRaw,
                 datesUserEdited: $0.datesUserEdited
             )
         }
@@ -1157,6 +1182,7 @@ private struct TripListIndex: Sendable {
                 mapCities: tripCities.map(\.city),
                 footprintIDs: tripItems.compactMap(\.sourceFootprintID),
                 actualDayRequests: actualDayRequests,
+                includesHomeCityActualItems: trip.originRaw == TripOrigin.manual.rawValue,
                 usesPlannedStopMarkers: usesPlannedStopMarkers,
                 nextStop: nextIndex.map { stop(from: tripItems[$0]) },
                 previousStop: previousRow.map(stop(from:)),
@@ -1499,7 +1525,12 @@ private struct TripListCardHero: View {
             let actualDayRequests = model.actualDayRequests
             let actualSnapshots: [TripActualItemSnapshot]
             if actualDayRequests.isEmpty { actualSnapshots = [] }
-            else { actualSnapshots = await TripScanManager.shared.actualItems(for: actualDayRequests) }
+            else {
+                actualSnapshots = await TripScanManager.shared.actualItems(
+                    for: actualDayRequests,
+                    includingHomeCity: model.includesHomeCityActualItems
+                )
+            }
             let footprintIDs = actualDayRequests.isEmpty
                 ? model.footprintIDs
                 : actualSnapshots.compactMap(\.sourceFootprintID)
@@ -1774,10 +1805,10 @@ private func buildTripCardMapContent(
             sequenceNumber: nil
         )
     }
-    // Match the detail map: a newly created plan has city coordinates
-    // before it has arranged stops, so its list card must use those
+    // Match the detail map: newly created trips can have recognised city
+    // coordinates before their stop snapshots arrive, so the card uses those
     // cities instead of falling through to the empty-map placeholder.
-    let displayedStops = usesPlannedStopMarkers && itemStops.isEmpty ? cityStops : itemStops
+    let displayedStops = itemStops.isEmpty ? cityStops : itemStops
     let itemCoordinates = displayedStops.compactMap { stop -> CLLocationCoordinate2D? in
         let coordinate = CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)
         guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
@@ -1794,11 +1825,16 @@ private func buildTripCardMapContent(
         guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
         return tripCityMatchesHome(cityName: city.cityName, countryCode: city.countryCode, homeCity: homeCity) ? nil : coordinate
     }
-    // Planned trips must show the actual itinerary extent. Historical
-    // cards retain their city-level framing and home-city filtering.
+    // Planned trips show the actual itinerary extent. Historical cards keep
+    // home out of the frame when away content exists, but a manually dated
+    // in-city trip must fall back to its real home-city footprints instead of
+    // becoming an empty-map placeholder.
+    let hasAwayContent = !nonHomeItemCoordinates.isEmpty || !nonHomeCityCoordinates.isEmpty
     let stopCoordinates = usesPlannedStopMarkers
         ? itemCoordinates
-        : (nonHomeCityCoordinates.isEmpty ? nonHomeItemCoordinates : nonHomeCityCoordinates)
+        : (!nonHomeCityCoordinates.isEmpty
+            ? nonHomeCityCoordinates
+            : (!nonHomeItemCoordinates.isEmpty ? nonHomeItemCoordinates : itemCoordinates))
     var styleByValue: [String: TripActivityStyle] = [:]
     for style in loadedStyles {
         styleByValue[style.id] = style
@@ -1807,7 +1843,9 @@ private func buildTripCardMapContent(
     let stopMarkers = displayedStops.compactMap { stop -> TripCardMapStopMarker? in
         let coordinate = CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)
         guard coordinate.isRenderableMapCoordinate,
-              usesPlannedStopMarkers || !tripCityMatchesHome(cityName: stop.cityName, countryCode: stop.countryCode, homeCity: homeCity) else { return nil }
+              usesPlannedStopMarkers
+                || !tripCityMatchesHome(cityName: stop.cityName, countryCode: stop.countryCode, homeCity: homeCity)
+                || !hasAwayContent else { return nil }
         let style = usesPlannedStopMarkers ? nil : stop.activityTypeValue.flatMap { styleByValue[$0] }
         return TripCardMapStopMarker(
             itemID: nil,
@@ -2420,6 +2458,7 @@ struct TripShareTripSnapshot: Sendable {
     let id: UUID
     let title: String
     let kind: TripKind
+    let originRaw: String
     let plannedStartDay: Date
     let plannedEndDay: Date
     let coverPhotoIdentifier: String?
@@ -2428,6 +2467,7 @@ struct TripShareTripSnapshot: Sendable {
         id = trip.id
         title = trip.title
         kind = trip.kind
+        originRaw = trip.originRaw
         plannedStartDay = trip.plannedStartDay
         plannedEndDay = trip.plannedEndDay
         coverPhotoIdentifier = trip.coverPhotoIdentifier
@@ -2682,7 +2722,10 @@ private func buildTripShareSummary(
         : []
     let actualSnapshots = actualDayRequests.isEmpty
         ? nil
-        : await TripScanManager.shared.actualItems(for: actualDayRequests)
+        : await TripScanManager.shared.actualItems(
+            for: actualDayRequests,
+            includingHomeCity: trip.originRaw == TripOrigin.manual.rawValue
+        )
     let mapContent = await loadTripCardMapContent(input: TripCardMapInput(
         items: sortedItems.map(\.mapItem),
         cities: cities.map(\.mapCity),
@@ -3024,6 +3067,7 @@ private struct CreateTripView: View {
     @Environment(\.modelContext) private var context
     let activityStyles: [TripActivityStyle]
     var forcesHistorical = false
+    let onCreated: (Trip) -> Void
     @State private var title = ""
     @State private var notes = ""
     @State private var startDay = Calendar.current.startOfDay(for: Date())
@@ -3031,13 +3075,23 @@ private struct CreateTripView: View {
     @State private var citiesByDay: [Date: [TripCitySelection]] = [:]
     @State private var citySearchDay: Date?
     @State private var importExistingFootprints = true
+    @State private var detectedDays: [TripImportedDay] = []
+    @State private var isDetectingFootprints = false
+    @State private var titleWasUserEdited = false
+    @State private var automaticTitleRevision = 0
     @State private var isSaving = false
     @State private var activityTypeValue: String? = nil
 
     var body: some View {
         NavigationStack {
             Form {
-                DFKIMETextField(placeholder: "标题", text: $title)
+                DFKIMETextField(placeholder: "标题", text: Binding(
+                    get: { title },
+                    set: {
+                        title = $0
+                        titleWasUserEdited = true
+                    }
+                ))
                 DFKIMEMultilineTextField(placeholder: "备注", text: $notes)
                 TripActivityTypePicker(styles: activityStyles, selection: $activityTypeValue)
                 DatePicker("开始日期", selection: $startDay, displayedComponents: .date)
@@ -3052,13 +3106,26 @@ private struct CreateTripView: View {
                 DatePicker("结束日期", selection: $endDay, in: startDay..., displayedComponents: .date)
                 Toggle("加入这段时间的足迹", isOn: $importExistingFootprints)
                 if importExistingFootprints {
-                    Text("已有足迹、交通和照片会显示在行程中。")
-                        .font(.caption).foregroundStyle(.secondary)
+                    if isDetectingFootprints {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("正在识别这段时间的足迹…")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    } else {
+                        Text(detectedDays.contains(where: { !$0.cities.isEmpty })
+                             ? "已按日期识别足迹城市，交通和照片也会显示在行程中。"
+                             : "这段时间没有识别到可加入的足迹。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 ForEach(tripDays, id: \.self) { day in
                     TripDayCitySection(
                         day: day,
                         cities: citiesByDay[day] ?? [],
+                        detectedCities: detectedCities(on: day),
                         onAdd: { citySearchDay = day },
                         onRemove: { remove($0, from: day) }
                     )
@@ -3082,9 +3149,13 @@ private struct CreateTripView: View {
                 var cities = citiesByDay[selectedDay] ?? []
                 if !cities.contains(where: { $0.key == city.key }) { cities.append(city) }
                 citiesByDay[selectedDay] = cities
+                refreshAutomaticTitle()
                 citySearchDay = nil
                 }
             }
+        }
+        .task(id: detectionRequestID) {
+            await detectExistingFootprints()
         }
     }
 
@@ -3102,6 +3173,61 @@ private struct CreateTripView: View {
 
     private func remove(_ city: TripCitySelection, from day: Date) {
         citiesByDay[day]?.removeAll { $0.key == city.key }
+        if citiesByDay[day]?.isEmpty == true { citiesByDay[day] = nil }
+        refreshAutomaticTitle()
+    }
+
+    private var detectionRequestID: String {
+        let calendar = Calendar.autoupdatingCurrent
+        let start = calendar.startOfDay(for: startDay).timeIntervalSinceReferenceDate
+        let end = calendar.startOfDay(for: endDay).timeIntervalSinceReferenceDate
+        return "\(start)|\(end)|\(importExistingFootprints)"
+    }
+
+    private func detectedCities(on day: Date) -> [TripImportedCity] {
+        detectedDays.first {
+            Calendar.autoupdatingCurrent.isDate($0.day, inSameDayAs: day)
+        }?.cities ?? []
+    }
+
+    @MainActor
+    private func refreshAutomaticTitle() {
+        guard !titleWasUserEdited else { return }
+        let detectedSnapshot = detectedDays
+        let selectedSnapshot = citiesByDay
+        let startSnapshot = startDay
+        let endSnapshot = endDay
+        automaticTitleRevision &+= 1
+        let revision = automaticTitleRevision
+        Task { @MainActor in
+            let generated = await Task.detached(priority: .utility) {
+                let names = detectedSnapshot.flatMap(\.cities).map(\.cityName)
+                    + selectedSnapshot.keys.sorted().flatMap { selectedSnapshot[$0] ?? [] }.map(\.cityName)
+                let dayCount = tripDates(from: startSnapshot, through: endSnapshot).count
+                return names.isEmpty ? "" : tripAutomaticTitle(cityNames: names, dayCount: dayCount)
+            }.value
+            guard revision == automaticTitleRevision, !titleWasUserEdited else { return }
+            title = generated
+        }
+    }
+
+    @MainActor
+    private func detectExistingFootprints() async {
+        guard importExistingFootprints else {
+            detectedDays = []
+            isDetectingFootprints = false
+            refreshAutomaticTitle()
+            return
+        }
+        let calendar = Calendar.autoupdatingCurrent
+        let start = calendar.startOfDay(for: startDay)
+        let end = max(start, calendar.startOfDay(for: endDay))
+        isDetectingFootprints = true
+        let imported = await TripScanManager.shared.importCities(from: start, through: end)
+        guard !Task.isCancelled else { return }
+        detectedDays = imported
+        isDetectingFootprints = false
+        refreshAutomaticTitle()
     }
 
     private func save() {
@@ -3128,6 +3254,9 @@ private struct CreateTripView: View {
             let state: TripState = forcesHistorical ? .historical : (end < today ? .historical : (start <= today ? .active : .planned))
             let kind: TripKind = state == .planned ? .planned : .historical
             let trip = Trip(title: title.trimmingCharacters(in: .whitespacesAndNewlines), notes: notes, kind: kind, state: state, plannedStartDay: start, plannedEndDay: end)
+            trip.titleUserEdited = titleWasUserEdited
+            trip.datesUserEdited = true
+            trip.citiesUserEdited = !citiesByDay.isEmpty
             trip.activityTypeValue = activityTypeValue
             if state == .active { trip.actualStartedAt = start }
             context.insert(trip)
@@ -3164,7 +3293,9 @@ private struct CreateTripView: View {
                     context.insert(TripDayCity(tripDayID: day.id, countryCode: city.countryCode, countryName: city.countryName, cityName: city.cityName, cityIdentifier: city.cityIdentifier, latitude: city.latitude, longitude: city.longitude, timeZoneIdentifier: city.timeZoneIdentifier, orderIndex: index, isUserEdited: true))
                 }
             }
-            try? context.save(); dismiss()
+            try? context.save()
+            onCreated(trip)
+            dismiss()
         }
     }
 }
@@ -3220,11 +3351,21 @@ private struct TripActivityTypePicker: View {
 private struct TripDayCitySection: View {
     let day: Date
     let cities: [TripCitySelection]
+    let detectedCities: [TripImportedCity]
     let onAdd: () -> Void
     let onRemove: (TripCitySelection) -> Void
 
     var body: some View {
         Section(day.formatted(date: .complete, time: .omitted)) {
+            ForEach(Array(detectedCities.enumerated()), id: \.offset) { _, city in
+                HStack {
+                    Label(city.countryName.isEmpty ? city.cityName : "\(city.cityName)，\(city.countryName)", systemImage: "location.fill")
+                    Spacer()
+                    Text("已识别")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             ForEach(cities, id: \.key) { city in
                 HStack {
                     Label(city.displayName, systemImage: "building.2")
@@ -3435,7 +3576,7 @@ private struct TripIntroductionBackgroundIcon: View {
     }
 }
 
-private struct TripCitySelection: Hashable {
+private struct TripCitySelection: Hashable, Sendable {
     let cityName: String
     let cityIdentifier: String?
     let countryCode: String
@@ -7690,14 +7831,24 @@ private struct TripDetailMapModel: Sendable {
             )
         }
 
-        let cityCoordinates = cities.compactMap { city -> CLLocationCoordinate2D? in
+        let allCityCoordinates = cities.compactMap { city -> CLLocationCoordinate2D? in
+            guard let latitude = city.latitude, let longitude = city.longitude else { return nil }
+            let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+            return CLLocationCoordinate2DIsValid(coordinate) ? coordinate : nil
+        }
+        let awayCityCoordinates = cities.compactMap { city -> CLLocationCoordinate2D? in
             guard let latitude = city.latitude, let longitude = city.longitude else { return nil }
             let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
             guard CLLocationCoordinate2DIsValid(coordinate),
                   !tripCityMatchesHome(cityName: city.cityName, countryCode: city.countryCode, homeCity: homeCity) else { return nil }
             return coordinate
         }
-        let itemCoordinates = items.compactMap { item -> CLLocationCoordinate2D? in
+        let allItemCoordinates = items.compactMap { item -> CLLocationCoordinate2D? in
+            guard let latitude = item.latitude, let longitude = item.longitude else { return nil }
+            let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+            return CLLocationCoordinate2DIsValid(coordinate) ? coordinate : nil
+        }
+        let awayItemCoordinates = items.compactMap { item -> CLLocationCoordinate2D? in
             guard let latitude = item.latitude, let longitude = item.longitude else { return nil }
             let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
             guard CLLocationCoordinate2DIsValid(coordinate),
@@ -7707,8 +7858,11 @@ private struct TripDetailMapModel: Sendable {
         let routeCoordinates = transportRoutes.values.flatMap { route in
             route.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
         }
-        let destinationCoordinates = cityCoordinates + itemCoordinates
-        model.mapCoordinates = destinationCoordinates.isEmpty ? routeCoordinates : destinationCoordinates
+        let awayCoordinates = awayCityCoordinates + awayItemCoordinates
+        let inCityFallbackCoordinates = !allItemCoordinates.isEmpty ? allItemCoordinates : allCityCoordinates
+        model.mapCoordinates = !awayCoordinates.isEmpty
+            ? awayCoordinates
+            : (!inCityFallbackCoordinates.isEmpty ? inCityFallbackCoordinates : routeCoordinates)
 
         for item in items where model.coordinatesByItemID[item.id] == nil {
             if item.kindRaw == TripItemKind.transport.rawValue,
@@ -8088,7 +8242,10 @@ struct TripDetailView: View {
             guard isRowIndexLoaded else { return }
             if trip.state != .planned {
                 let requests = rowIndex.actualDayRequests
-                let snapshots = await TripScanManager.shared.actualItems(for: requests)
+                let snapshots = await TripScanManager.shared.actualItems(
+                    for: requests,
+                    includingHomeCity: trip.originRaw == TripOrigin.manual.rawValue
+                )
                 // Photos lookups run off the main thread; only the item copies are made here.
                 let displayableAssetIDs = await Task.detached(priority: .userInitiated) {
                     snapshots.map { PhotoService.shared.displayableAssetIDs($0.photoAssetIDs) }

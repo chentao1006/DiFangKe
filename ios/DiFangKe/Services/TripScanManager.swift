@@ -555,7 +555,10 @@ final class TripScanManager {
         }.value
     }
 
-    func actualItems(for days: [TripActualDayRequest]) async -> [TripActualItemSnapshot] {
+    func actualItems(
+        for days: [TripActualDayRequest],
+        includingHomeCity: Bool = false
+    ) async -> [TripActualItemSnapshot] {
         guard !days.isEmpty, let legacyContainer else { return [] }
         let tripContainer = tripContainer
         return await Task.detached(priority: .utility) {
@@ -580,8 +583,9 @@ final class TripScanManager {
                 intervals.first { start >= $0.1 && start < $0.2 }?.0.id
                     ?? intervals.first { start < $0.2 && end > $0.1 }?.0.id
             }
-            // A trip covers the time away from home: home-city stops are not part of it,
-            // and neither is a move whose two ends both sit nearest to a home-city stop.
+            // Automatically recognised trips cover time away from home. A manually
+            // dated trip explicitly includes the selected range, including home-city
+            // stops and moves, so an in-city trip does not appear empty.
             var homeReferences: [(location: CLLocation, isHome: Bool)] = footprints.map { footprint in
                 let isHome = home.map { Self.footprintMatchesHome(footprint, home: $0) } ?? false
                 return (CLLocation(latitude: footprint.latitude, longitude: footprint.longitude), isHome)
@@ -600,12 +604,12 @@ final class TripScanManager {
                 return isHomeEndpoint(points.first) && isHomeEndpoint(points.last)
             }
             let stops = footprints.compactMap { footprint -> TripActualItemSnapshot? in
-                guard home.map({ !Self.footprintMatchesHome(footprint, home: $0) }) ?? true,
+                guard (includingHomeCity || home.map({ !Self.footprintMatchesHome(footprint, home: $0) }) ?? true),
                       let dayID = dayID(for: footprint.startTime, end: footprint.endTime) else { return nil }
                 return .init(dayID: dayID, kind: .stop, countryCode: footprint.countryCode, countryName: footprint.countryName, cityName: footprint.cityName, placeID: footprint.placeID, placeName: footprint.address ?? footprint.cityName, address: footprint.address, latitude: footprint.latitude, longitude: footprint.longitude, startTime: footprint.startTime, endTime: footprint.endTime, activityTypeValue: footprint.activityTypeValue, transportTypeRaw: nil, startLocationName: nil, endLocationName: nil, notes: footprint.reason ?? "", sourceFootprintID: footprint.footprintID, sourceTransportRecordID: nil, photoAssetIDs: footprint.photoAssetIDs)
             }
             let moves = transports.compactMap { transport -> TripActualItemSnapshot? in
-                guard !staysInHomeCity(transport),
+                guard (includingHomeCity || !staysInHomeCity(transport)),
                       let dayID = dayID(for: transport.startTime, end: transport.endTime) else { return nil }
                 return .init(dayID: dayID, kind: .transport, countryCode: nil, countryName: nil, cityName: nil, placeID: nil, placeName: nil, address: nil, latitude: nil, longitude: nil, startTime: transport.startTime, endTime: transport.endTime, activityTypeValue: nil, transportTypeRaw: transport.manualTypeRaw ?? transport.typeRaw, startLocationName: transport.startLocation, endLocationName: transport.endLocation, notes: "", sourceFootprintID: nil, sourceTransportRecordID: transport.recordID, photoAssetIDs: [])
             }
