@@ -146,6 +146,12 @@ struct DFKShareCardPayload: Identifiable {
     var mapFootprints: [Footprint] = []
     var mapTransports: [TransportRecord] = []
     var mapActivities: [ActivityType] = []
+    /// Value copies of `mapFootprints` by ID, built with the payload, so the
+    /// templates never walk the model objects while rendering.
+    var mapFootprintSnapshots: [UUID: DFKShareFootprintSnapshot] = [:]
+    /// Normalized trace for `DFKShareMapFallbackView`, precomputed from
+    /// `coordinates` off main when available; nil means not precomputed.
+    var mapFallbackPoints: [CGPoint]?
     var isTripShare: Bool = false
     var tripTemplate: DFKTripShareTemplate = .ticket
     var footprintTemplate: DFKFootprintShareTemplate = .dial
@@ -169,6 +175,62 @@ struct DFKShareCardPayload: Identifiable {
     var isLoading: Bool = false
     var brandName: String = "地方客"
     var brandSlogan: String = "走过的地方，就是你的生活"
+}
+
+/// The footprint fields share payloads and templates read, copied once on the
+/// model's actor so grouping, sorting and text work can run off main.
+struct DFKShareFootprintSnapshot: Sendable {
+    let footprintID: UUID
+    let startTime: Date
+    let endTime: Date
+    let duration: TimeInterval
+    let latitudes: [Double]
+    let longitudes: [Double]
+    let address: String?
+    let reason: String?
+    let placeID: UUID?
+    let countryCode: String?
+    let countryName: String?
+    let cityName: String?
+    let photoAssetIDs: [String]
+    let activityName: String?
+    let activityIcon: String?
+    let activityColor: Color?
+
+    init(footprint: Footprint, activities: [ActivityType]) {
+        let activity = footprint.getActivityType(from: activities)
+        footprintID = footprint.footprintID
+        startTime = footprint.startTime
+        endTime = footprint.endTime
+        duration = footprint.duration
+        latitudes = footprint.latitudeArray
+        longitudes = footprint.longitudeArray
+        address = footprint.address
+        reason = footprint.reason
+        placeID = footprint.placeID
+        countryCode = footprint.countryCode
+        countryName = footprint.countryName
+        cityName = footprint.cityName
+        photoAssetIDs = footprint.photoAssetIDs
+        activityName = activity?.name
+        activityIcon = activity?.icon
+        activityColor = activity?.color
+    }
+
+    // Same arithmetic as `Footprint.latitude` / `longitude` / `coordinates`.
+    var latitude: Double {
+        guard !latitudes.isEmpty else { return 0 }
+        return latitudes.reduce(0, +) / Double(latitudes.count)
+    }
+
+    var longitude: Double {
+        guard !longitudes.isEmpty else { return 0 }
+        return longitudes.reduce(0, +) / Double(longitudes.count)
+    }
+
+    var coordinates: [CLLocationCoordinate2D] {
+        zip(latitudes, longitudes).map { CLLocationCoordinate2D(latitude: $0, longitude: $1) }
+    }
 }
 
 struct DFKShareReviewMemory: Identifiable {
@@ -794,6 +856,15 @@ struct DFKShareCardPreviewView: View {
         let requestID = UUID()
         mapRefreshRequest = requestID
         editablePayload.coordinates = coordinates
+        // The precomputed trace belongs to the old coordinates; rebuild it off main.
+        editablePayload.mapFallbackPoints = nil
+        Task { @MainActor in
+            let points = await Task.detached(priority: .userInitiated) {
+                DFKShareCardFactory.mapFallbackPoints(for: coordinates)
+            }.value
+            guard mapRefreshRequest == requestID else { return }
+            editablePayload.mapFallbackPoints = points
+        }
         let hasTransportOverlay: Bool
         if case .timeline = editablePayload.kind {
             hasTransportOverlay = !editablePayload.mapTransports.isEmpty
@@ -977,28 +1048,52 @@ struct DFKShareCardPreviewView: View {
         // The card has a fully opaque canvas. Avoid an AlphaPremulLast bitmap,
         // which doubles decode memory for long timeline exports.
         renderer.isOpaque = true
-        if let image = renderer.uiImage {
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = image.scale
-            format.opaque = true
-            let flattenedImage = UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
-                UIColor(selectedTheme.background).setFill()
-                UIRectFill(CGRect(origin: .zero, size: image.size))
-                image.draw(at: .zero)
-            }
-            let temporaryURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("difangke-share-\(UUID().uuidString).jpg")
-            if let jpegData = flattenedImage.jpegData(compressionQuality: 0.88) {
-                do {
-                    try jpegData.write(to: temporaryURL, options: .atomic)
-                    renderedImageURL = temporaryURL
-                } catch {
-                    renderedImageURL = nil
-                }
-            }
+        // ImageRenderer must run on main; flattening, JPEG encoding and file IO
+        // run off main with only the rendered bitmap and resolved color.
+        guard let renderedCGImage = renderer.cgImage else {
+            isRendering = false
+            showingShareSheet = false
+            return
         }
-        isRendering = false
-        showingShareSheet = renderedImageURL != nil
+        let imageScale = exportScale
+        let backgroundColor = UIColor(selectedTheme.background).cgColor
+        Task { @MainActor in
+            let url = await Task.detached(priority: .userInitiated) {
+                Self.writeShareJPEG(
+                    cgImage: renderedCGImage,
+                    scale: imageScale,
+                    backgroundColor: backgroundColor
+                )
+            }.value
+            renderedImageURL = url
+            isRendering = false
+            showingShareSheet = url != nil
+        }
+    }
+
+    nonisolated private static func writeShareJPEG(
+        cgImage: CGImage,
+        scale: CGFloat,
+        backgroundColor: CGColor
+    ) -> URL? {
+        let image = UIImage(cgImage: cgImage, scale: scale, orientation: .up)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = true
+        let flattenedImage = UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
+            UIColor(cgColor: backgroundColor).setFill()
+            UIRectFill(CGRect(origin: .zero, size: image.size))
+            image.draw(at: .zero)
+        }
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("difangke-share-\(UUID().uuidString).jpg")
+        guard let jpegData = flattenedImage.jpegData(compressionQuality: 0.88) else { return nil }
+        do {
+            try jpegData.write(to: temporaryURL, options: .atomic)
+            return temporaryURL
+        } catch {
+            return nil
+        }
     }
 
 }
@@ -1441,7 +1536,7 @@ struct DFKShareCardView: View {
                 .blur(radius: s(1.2))
                 .clipped()
         } else if !payload.coordinates.isEmpty {
-            DFKShareMapFallbackView(coordinates: payload.coordinates, theme: theme)
+            DFKShareMapFallbackView(coordinates: payload.coordinates, precomputedPoints: payload.mapFallbackPoints, theme: theme)
                 .frame(width: cardWidth, height: cardHeight)
                 .opacity(theme == .journal ? 0.10 : (usesDarkMapStyle ? 0.18 : 0.22))
                 .overlay(theme.background.opacity(theme == .journal ? 0.72 : (usesDarkMapStyle ? 0.64 : 0.52)))
@@ -1775,7 +1870,7 @@ struct DFKShareCardView: View {
                         .scaledToFill()
                         .frame(width: proxy.size.width, height: proxy.size.height)
                 } else {
-                    DFKShareMapFallbackView(coordinates: payload.coordinates, theme: theme)
+                    DFKShareMapFallbackView(coordinates: payload.coordinates, precomputedPoints: payload.mapFallbackPoints, theme: theme)
                         .frame(width: proxy.size.width, height: proxy.size.height)
                 }
             }
@@ -1874,7 +1969,7 @@ struct DFKShareCardView: View {
     }
 
     private func shareMapFallbackLayer(height: CGFloat) -> some View {
-        DFKShareMapFallbackView(coordinates: payload.coordinates, theme: theme)
+        DFKShareMapFallbackView(coordinates: payload.coordinates, precomputedPoints: payload.mapFallbackPoints, theme: theme)
             .frame(height: height)
             .clipped()
     }
@@ -2120,29 +2215,7 @@ private struct DFKShareMapTraceOverlay: View {
     }
 
     static func normalizedPoints(for coordinates: [CLLocationCoordinate2D], reference: [CLLocationCoordinate2D]) -> [CGPoint] {
-        guard !coordinates.isEmpty else {
-            return [CGPoint(x: 0.28, y: 0.46), CGPoint(x: 0.58, y: 0.34), CGPoint(x: 0.72, y: 0.62)]
-        }
-        let validCoordinates = reference.filter { coordinate in
-            CLLocationCoordinate2DIsValid(coordinate) &&
-            abs(coordinate.latitude) > 0.000001 &&
-            abs(coordinate.longitude) > 0.000001
-        }
-        let source = validCoordinates.isEmpty ? coordinates : validCoordinates
-        let lats = source.map(\.latitude)
-        let lons = source.map(\.longitude)
-        let minLat = lats.min() ?? 0
-        let maxLat = lats.max() ?? 1
-        let minLon = lons.min() ?? 0
-        let maxLon = lons.max() ?? 1
-        let latSpan = max(maxLat - minLat, 0.0001)
-        let lonSpan = max(maxLon - minLon, 0.0001)
-        return coordinates.prefix(40).map {
-            CGPoint(
-                x: 0.10 + (($0.longitude - minLon) / lonSpan) * 0.80,
-                y: 0.10 + (1 - (($0.latitude - minLat) / latSpan)) * 0.80
-            )
-        }
+        DFKShareCardFactory.mapFallbackPoints(for: coordinates, reference: reference)
     }
 
     private func markerStyle(for marker: DFKShareMapMarker?) -> (icon: String, color: Color) {
@@ -2170,13 +2243,13 @@ private struct DFKShareMapTraceOverlay: View {
 
 private struct DFKShareMapFallbackView: View {
     let coordinates: [CLLocationCoordinate2D]
+    /// Precomputed trace (`DFKShareCardPayload.mapFallbackPoints`) when available.
+    var precomputedPoints: [CGPoint]?
     let theme: DFKShareCardTheme
 
-    private var normalizedPoints: [CGPoint] {
-        DFKShareMapTraceOverlay.normalizedPoints(for: coordinates)
-    }
-
     var body: some View {
+        // Resolve once per body; the trace is reused by the path and the dots.
+        let normalizedPoints = precomputedPoints ?? DFKShareCardFactory.mapFallbackPoints(for: coordinates)
         GeometryReader { proxy in
             ZStack {
                 LinearGradient(
@@ -2319,70 +2392,174 @@ enum DFKShareCardFactory {
     }
 
     static func momentPayload(footprint: Footprint, activities: [ActivityType], images: [UIImage], mapImage: UIImage?, lightMapImage: UIImage? = nil, darkMapImage: UIImage? = nil) -> DFKShareCardPayload {
-        let place = displayPlace(for: footprint)
-        let activity = footprint.getActivityType(from: activities)
+        let snapshot = DFKShareFootprintSnapshot(footprint: footprint, activities: activities)
+        let place = displayPlace(address: snapshot.address)
         let entry = DFKShareEntry(
-            time: timeRange(footprint.startTime, footprint.endTime),
+            time: timeRange(snapshot.startTime, snapshot.endTime),
             title: place,
-            detail: footprint.reason?.trimmingCharacters(in: .whitespacesAndNewlines),
-            tag: activity?.name,
-            activityIcon: activity?.icon,
-            activityColor: activity?.color,
-            coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude),
-            footprintIDs: [footprint.footprintID]
+            detail: snapshot.reason?.trimmingCharacters(in: .whitespacesAndNewlines),
+            tag: snapshot.activityName,
+            activityIcon: snapshot.activityIcon,
+            activityColor: snapshot.activityColor,
+            coordinate: CLLocationCoordinate2D(latitude: snapshot.latitude, longitude: snapshot.longitude),
+            footprintIDs: [snapshot.footprintID]
         )
         var payload = DFKShareCardPayload(
             kind: .moment,
             title: place,
             subtitle: "这一刻，被认真留了下来",
-            rangeText: dateText(footprint.startTime),
-            locationText: locationText(for: [footprint]),
+            rangeText: dateText(snapshot.startTime),
+            locationText: locationText(for: [snapshot]),
             heroImage: images.first,
             heroImages: images,
             backgroundMapImage: mapImage,
             backgroundMapLightImage: lightMapImage,
             backgroundMapDarkImage: darkMapImage,
-            coordinates: footprint.coordinates,
+            coordinates: snapshot.coordinates,
             entries: [entry],
             summary: nil
         )
         payload.mapFootprints = [footprint]
+        payload.mapFootprintSnapshots = [snapshot.footprintID: snapshot]
         return payload
     }
 
     static func timelinePayload(date: Date, items: [TimelineItem], activities: [ActivityType], images: [UIImage], mapImage: UIImage?, lightMapImage: UIImage? = nil, darkMapImage: UIImage? = nil) -> DFKShareCardPayload {
-        let footprints = items.compactMap { item -> Footprint? in
-            if case .footprint(let footprint) = item { return footprint }
-            return nil
-        }.sorted { $0.startTime < $1.startTime }
-        return timelinePayload(rangeText: dateText(date), footprints: footprints, activities: activities, images: images, mapImage: mapImage, lightMapImage: lightMapImage, darkMapImage: darkMapImage)
+        timelinePayload(rangeText: dateText(date), footprints: timelineFootprints(from: items), activities: activities, images: images, mapImage: mapImage, lightMapImage: lightMapImage, darkMapImage: darkMapImage)
     }
 
     static func timelinePayload(rangeText: String, footprints: [Footprint], activities: [ActivityType], images: [UIImage], mapImage: UIImage?, lightMapImage: UIImage? = nil, darkMapImage: UIImage? = nil) -> DFKShareCardPayload {
-        let sortedFootprints = footprints.sorted { $0.startTime < $1.startTime }
-        let calendar = Calendar.current
-        let distinctDays = Set(sortedFootprints.map { calendar.startOfDay(for: $0.startTime) })
-        let entries = mergedEntries(
-            from: sortedFootprints,
+        let snapshots = footprints.map { DFKShareFootprintSnapshot(footprint: $0, activities: activities) }
+        return timelinePayload(
+            rangeText: rangeText,
+            footprints: footprints,
+            content: timelineContent(from: snapshots),
             activities: activities,
-            showsDayDividers: distinctDays.count > 1
+            images: images,
+            mapImage: mapImage,
+            lightMapImage: lightMapImage,
+            darkMapImage: darkMapImage
         )
+    }
+
+    /// Same payload as the synchronous variant; only the model field copy
+    /// stays on main, while sorting, merging and text work run detached.
+    @MainActor
+    static func makeTimelinePayload(date: Date, items: [TimelineItem], activities: [ActivityType], images: [UIImage], mapImage: UIImage?, lightMapImage: UIImage? = nil, darkMapImage: UIImage? = nil) async -> DFKShareCardPayload {
+        await makeTimelinePayload(rangeText: dateText(date), footprints: timelineFootprints(from: items), activities: activities, images: images, mapImage: mapImage, lightMapImage: lightMapImage, darkMapImage: darkMapImage)
+    }
+
+    @MainActor
+    static func makeTimelinePayload(rangeText: String, footprints: [Footprint], activities: [ActivityType], images: [UIImage], mapImage: UIImage?, lightMapImage: UIImage? = nil, darkMapImage: UIImage? = nil) async -> DFKShareCardPayload {
+        let snapshots = footprints.map { DFKShareFootprintSnapshot(footprint: $0, activities: activities) }
+        let content = await Task.detached(priority: .userInitiated) {
+            var built = timelineContent(from: snapshots)
+            built.fallbackPoints = mapFallbackPoints(for: built.coordinates)
+            return built
+        }.value
+        return timelinePayload(
+            rangeText: rangeText,
+            footprints: footprints,
+            content: content,
+            activities: activities,
+            images: images,
+            mapImage: mapImage,
+            lightMapImage: lightMapImage,
+            darkMapImage: darkMapImage
+        )
+    }
+
+    /// Normalized fallback trace for `coordinates`; safe to call off main.
+    static func mapFallbackPoints(for coordinates: [CLLocationCoordinate2D]) -> [CGPoint] {
+        mapFallbackPoints(for: coordinates, reference: coordinates)
+    }
+
+    static func mapFallbackPoints(for coordinates: [CLLocationCoordinate2D], reference: [CLLocationCoordinate2D]) -> [CGPoint] {
+        guard !coordinates.isEmpty else {
+            return [CGPoint(x: 0.28, y: 0.46), CGPoint(x: 0.58, y: 0.34), CGPoint(x: 0.72, y: 0.62)]
+        }
+        let validCoordinates = reference.filter { coordinate in
+            CLLocationCoordinate2DIsValid(coordinate) &&
+            abs(coordinate.latitude) > 0.000001 &&
+            abs(coordinate.longitude) > 0.000001
+        }
+        let source = validCoordinates.isEmpty ? coordinates : validCoordinates
+        let lats = source.map(\.latitude)
+        let lons = source.map(\.longitude)
+        let minLat = lats.min() ?? 0
+        let maxLat = lats.max() ?? 1
+        let minLon = lons.min() ?? 0
+        let maxLon = lons.max() ?? 1
+        let latSpan = max(maxLat - minLat, 0.0001)
+        let lonSpan = max(maxLon - minLon, 0.0001)
+        return coordinates.prefix(40).map {
+            CGPoint(
+                x: 0.10 + (($0.longitude - minLon) / lonSpan) * 0.80,
+                y: 0.10 + (1 - (($0.latitude - minLat) / latSpan)) * 0.80
+            )
+        }
+    }
+
+    private struct TimelineContent {
+        /// Indices into the input footprints, ordered by start time.
+        var sortedOrder: [Int]
+        var snapshotsByID: [UUID: DFKShareFootprintSnapshot]
+        var entries: [DFKShareEntry]
+        var locationText: String?
+        var coordinates: [CLLocationCoordinate2D]
+        var fallbackPoints: [CGPoint]?
+    }
+
+    private static func timelineFootprints(from items: [TimelineItem]) -> [Footprint] {
+        items.compactMap { item -> Footprint? in
+            if case .footprint(let footprint) = item { return footprint }
+            return nil
+        }.sorted { $0.startTime < $1.startTime }
+    }
+
+    private static func timelineContent(from snapshots: [DFKShareFootprintSnapshot]) -> TimelineContent {
+        let sortedOrder = snapshots.indices.sorted { snapshots[$0].startTime < snapshots[$1].startTime }
+        let sortedSnapshots = sortedOrder.map { snapshots[$0] }
+        let calendar = Calendar.current
+        let distinctDays = Set(sortedSnapshots.map { calendar.startOfDay(for: $0.startTime) })
+        return TimelineContent(
+            sortedOrder: sortedOrder,
+            snapshotsByID: Dictionary(sortedSnapshots.map { ($0.footprintID, $0) }, uniquingKeysWith: { first, _ in first }),
+            entries: mergedEntries(from: sortedSnapshots, showsDayDividers: distinctDays.count > 1),
+            locationText: locationText(for: sortedSnapshots),
+            coordinates: sortedSnapshots.flatMap(\.coordinates)
+        )
+    }
+
+    private static func timelinePayload(
+        rangeText: String,
+        footprints: [Footprint],
+        content: TimelineContent,
+        activities: [ActivityType],
+        images: [UIImage],
+        mapImage: UIImage?,
+        lightMapImage: UIImage?,
+        darkMapImage: UIImage?
+    ) -> DFKShareCardPayload {
+        let entries = content.entries
         let title = entries.isEmpty ? "这段时间还没有足迹" : "这段时间去了 \(entries.count) 个地方"
         var payload = DFKShareCardPayload(
             kind: .timeline,
             title: title,
             subtitle: "我这一段时间去了哪里",
             rangeText: rangeText,
-            locationText: locationText(for: sortedFootprints),
+            locationText: content.locationText,
             heroImage: images.first,
             heroImages: images,
             backgroundMapImage: mapImage,
             backgroundMapLightImage: lightMapImage,
             backgroundMapDarkImage: darkMapImage,
-            coordinates: sortedFootprints.flatMap(\.coordinates),
+            coordinates: content.coordinates,
             entries: entries
         )
-        payload.mapFootprints = sortedFootprints
+        payload.mapFootprints = content.sortedOrder.map { footprints[$0] }
+        payload.mapFootprintSnapshots = content.snapshotsByID
+        payload.mapFallbackPoints = content.fallbackPoints
         payload.mapActivities = activities
         return payload
     }
@@ -2435,21 +2612,22 @@ enum DFKShareCardFactory {
         )
     }
 
-    private static func locationText(for footprints: [Footprint]) -> String? {
+    /// Expects `footprints` already ordered by start time.
+    private static func locationText(for footprints: [DFKShareFootprintSnapshot]) -> String? {
         struct CountryCities {
             let country: String
             var cities: [String]
         }
 
         var locations: [CountryCities] = []
-        for footprint in footprints.sorted(by: { $0.startTime < $1.startTime }) {
+        for footprint in footprints {
             let countryCode = footprint.countryCode?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .uppercased()
             let storedCountry = footprint.countryName?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let localizedCountry = countryCode.flatMap {
-                Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
+                chineseLocale.localizedString(forRegionCode: $0)
             }
             guard let country = [storedCountry, localizedCountry]
                 .compactMap({ $0 })
@@ -2472,14 +2650,14 @@ enum DFKShareCardFactory {
             .joined(separator: " / ")
     }
 
-    private static func displayPlace(for footprint: Footprint) -> String {
-        let text = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    private static func displayPlace(address: String?) -> String {
+        let text = address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return text.isEmpty ? "一个生活现场" : text
     }
 
+    /// Expects `footprints` already ordered by start time.
     private static func mergedEntries(
-        from footprints: [Footprint],
-        activities: [ActivityType],
+        from footprints: [DFKShareFootprintSnapshot],
         showsDayDividers: Bool
     ) -> [DFKShareEntry] {
         struct Accumulator {
@@ -2488,7 +2666,7 @@ enum DFKShareCardFactory {
             var totalDuration: TimeInterval
             var firstStartTime: Date
             var lastEndTime: Date
-            var representative: Footprint
+            var representative: DFKShareFootprintSnapshot
             var count: Int
             var detail: String?
             var tag: String?
@@ -2501,18 +2679,19 @@ enum DFKShareCardFactory {
         var orderedKeys: [String] = []
 
         let calendar = Calendar.current
-        for footprint in footprints.sorted(by: { $0.startTime < $1.startTime }) {
+        for footprint in footprints {
             let dayStart = calendar.startOfDay(for: footprint.startTime)
             // A place may merge within the same day, never across separate days.
             let key = "\(dayStart.timeIntervalSinceReferenceDate)|\(placeKey(for: footprint))"
             let detail = footprint.reason?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let activity = footprint.getActivityType(from: activities)
-            let tag = activity?.name
+            let tag = footprint.activityName
             let weight = max(footprint.duration, 1)
+            let latitude = footprint.latitude
+            let longitude = footprint.longitude
 
             if var existing = buckets[key] {
-                existing.weightedLatitude += footprint.latitude * weight
-                existing.weightedLongitude += footprint.longitude * weight
+                existing.weightedLatitude += latitude * weight
+                existing.weightedLongitude += longitude * weight
                 existing.totalDuration += weight
                 existing.firstStartTime = min(existing.firstStartTime, footprint.startTime)
                 existing.lastEndTime = max(existing.lastEndTime, footprint.endTime)
@@ -2528,15 +2707,15 @@ enum DFKShareCardFactory {
                     existing.tag = tag
                 }
                 if existing.activityIcon?.isEmpty ?? true {
-                    existing.activityIcon = activity?.icon
-                    existing.activityColor = activity?.color
+                    existing.activityIcon = footprint.activityIcon
+                    existing.activityColor = footprint.activityColor
                 }
                 buckets[key] = existing
             } else {
                 orderedKeys.append(key)
                 buckets[key] = Accumulator(
-                    weightedLatitude: footprint.latitude * weight,
-                    weightedLongitude: footprint.longitude * weight,
+                    weightedLatitude: latitude * weight,
+                    weightedLongitude: longitude * weight,
                     totalDuration: weight,
                     firstStartTime: footprint.startTime,
                     lastEndTime: footprint.endTime,
@@ -2544,8 +2723,8 @@ enum DFKShareCardFactory {
                     count: 1,
                     detail: detail,
                     tag: tag,
-                    activityIcon: activity?.icon,
-                    activityColor: activity?.color,
+                    activityIcon: footprint.activityIcon,
+                    activityColor: footprint.activityColor,
                     footprintIDs: [footprint.footprintID]
                 )
             }
@@ -2565,7 +2744,7 @@ enum DFKShareCardFactory {
             previousDay = dayStart
             return DFKShareEntry(
                 time: startAndAccumulatedDurationText(start: item.firstStartTime, duration: duration),
-                title: displayPlace(for: item.representative),
+                title: displayPlace(address: item.representative.address),
                 detail: item.detail,
                 tag: item.tag,
                 activityIcon: item.activityIcon,
@@ -2581,15 +2760,29 @@ enum DFKShareCardFactory {
         }
     }
 
-    static func formattedDayDivider(for date: Date) -> String {
+    private static let chineseLocale = Locale(identifier: "zh_Hans_CN")
+
+    // DateFormatter is thread-safe on iOS; reuse instead of one per call.
+    private static let dayDividerFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_Hans_CN")
         formatter.dateFormat = "M月d日 EEEE"
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    private static let dateTextFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "yyyy年M月d日 EEEE"
+        return formatter
+    }()
+
+    static func formattedDayDivider(for date: Date) -> String {
+        dayDividerFormatter.string(from: date)
     }
 
-    private static func placeKey(for footprint: Footprint) -> String {
-        let normalizedName = displayPlace(for: footprint)
+    private static func placeKey(for footprint: DFKShareFootprintSnapshot) -> String {
+        let normalizedName = displayPlace(address: footprint.address)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .lowercased()
@@ -2621,10 +2814,7 @@ enum DFKShareCardFactory {
     }
 
     static func dateText(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
-        formatter.dateFormat = "yyyy年M月d日 EEEE"
-        return formatter.string(from: date)
+        dateTextFormatter.string(from: date)
     }
 
     private static func cityName(from address: String) -> String? {
@@ -2668,17 +2858,73 @@ private struct DFKShareMapSnapshotMarker {
     let scale: CGFloat
 }
 
+/// Collects `loadShareMedia` results from photo, map and template callbacks
+/// that finish on different threads.
+private final class DFKShareMediaAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var selectedAssetIDs: [String] = []
+    private var loadedImages: [(String, UIImage)] = []
+    private var mapImages: (light: UIImage?, dark: UIImage?) = (nil, nil)
+    private var backgroundMapImages: (light: UIImage?, dark: UIImage?) = (nil, nil)
+    private var templateMapImages: (tall: UIImage?, wide: UIImage?) = (nil, nil)
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    func setSelectedAssetIDs(_ ids: [String]) { withLock { selectedAssetIDs = ids } }
+    func appendImage(_ image: UIImage, for assetID: String) { withLock { loadedImages.append((assetID, image)) } }
+    func setMapImages(_ images: (light: UIImage?, dark: UIImage?)) { withLock { mapImages = images } }
+    func setBackgroundMapImages(_ images: (light: UIImage?, dark: UIImage?)) { withLock { backgroundMapImages = images } }
+    func setTemplateMapImages(tall: UIImage?, wide: UIImage?) { withLock { templateMapImages = (tall, wide) } }
+
+    func media() -> DFKShareMedia {
+        withLock {
+            let imagesByID = Dictionary(loadedImages, uniquingKeysWith: { first, _ in first })
+            let orderedAssetIDs = selectedAssetIDs.filter { imagesByID[$0] != nil }
+            return DFKShareMedia(
+                images: orderedAssetIDs.compactMap { imagesByID[$0] },
+                imageAssetIDs: orderedAssetIDs,
+                mapImage: mapImages.light ?? mapImages.dark,
+                lightMapImage: mapImages.light,
+                darkMapImage: mapImages.dark,
+                backgroundMapImage: backgroundMapImages.light ?? backgroundMapImages.dark,
+                backgroundLightMapImage: backgroundMapImages.light,
+                backgroundDarkMapImage: backgroundMapImages.dark,
+                templateTallMapImage: templateMapImages.tall,
+                templateWideMapImage: templateMapImages.wide
+            )
+        }
+    }
+}
+
+/// Lets an opportunistic photo request leave its dispatch group exactly once.
+private final class DFKShareOnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isClaimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isClaimed else { return false }
+        isClaimed = true
+        return true
+    }
+}
+
 enum DFKShareImageLoader {
     static func loadStatisticsHeatmapImages(
         points: [DFKMapView.HeatmapPoint],
         completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
     ) {
-        let validPoints = points.filter { $0.coordinate.isRenderableMapCoordinate }
-        guard !validPoints.isEmpty else {
-            completion((nil, nil))
-            return
-        }
         Task {
+            let validPoints = points.filter { $0.coordinate.isRenderableMapCoordinate }
+            guard !validPoints.isEmpty else {
+                await MainActor.run { completion((nil, nil)) }
+                return
+            }
             async let light = makeMapSnapshot(
                 coordinates: validPoints.map(\.coordinate),
                 markers: [],
@@ -2709,31 +2955,27 @@ enum DFKShareImageLoader {
         photoTargetSize: CGSize = CGSize(width: 1200, height: 1200),
         completion: @escaping (DFKShareMedia) -> Void
     ) {
-        let selectedAssetIDs = Array(NSOrderedSet(array: assetIDs).array.compactMap { $0 as? String }.shuffled().prefix(20))
         let group = DispatchGroup()
-        let lock = NSLock()
-        var loadedImages: [(String, UIImage)] = []
-        var mapImage: UIImage?
-        var lightMapImage: UIImage?
-        var darkMapImage: UIImage?
-        var backgroundMapImage: UIImage?
-        var backgroundLightMapImage: UIImage?
-        var backgroundDarkMapImage: UIImage?
-        var templateMapImages: (tall: UIImage?, wide: UIImage?) = (nil, nil)
+        let accumulator = DFKShareMediaAccumulator()
 
-        for assetID in selectedAssetIDs {
-            group.enter()
-            var didFinish = false
-            PhotoService.shared.loadImage(for: assetID, targetSize: photoTargetSize) { image, _, _, isDegraded in
-                guard !isDegraded, !didFinish else { return }
-                didFinish = true
-                if let image {
-                    lock.lock()
-                    loadedImages.append((assetID, image))
-                    lock.unlock()
+        // Dedup/shuffle of the ID pool runs off main; `requestImage` also does
+        // its PHAsset lookup off main and delivers results on main.
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let selectedAssetIDs = Array(NSOrderedSet(array: assetIDs).array.compactMap { $0 as? String }.shuffled().prefix(20))
+            accumulator.setSelectedAssetIDs(selectedAssetIDs)
+            for assetID in selectedAssetIDs {
+                group.enter()
+                let didFinish = DFKShareOnceFlag()
+                _ = PhotoService.shared.requestImage(for: assetID, targetSize: photoTargetSize) { image, _, _, isDegraded in
+                    guard !isDegraded, didFinish.claim() else { return }
+                    if let image {
+                        accumulator.appendImage(image, for: assetID)
+                    }
+                    group.leave()
                 }
-                group.leave()
             }
+            group.leave()
         }
 
         group.enter()
@@ -2745,9 +2987,7 @@ enum DFKShareImageLoader {
             activities: activities,
             markerScale: markerScale
         ) { images in
-            lightMapImage = images.light
-            darkMapImage = images.dark
-            mapImage = images.light ?? images.dark
+            accumulator.setMapImages(images)
             group.leave()
         }
 
@@ -2768,36 +3008,19 @@ enum DFKShareImageLoader {
                     markerScale: markerScale * DFKShareTemplateStyle.portraitMapMarkerBoost,
                     size: DFKShareTemplateStyle.wideMapSize
                 )
-                await MainActor.run {
-                    templateMapImages = (tall.light, wide.dark)
-                    group.leave()
-                }
+                accumulator.setTemplateMapImages(tall: tall.light, wide: wide.dark)
+                group.leave()
             }
         }
 
         group.enter()
         loadBackgroundMapImages(coordinates: coordinates) { images in
-            backgroundLightMapImage = images.light
-            backgroundDarkMapImage = images.dark
-            backgroundMapImage = images.light ?? images.dark
+            accumulator.setBackgroundMapImages(images)
             group.leave()
         }
 
         group.notify(queue: .main) {
-            let imagesByID = Dictionary(uniqueKeysWithValues: loadedImages)
-            let orderedAssetIDs = selectedAssetIDs.filter { imagesByID[$0] != nil }
-            completion(DFKShareMedia(
-                images: orderedAssetIDs.compactMap { imagesByID[$0] },
-                imageAssetIDs: orderedAssetIDs,
-                mapImage: mapImage,
-                lightMapImage: lightMapImage,
-                darkMapImage: darkMapImage,
-                backgroundMapImage: backgroundMapImage,
-                backgroundLightMapImage: backgroundLightMapImage,
-                backgroundDarkMapImage: backgroundDarkMapImage,
-                templateTallMapImage: templateMapImages.tall,
-                templateWideMapImage: templateMapImages.wide
-            ))
+            completion(accumulator.media())
         }
     }
 
@@ -2809,12 +3032,13 @@ enum DFKShareImageLoader {
         coordinates: [CLLocationCoordinate2D],
         completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
     ) {
-        let validCoordinates = coordinates.filter { CLLocationCoordinate2DIsValid($0) && abs($0.latitude) > 0.000001 && abs($0.longitude) > 0.000001 }
-        guard !validCoordinates.isEmpty else {
-            completion((nil, nil))
-            return
-        }
+        // Filter inside the task: the input can be every coordinate of a period.
         Task {
+            let validCoordinates = coordinates.filter { CLLocationCoordinate2DIsValid($0) && abs($0.latitude) > 0.000001 && abs($0.longitude) > 0.000001 }
+            guard !validCoordinates.isEmpty else {
+                await MainActor.run { completion((nil, nil)) }
+                return
+            }
             async let light = makeMapSnapshot(coordinates: validCoordinates, markers: [], style: .light, drawsFootprintOverlays: false)
             async let dark = makeMapSnapshot(coordinates: validCoordinates, markers: [], style: .dark, drawsFootprintOverlays: false)
             let images = await (light, dark)
@@ -2936,17 +3160,16 @@ enum DFKShareImageLoader {
         drawsPath: Bool = true,
         completion: @escaping ((light: UIImage?, dark: UIImage?)) -> Void
     ) {
-        let validCoordinates = coordinates.filter { coordinate in
-            CLLocationCoordinate2DIsValid(coordinate) &&
-            abs(coordinate.latitude) > 0.000001 &&
-            abs(coordinate.longitude) > 0.000001
-        }
-        guard !validCoordinates.isEmpty else {
-            completion((nil, nil))
-            return
-        }
-
         Task {
+            let validCoordinates = coordinates.filter { coordinate in
+                CLLocationCoordinate2DIsValid(coordinate) &&
+                abs(coordinate.latitude) > 0.000001 &&
+                abs(coordinate.longitude) > 0.000001
+            }
+            guard !validCoordinates.isEmpty else {
+                await MainActor.run { completion((nil, nil)) }
+                return
+            }
             async let light = makeMapSnapshot(coordinates: validCoordinates, markers: markers, style: .light, drawsPath: drawsPath)
             async let dark = makeMapSnapshot(coordinates: validCoordinates, markers: markers, style: .dark, drawsPath: drawsPath)
             let images = await (light, dark)
@@ -2968,12 +3191,15 @@ enum DFKShareImageLoader {
 
     /// A few randomly chosen photos from `assetIDs`, loaded together.
     static func loadSampledImages(assetIDs: [String], limit: Int = 3, completion: @escaping (DFKShareMedia) -> Void) {
-        let sampled = Array(NSOrderedSet(array: assetIDs).array.compactMap { $0 as? String }.shuffled().prefix(limit))
-        guard !sampled.isEmpty else {
-            completion(DFKShareMedia(images: []))
-            return
+        // The pool can hold every photo of a period; sample it off main.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let sampled = Array(NSOrderedSet(array: assetIDs).array.compactMap { $0 as? String }.shuffled().prefix(limit))
+            guard !sampled.isEmpty else {
+                DispatchQueue.main.async { completion(DFKShareMedia(images: [])) }
+                return
+            }
+            loadShareMedia(assetIDs: sampled, coordinates: [], photoTargetSize: sampledPhotoTargetSize, completion: completion)
         }
-        loadShareMedia(assetIDs: sampled, coordinates: [], photoTargetSize: sampledPhotoTargetSize, completion: completion)
     }
 
     @MainActor
@@ -2988,17 +3214,16 @@ enum DFKShareImageLoader {
     }
 
     private static func loadMapSnapshot(coordinates: [CLLocationCoordinate2D], completion: @escaping (UIImage?) -> Void) {
-        let validCoordinates = coordinates.filter { coordinate in
-            CLLocationCoordinate2DIsValid(coordinate) &&
-            abs(coordinate.latitude) > 0.000001 &&
-            abs(coordinate.longitude) > 0.000001
-        }
-        guard !validCoordinates.isEmpty else {
-            completion(nil)
-            return
-        }
-
         Task {
+            let validCoordinates = coordinates.filter { coordinate in
+                CLLocationCoordinate2DIsValid(coordinate) &&
+                abs(coordinate.latitude) > 0.000001 &&
+                abs(coordinate.longitude) > 0.000001
+            }
+            guard !validCoordinates.isEmpty else {
+                await MainActor.run { completion(nil) }
+                return
+            }
             let image = await makeMapSnapshot(coordinates: validCoordinates, markers: [])
             await MainActor.run {
                 completion(image)

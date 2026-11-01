@@ -371,6 +371,9 @@ struct Transport: Identifiable {
     let pathPoints: [TransportPathPoint]
     var manualType: TransportType? = nil
     var stepCount: Int? = nil
+    /// Memoized `lineSegments`. Not persisted; `id` and `pathPoints` are
+    /// immutable, so copies of this value may safely share the result.
+    private let lineSegmentsCache = TransportLineSegmentsCache()
     
     init(id: UUID = UUID(), startTime: Date, endTime: Date, startLocation: String, endLocation: String, type: TransportType, distance: Double, averageSpeed: Double, points: [CLLocationCoordinate2D], pathPoints: [TransportPathPoint]? = nil, manualType: TransportType? = nil, stepCount: Int? = nil) {
         self.id = id
@@ -439,12 +442,41 @@ struct TransportLineSegment: Identifiable {
     let isDashed: Bool
 }
 
+/// Thread-safe, compute-once storage for `Transport.lineSegments`.
+final class TransportLineSegmentsCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var segments: [TransportLineSegment]?
+
+    func value(_ compute: () -> [TransportLineSegment]) -> [TransportLineSegment] {
+        lock.lock()
+        if let segments {
+            lock.unlock()
+            return segments
+        }
+        lock.unlock()
+        // Compute outside the lock; concurrent first readers produce identical results.
+        let computed = compute()
+        lock.lock()
+        defer { lock.unlock() }
+        if let segments { return segments }
+        segments = computed
+        return computed
+    }
+}
+
 extension Transport {
     /// A direct jump this long has no route shape between its two samples.
     /// Display it as inferred rather than implying a recorded GPS trace.
     private static let inferredRouteDistanceThreshold: CLLocationDistance = 500
 
+    /// Smoothed display geometry. Computed once per value (it depends only on
+    /// the immutable `id` and `pathPoints`) and shared by its copies, so view
+    /// bodies reading it repeatedly do not redo filtering and spline smoothing.
     var lineSegments: [TransportLineSegment] {
+        lineSegmentsCache.value { computeLineSegments() }
+    }
+
+    private func computeLineSegments() -> [TransportLineSegment] {
         let validPoints = pathPoints.filter {
             $0.coordinate.latitude.isFinite &&
             $0.coordinate.longitude.isFinite &&

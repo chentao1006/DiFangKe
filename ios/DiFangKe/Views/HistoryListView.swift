@@ -85,6 +85,22 @@ private func timelineIconStyle(for item: DaySummary.TimelineIcon, colorScheme: C
 
 
 
+/// Groups positions by the start of their day, off the main thread; the
+/// order inside each day is the input order, days sorted as requested.
+private enum HistoryDayGrouping {
+    static func groupIndices(startTimes: [Date], newestFirst: Bool) async -> [(Date, [Int])] {
+        await Task.detached(priority: .userInitiated) {
+            let calendar = Calendar.current
+            let grouped = Dictionary(grouping: startTimes.indices) { index in
+                calendar.startOfDay(for: startTimes[index])
+            }
+            return grouped
+                .sorted { newestFirst ? $0.key > $1.key : $0.key < $1.key }
+                .map { ($0.key, $0.value) }
+        }.value
+    }
+}
+
 struct IdentifiableDate: Identifiable {
     var id: Date { date }
     let date: Date
@@ -115,6 +131,141 @@ private struct HistoryCalendarIndexSource: Equatable {
 private struct HistoryCalendarDayIndex {
     let footprintsByDay: [Date: [Footprint]]
     let transportsByDay: [Date: [TransportRecord]]
+    let locationLabelsByDay: [Date: [String]]
+    let historyYears: [(year: Int, date: Date)]
+}
+
+/// The calendar index as positions into the source arrays, with the month
+/// labels and year list, built off the main thread from value snapshots.
+private struct HistoryCalendarIndexLayout {
+    let footprintIndicesByDay: [Date: [Int]]
+    let transportIndicesByDay: [Date: [Int]]
+    let locationLabelsByDay: [Date: [String]]
+    let historyYears: [(year: Int, date: Date)]
+}
+
+private enum HistoryCalendarIndexBuilder {
+    /// Days a [start, end) span meaningfully overlaps, skipping any day where the
+    /// overlap is under `minOverlap` (e.g. a span that ends right at midnight would
+    /// otherwise flag the next day too, even though it has ~0s of actual time on it).
+    static func daysWithMeaningfulOverlap(from start: Date, to end: Date, calendar: Calendar, minOverlap: TimeInterval = 60) -> [Date] {
+        guard end > start else { return [calendar.startOfDay(for: start)] }
+        var days: [Date] = []
+        var current = calendar.startOfDay(for: start)
+        let lastDay = calendar.startOfDay(for: end)
+        while current <= lastDay {
+            guard let next = calendar.date(byAdding: .day, value: 1, to: current) else { break }
+            let overlapStart = max(start, current)
+            let overlapEnd = min(end, next)
+            if overlapEnd.timeIntervalSince(overlapStart) >= minOverlap {
+                days.append(current)
+            }
+            current = next
+        }
+        return days.isEmpty ? [calendar.startOfDay(for: start)] : days
+    }
+
+    static func build(source: HistoryCalendarIndexSource, calendar: Calendar) -> HistoryCalendarIndexLayout {
+        var footprintIndices: [Date: [Int]] = [:]
+        var transportIndices: [Date: [Int]] = [:]
+
+        for (index, footprint) in source.footprints.enumerated() where footprint.status != "ignored" {
+            for day in daysWithMeaningfulOverlap(from: footprint.startTime, to: footprint.endTime, calendar: calendar) {
+                footprintIndices[day, default: []].append(index)
+            }
+        }
+
+        for (index, transport) in source.transports.enumerated() where transport.status != "ignored" {
+            for day in daysWithMeaningfulOverlap(from: transport.startTime, to: transport.endTime, calendar: calendar) {
+                transportIndices[day, default: []].append(index)
+            }
+        }
+
+        return HistoryCalendarIndexLayout(
+            footprintIndicesByDay: footprintIndices,
+            transportIndicesByDay: transportIndices,
+            locationLabelsByDay: locationLabels(footprintIndicesByDay: footprintIndices, footprints: source.footprints, calendar: calendar),
+            historyYears: Self.historyYears(source.footprints.map(\.startTime), calendar: calendar)
+        )
+    }
+
+    private static func historyYears(_ dates: [Date], calendar: Calendar) -> [(year: Int, date: Date)] {
+        let grouped = Dictionary(grouping: dates) { date in
+            calendar.component(.year, from: date)
+        }
+
+        return grouped.compactMap { year, dates in
+            let earliestDateInYear = dates
+                .map { calendar.startOfDay(for: $0) }
+                .min()
+            return earliestDateInYear.map { (year: year, date: $0) }
+        }
+        .sorted { $0.year > $1.year }
+    }
+
+    /// Location-change labels for every day with footprints; days without
+    /// footprints have none.
+    private static func locationLabels(
+        footprintIndicesByDay: [Date: [Int]],
+        footprints: [HistoryFootprintIndexEntry],
+        calendar: Calendar
+    ) -> [Date: [String]] {
+        var resolver = HistoryCalendarLocation.Resolver()
+        var locationsByDay: [Date: [HistoryCalendarLocation]] = [:]
+        for (day, indices) in footprintIndicesByDay {
+            let locations = indices
+                .map { footprints[$0] }
+                .sorted { $0.startTime < $1.startTime }
+                .compactMap { resolver.location(for: $0) }
+            locationsByDay[day] = locations.reduce(into: []) { result, location in
+                if result.last != location {
+                    result.append(location)
+                }
+            }
+        }
+
+        let footprintDates = footprintIndicesByDay
+            .compactMap { date, indices in indices.isEmpty ? nil : date }
+            .sorted()
+
+        var labelsByDay: [Date: [String]] = [:]
+        for (position, date) in footprintDates.enumerated() {
+            let currentLocations = locationsByDay[date] ?? []
+            guard !currentLocations.isEmpty else { continue }
+
+            let shouldAlwaysShowLocation = calendar.component(.day, from: date) == 1
+            if shouldAlwaysShowLocation {
+                let cityLabels = uniqueLabels(currentLocations.compactMap(\.cityLabel))
+                labelsByDay[date] = cityLabels.isEmpty
+                    ? uniqueLabels(currentLocations.map(\.countryLabel))
+                    : cityLabels
+                continue
+            }
+
+            var previousLocation = position > 0 ? locationsByDay[footprintDates[position - 1]]?.last : nil
+            var labels: [String] = []
+            for location in currentLocations {
+                if let previousLocation {
+                    if location.countryKey != previousLocation.countryKey {
+                        labels.append(location.countryLabel)
+                    } else if location.cityKey != previousLocation.cityKey,
+                              let cityLabel = location.cityLabel {
+                        labels.append(cityLabel)
+                    }
+                } else {
+                    labels.append(location.countryLabel)
+                }
+                previousLocation = location
+            }
+            labelsByDay[date] = uniqueLabels(labels)
+        }
+        return labelsByDay
+    }
+
+    private static func uniqueLabels(_ labels: [String]) -> [String] {
+        var seen = Set<String>()
+        return labels.filter { seen.insert($0).inserted }
+    }
 }
 
 @MainActor
@@ -127,6 +278,12 @@ private final class HistoryCalendarIndexCache {
     func index(matching source: HistoryCalendarIndexSource) -> HistoryCalendarDayIndex? {
         guard self.source == source else { return nil }
         return index
+    }
+
+    /// The cached source and index, so callers can compare sources off main.
+    func cachedEntry() -> (source: HistoryCalendarIndexSource, index: HistoryCalendarDayIndex)? {
+        guard let source, let index else { return nil }
+        return (source, index)
     }
 
     /// A newly-mounted SwiftData query initially reports an empty collection.
@@ -254,11 +411,12 @@ struct HistoryListView: View {
             reviewPhotoImportSuggestionTask?.cancel()
             onStatisticsVisibilityChanged?(false)
         }
-        .onChange(of: allFootprints) {
+        // Cheap revisions instead of comparing the full query arrays.
+        .onChange(of: footprintsRevision) {
             scheduleCalendarIndexRefresh()
             scheduleReviewPhotoImportSuggestionIfNeeded()
         }
-        .onChange(of: allTransportRecords) { scheduleCalendarIndexRefresh() }
+        .onChange(of: transportRecordsRevision) { scheduleCalendarIndexRefresh() }
         .sheet(item: $showingDate) { item in
             MainTabView(initialDate: item.date)
                 .environment(locationManager)
@@ -342,6 +500,7 @@ struct HistoryListView: View {
                 HistoryMonthView(
                     footprintsByDay: footprintsByDay,
                     transportsByDay: transportsByDay,
+                    locationLabelsByDay: locationLabelsByDay,
                     allActivityTypes: allActivityTypes,
                     targetDate: selectedDate,
                     earliestDate: earliestHistoryDate,
@@ -457,10 +616,14 @@ struct HistoryListView: View {
                   !showingReviewIntroduction,
                   !UserDefaults.standard.bool(forKey: "reviewPhotoImportSuggestionShown") else { return }
 
-            let activeFootprintCount = allFootprints.lazy
-                .filter { $0.status != .ignored }
-                .count
-            guard activeFootprintCount <= AppConfig.shared.reviewPhotoImportSuggestionMaxFootprints else { return }
+            let container = modelContext.container
+            let activeFootprintCount = await Task.detached(priority: .utility) { () -> Int in
+                let context = ModelContext(container)
+                let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.statusValue != "ignored" })
+                return (try? context.fetchCount(descriptor)) ?? 0
+            }.value
+            guard !Task.isCancelled,
+                  activeFootprintCount <= AppConfig.shared.reviewPhotoImportSuggestionMaxFootprints else { return }
 
             UserDefaults.standard.set(true, forKey: "reviewPhotoImportSuggestionShown")
             showingReviewPhotoImportSuggestion = true
@@ -481,22 +644,14 @@ struct HistoryListView: View {
         viewMode == .month
     }
     
-    private var historyYears: [(year: Int, date: Date)] {
-        let calendar = Calendar.current
-        let dates = allFootprints.map(\.startTime)
-        let grouped = Dictionary(grouping: dates) { date in
-            calendar.component(.year, from: date)
-        }
-        
-        return grouped.compactMap { year, dates in
-            let earliestDateInYear = dates
-                .map { calendar.startOfDay(for: $0) }
-                .min()
-            return earliestDateInYear.map { (year: year, date: $0) }
-        }
-        .sorted { $0.year > $1.year }
+    private var footprintsRevision: [AnyHashable] {
+        [allFootprints.count, allFootprints.first?.footprintID, allFootprints.first?.date, allFootprints.last?.footprintID]
     }
-    
+
+    private var transportRecordsRevision: [AnyHashable] {
+        [allTransportRecords.count, allTransportRecords.first?.recordID, allTransportRecords.first?.startTime, allTransportRecords.last?.recordID]
+    }
+
     private func jumpToYear(_ date: Date) {
         selectedDate = Calendar.current.startOfDay(for: date)
         hasScrolledMonth = false
@@ -504,6 +659,8 @@ struct HistoryListView: View {
     
     @State private var footprintsByDay: [Date: [Footprint]] = [:]
     @State private var transportsByDay: [Date: [TransportRecord]] = [:]
+    @State private var locationLabelsByDay: [Date: [String]] = [:]
+    @State private var historyYears: [(year: Int, date: Date)] = []
 
     private var calendarIndexSource: HistoryCalendarIndexSource {
         HistoryCalendarIndexSource(
@@ -524,61 +681,48 @@ struct HistoryListView: View {
         )
     }
 
-    /// Days a [start, end) span meaningfully overlaps, skipping any day where the
-    /// overlap is under `minOverlap` (e.g. a span that ends right at midnight would
-    /// otherwise flag the next day too, even though it has ~0s of actual time on it).
-    private func daysWithMeaningfulOverlap(from start: Date, to end: Date, calendar: Calendar, minOverlap: TimeInterval = 60) -> [Date] {
-        guard end > start else { return [calendar.startOfDay(for: start)] }
-        var days: [Date] = []
-        var current = calendar.startOfDay(for: start)
-        let lastDay = calendar.startOfDay(for: end)
-        while current <= lastDay {
-            guard let next = calendar.date(byAdding: .day, value: 1, to: current) else { break }
-            let overlapStart = max(start, current)
-            let overlapEnd = min(end, next)
-            if overlapEnd.timeIntervalSince(overlapStart) >= minOverlap {
-                days.append(current)
-            }
-            current = next
-        }
-        return days.isEmpty ? [calendar.startOfDay(for: start)] : days
-    }
-
-    private func rebuildIndex() {
+    /// Snapshots the query results as values on main, then compares with the
+    /// cache and builds the index off main; only the final mapping back to the
+    /// models happens here.
+    private func rebuildIndexInBackground() async {
         guard calendarOnly else { return }
+        let footprints = allFootprints
+        let transports = allTransportRecords
         let source = calendarIndexSource
-        if let cached = HistoryCalendarIndexCache.shared.index(matching: source) {
-            applyCalendarIndex(cached)
+        let cached = HistoryCalendarIndexCache.shared.cachedEntry()
+        let cachedSource = cached?.source
+        let calendar = Calendar.current
+
+        let layout = await Task.detached(priority: .userInitiated) { () -> HistoryCalendarIndexLayout? in
+            if let cachedSource, cachedSource == source { return nil }
+            return HistoryCalendarIndexBuilder.build(source: source, calendar: calendar)
+        }.value
+        guard !Task.isCancelled else { return }
+
+        guard let layout else {
+            if let cached { applyCalendarIndex(cached.index) }
             return
         }
 
-        let calendar = Calendar.current
-        var fpMap: [Date: [Footprint]] = [:]
-        var tpMap: [Date: [TransportRecord]] = [:]
-
-        for fp in allFootprints where fp.statusValue != "ignored" {
-            for day in daysWithMeaningfulOverlap(from: fp.startTime, to: fp.endTime, calendar: calendar) {
-                fpMap[day, default: []].append(fp)
-            }
-        }
-
-        for tp in allTransportRecords where tp.statusRaw != "ignored" {
-            for day in daysWithMeaningfulOverlap(from: tp.startTime, to: tp.endTime, calendar: calendar) {
-                tpMap[day, default: []].append(tp)
-            }
-        }
-
         let index = HistoryCalendarDayIndex(
-            footprintsByDay: fpMap,
-            transportsByDay: tpMap
+            footprintsByDay: layout.footprintIndicesByDay.mapValues { $0.map { footprints[$0] } },
+            transportsByDay: layout.transportIndicesByDay.mapValues { $0.map { transports[$0] } },
+            locationLabelsByDay: layout.locationLabelsByDay,
+            historyYears: layout.historyYears
         )
         applyCalendarIndex(index)
         HistoryCalendarIndexCache.shared.store(index, for: source)
     }
 
+    private func rebuildIndex() {
+        scheduleCalendarIndexRefresh()
+    }
+
     private func applyCalendarIndex(_ index: HistoryCalendarDayIndex) {
         footprintsByDay = index.footprintsByDay
         transportsByDay = index.transportsByDay
+        locationLabelsByDay = index.locationLabelsByDay
+        historyYears = index.historyYears
     }
 
     private func prepareCalendarIndex() {
@@ -603,7 +747,8 @@ struct HistoryListView: View {
             await Task.yield()
             await Task.yield()
             guard !Task.isCancelled else { return }
-            rebuildIndex()
+            await rebuildIndexInBackground()
+            guard !Task.isCancelled else { return }
             isCalendarIndexReady = true
         }
     }
@@ -725,6 +870,8 @@ struct DayStatsView: View {
 struct HistoryMonthView: View {
     let footprintsByDay: [Date: [Footprint]]
     let transportsByDay: [Date: [TransportRecord]]
+    /// Location-change labels per day, precomputed with the calendar index.
+    let locationLabelsByDay: [Date: [String]]
     let allActivityTypes: [ActivityType]
     let targetDate: Date
     let earliestDate: Date
@@ -768,17 +915,13 @@ struct HistoryMonthView: View {
     }
     
     var body: some View {
-        let previousFootprintDates = previousFootprintDatesByDate()
         ScrollViewReader { proxy in
             ZStack {
                 ScrollView {
                     LazyVStack(spacing: 32, pinnedViews: [.sectionHeaders]) {
                         ForEach(months, id: \.self) { month in
                             Section(header: monthHeader(for: month)) {
-                                monthGrid(
-                                    for: month,
-                                    previousFootprintDates: previousFootprintDates
-                                )
+                                monthGrid(for: month)
                             }
                             .id("month-" + month.dayID)
                         }
@@ -890,18 +1033,10 @@ struct HistoryMonthView: View {
         return Array(symbols[firstIndex..<symbols.count] + symbols[0..<firstIndex])
     }
     
-    private func monthGrid(for month: Date, previousFootprintDates: [Date: Date]) -> some View {
+    private func monthGrid(for month: Date) -> some View {
         let days = daysInMonth(for: month)
         let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 7)
-        let locationLabelsByDate = Dictionary(uniqueKeysWithValues: days.map { date in
-            (
-                date,
-                locationChangeLabels(
-                    for: date,
-                    previousFootprintDate: previousFootprintDates[date]
-                )
-            )
-        })
+        let locationLabelsByDate = locationLabelsByDay
         return VStack(spacing: 8) {
             HStack(spacing: 0) {
                 ForEach(weekdaySymbols, id: \.self) { day in
@@ -917,10 +1052,7 @@ struct HistoryMonthView: View {
                     let isRightmostColumn = (leadingSpaces + index) % 7 == 6
                     let nextDate = Calendar.current.date(byAdding: .day, value: 1, to: date)
                     let nextLocationLabels = nextDate.map { nextDate in
-                        locationLabelsByDate[nextDate] ?? locationChangeLabels(
-                            for: nextDate,
-                            previousFootprintDate: previousFootprintDates[nextDate]
-                        )
+                        locationLabelsByDate[nextDate] ?? []
                     } ?? []
                     let nextDateForcesLocationLabel = nextDate.map { nextDate in
                         Calendar.current.component(.day, from: nextDate) == 1
@@ -949,71 +1081,6 @@ struct HistoryMonthView: View {
         }
     }
 
-    private func locationChangeLabels(for date: Date, previousFootprintDate: Date?) -> [String] {
-        let currentLocations = orderedLocations(in: footprintsByDay[date] ?? [])
-        guard !currentLocations.isEmpty else { return [] }
-
-        let calendar = Calendar.current
-        let shouldAlwaysShowLocation = calendar.component(.day, from: date) == 1
-        if shouldAlwaysShowLocation {
-            let cityLabels = uniqueLabels(currentLocations.compactMap(\.cityLabel))
-            return cityLabels.isEmpty
-                ? uniqueLabels(currentLocations.map(\.countryLabel))
-                : cityLabels
-        }
-
-        var previousLocation = previousFootprintDate.flatMap { previousDate in
-            orderedLocations(in: footprintsByDay[previousDate] ?? []).last
-        }
-        var labels: [String] = []
-
-        for location in currentLocations {
-            if let previousLocation {
-                if location.countryKey != previousLocation.countryKey {
-                    labels.append(location.countryLabel)
-                } else if location.cityKey != previousLocation.cityKey,
-                          let cityLabel = location.cityLabel {
-                    labels.append(cityLabel)
-                }
-            } else {
-                labels.append(location.countryLabel)
-            }
-            previousLocation = location
-        }
-
-        return uniqueLabels(labels)
-    }
-
-    private func previousFootprintDatesByDate() -> [Date: Date] {
-        let footprintDates = footprintsByDay
-            .compactMap { date, footprints in footprints.isEmpty ? nil : date }
-            .sorted()
-        guard footprintDates.count > 1 else { return [:] }
-
-        var result: [Date: Date] = [:]
-        for index in 1..<footprintDates.count {
-            result[footprintDates[index]] = footprintDates[index - 1]
-        }
-        return result
-    }
-
-    private func orderedLocations(in footprints: [Footprint]) -> [HistoryCalendarLocation] {
-        let locations = footprints
-            .sorted { $0.startTime < $1.startTime }
-            .compactMap(HistoryCalendarLocation.init(footprint:))
-
-        return locations.reduce(into: []) { result, location in
-            if result.last != location {
-                result.append(location)
-            }
-        }
-    }
-
-    private func uniqueLabels(_ labels: [String]) -> [String] {
-        var seen = Set<String>()
-        return labels.filter { seen.insert($0).inserted }
-    }
-    
     private func calculateLeadingSpaces(for month: Date) -> Int {
         guard let firstDay = month.startOfMonth else { return 0 }
         let calendar = Calendar.current
@@ -1035,31 +1102,44 @@ private struct HistoryCalendarLocation: Hashable {
     let cityKey: String?
     let cityLabel: String?
 
-    init?(footprint: Footprint) {
-        let countryCode = footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        let countryName = footprint.countryName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cityName = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let localizedCountry = countryCode.flatMap {
-            Locale(identifier: "zh_Hans_CN").localizedString(forRegionCode: $0)
-        }
-        guard let countryLabel = [countryName, localizedCountry]
-            .compactMap({ $0 })
-            .first(where: { !$0.isEmpty }) else { return nil }
+    /// Builds locations off main, reusing one locale and memoizing the ICU
+    /// Traditional-Simplified transform per distinct name.
+    struct Resolver {
+        private let locale = Locale(identifier: "zh_Hans_CN")
+        private var simplified: [String: String] = [:]
 
-        let normalizedCountry = countryLabel.applyingTransform(
-            StringTransform("Traditional-Simplified"),
-            reverse: false
-        ) ?? countryLabel
-        let normalizedCity = cityName.flatMap { value -> String? in
-            guard !value.isEmpty else { return nil }
-            return value.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? value
+        private mutating func simplify(_ value: String) -> String {
+            if let cached = simplified[value] { return cached }
+            let result = value.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? value
+            simplified[value] = result
+            return result
         }
-        let normalizedCountryKey = countryCode.flatMap { $0.isEmpty ? nil : $0 } ?? normalizedCountry
 
-        self.countryKey = normalizedCountryKey
-        self.countryLabel = normalizedCountry
-        self.cityKey = normalizedCity.map { "\(normalizedCountryKey)|\($0)" }
-        self.cityLabel = normalizedCity
+        mutating func location(for footprint: HistoryFootprintIndexEntry) -> HistoryCalendarLocation? {
+            let countryCode = footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            let countryName = footprint.countryName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cityName = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let localizedCountry = countryCode.flatMap {
+                locale.localizedString(forRegionCode: $0)
+            }
+            guard let countryLabel = [countryName, localizedCountry]
+                .compactMap({ $0 })
+                .first(where: { !$0.isEmpty }) else { return nil }
+
+            let normalizedCountry = simplify(countryLabel)
+            let normalizedCity = cityName.flatMap { value -> String? in
+                guard !value.isEmpty else { return nil }
+                return simplify(value)
+            }
+            let normalizedCountryKey = countryCode.flatMap { $0.isEmpty ? nil : $0 } ?? normalizedCountry
+
+            return HistoryCalendarLocation(
+                countryKey: normalizedCountryKey,
+                countryLabel: normalizedCountry,
+                cityKey: normalizedCity.map { "\(normalizedCountryKey)|\($0)" },
+                cityLabel: normalizedCity
+            )
+        }
     }
 }
 
@@ -1273,11 +1353,16 @@ private struct MonthDayTimelineRing: View {
 }
 
 // MARK: - Extensions
+/// Shared formatter for `dayID`; DateFormatter formatting is thread-safe.
+private let historyDayIDFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyyMMdd"
+    return formatter
+}()
+
 extension Date {
     var dayID: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd"
-        return formatter.string(from: self)
+        historyDayIDFormatter.string(from: self)
     }
     var startOfMonth: Date? {
         Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: self))
@@ -1684,25 +1769,37 @@ struct PhotoImportFlowModifier: ViewModifier {
         self.scanTotal = 0
         photoService.isScanCancelled = false
         isScanning = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            let sourceContext = modelContainer.map(ModelContext.init) ?? modelContext
-            let finalEnd = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: end) ?? end
+        let container = modelContainer ?? modelContext.container
+        let finalEnd = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: end) ?? end
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 500_000_000)
             // Fetched when a scan starts, so hosts don't observe every footprint.
-            let allFootprints = (try? sourceContext.fetch(FetchDescriptor<Footprint>())) ?? []
-            let allPlaces = (try? sourceContext.fetch(FetchDescriptor<Place>(sortBy: [SortDescriptor(\.name)]))) ?? []
-            let allActivityTypes = (try? sourceContext.fetch(FetchDescriptor<ActivityType>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? []
-            let activeFootprints = allFootprints.filter { $0.status != .ignored }
-            let existingIDs = Set(activeFootprints.flatMap { $0.photoAssetIDs })
-            let liteHistory = activeFootprints.map { TimelineBuilder.convertToFootprintLite($0) }
-            let litePlaces = allPlaces.map { $0.convertToLite() }
-            let liteActivities = allActivityTypes.map { $0.convertToLite() }
+            // History, places and activities are read as lite values off main.
+            let snapshot = await Task.detached(priority: .userInitiated) { () -> (existingIDs: Set<String>, history: [FootprintLite], places: [PlaceLite], activities: [ActivityTypeLite]) in
+                let context = ModelContext(container)
+                let allFootprints = (try? context.fetch(FetchDescriptor<Footprint>())) ?? []
+                let allPlaces = (try? context.fetch(FetchDescriptor<Place>(sortBy: [SortDescriptor(\.name)]))) ?? []
+                let allActivityTypes = (try? context.fetch(FetchDescriptor<ActivityType>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? []
+                let activeFootprints = allFootprints.filter { $0.status != .ignored }
+                return (
+                    Set(activeFootprints.flatMap { $0.photoAssetIDs }),
+                    activeFootprints.map { TimelineBuilder.convertToFootprintLite($0) },
+                    allPlaces.map { $0.convertToLite() },
+                    allActivityTypes.map { $0.convertToLite() }
+                )
+            }.value
+            guard isScanning, !photoService.isScanCancelled else { return }
 
-            PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: litePlaces, allActivities: liteActivities, excludedAssetIDs: existingIDs, history: liteHistory, onProgress: { current, total in
+            PhotoService.shared.autoScanFootprints(from: start, to: finalEnd, allPlaces: snapshot.places, allActivities: snapshot.activities, excludedAssetIDs: snapshot.existingIDs, history: snapshot.history, onProgress: { current, total in
                 self.scanProgress = current
                 self.scanTotal = total
             }) { results in
                 self.isScanning = false
                 if !results.isEmpty {
+                    // The review edits drafts against main-context places and activities.
+                    let payloadContext = modelContainer.map(ModelContext.init) ?? modelContext
+                    let allPlaces = (try? payloadContext.fetch(FetchDescriptor<Place>(sortBy: [SortDescriptor(\.name)]))) ?? []
+                    let allActivityTypes = (try? payloadContext.fetch(FetchDescriptor<ActivityType>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? []
                     self.scannedResults = results
                     self.reviewPayload = PhotoImportReviewPayload(
                         results: results,
@@ -1861,8 +1958,8 @@ struct PhotoImportRangePicker: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() } } }
-            .onAppear {
-                if let earliestDate = PhotoService.shared.getEarliestAssetDate() {
+            .task {
+                if let earliestDate = await PhotoService.shared.getEarliestAssetDateAsync() {
                     let year = Calendar.current.component(.year, from: earliestDate)
                     earliestYear = year
                 }
@@ -1884,11 +1981,13 @@ struct PhotoImportResultsView: View {
     let allActivityTypes: [ActivityType]
     let onConfirm: ([Footprint]) -> Void
     
-    private var groupedResults: [(Date, [Footprint])] {
-        let grouped = Dictionary(grouping: results) { fp in
-            Calendar.current.startOfDay(for: fp.startTime)
-        }
-        return grouped.sorted { $0.key < $1.key }
+    @State private var groupedResults: [(Date, [Footprint])] = []
+
+    private func refreshGroupedResults() async {
+        let results = results
+        let groups = await HistoryDayGrouping.groupIndices(startTimes: results.map(\.startTime), newestFirst: false)
+        guard !Task.isCancelled else { return }
+        groupedResults = groups.map { date, indices in (date, indices.map { results[$0] }) }
     }
     
     private var scanYear: String {
@@ -1995,6 +2094,9 @@ struct PhotoImportResultsView: View {
             }
             .onAppear {
                 PhotoImportDraftRecovery.markPending(results)
+            }
+            .task(id: results.count) {
+                await refreshGroupedResults()
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -2158,15 +2260,25 @@ struct HistoryFavoritesView: View {
     /// Presented from here, deep inside History's content, dragging the detail
     /// between detents rebuilt it on every drag (new identity each time).
     let onFootprintSelected: (Footprint) -> Void
-    
-    private var groupedFootprints: [(Date, [Footprint])] {
+    @State private var groupedFootprints: [(Date, [Footprint])] = []
+
+    private var groupingKey: Int {
+        var hasher = Hasher()
+        hasher.combine(includedFootprintIDs)
+        for footprint in favoriteFootprints {
+            hasher.combine(footprint.footprintID)
+            hasher.combine(footprint.startTime)
+        }
+        return hasher.finalize()
+    }
+
+    private func refreshGroupedFootprints() async {
         let visibleFootprints = includedFootprintIDs.map { includedIDs in
             favoriteFootprints.filter { includedIDs.contains($0.footprintID) }
         } ?? favoriteFootprints
-        let grouped = Dictionary(grouping: visibleFootprints) { fp in
-            Calendar.current.startOfDay(for: fp.startTime)
-        }
-        return grouped.sorted { $0.key > $1.key }
+        let groups = await HistoryDayGrouping.groupIndices(startTimes: visibleFootprints.map(\.startTime), newestFirst: true)
+        guard !Task.isCancelled else { return }
+        groupedFootprints = groups.map { date, indices in (date, indices.map { visibleFootprints[$0] }) }
     }
     
     var body: some View {
@@ -2189,6 +2301,9 @@ struct HistoryFavoritesView: View {
             }
         }
         .background(Color.dfkBackground)
+        .task(id: groupingKey) {
+            await refreshGroupedFootprints()
+        }
     }
 
     private func favoriteHeader(for date: Date) -> some View {

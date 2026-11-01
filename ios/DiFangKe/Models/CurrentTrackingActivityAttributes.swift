@@ -17,19 +17,21 @@ enum CurrentActivityMapSnapshotCache {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: container, includingPropertiesForKeys: [.contentModificationDateKey]
         )) ?? []
-        let candidates = files.filter {
-            $0.lastPathComponent.hasPrefix("current_activity_")
-                && $0.lastPathComponent.hasSuffix("_\(suffix).png")
-                && !$0.lastPathComponent.contains("_photo_")
-                && $0 != exactURL
+        let fileSuffix = "_\(suffix).png"
+        // Read each candidate's sort keys once (prefetched by the enumeration)
+        // instead of querying resource values inside the comparator.
+        let candidates = files.compactMap { url -> (url: URL, isCurrent: Bool, date: Date)? in
+            let name = url.lastPathComponent
+            guard name.hasPrefix("current_activity_"),
+                  name.hasSuffix(fileSuffix),
+                  !name.contains("_photo_"),
+                  url != exactURL else { return nil }
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return (url, name.hasPrefix(prefix), date)
         }.sorted { left, right in
-            let leftIsCurrent = left.lastPathComponent.hasPrefix(prefix)
-            let rightIsCurrent = right.lastPathComponent.hasPrefix(prefix)
-            if leftIsCurrent != rightIsCurrent { return leftIsCurrent }
-            let leftDate = (try? left.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let rightDate = (try? right.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return leftDate > rightDate
-        }
+            if left.isCurrent != right.isCurrent { return left.isCurrent }
+            return left.date > right.date
+        }.map(\.url)
         return (FileManager.default.fileExists(atPath: exactURL.path) ? [exactURL] : []) + candidates
     }
 }

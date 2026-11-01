@@ -90,8 +90,10 @@ internal fun TimelineMapPane(
     val footprints = remember(items) { items.filterIsInstance<TimelineItem.FootprintItem>().map { it.footprint } }
     val transports = remember(items) { items.filterIsInstance<TimelineItem.TransportItem>() }
 
-    val overlays = remember(items, dailyPoints, activityTypes, allPlaces, selection) {
-        when (selection) {
+    // Marker aggregation and route JSON parsing run off main; the map keeps the last overlays meanwhile.
+    val emptyOverlays = remember { TimelineMapOverlays(emptyList(), emptyList(), emptyList()) }
+    val overlays by produceState(emptyOverlays, items, dailyPoints, activityTypes, allPlaces, selection) {
+        value = withContext(Dispatchers.Default) { when (selection) {
             is TimelineSelection.Footprint -> {
                 val fp = footprints.filter { it.footprintID == selection.id }
                 TimelineMapOverlays(
@@ -113,7 +115,7 @@ internal fun TimelineMapPane(
                 routes = listOfNotNull(dailyPoints),
                 places = allPlaces
             )
-        }
+        } }
     }
 
     // B4: load the latest photo of each pin as a small bitmap.
@@ -134,9 +136,10 @@ internal fun TimelineMapPane(
     val baseKey = remember(mapDates, items.size) {
         "dates:" + mapDates.map { it.time }.sorted().joinToString(",") + ":" + items.size
     }
-    val cameraFit = remember(baseKey, selection, overlays) {
-        val wasSelected = previousSelection != null && selection == null
-        val fit = when (selection) {
+    // Captured per selection/date change so the async overlay refresh cannot flip skipMove for the same key.
+    val wasSelected = remember(baseKey, selection) { previousSelection != null && selection == null }
+    val cameraFit by produceState<TimelineCameraFit?>(null, baseKey, selection, overlays, wasSelected) {
+        value = withContext(Dispatchers.Default) { when (selection) {
             null -> TimelineCameraFit(
                 key = baseKey,
                 points = footprints.mapNotNull { fp ->
@@ -155,8 +158,7 @@ internal fun TimelineMapPane(
                 points = transports.filter { it.transport.recordID == selection.id }
                     .flatMap { routePoints(it.transport.pointsJson) }
             )
-        }
-        fit
+        } }
     }
     SideEffect { previousSelection = selection }
 

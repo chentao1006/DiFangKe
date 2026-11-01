@@ -45,7 +45,8 @@ class PhotoService private constructor(private val context: Context) {
         photoUris: List<Uri>,
         excludedPhotoUris: Set<String> = emptySet(),
         history: List<FootprintEntity> = emptyList()
-    ): List<FootprintEntity> {
+    ): List<FootprintEntity> = withContext(Dispatchers.Default) {
+        // O(photos x footprints) matching and clustering stay off main.
         val photos = photosFromUris(photoUris)
             .filter { photo ->
                 photo.latitude != null && photo.longitude != null && photo.uri !in excludedPhotoUris &&
@@ -54,7 +55,7 @@ class PhotoService private constructor(private val context: Context) {
                     history.none { footprint -> photoBelongsToStay(photo, footprint) }
             }
             .sortedBy { it.dateTaken }
-        if (photos.isEmpty()) return emptyList()
+        if (photos.isEmpty()) return@withContext emptyList()
 
         val clusters = mutableListOf<MutableList<PhotoInfo>>()
         photos.forEach { photo ->
@@ -70,7 +71,7 @@ class PhotoService private constructor(private val context: Context) {
             }
         }
 
-        return clusters.map { cluster ->
+        clusters.map { cluster ->
             val first = cluster.first()
             val last = cluster.last()
             val latitudes = cluster.mapNotNull { it.latitude }

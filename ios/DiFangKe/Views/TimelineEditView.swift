@@ -338,14 +338,28 @@ struct TimelineEditView: View {
                     self.viewportHeight = mainHeight
                     calculateLayouts()
                     
-                    var allCoords: [CLLocationCoordinate2D] = []
-                    for item in displayedTimelineItems {
-                        switch item {
-                        case .footprint(let fp): allCoords.append(CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude))
-                        case .transport(let tp): allCoords.append(contentsOf: tp.points)
-                        }
+                    // Route coordinates are gathered and bounded off main.
+                    let routes = EditorTransportRoutes(transports: displayedTimelineItems.map { item -> Transport? in
+                        if case .transport(let transport) = item { return transport }
+                        return nil
+                    })
+                    let footprintCoordinates = displayedTimelineItems.map { item -> CLLocationCoordinate2D? in
+                        guard case .footprint(let fp) = item else { return nil }
+                        return CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)
                     }
-                    if let region = allCoords.boundingRegion(paddingFactor: 1.4) {
+                    Task { @MainActor in
+                        let region = await Task.detached(priority: .userInitiated) { () -> MKCoordinateRegion? in
+                            var allCoords: [CLLocationCoordinate2D] = []
+                            for (footprintCoordinate, transport) in zip(footprintCoordinates, routes.transports) {
+                                if let footprintCoordinate { allCoords.append(footprintCoordinate) }
+                                if let transport { allCoords.append(contentsOf: transport.points) }
+                            }
+                            return allCoords.boundingRegion(paddingFactor: 1.4)
+                        }.value
+                        // The selected-time focus below may already own the
+                        // camera; keep the original order by applying the
+                        // overview only if no focused coordinate exists yet.
+                        guard let region, selectedCoordinate == nil else { return }
                         cameraPosition = .region(region)
                     }
                     
@@ -508,7 +522,8 @@ struct TimelineEditView: View {
                 return
             }
             let items = displayedTimelineItems
-            let coord = PersistentTimelineBuilder.coordinate(at: time ?? selectedTime, in: items)
+            let coord = await resolveCoordinate(at: time ?? selectedTime, in: items)
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 self.selectedCoordinate = coord
                 if movesCamera, let validCoord = coord {
@@ -520,11 +535,43 @@ struct TimelineEditView: View {
 
     private func updateMapFocus(for time: Date, movesCamera: Bool) {
         coordinateUpdateTask?.cancel()
-        let coord = PersistentTimelineBuilder.coordinate(at: time, in: displayedTimelineItems)
-        selectedCoordinate = coord
-        if movesCamera, let coord {
-            cameraPosition = .camera(MapCamera(centerCoordinate: coord, distance: 1000))
+        let items = displayedTimelineItems
+        coordinateUpdateTask = Task { @MainActor in
+            let coord = await resolveCoordinate(at: time, in: items)
+            guard !Task.isCancelled else { return }
+            selectedCoordinate = coord
+            if movesCamera, let coord {
+                cameraPosition = .camera(MapCamera(centerCoordinate: coord, distance: 1000))
+            }
         }
+    }
+
+    private struct TransportCoordinateQuery: @unchecked Sendable {
+        /// Always a `.transport` item, which holds no model object.
+        let item: TimelineItem
+    }
+
+    /// Same result as `PersistentTimelineBuilder.coordinate(at:in:)`. Finding
+    /// the item is a short scan over the day's items; searching a matching
+    /// route (the costly part) runs off main through the same builder call.
+    @MainActor
+    private func resolveCoordinate(at time: Date, in items: [TimelineItem]) async -> CLLocationCoordinate2D? {
+        for item in items where time >= item.startTime && time <= item.endTime {
+            switch item {
+            case .footprint(let footprint):
+                return CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+            case .transport(let transport):
+                // The builder skips a covering transport without points.
+                guard !transport.pathPoints.isEmpty || !transport.points.isEmpty else { continue }
+                let query = TransportCoordinateQuery(item: item)
+                return await Task.detached(priority: .userInitiated) {
+                    PersistentTimelineBuilder.coordinate(at: time, in: [query.item])
+                }.value
+            }
+        }
+        // No covering item: the builder only checks time ranges and the
+        // first/last item here, without scanning any route.
+        return PersistentTimelineBuilder.coordinate(at: time, in: items)
     }
 
     private func updateDragMapFocusIfNeeded(for time: Date) {
@@ -618,6 +665,14 @@ struct TimelineEditView: View {
     }
 
     private func pointsData(for transport: Transport) -> Data {
+        Self.encodedPointsData(for: transport)
+    }
+
+    private struct EditorTransportRoutes: @unchecked Sendable {
+        let transports: [Transport?]
+    }
+
+    nonisolated private static func encodedPointsData(for transport: Transport) -> Data {
         let coordinates = transport.pathPoints.isEmpty
             ? transport.points.map { CodableCoordinate(lat: $0.latitude, lon: $0.longitude) }
             : transport.pathPoints.map {
@@ -1018,7 +1073,7 @@ struct TimelineEditView: View {
         return persistent
     }
 
-    private func makePersistentTransportRecord(from transport: Transport, startTime: Date, endTime: Date) -> TransportRecord {
+    private func makePersistentTransportRecord(from transport: Transport, startTime: Date, endTime: Date, encodedPoints: Data? = nil) -> TransportRecord {
         let record = TransportRecord(
             recordID: transport.id,
             day: Calendar.current.startOfDay(for: startTime),
@@ -1029,7 +1084,7 @@ struct TimelineEditView: View {
             typeRaw: transport.type.rawValue,
             distance: transport.distance,
             averageSpeed: transport.averageSpeed,
-            pointsData: pointsData(for: transport),
+            pointsData: encodedPoints ?? pointsData(for: transport),
             statusRaw: "active",
             stepCount: transport.stepCount
         )
@@ -1135,7 +1190,23 @@ struct TimelineEditView: View {
     }
     
     private func saveTimelineEdits() {
-        let finalIDs = Set(itemLayouts.map(\.id))
+        // Encode every route off main, then apply the edits on the view's
+        // context using the same layouts that were encoded.
+        let layouts = itemLayouts
+        let routes = EditorTransportRoutes(transports: layouts.map { layout -> Transport? in
+            if case .transport(let transport) = layout.item { return transport }
+            return nil
+        })
+        Task { @MainActor in
+            let encodedPoints = await Task.detached(priority: .userInitiated) {
+                routes.transports.map { $0.map { Self.encodedPointsData(for: $0) } }
+            }.value
+            applyTimelineEdits(layouts: layouts, encodedPoints: encodedPoints)
+        }
+    }
+
+    private func applyTimelineEdits(layouts: [ItemLayout], encodedPoints: [Data?]) {
+        let finalIDs = Set(layouts.map(\.id))
         
         for item in timelineItems where !finalIDs.contains(item.id) {
             switch item {
@@ -1154,7 +1225,7 @@ struct TimelineEditView: View {
             }
         }
         
-        for layout in itemLayouts {
+        for (layoutIndex, layout) in layouts.enumerated() {
             switch layout.item {
             case .footprint(let draft):
                 let original = timelineItems.compactMap { item -> Footprint? in
@@ -1197,11 +1268,11 @@ struct TimelineEditView: View {
                     record.typeRaw = transport.type.rawValue
                     record.distance = transport.distance
                     record.averageSpeed = transport.averageSpeed
-                    record.pointsData = pointsData(for: transport)
+                    record.pointsData = encodedPoints[layoutIndex] ?? pointsData(for: transport)
                     record.manualTypeRaw = transport.manualType?.rawValue ?? transport.type.rawValue
                     record.statusRaw = "active"
                 } else {
-                    modelContext.insert(makePersistentTransportRecord(from: transport, startTime: layout.startTime, endTime: layout.endTime))
+                    modelContext.insert(makePersistentTransportRecord(from: transport, startTime: layout.startTime, endTime: layout.endTime, encodedPoints: encodedPoints[layoutIndex]))
                 }
             }
         }

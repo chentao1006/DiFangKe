@@ -305,11 +305,17 @@ struct DiFangKeApp: App {
                                     // are guarded at insertion time as well.
                                     if !didRunStartupDataMaintenance {
                                         didRunStartupDataMaintenance = true
-                                        let exactClonesRemoved = DataDeduplicationService.reconcileImportedDuplicates(in: container)
-                                        let transportsRemoved = DataDeduplicationService.deduplicateTransports(context: context)
-                                        if exactClonesRemoved > 0 || transportsRemoved > 0 {
-                                            TimelineBuilder.timelineCache.removeAll()
-                                            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                                        // Whole-database fetches and pairwise
+                                        // comparisons run on background contexts;
+                                        // the timeline refreshes via the
+                                        // notification once they have saved.
+                                        Task { @MainActor in
+                                            let exactClonesRemoved = await DataDeduplicationService.reconcileImportedDuplicatesInBackground(in: container)
+                                            let transportsRemoved = await DataDeduplicationService.deduplicateTransports(in: container)
+                                            if exactClonesRemoved > 0 || transportsRemoved > 0 {
+                                                TimelineBuilder.timelineCache.removeAll()
+                                                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                                            }
                                         }
                                     }
                                     

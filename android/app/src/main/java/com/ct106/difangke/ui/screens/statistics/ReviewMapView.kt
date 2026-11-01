@@ -27,7 +27,9 @@ import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.data.model.TransportType
 import com.ct106.difangke.service.LocationTrackingService
 import com.ct106.difangke.ui.components.FootprintMapMarker
-import com.ct106.difangke.ui.components.addFootprintMarkers
+import com.ct106.difangke.ui.components.PreparedFootprintMarker
+import com.ct106.difangke.ui.components.addPreparedFootprintMarkers
+import com.ct106.difangke.ui.components.prepareFootprintMarkers
 import com.ct106.difangke.ui.components.createTransportOverviewIconBitmap
 import com.ct106.difangke.ui.screens.main.loadPinThumbnail
 import com.ct106.difangke.ui.share.photoUris
@@ -124,6 +126,21 @@ fun ReviewMapView(
         if (loaded.isNotEmpty()) photoBitmaps = photoBitmaps + loaded
     }
 
+    // Pin bitmaps for the current display/theme/photos are rendered off main; the map redraws per new render.
+    var render by remember { mutableStateOf<ReviewMapRender?>(null) }
+    LaunchedEffect(display, isDark, photoBitmaps) {
+        val source = display ?: return@LaunchedEffect
+        val photos = photoBitmaps
+        render = withContext(Dispatchers.Default) {
+            ReviewMapRender(
+                display = source,
+                isDark = isDark,
+                markers = if (source.markers.isEmpty()) emptyList()
+                else prepareFootprintMarkers(source.markers, isDark, photos)
+            )
+        }
+    }
+
     val trackingState by LocationTrackingService.stateFlow.collectAsState()
     val userLocation = if (!showsUserLocation) null else when (val state = trackingState) {
         is LocationTrackingService.TrackingState.Tracking ->
@@ -176,18 +193,16 @@ fun ReviewMapView(
                 map.mapType = if (isDark) TencentMap.MAP_TYPE_DARK else TencentMap.MAP_TYPE_NORMAL
             }
 
-            val currentDisplay = display
-            val needsRedraw = holder.lastDisplay !== currentDisplay ||
-                holder.lastPhotos != photoBitmaps || holder.lastDark != isDark
+            val currentRender = render
+            val needsRedraw = holder.lastRender !== currentRender
             holder.lastDark = isDark
             if (needsRedraw) {
-                holder.lastDisplay = currentDisplay
-                holder.lastPhotos = photoBitmaps
+                holder.lastRender = currentRender
                 map.clear()
                 holder.userMarker = null
                 holder.lastUser = null
-                if (currentDisplay != null) {
-                    drawReviewMap(map, view, currentDisplay, isDark, accent, photoBitmaps, holder)
+                if (currentRender != null) {
+                    drawReviewMap(map, view, currentRender.display, currentRender.isDark, accent, currentRender.markers, holder)
                 }
             }
 
@@ -239,8 +254,7 @@ private class ReviewMapHolder {
     var interactive = false
     var lastInteractive: Boolean? = null
     var lastDark: Boolean? = null
-    var lastDisplay: ReviewMapDisplay? = null
-    var lastPhotos: Map<String, Bitmap>? = null
+    var lastRender: ReviewMapRender? = null
     var lastFitKey: String? = null
     var lastUser: LatLng? = null
     var userMarker: Marker? = null
@@ -334,6 +348,13 @@ private class ReviewTransportIconPoint(
     val longitude: Double,
     val type: TransportType,
     val travelsWest: Boolean
+)
+
+/** A display plus its pin bitmaps, rendered off main for one theme/photo set. */
+private class ReviewMapRender(
+    val display: ReviewMapDisplay,
+    val isDark: Boolean,
+    val markers: List<PreparedFootprintMarker>
 )
 
 private class ReviewMapDisplay(
@@ -669,7 +690,7 @@ private fun drawReviewMap(
     display: ReviewMapDisplay,
     isDark: Boolean,
     accent: Int,
-    photoBitmaps: Map<String, Bitmap>,
+    preparedMarkers: List<PreparedFootprintMarker>,
     holder: ReviewMapHolder
 ) {
     val density = view.resources.displayMetrics.density
@@ -748,12 +769,7 @@ private fun drawReviewMap(
         } else {
             null
         }
-        map.addFootprintMarkers(
-            display.markers,
-            isDark = isDark,
-            onMarkerClick = onMarkerClick,
-            photoBitmaps = photoBitmaps
-        )
+        map.addPreparedFootprintMarkers(preparedMarkers, onMarkerClick = onMarkerClick)
     }
 }
 

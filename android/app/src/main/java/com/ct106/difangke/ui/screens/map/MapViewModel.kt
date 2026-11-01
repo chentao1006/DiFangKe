@@ -9,6 +9,7 @@ import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.model.TransportType
 import com.ct106.difangke.ui.components.FootprintMapMarker
 import com.ct106.difangke.ui.components.buildFootprintMapMarkers
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.*
@@ -44,7 +45,8 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadPathForDate(timestamp: Long?) {
-        viewModelScope.launch {
+        // Marker aggregation and route JSON parsing run on Default; StateFlow writes are thread-safe.
+        viewModelScope.launch(Dispatchers.Default) {
             val cal = Calendar.getInstance().apply {
                 if (timestamp != null) {
                     timeInMillis = timestamp
@@ -70,10 +72,12 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
             // 加载交通轨迹
             val transports = db.transportRecordDao().getForDay(startOfTarget, endOfTarget)
-            _transportMarkers.value = transports.mapNotNull { transport ->
-                val points = parseTransportPathPoints(transport.pointsJson)
+            // Parse each route once and reuse it for both the midpoint marker and the path.
+            val parsedRoutes = transports.map { parseTransportPathPoints(it.pointsJson) }
+            _transportMarkers.value = transports.mapIndexedNotNull { index, transport ->
+                val points = parsedRoutes[index]
                     .filterNot { it.isSeparator }
-                if (points.size < 2) return@mapNotNull null
+                if (points.size < 2) return@mapIndexedNotNull null
                 val midpoint = points[points.lastIndex / 2]
                 FootprintMapMarker(
                     id = "transport:${transport.recordID}",
@@ -83,8 +87,8 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                     colorHex = "#00A0AC"
                 )
             }
-            transports.forEach { tp ->
-                dbPoints.addAll(parseTransportPathPoints(tp.pointsJson))
+            parsedRoutes.forEach { route ->
+                dbPoints.addAll(route)
                 // 插入分隔符，防止不同的交通记录被连成一条直线
                 dbPoints.add(MapPathPoint(Double.NaN, Double.NaN, connectsPreviousToNext = false))
             }

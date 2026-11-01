@@ -54,6 +54,8 @@ import com.ct106.difangke.ui.share.ShareCardRequest
 import com.ct106.difangke.AppConfig
 import com.ct106.difangke.data.model.FootprintStatus
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.launch
@@ -182,16 +184,22 @@ fun HistoryFavoritesView(
     allPlaces: List<PlaceEntity>,
     onNavigateToDetail: (String) -> Unit
 ) {
-    val groupedFavorites = favorites.groupBy { fp ->
-        Calendar.getInstance().apply {
-            time = fp.startTime
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.time
+    // Day grouping runs off main; the list renders the last grouping meanwhile.
+    val favoritesLayout by produceState(emptyMap<Date, List<FootprintEntity>>() to emptyList<Date>(), favorites) {
+        value = withContext(Dispatchers.Default) {
+            val grouped = favorites.groupBy { fp ->
+                Calendar.getInstance().apply {
+                    time = fp.startTime
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }.time
+            }
+            grouped to grouped.keys.sortedDescending()
+        }
     }
-    val sortedDates = groupedFavorites.keys.sortedDescending()
+    val (groupedFavorites, sortedDates) = favoritesLayout
     
     if (favorites.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -239,18 +247,23 @@ fun HistoryWeekView(
     onRebuild: (Date) -> Unit,
     onViewRawPoints: (Date) -> Unit
 ) {
-    val sortedDates = summaries.keys.sortedDescending()
-    val groupedByWeek = sortedDates.groupBy { date ->
-        Calendar.getInstance().apply {
-            time = date
-            set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.time
+    // Week grouping runs off main; the list renders the last grouping meanwhile.
+    val weekLayout by produceState(emptyMap<Date, List<Date>>() to emptyList<Date>(), summaries) {
+        value = withContext(Dispatchers.Default) {
+            val grouped = summaries.keys.sortedDescending().groupBy { date ->
+                Calendar.getInstance().apply {
+                    time = date
+                    set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }.time
+            }
+            grouped to grouped.keys.sortedDescending()
+        }
     }
-    val sortedWeekStarts = groupedByWeek.keys.sortedDescending()
+    val (groupedByWeek, sortedWeekStarts) = weekLayout
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),

@@ -37,12 +37,19 @@ struct TransportModalView: View {
     private var currentStartTime: Date { localStartTime ?? displayedTransport.startTime }
     private var currentEndTime: Date { localEndTime ?? displayedTransport.endTime }
 
-    private var validTransportPoints: [CLLocationCoordinate2D] {
-        displayedTransport.points.filter {
-            $0.latitude.isFinite &&
-            $0.longitude.isFinite &&
-            CLLocationCoordinate2DIsValid($0)
-        }
+    private static func isValidTransportPoint(_ coordinate: CLLocationCoordinate2D) -> Bool {
+        coordinate.latitude.isFinite &&
+            coordinate.longitude.isFinite &&
+            CLLocationCoordinate2DIsValid(coordinate)
+    }
+
+    /// First/last valid route points without filtering the whole route.
+    private var validStartPoint: CLLocationCoordinate2D? {
+        displayedTransport.points.first(where: { Self.isValidTransportPoint($0) })
+    }
+
+    private var validEndPoint: CLLocationCoordinate2D? {
+        displayedTransport.points.last(where: { Self.isValidTransportPoint($0) })
     }
 
     // Use the effective type for display
@@ -87,13 +94,13 @@ struct TransportModalView: View {
                             }
 
                             // Start Marker (Physical Look & Title)
-                            if let start = validTransportPoints.first {
+                            if let start = validStartPoint {
                                 Marker("", systemImage: "play.fill", coordinate: start)
                                     .tint(.green)
                             }
                             
                             // End Marker (Physical Look & Title)
-                            if let end = validTransportPoints.last {
+                            if let end = validEndPoint {
                                 Marker("", systemImage: "stop.fill", coordinate: end)
                                     .tint(.blue)
                             }
@@ -249,7 +256,13 @@ struct TransportModalView: View {
                 }
                 
                 // 默认范围不要变：显式设置 camera 为交通路径的范围，避免被 allPlaces 的 MapCircle 撑开
-                if let region = transport.points.boundingRegion() {
+                let points = transport.points
+                Task { @MainActor in
+                    let region = await Task.detached(priority: .userInitiated) {
+                        points.boundingRegion()
+                    }.value
+                    // A reload may already have framed the refreshed route.
+                    guard refreshedTransport == nil, let region else { return }
                     position = .region(region)
                 }
 
@@ -299,15 +312,19 @@ struct TransportModalView: View {
     }
 
     private func reloadDisplayedTransport(for date: Date) {
-        let items = PersistentTimelineBuilder.fetchTimeline(for: date, in: modelContext)
-        let updated = items.compactMap { item -> Transport? in
-            guard case .transport(let candidate) = item, candidate.id == transport.id else { return nil }
-            return candidate
-        }.first
-        guard let updated else { return }
-        refreshedTransport = updated
-        if let region = updated.points.boundingRegion() {
-            position = .region(region)
+        let transportID = transport.id
+        Task { @MainActor in
+            let transports = await PersistentTimelineBuilder.fetchTimelineTransports(for: date, container: modelContext.container)
+            let updated = transports.first { $0.id == transportID }
+            guard let updated else { return }
+            refreshedTransport = updated
+            let points = updated.points
+            let region = await Task.detached(priority: .userInitiated) {
+                points.boundingRegion()
+            }.value
+            if let region {
+                position = .region(region)
+            }
         }
     }
 
@@ -369,42 +386,95 @@ struct TransportSplitView: View {
         return lowerBound...upperBound
     }
 
-    private var firstRoute: [CodableCoordinate] {
-        splitRoutes.first
-    }
+    /// Split result for one slider value, computed off main. The body only
+    /// reads this; the map redraws only when `revision` changes.
+    private struct SplitPreview: @unchecked Sendable {
+        let splitTime: Date
+        let firstRoute: [CodableCoordinate]
+        let secondRoute: [CodableCoordinate]
+        /// Renderable coordinates of each half.
+        let firstSegment: [CLLocationCoordinate2D]
+        let secondSegment: [CLLocationCoordinate2D]
+        let splitCoordinate: CLLocationCoordinate2D?
+        let firstDistance: Double
+        let secondDistance: Double
+        let mapRect: MKMapRect?
+        let revision: Int
 
-    private var secondRoute: [CodableCoordinate] {
-        splitRoutes.second
-    }
+        var hasPreviewCoordinates: Bool {
+            !firstRoute.isEmpty || !secondRoute.isEmpty
+        }
 
-    private var splitRoutes: (first: [CodableCoordinate], second: [CodableCoordinate]) {
-        TransportSplitRouteBuilder.segments(
-            points: routePoints,
-            startTime: transport.startTime,
-            splitTime: boundedSplitTime,
-            endTime: transport.endTime
+        static let empty = SplitPreview(
+            splitTime: .distantPast, firstRoute: [], secondRoute: [], firstSegment: [], secondSegment: [],
+            splitCoordinate: nil, firstDistance: 0, secondDistance: 0, mapRect: nil, revision: 0
         )
     }
 
-    private var previewCoordinates: [CLLocationCoordinate2D] {
-        (firstRoute + secondRoute).map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+    @State private var routeRevision = 0
+    @State private var splitPreview = SplitPreview.empty
+
+    private struct SplitPreviewKey: Equatable {
+        let routeRevision: Int
+        let splitTime: Date
     }
 
-    private var firstSegmentCoordinates: [CLLocationCoordinate2D] {
-        firstRoute.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+    nonisolated private static func splitRoutes(points: [CodableCoordinate], startTime: Date, splitTime: Date, endTime: Date) -> (first: [CodableCoordinate], second: [CodableCoordinate]) {
+        TransportSplitRouteBuilder.segments(
+            points: points,
+            startTime: startTime,
+            splitTime: splitTime,
+            endTime: endTime
+        )
     }
 
-    private var secondSegmentCoordinates: [CLLocationCoordinate2D] {
-        secondRoute.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+    nonisolated private static func makeSplitPreview(points: [CodableCoordinate], startTime: Date, splitTime: Date, endTime: Date, revision: Int) -> SplitPreview {
+        let routes = splitRoutes(points: points, startTime: startTime, splitTime: splitTime, endTime: endTime)
+        func renderable(_ route: [CodableCoordinate]) -> [CLLocationCoordinate2D] {
+            route.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }.filter { coordinate in
+                coordinate.latitude.isFinite && coordinate.longitude.isFinite && CLLocationCoordinate2DIsValid(coordinate)
+            }
+        }
+        let firstSegment = renderable(routes.first)
+        let secondSegment = renderable(routes.second)
+        let splitCoordinate = routes.first.last.flatMap { point -> CLLocationCoordinate2D? in
+            let coordinate = CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon)
+            guard coordinate.latitude.isFinite,
+                  coordinate.longitude.isFinite,
+                  CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+            return coordinate
+        }
+        let route = firstSegment + secondSegment
+        let mapRect = route.first.map { initial in
+            route.dropFirst().reduce(MKMapRect(origin: MKMapPoint(initial), size: MKMapSize(width: 1, height: 1))) { rect, coordinate in
+                rect.union(MKMapRect(origin: MKMapPoint(coordinate), size: MKMapSize(width: 1, height: 1)))
+            }
+        }
+        return SplitPreview(
+            splitTime: splitTime,
+            firstRoute: routes.first,
+            secondRoute: routes.second,
+            firstSegment: firstSegment,
+            secondSegment: secondSegment,
+            splitCoordinate: splitCoordinate,
+            firstDistance: TimelineBuilder.calculatePathDistance(routes.first),
+            secondDistance: TimelineBuilder.calculatePathDistance(routes.second),
+            mapRect: mapRect,
+            revision: revision
+        )
     }
 
-    private var splitCoordinate: CLLocationCoordinate2D? {
-        guard let point = firstRoute.last else { return nil }
-        let coordinate = CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon)
-        guard coordinate.latitude.isFinite,
-              coordinate.longitude.isFinite,
-              CLLocationCoordinate2DIsValid(coordinate) else { return nil }
-        return coordinate
+    private func refreshSplitPreview() async {
+        let points = routePoints
+        let startTime = transport.startTime
+        let endTime = transport.endTime
+        let split = boundedSplitTime
+        let revision = splitPreview.revision &+ 1
+        let preview = await Task.detached(priority: .userInitiated) {
+            Self.makeSplitPreview(points: points, startTime: startTime, splitTime: split, endTime: endTime, revision: revision)
+        }.value
+        guard !Task.isCancelled else { return }
+        splitPreview = preview
     }
 
     var body: some View {
@@ -412,11 +482,13 @@ struct TransportSplitView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     GeometryReader { proxy in
-                        if proxy.size.width > 1 && proxy.size.height > 1 && !previewCoordinates.isEmpty {
+                        if proxy.size.width > 1 && proxy.size.height > 1 && splitPreview.hasPreviewCoordinates {
                             TransportSplitMapView(
-                                firstSegment: firstSegmentCoordinates,
-                                secondSegment: secondSegmentCoordinates,
-                                splitCoordinate: splitCoordinate
+                                firstSegment: splitPreview.firstSegment,
+                                secondSegment: splitPreview.secondSegment,
+                                splitCoordinate: splitPreview.splitCoordinate,
+                                mapRect: splitPreview.mapRect,
+                                renderRevision: splitPreview.revision
                             )
                         } else {
                             Color.secondary.opacity(0.05)
@@ -463,8 +535,8 @@ struct TransportSplitView: View {
                     .background(RoundedRectangle(cornerRadius: 14).fill(Color.secondary.opacity(0.05)))
 
                     HStack(spacing: 12) {
-                        SplitPreviewTransportCard(title: "前半段", start: transport.startTime, end: boundedSplitTime, distance: TimelineBuilder.calculatePathDistance(firstRoute), color: .green)
-                        SplitPreviewTransportCard(title: "后半段", start: boundedSplitTime, end: transport.endTime, distance: TimelineBuilder.calculatePathDistance(secondRoute), color: .blue)
+                        SplitPreviewTransportCard(title: "前半段", start: transport.startTime, end: boundedSplitTime, distance: splitPreview.firstDistance, color: .green)
+                        SplitPreviewTransportCard(title: "后半段", start: boundedSplitTime, end: transport.endTime, distance: splitPreview.secondDistance, color: .blue)
                     }
                 }
                 .padding(20)
@@ -493,38 +565,77 @@ struct TransportSplitView: View {
             )
             loadRoute()
         }
+        .task(id: SplitPreviewKey(routeRevision: routeRevision, splitTime: boundedSplitTime)) {
+            await refreshSplitPreview()
+        }
     }
 
     private func loadRoute() {
-        guard let record = findRecord(),
-              let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData) else {
-            routePoints = [
-                CodableCoordinate(lat: transport.points.first?.latitude ?? 0, lon: transport.points.first?.longitude ?? 0, timestamp: transport.startTime),
-                CodableCoordinate(lat: transport.points.last?.latitude ?? 0, lon: transport.points.last?.longitude ?? 0, timestamp: transport.endTime)
-            ]
+        let fallback = [
+            CodableCoordinate(lat: transport.points.first?.latitude ?? 0, lon: transport.points.first?.longitude ?? 0, timestamp: transport.startTime),
+            CodableCoordinate(lat: transport.points.last?.latitude ?? 0, lon: transport.points.last?.longitude ?? 0, timestamp: transport.endTime)
+        ]
+        guard let pointsData = findRecord()?.pointsData else {
+            routePoints = fallback
+            routeRevision &+= 1
             return
         }
-        routePoints = decoded
+        Task { @MainActor in
+            let decoded = await Task.detached(priority: .userInitiated) {
+                try? JSONDecoder().decode([CodableCoordinate].self, from: pointsData)
+            }.value
+            routePoints = decoded ?? fallback
+            routeRevision &+= 1
+        }
     }
 
     private func saveSplit() {
-        guard canSplit, let record = findRecord() else { return }
+        guard canSplit, findRecord() != nil else { return }
         // Persist exactly the same cut shown in the preview. Re-running route
         // interpolation here used to move the endpoints at save time.
         let split = boundedSplitTime
+        let points = routePoints
+        let startTime = transport.startTime
+        let endTime = transport.endTime
+        Task { @MainActor in
+            let prepared = await Task.detached(priority: .userInitiated) {
+                let routes = Self.splitRoutes(points: points, startTime: startTime, splitTime: split, endTime: endTime)
+                return SplitSaveRoutes(
+                    firstPoints: routes.first,
+                    secondPoints: routes.second,
+                    firstData: try? JSONEncoder().encode(routes.first),
+                    secondData: try? JSONEncoder().encode(routes.second),
+                    firstDistance: TimelineBuilder.calculatePathDistance(routes.first),
+                    secondDistance: TimelineBuilder.calculatePathDistance(routes.second)
+                )
+            }.value
+            guard let record = findRecord() else { return }
+            applySplit(record: record, split: split, routes: prepared)
+        }
+    }
+
+    private struct SplitSaveRoutes: @unchecked Sendable {
+        let firstPoints: [CodableCoordinate]
+        let secondPoints: [CodableCoordinate]
+        let firstData: Data?
+        let secondData: Data?
+        let firstDistance: Double
+        let secondDistance: Double
+    }
+
+    private func applySplit(record: TransportRecord, split: Date, routes: SplitSaveRoutes) {
         let oldEnd = record.endTime
         let oldEndLocation = record.endLocation
         let ratio = split.timeIntervalSince(record.startTime) / max(1, record.endTime.timeIntervalSince(record.startTime))
-        let routes = splitRoutes
-        let firstPoints = routes.first
-        let secondPoints = routes.second
+        let firstPoints = routes.firstPoints
+        let secondPoints = routes.secondPoints
         let explicitlySelectedType = record.manualTypeRaw
 
         record.endTime = split
         record.day = Calendar.current.startOfDay(for: record.startTime)
         record.endLocation = "中途"
-        record.pointsData = (try? JSONEncoder().encode(firstPoints)) ?? record.pointsData
-        record.distance = TimelineBuilder.calculatePathDistance(firstPoints)
+        record.pointsData = routes.firstData ?? record.pointsData
+        record.distance = routes.firstDistance
         record.averageSpeed = record.distance / max(1, record.endTime.timeIntervalSince(record.startTime))
         record.stepCount = splitMetric(record.stepCount, ratio: ratio, second: false)
         record.typeRaw = explicitlySelectedType ?? inferredSplitType(for: record, points: firstPoints)
@@ -537,9 +648,9 @@ struct TransportSplitView: View {
             startLocation: "中途",
             endLocation: oldEndLocation,
             typeRaw: record.typeRaw,
-            distance: TimelineBuilder.calculatePathDistance(secondPoints),
+            distance: routes.secondDistance,
             averageSpeed: 0,
-            pointsData: (try? JSONEncoder().encode(secondPoints)) ?? Data(),
+            pointsData: routes.secondData ?? Data(),
             stepCount: splitMetric(transport.stepCount, ratio: ratio, second: true)
         )
         newRecord.averageSpeed = newRecord.distance / max(1, oldEnd.timeIntervalSince(split))
@@ -612,9 +723,13 @@ private struct SplitPreviewTransportCard: View {
 }
 
 private struct TransportSplitMapView: UIViewRepresentable {
+    /// Already filtered to renderable coordinates.
     let firstSegment: [CLLocationCoordinate2D]
     let secondSegment: [CLLocationCoordinate2D]
     let splitCoordinate: CLLocationCoordinate2D?
+    let mapRect: MKMapRect?
+    /// Changes whenever the preview geometry changes.
+    let renderRevision: Int
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -628,12 +743,11 @@ private struct TransportSplitMapView: UIViewRepresentable {
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
-        let first = validCoordinates(firstSegment)
-        let second = validCoordinates(secondSegment)
-        let marker = splitCoordinate.flatMap { validCoordinates([$0]).first }
-        let key = "\(first.map(coordinateKey).joined(separator: ","))|\(second.map(coordinateKey).joined(separator: ","))|\(marker.map(coordinateKey) ?? "")"
-        guard key != context.coordinator.renderKey else { return }
-        context.coordinator.renderKey = key
+        guard renderRevision != context.coordinator.renderRevision else { return }
+        context.coordinator.renderRevision = renderRevision
+        let first = firstSegment
+        let second = secondSegment
+        let marker = splitCoordinate
 
         mapView.removeOverlays(mapView.overlays)
         mapView.removeAnnotations(mapView.annotations)
@@ -654,27 +768,13 @@ private struct TransportSplitMapView: UIViewRepresentable {
             mapView.addAnnotation(annotation)
         }
 
-        let route = first + second
-        guard let initial = route.first else { return }
-        let rect = route.dropFirst().reduce(MKMapRect(origin: MKMapPoint(initial), size: MKMapSize(width: 1, height: 1))) { rect, coordinate in
-            rect.union(MKMapRect(origin: MKMapPoint(coordinate), size: MKMapSize(width: 1, height: 1)))
-        }
+        guard let rect = mapRect else { return }
         mapView.setVisibleMapRect(rect, edgePadding: UIEdgeInsets(top: 34, left: 34, bottom: 34, right: 34), animated: context.coordinator.hasRendered)
         context.coordinator.hasRendered = true
     }
 
-    private func validCoordinates(_ coordinates: [CLLocationCoordinate2D]) -> [CLLocationCoordinate2D] {
-        coordinates.filter { coordinate in
-            coordinate.latitude.isFinite && coordinate.longitude.isFinite && CLLocationCoordinate2DIsValid(coordinate)
-        }
-    }
-
-    private func coordinateKey(_ coordinate: CLLocationCoordinate2D) -> String {
-        String(format: "%.6f,%.6f", coordinate.latitude, coordinate.longitude)
-    }
-
     final class Coordinator: NSObject, MKMapViewDelegate {
-        var renderKey = ""
+        var renderRevision = -1
         var hasRendered = false
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
@@ -711,21 +811,86 @@ private struct TransportTimeAdjustmentView: View {
     @State private var rangeEnd = Date()
     @State private var draftStart = Date()
     @State private var draftEnd = Date()
-    @State private var rawPoints: [CLLocation] = []
+    @State private var rawPointIndex = RawPointTimeIndex.empty
     @State private var isLoadingRawPoints = true
     @State private var hasInitializedRange = false
     @State private var isRegenerating = false
 
     private let minimumDuration: TimeInterval = 60
 
-    private var selectedPoints: [CLLocation] {
-        rawPoints.filter { $0.timestamp >= draftStart && $0.timestamp <= draftEnd }
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    /// Raw points indexed off main when loaded. Drag updates then select the
+    /// draft range by binary search over sorted timestamps instead of
+    /// filtering every point on each slider change.
+    private struct RawPointTimeIndex: Sendable {
+        /// Chronological timestamps of all raw points.
+        let timestamps: [Date]
+        /// Renderable coordinates, in the same order as their points.
+        let validCoordinates: [CLLocationCoordinate2D]
+        /// `validPrefixCounts[i]` = renderable points among the first `i`.
+        let validPrefixCounts: [Int]
+
+        static let empty = RawPointTimeIndex(timestamps: [], validCoordinates: [], validPrefixCounts: [0])
+
+        init(timestamps: [Date], validCoordinates: [CLLocationCoordinate2D], validPrefixCounts: [Int]) {
+            self.timestamps = timestamps
+            self.validCoordinates = validCoordinates
+            self.validPrefixCounts = validPrefixCounts
+        }
+
+        init(points: [CLLocation]) {
+            var timestamps: [Date] = []
+            var validCoordinates: [CLLocationCoordinate2D] = []
+            var validPrefixCounts: [Int] = [0]
+            timestamps.reserveCapacity(points.count)
+            validPrefixCounts.reserveCapacity(points.count + 1)
+            for point in points {
+                timestamps.append(point.timestamp)
+                let coordinate = point.coordinate
+                if coordinate.latitude.isFinite && coordinate.longitude.isFinite && CLLocationCoordinate2DIsValid(coordinate) {
+                    validCoordinates.append(coordinate)
+                }
+                validPrefixCounts.append(validCoordinates.count)
+            }
+            self.init(timestamps: timestamps, validCoordinates: validCoordinates, validPrefixCounts: validPrefixCounts)
+        }
+
+        /// Indices of points with `start <= timestamp <= end`.
+        func range(from start: Date, to end: Date) -> Range<Int> {
+            var low = 0
+            var high = timestamps.count
+            while low < high {
+                let mid = (low + high) / 2
+                if timestamps[mid] < start { low = mid + 1 } else { high = mid }
+            }
+            let lower = low
+            high = timestamps.count
+            while low < high {
+                let mid = (low + high) / 2
+                if timestamps[mid] <= end { low = mid + 1 } else { high = mid }
+            }
+            return lower..<max(lower, low)
+        }
+    }
+
+    private var selectedRange: Range<Int> {
+        rawPointIndex.range(from: draftStart, to: draftEnd)
+    }
+
+    private var selectedPointCount: Int {
+        selectedRange.count
     }
 
     private var selectedCoordinates: [CLLocationCoordinate2D] {
-        selectedPoints.map(\.coordinate).filter {
-            $0.latitude.isFinite && $0.longitude.isFinite && CLLocationCoordinate2DIsValid($0)
-        }
+        let range = selectedRange
+        let lower = rawPointIndex.validPrefixCounts[range.lowerBound]
+        let upper = rawPointIndex.validPrefixCounts[range.upperBound]
+        return Array(rawPointIndex.validCoordinates[lower..<upper])
     }
 
     private var canSave: Bool {
@@ -738,8 +903,9 @@ private struct TransportTimeAdjustmentView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     GeometryReader { proxy in
-                        if proxy.size.width > 1 && proxy.size.height > 1 && !selectedCoordinates.isEmpty {
-                            FootprintTimeAdjustmentMapView(coordinates: selectedCoordinates, dotDiameter: 14)
+                        let coordinates = selectedCoordinates
+                        if proxy.size.width > 1 && proxy.size.height > 1 && !coordinates.isEmpty {
+                            FootprintTimeAdjustmentMapView(coordinates: coordinates, dotDiameter: 14)
                                 .frame(minWidth: 1, minHeight: 1)
                         } else {
                             Color.secondary.opacity(0.05)
@@ -748,7 +914,7 @@ private struct TransportTimeAdjustmentView: View {
                     .frame(height: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
                     .overlay(alignment: .bottomLeading) {
-                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
+                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPointCount) 个原始点")
                             .font(.caption.bold())
                             .foregroundColor(.white)
                             .padding(.horizontal, 10)
@@ -872,10 +1038,10 @@ private struct TransportTimeAdjustmentView: View {
                 let chronological = dates.flatMap {
                     RawLocationStore.shared.loadAllDevicesLocations(for: $0, filtered: false)
                 }.sorted { $0.timestamp < $1.timestamp }
-                return RawLocationStore.filterRidiculousSpikes(chronological)
+                return RawPointTimeIndex(points: RawLocationStore.filterRidiculousSpikes(chronological))
             }.value
             await MainActor.run {
-                rawPoints = points
+                rawPointIndex = points
                 isLoadingRawPoints = false
             }
         }
@@ -1127,8 +1293,6 @@ private struct TransportTimeAdjustmentView: View {
     }
 
     private func timeText(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter.string(from: date)
+        Self.timeFormatter.string(from: date)
     }
 }

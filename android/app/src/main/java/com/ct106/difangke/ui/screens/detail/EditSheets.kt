@@ -34,12 +34,49 @@ import com.tencent.tencentmap.mapsdk.maps.model.CircleOptions
 import com.tencent.tencentmap.mapsdk.maps.model.LatLng
 import com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions
 import java.util.Date
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.log2
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToLong
 
 private fun minuteFloor(ms: Long) = ms / 60_000L * 60_000L
+
+/** Precomputed map content for [TimeAdjustEditor]. */
+private class TimeAdjustPreview(
+    val count: Int,
+    val pointCount: Int,
+    val segments: List<MapSegment>,
+    val dots: List<MapDot>
+) {
+    companion object {
+        val Empty = TimeAdjustPreview(0, 0, emptyList(), emptyList())
+    }
+}
+
+/** Precomputed map content for [FootprintSplitSheet]. */
+private class FootprintSplitPreview(
+    val segments: List<MapSegment>,
+    val dots: List<MapDot>,
+    val splitPoint: LatLng?
+) {
+    companion object {
+        val Empty = FootprintSplitPreview(emptyList(), emptyList(), null)
+    }
+}
+
+/** Precomputed map content and distances for [TransportSplitSheet]. */
+private class TransportSplitPreview(
+    val segments: List<MapSegment>,
+    val marker: LatLng?,
+    val firstDistance: Double,
+    val secondDistance: Double
+) {
+    companion object {
+        val Empty = TransportSplitPreview(emptyList(), null, 0.0, 0.0)
+    }
+}
 
 /**
  * Shared time-range editor (iOS FootprintTimeAdjustmentView / TransportTimeAdjustmentView):
@@ -77,7 +114,19 @@ private fun TimeAdjustEditor(
     val r = range
     val start = Date(draft.start.toLong())
     val end = Date(draft.endInclusive.toLong())
-    val selected = raw.filter { !it.timestamp.before(start) && !it.timestamp.after(end) }
+    // Raw-point filtering and map geometry for the draft range run off main; slider moves restart it.
+    val selection by produceState(TimeAdjustPreview.Empty, raw, draft) {
+        value = withContext(Dispatchers.Default) {
+            val selected = raw.filter { !it.timestamp.before(start) && !it.timestamp.after(end) }
+            val pts = selected.map { LatLng(it.latitude, it.longitude) }
+            TimeAdjustPreview(
+                count = selected.size,
+                pointCount = pts.size,
+                segments = listOf(MapSegment(pts, DfkAccent.copy(alpha = 0.6f), width = 6f)),
+                dots = pts.map { MapDot(it, DfkAccent, dotDiameterDp) }
+            )
+        }
+    }
     val canSave = r != null && !loading && !busy && end.time - start.time >= minDurationMs
 
     EditorDialogScaffold(
@@ -88,16 +137,16 @@ private fun TimeAdjustEditor(
         busy = busy
     ) {
         Box(Modifier.fillMaxWidth().height(300.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))) {
-            val pts = selected.map { LatLng(it.latitude, it.longitude) }
-            if (pts.isNotEmpty()) {
+            val preview = selection
+            if (preview.pointCount > 0) {
                 TrackPreviewMap(
-                    segments = listOf(MapSegment(pts, DfkAccent.copy(alpha = 0.6f), width = 6f)),
-                    dots = pts.map { MapDot(it, DfkAccent, dotDiameterDp) },
+                    segments = preview.segments,
+                    dots = preview.dots,
                     modifier = Modifier.fillMaxSize(),
-                    fitKey = pts.size
+                    fitKey = preview.pointCount
                 )
             }
-            RawPointBadge(loading, selected.size, Modifier.align(Alignment.BottomStart))
+            RawPointBadge(loading, preview.count, Modifier.align(Alignment.BottomStart))
         }
         TimeControlCard(
             label = "调整时间",
@@ -174,25 +223,40 @@ fun FootprintSplitSheet(
         loading = false
     }
     val bounded = if (canSplit) splitMs.coerceIn(startMs + minMs, endMs - minMs) else startMs + (endMs - startMs) / 2
-    val stored = remember(footprint.footprintID) {
-        val lats = TimelineEditActions.jsonDoubles(footprint.latitudeJson)
-        val lons = TimelineEditActions.jsonDoubles(footprint.longitudeJson)
-        (0 until min(lats.size, lons.size)).map { LatLng(lats[it], lons[it]) }
+    val stored by produceState<List<LatLng>>(emptyList(), footprint.footprintID) {
+        value = withContext(Dispatchers.Default) {
+            val lats = TimelineEditActions.jsonDoubles(footprint.latitudeJson)
+            val lons = TimelineEditActions.jsonDoubles(footprint.longitudeJson)
+            (0 until min(lats.size, lons.size)).map { LatLng(lats[it], lons[it]) }
+        }
     }
-    val ratio = (bounded - startMs).toDouble() / max(1L, endMs - startMs)
-    fun segment(from: Long, to: Long, r0: Double, r1: Double): List<LatLng> {
-        val inRange = raw.filter { it.timestamp.time in from..to }.map { LatLng(it.latitude, it.longitude) }
-        if (inRange.isNotEmpty()) return inRange
-        if (stored.isEmpty()) return emptyList()
-        val last = stored.lastIndex
-        val s = (last * r0).toInt().coerceIn(0, last)
-        val e = (last * r1).toInt().coerceIn(s, last)
-        return stored.subList(s, e + 1)
+    val rawInRangeCount by produceState(0, raw) {
+        value = withContext(Dispatchers.Default) { raw.count { it.timestamp.time in startMs..endMs } }
     }
-    val first = segment(startMs, bounded, 0.0, ratio)
-    val second = segment(bounded, endMs, ratio, 1.0)
-    val splitPoint = raw.minByOrNull { kotlin.math.abs(it.timestamp.time - bounded) }?.let { LatLng(it.latitude, it.longitude) }
-        ?: first.lastOrNull()
+    // Both halves, their dots and the split marker are rebuilt off main; each slider step cancels the previous run.
+    val preview by produceState(FootprintSplitPreview.Empty, raw, stored, bounded) {
+        value = withContext(Dispatchers.Default) {
+            val ratio = (bounded - startMs).toDouble() / max(1L, endMs - startMs)
+            fun segment(from: Long, to: Long, r0: Double, r1: Double): List<LatLng> {
+                val inRange = raw.filter { it.timestamp.time in from..to }.map { LatLng(it.latitude, it.longitude) }
+                if (inRange.isNotEmpty()) return inRange
+                if (stored.isEmpty()) return emptyList()
+                val last = stored.lastIndex
+                val s = (last * r0).toInt().coerceIn(0, last)
+                val e = (last * r1).toInt().coerceIn(s, last)
+                return stored.subList(s, e + 1)
+            }
+            val first = segment(startMs, bounded, 0.0, ratio)
+            val second = segment(bounded, endMs, ratio, 1.0)
+            val splitPoint = raw.minByOrNull { kotlin.math.abs(it.timestamp.time - bounded) }?.let { LatLng(it.latitude, it.longitude) }
+                ?: first.lastOrNull()
+            FootprintSplitPreview(
+                segments = listOf(MapSegment(first, SplitGreen, width = 8f), MapSegment(second, SplitBlue, width = 8f)),
+                dots = first.map { MapDot(it, SplitGreen, 8) } + second.map { MapDot(it, SplitBlue, 8) },
+                splitPoint = splitPoint
+            )
+        }
+    }
     val title = footprint.address?.trim()?.takeIf { it.isNotEmpty() } ?: "未知地点"
 
     EditorDialogScaffold(
@@ -203,14 +267,14 @@ fun FootprintSplitSheet(
     ) {
         Box(Modifier.fillMaxWidth().height(300.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))) {
             TrackPreviewMap(
-                segments = listOf(MapSegment(first, SplitGreen, width = 8f), MapSegment(second, SplitBlue, width = 8f)),
-                dots = first.map { MapDot(it, SplitGreen, 8) } + second.map { MapDot(it, SplitBlue, 8) },
-                marker = splitPoint,
+                segments = preview.segments,
+                dots = preview.dots,
+                marker = preview.splitPoint,
                 markerColor = Color(0xFFFF9500),
                 modifier = Modifier.fillMaxSize(),
                 fitKey = stored.size + raw.size
             )
-            RawPointBadge(loading, raw.count { it.timestamp.time in startMs..endMs }, Modifier.align(Alignment.BottomStart))
+            RawPointBadge(loading, rawInRangeCount, Modifier.align(Alignment.BottomStart))
         }
         TimeControlCard("分割点", hmText(Date(bounded)), hmText(footprint.startTime), hmText(footprint.endTime)) {
             if (canSplit) {
@@ -262,18 +326,30 @@ fun TransportSplitSheet(transport: TransportRecordEntity, onDismiss: () -> Unit,
     val minMs = TimelineEditActions.MIN_TRANSPORT_SEGMENT_MS
     val canSplit = TimelineEditActions.canSplitTransport(transport)
     var splitMs by remember { mutableLongStateOf(TimelineEditActions.roundedToMinute(Date(startMs + (endMs - startMs) / 2)).time) }
-    val points = remember(transport.pointsJson) { TimelineEditActions.parseRoutePoints(transport.pointsJson) }
-    val bounded = if (canSplit) splitMs.coerceIn(startMs + minMs, endMs - minMs) else startMs
-    val (firstRoute, secondRoute) = remember(points, bounded) {
-        TimelineEditActions.splitRoutes(points, transport.startTime, Date(bounded), transport.endTime)
+    val points by produceState<List<TimelineEditActions.RoutePoint>>(emptyList(), transport.pointsJson) {
+        value = withContext(Dispatchers.Default) { TimelineEditActions.parseRoutePoints(transport.pointsJson) }
     }
-    fun ll(p: List<TimelineEditActions.RoutePoint>) = p.map { LatLng(it.lat, it.lon) }
+    val bounded = if (canSplit) splitMs.coerceIn(startMs + minMs, endMs - minMs) else startMs
+    // Route split, map geometry and distances are computed off main; each slider step cancels the previous run.
+    val preview by produceState(TransportSplitPreview.Empty, points, bounded) {
+        value = withContext(Dispatchers.Default) {
+            val (firstRoute, secondRoute) =
+                TimelineEditActions.splitRoutes(points, transport.startTime, Date(bounded), transport.endTime)
+            fun ll(p: List<TimelineEditActions.RoutePoint>) = p.map { LatLng(it.lat, it.lon) }
+            TransportSplitPreview(
+                segments = listOf(MapSegment(ll(firstRoute), SplitGreen, width = 10f), MapSegment(ll(secondRoute), SplitBlue, width = 10f)),
+                marker = firstRoute.lastOrNull()?.let { LatLng(it.lat, it.lon) },
+                firstDistance = TimelineEditActions.pathDistance(firstRoute),
+                secondDistance = TimelineEditActions.pathDistance(secondRoute)
+            )
+        }
+    }
     EditorDialogScaffold("拆分交通", onDismiss, { onSave(Date(bounded)) }, canSplit) {
         Box(Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))) {
             if (points.isNotEmpty()) {
                 TrackPreviewMap(
-                    segments = listOf(MapSegment(ll(firstRoute), SplitGreen, width = 10f), MapSegment(ll(secondRoute), SplitBlue, width = 10f)),
-                    marker = firstRoute.lastOrNull()?.let { LatLng(it.lat, it.lon) },
+                    segments = preview.segments,
+                    marker = preview.marker,
                     markerColor = Color(0xFFFF9500),
                     modifier = Modifier.fillMaxSize(),
                     fitKey = points.size
@@ -293,8 +369,8 @@ fun TransportSplitSheet(transport: TransportRecordEntity, onDismiss: () -> Unit,
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            SplitPreviewTransportCard("前半段", transport.startTime, Date(bounded), TimelineEditActions.pathDistance(firstRoute), SplitGreen, Modifier.weight(1f))
-            SplitPreviewTransportCard("后半段", Date(bounded), transport.endTime, TimelineEditActions.pathDistance(secondRoute), SplitBlue, Modifier.weight(1f))
+            SplitPreviewTransportCard("前半段", transport.startTime, Date(bounded), preview.firstDistance, SplitGreen, Modifier.weight(1f))
+            SplitPreviewTransportCard("后半段", Date(bounded), transport.endTime, preview.secondDistance, SplitBlue, Modifier.weight(1f))
         }
     }
 }

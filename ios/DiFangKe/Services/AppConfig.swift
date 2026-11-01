@@ -656,12 +656,16 @@ class AppConfig {
         double(forKey: "REVIEW_MAP_TRAJECTORY_BASE_CELL_DEGREES")
     }
 
-    var reviewMapTrajectoryMaxDrawPoints: Int {
-        int(forKey: "REVIEW_MAP_TRAJECTORY_MAX_DRAW_POINTS")
+    var reviewMapTransportIconMinSpacing: Double {
+        double(forKey: "REVIEW_MAP_TRANSPORT_ICON_MIN_SPACING")
     }
 
-    var reviewMapTrajectoryPathMaxSpan: Double {
-        double(forKey: "REVIEW_MAP_TRAJECTORY_PATH_MAX_SPAN")
+    var reviewMapTransportIconSameTypeSpacing: Double {
+        double(forKey: "REVIEW_MAP_TRANSPORT_ICON_SAME_TYPE_SPACING")
+    }
+
+    var reviewPlacePhotoPreviewCount: Int {
+        int(forKey: "REVIEW_PLACE_PHOTO_PREVIEW_COUNT")
     }
 
     // MARK: - TimelineBuilder tuning

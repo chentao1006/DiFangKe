@@ -28,17 +28,12 @@ struct RawPointsListView: View {
     @State private var selectionBox: CGRect?
     @State private var isBatchDeleting = false
     @State private var editMode: EditMode = .inactive
-
-    private var driftCount: Int {
-        entries.filter { $0.isDriftPoint }.count
-    }
-
-    private var filteredEntries: [RawPointEntry] {
-        if !showOnlySuspicious {
-            return entries
-        }
-        return entries.filter { $0.isDriftPoint || suspiciousIndices.contains($0.originalIndex) }
-    }
+    // Derived from entries/filter/selection off main; body only reads these.
+    @State private var filteredEntries: [RawPointEntry] = []
+    @State private var driftCount = 0
+    @State private var coordinatesByIndex: [Int: CLLocationCoordinate2D] = [:]
+    @State private var multiSelectedCoordinates: [CLLocationCoordinate2D] = []
+    @State private var multiSelectionRevision = 0
 
     var body: some View {
         NavigationStack {
@@ -54,18 +49,24 @@ struct RawPointsListView: View {
                                 driftCoordinates: mapDriftCoordinates,
                                 dataVersion: dataVersion,
                                 selection: mapSelection,
-                                multiSelectedCoordinates: entries.filter { selection.contains($0.originalIndex) }.map { $0.location.coordinate },
+                                multiSelectedCoordinates: multiSelectedCoordinates,
+                                multiSelectionRevision: multiSelectionRevision,
                                 recenterTrigger: positionResetTrigger,
                                 isSelecting: isSelecting,
                                 selectionBox: $selectionBox,
                                 onBoxSelect: { minLat, maxLat, minLon, maxLon in
-                                    let newSelection = filteredEntries.filter { entry in
-                                        let coord = entry.location.coordinate
-                                        return coord.latitude >= minLat && coord.latitude <= maxLat &&
-                                               coord.longitude >= minLon && coord.longitude <= maxLon
-                                    }.map(\.originalIndex)
-                                    for idx in newSelection {
-                                        selection.insert(idx)
+                                    let candidates = filteredEntries
+                                    Task { @MainActor in
+                                        let newSelection = await Task.detached(priority: .userInitiated) {
+                                            candidates.filter { entry in
+                                                let coord = entry.location.coordinate
+                                                return coord.latitude >= minLat && coord.latitude <= maxLat &&
+                                                       coord.longitude >= minLon && coord.longitude <= maxLon
+                                            }.map(\.originalIndex)
+                                        }.value
+                                        for idx in newSelection {
+                                            selection.insert(idx)
+                                        }
                                     }
                                 },
                                 onSelectCoordinate: selectNearestPoint(to:)
@@ -237,6 +238,12 @@ struct RawPointsListView: View {
                             }
                         }
                         .environment(\.editMode, $editMode)
+                        .task(id: selection) {
+                            await refreshMultiSelectedCoordinates()
+                        }
+                        .onChange(of: showOnlySuspicious) { _, _ in
+                            refreshFilteredEntries()
+                        }
                         .onChange(of: selection) { _, newSelection in
                             if !newSelection.isEmpty && !isSelecting {
                                 isSelecting = true
@@ -323,32 +330,38 @@ struct RawPointsListView: View {
     }
 
     private func selectNearestPoint(to coordinate: CLLocationCoordinate2D) {
-        let tapLocation = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-
         // 只在当前可见（过滤后）的点中查找最近点
-        var closestEntry: RawPointEntry?
-        var minDistance: CLLocationDistance = Double.infinity
+        let candidates = filteredEntries
+        Task { @MainActor in
+            let nearest = await Task.detached(priority: .userInitiated) { () -> (entry: RawPointEntry, distance: CLLocationDistance)? in
+                let tapLocation = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+                var closestEntry: RawPointEntry?
+                var minDistance: CLLocationDistance = Double.infinity
 
-        for entry in filteredEntries {
-            let dist = entry.location.distance(from: tapLocation)
-            if dist < minDistance {
-                minDistance = dist
-                closestEntry = entry
-            }
-        }
-
-        if let closest = closestEntry, minDistance < 1000 {
-            if isSelecting {
-                if selection.contains(closest.originalIndex) {
-                    selection.remove(closest.originalIndex)
-                } else {
-                    selection.insert(closest.originalIndex)
+                for entry in candidates {
+                    let dist = entry.location.distance(from: tapLocation)
+                    if dist < minDistance {
+                        minDistance = dist
+                        closestEntry = entry
+                    }
                 }
-            } else {
-                selectedIndex = closest.originalIndex
-                scrollTargetIndex = closest.originalIndex
-                DispatchQueue.main.async {
-                    mapSelection.select(closest.location.coordinate, shouldCenter: true)
+                return closestEntry.map { ($0, minDistance) }
+            }.value
+
+            if let nearest, nearest.distance < 1000 {
+                let closest = nearest.entry
+                if isSelecting {
+                    if selection.contains(closest.originalIndex) {
+                        selection.remove(closest.originalIndex)
+                    } else {
+                        selection.insert(closest.originalIndex)
+                    }
+                } else {
+                    selectedIndex = closest.originalIndex
+                    scrollTargetIndex = closest.originalIndex
+                    DispatchQueue.main.async {
+                        mapSelection.select(closest.location.coordinate, shouldCenter: true)
+                    }
                 }
             }
         }
@@ -356,35 +369,93 @@ struct RawPointsListView: View {
 
     private func loadPoints() {
         isLoading = true
+        let showOnlySuspicious = showOnlySuspicious
         Task.detached(priority: .userInitiated) {
             let rawEntries = RawLocationStore.shared.loadAllDevicesLocationsWithDriftFlags(for: date)
             let loadResult = RawPointsLoadResult(entries: rawEntries)
+            let derived = RawPointsDerivedState(loadResult: loadResult, showOnlySuspicious: showOnlySuspicious)
             await MainActor.run {
-                self.entries = loadResult.entries
-                self.previousDistances = loadResult.previousDistances
-                self.suspiciousIndices = loadResult.suspiciousIndices
-                self.mapCoordinates = loadResult.mapCoordinates
-                self.mapDriftCoordinates = loadResult.mapDriftCoordinates
+                self.apply(loadResult, derived: derived)
                 self.isLoading = false
             }
         }
     }
 
+    @MainActor
+    private func apply(_ loadResult: RawPointsLoadResult, derived: RawPointsDerivedState) {
+        entries = loadResult.entries
+        previousDistances = loadResult.previousDistances
+        suspiciousIndices = loadResult.suspiciousIndices
+        mapCoordinates = loadResult.mapCoordinates
+        mapDriftCoordinates = loadResult.mapDriftCoordinates
+        filteredEntries = derived.filteredEntries
+        driftCount = derived.driftCount
+        coordinatesByIndex = derived.coordinatesByIndex
+        dataVersion += 1
+    }
+
+    /// Re-filters the list off main (filter toggle).
+    private func refreshFilteredEntries() {
+        let entries = entries
+        let suspiciousIndices = suspiciousIndices
+        let showOnlySuspicious = showOnlySuspicious
+        let version = dataVersion
+        Task { @MainActor in
+            let filtered = await Task.detached(priority: .userInitiated) {
+                RawPointsDerivedState.filter(entries, suspiciousIndices: suspiciousIndices, showOnlySuspicious: showOnlySuspicious)
+            }.value
+            guard version == dataVersion, showOnlySuspicious == self.showOnlySuspicious else { return }
+            withAnimation {
+                filteredEntries = filtered
+            }
+        }
+    }
+
+    private func refreshMultiSelectedCoordinates() async {
+        let selection = selection
+        let coordinatesByIndex = coordinatesByIndex
+        let coordinates = await Task.detached(priority: .userInitiated) {
+            selection.sorted().compactMap { coordinatesByIndex[$0] }
+        }.value
+        guard !Task.isCancelled else { return }
+        multiSelectedCoordinates = coordinates
+        multiSelectionRevision &+= 1
+    }
+
+    /// Recomputes distances, suspicious flags and map data for the remaining
+    /// points off main. Retries if the list changed meanwhile.
+    @MainActor
+    private func removeEntries(_ transform: @escaping @Sendable ([RawPointEntry]) -> [RawPointEntry]) async -> Bool {
+        while true {
+            let version = dataVersion
+            let current = entries
+            let showOnlySuspicious = showOnlySuspicious
+            let result = await Task.detached(priority: .userInitiated) { () -> (RawPointsLoadResult, RawPointsDerivedState)? in
+                let remaining = transform(current)
+                guard remaining.count != current.count else { return nil }
+                let loadResult = RawPointsLoadResult(entries: remaining)
+                return (loadResult, RawPointsDerivedState(loadResult: loadResult, showOnlySuspicious: showOnlySuspicious))
+            }.value
+            guard version == dataVersion, showOnlySuspicious == self.showOnlySuspicious else { continue }
+            guard let result else { return false }
+            let (loadResult, derived) = result
+            withAnimation(.spring()) {
+                apply(loadResult, derived: derived)
+            }
+            return true
+        }
+    }
+
     private func deletePoint(_ point: CLLocation) {
+        let timestamp = point.timestamp
         Task {
-            await RawLocationStore.shared.deleteLocation(at: point.timestamp.timeIntervalSince1970, for: date)
-            await MainActor.run {
-                if let idx = entries.firstIndex(where: { $0.location.timestamp == point.timestamp }) {
-                    withAnimation(.spring()) {
-                        _ = entries.remove(at: idx)
-                    }
-                    let loadResult = RawPointsLoadResult(entries: entries)
-                    previousDistances = loadResult.previousDistances
-                    suspiciousIndices = loadResult.suspiciousIndices
-                    mapCoordinates = loadResult.mapCoordinates
-                    mapDriftCoordinates = loadResult.mapDriftCoordinates
-                    dataVersion += 1
+            await RawLocationStore.shared.deleteLocation(at: timestamp.timeIntervalSince1970, for: date)
+            _ = await removeEntries { entries in
+                var remaining = entries
+                if let idx = remaining.firstIndex(where: { $0.location.timestamp == timestamp }) {
+                    remaining.remove(at: idx)
                 }
+                return remaining
             }
         }
     }
@@ -392,23 +463,18 @@ struct RawPointsListView: View {
     private func deleteSelectedPoints() {
         isBatchDeleting = true
         let indicesToDelete = selection
-        let timestampsToDelete = Set(entries.filter { indicesToDelete.contains($0.originalIndex) }.map { $0.location.timestamp.timeIntervalSince1970 })
+        let currentEntries = entries
 
         Task {
+            let timestampsToDelete = await Task.detached(priority: .userInitiated) {
+                Set(currentEntries.filter { indicesToDelete.contains($0.originalIndex) }.map { $0.location.timestamp.timeIntervalSince1970 })
+            }.value
             await RawLocationStore.shared.deleteLocations(at: timestampsToDelete, for: self.date)
 
+            _ = await removeEntries { entries in
+                entries.filter { !indicesToDelete.contains($0.originalIndex) }
+            }
             await MainActor.run {
-                withAnimation(.spring()) {
-                    self.entries.removeAll { indicesToDelete.contains($0.originalIndex) }
-                }
-                
-                let loadResult = RawPointsLoadResult(entries: self.entries)
-                self.previousDistances = loadResult.previousDistances
-                self.suspiciousIndices = loadResult.suspiciousIndices
-                self.mapCoordinates = loadResult.mapCoordinates
-                self.mapDriftCoordinates = loadResult.mapDriftCoordinates
-                self.dataVersion += 1
-                
                 self.isSelecting = false
                 self.selection.removeAll()
                 self.isBatchDeleting = false
@@ -417,16 +483,29 @@ struct RawPointsListView: View {
     }
 
     private func exportRawPoints() {
-        do {
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.dateFormat = "yyyy-MM-dd"
-            let filename = "DiFangKe_RawPoints_\(formatter.string(from: date)).csv"
-            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-            try rawPointsCSVData().write(to: tempURL, options: .atomic)
-            presentActivitySheet(items: [tempURL])
-        } catch {
-            exportErrorMessage = error.localizedDescription
+        let entries = entries
+        let date = date
+        Task { @MainActor in
+            // CSV formatting and the file write run off main.
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<URL, Error> in
+                do {
+                    let formatter = DateFormatter()
+                    formatter.locale = Locale(identifier: "en_US_POSIX")
+                    formatter.dateFormat = "yyyy-MM-dd"
+                    let filename = "DiFangKe_RawPoints_\(formatter.string(from: date)).csv"
+                    let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+                    try Self.rawPointsCSVData(entries: entries).write(to: tempURL, options: .atomic)
+                    return .success(tempURL)
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+            switch result {
+            case .success(let url):
+                presentActivitySheet(items: [url])
+            case .failure(let error):
+                exportErrorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -454,7 +533,7 @@ struct RawPointsListView: View {
         topController.present(activityController, animated: true)
     }
 
-    private func rawPointsCSVData() throws -> Data {
+    nonisolated private static func rawPointsCSVData(entries: [RawPointEntry]) throws -> Data {
         let isoFormatter = ISO8601DateFormatter()
         isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let numberLocale = Locale(identifier: "en_US_POSIX")
@@ -491,7 +570,8 @@ private struct RawPointRow: View, Equatable {
         lhs.entry.originalIndex == rhs.entry.originalIndex &&
         lhs.entry.isDriftPoint == rhs.entry.isDriftPoint &&
         lhs.entry.location.timestamp == rhs.entry.location.timestamp &&
-        lhs.entry.location.coordinate.rawPointsCoordinateKey == rhs.entry.location.coordinate.rawPointsCoordinateKey &&
+        lhs.entry.location.coordinate.latitude == rhs.entry.location.coordinate.latitude &&
+        lhs.entry.location.coordinate.longitude == rhs.entry.location.coordinate.longitude &&
         lhs.entry.location.horizontalAccuracy == rhs.entry.location.horizontalAccuracy &&
         lhs.previousDistance == rhs.previousDistance &&
         lhs.isSelected == rhs.isSelected
@@ -579,6 +659,29 @@ private final class RawPointsMapSelection {
     func select(_ coordinate: CLLocationCoordinate2D?, shouldCenter: Bool = false) {
         currentCoordinate = coordinate
         onSelect?(coordinate, shouldCenter)
+    }
+}
+
+/// List/filter data derived from a load result, built off main.
+private struct RawPointsDerivedState {
+    let filteredEntries: [RawPointEntry]
+    let driftCount: Int
+    let coordinatesByIndex: [Int: CLLocationCoordinate2D]
+
+    init(loadResult: RawPointsLoadResult, showOnlySuspicious: Bool) {
+        filteredEntries = Self.filter(loadResult.entries, suspiciousIndices: loadResult.suspiciousIndices, showOnlySuspicious: showOnlySuspicious)
+        driftCount = loadResult.entries.filter { $0.isDriftPoint }.count
+        coordinatesByIndex = Dictionary(
+            loadResult.entries.map { ($0.originalIndex, $0.location.coordinate) },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
+
+    static func filter(_ entries: [RawPointEntry], suspiciousIndices: Set<Int>, showOnlySuspicious: Bool) -> [RawPointEntry] {
+        if !showOnlySuspicious {
+            return entries
+        }
+        return entries.filter { $0.isDriftPoint || suspiciousIndices.contains($0.originalIndex) }
     }
 }
 
@@ -678,6 +781,8 @@ private struct RawPointsMapView: UIViewRepresentable {
     let dataVersion: Int
     let selection: RawPointsMapSelection
     let multiSelectedCoordinates: [CLLocationCoordinate2D]
+    /// Bumped whenever `multiSelectedCoordinates` is reassigned.
+    let multiSelectionRevision: Int
     let recenterTrigger: Int
     var isSelecting: Bool
     @Binding var selectionBox: CGRect?
@@ -716,7 +821,7 @@ private struct RawPointsMapView: UIViewRepresentable {
         coordinator.selectedAnnotation = nil
         coordinator.selectedCoordinateKey = ""
         coordinator.isApplyingRegionProgrammatically = false
-        coordinator.multiSelectedAnnotations.removeAll()
+        coordinator.multiSelectionOverlay = nil
 
         mapView.delegate = nil
         // MKMapView renders its overlays asynchronously. It owns the annotations and
@@ -734,10 +839,11 @@ private struct RawPointsMapView: UIViewRepresentable {
         
         let triggerValue = recenterTrigger
         let multiSelected = multiSelectedCoordinates
+        let multiSelectionRevision = multiSelectionRevision
         let updateBlock = { [weak coordinator = context.coordinator, weak safeMap] in
             guard let safeMap, let coordinator else { return }
             coordinator.updateMapDataIfNeeded(on: safeMap)
-            coordinator.updateMultiSelectionOverlay(multiSelected, on: safeMap)
+            coordinator.updateMultiSelectionOverlay(multiSelected, revision: multiSelectionRevision, on: safeMap)
             
             if coordinator.lastRecenterTrigger != triggerValue {
                 coordinator.lastRecenterTrigger = triggerValue
@@ -786,7 +892,7 @@ private struct RawPointsMapView: UIViewRepresentable {
         fileprivate var selectedAnnotation: RawPointMapAnnotation?
         fileprivate var selectedCoordinateKey = ""
         fileprivate var isApplyingRegionProgrammatically = false
-        fileprivate var multiSelectedAnnotations: [RawPointMapAnnotation] = []
+        fileprivate var multiSelectionOverlay: RawPointDotOverlay?
         private var pendingInitialFitKey = ""
         private var lastMultiSelectedKey = ""
 
@@ -849,7 +955,7 @@ private struct RawPointsMapView: UIViewRepresentable {
             mapDataKey = newKey
 
             mapView.removeOverlays(mapView.overlays)
-            multiSelectedAnnotations.removeAll()
+            multiSelectionOverlay = nil
             lastMultiSelectedKey = ""
             
             let removable = mapView.annotations.filter { !($0 is MKUserLocation) }
@@ -894,25 +1000,23 @@ private struct RawPointsMapView: UIViewRepresentable {
             }
         }
 
-        func updateMultiSelectionOverlay(_ coordinates: [CLLocationCoordinate2D], on mapView: MKMapView) {
-            let key = "\(coordinates.count)_" + (coordinates.first.map { "\($0.latitude),\($0.longitude)" } ?? "")
-            
-            if lastMultiSelectedKey == key && (!coordinates.isEmpty || multiSelectedAnnotations.isEmpty) {
-                return
-            }
-            
-            if !multiSelectedAnnotations.isEmpty {
-                mapView.removeAnnotations(multiSelectedAnnotations)
-                multiSelectedAnnotations.removeAll()
-            }
-            
+        /// All selected points drawn by one dot overlay instead of one
+        /// annotation per point, so large selections stay cheap.
+        func updateMultiSelectionOverlay(_ coordinates: [CLLocationCoordinate2D], revision: Int, on mapView: MKMapView) {
+            let key = "\(revision)_\(coordinates.count)"
+            guard lastMultiSelectedKey != key else { return }
             lastMultiSelectedKey = key
-            
-            if !coordinates.isEmpty {
-                let annotations = coordinates.map { RawPointMapAnnotation(coordinate: $0, kind: .selected) }
-                multiSelectedAnnotations = annotations
-                mapView.addAnnotations(annotations)
+
+            if let multiSelectionOverlay {
+                mapView.removeOverlay(multiSelectionOverlay)
+                self.multiSelectionOverlay = nil
             }
+
+            let renderable = coordinates.filter(\.isRawPointsRenderable)
+            guard !renderable.isEmpty else { return }
+            let overlay = RawPointDotOverlay(coordinates: renderable, color: .systemRed, diameter: 8, alpha: 1)
+            multiSelectionOverlay = overlay
+            mapView.addOverlay(overlay)
         }
 
         private func scheduleInitialFit(on mapView: MKMapView, key: String, attempt: Int = 0) {
@@ -1041,13 +1145,15 @@ private final class RawPointDotOverlay: NSObject, MKOverlay {
     let coordinates: [CLLocationCoordinate2D]
     let color: UIColor
     let diameter: CGFloat
+    let alpha: CGFloat
     let coordinate: CLLocationCoordinate2D
     let boundingMapRect: MKMapRect
 
-    init(coordinates: [CLLocationCoordinate2D], color: UIColor, diameter: CGFloat) {
+    init(coordinates: [CLLocationCoordinate2D], color: UIColor, diameter: CGFloat, alpha: CGFloat = 0.65) {
         self.coordinates = coordinates
         self.color = color
         self.diameter = diameter
+        self.alpha = alpha
 
         let points = coordinates.map(MKMapPoint.init)
         if let first = points.first {
@@ -1067,7 +1173,7 @@ private final class RawPointDotOverlay: NSObject, MKOverlay {
 private final class RawPointDotOverlayRenderer: MKOverlayRenderer {
     override func draw(_ mapRect: MKMapRect, zoomScale: MKZoomScale, in context: CGContext) {
         guard let dotOverlay = overlay as? RawPointDotOverlay else { return }
-        context.setFillColor(dotOverlay.color.withAlphaComponent(0.65).cgColor)
+        context.setFillColor(dotOverlay.color.withAlphaComponent(dotOverlay.alpha).cgColor)
         
         let scaledDiameter = dotOverlay.diameter / zoomScale
 

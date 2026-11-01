@@ -356,7 +356,7 @@ class OpenAIService {
     // MARK: - Task Handlers (Async)
 
     
-    private struct DailySummaryProfile {
+    private struct DailySummaryProfile: Sendable {
         let lines: [String]
         let fingerprint: String
         let fallbackSummary: String
@@ -403,21 +403,25 @@ class OpenAIService {
     }
 
     func currentDailyOverviewSummary(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], completion: @escaping (String?) -> Void) {
+        currentDailyOverviewSummary(for: date, footprintIDs: footprints.map(\.footprintID),
+                                    transportIDs: transports.map(\.recordID), completion: completion)
+    }
+
+    /// ID-based variant for callers holding models from a background context.
+    func currentDailyOverviewSummary(for date: Date, footprintIDs fpIds: [UUID], transportIDs tpIds: [UUID], completion: @escaping (String?) -> Void) {
         guard let container = modelContainer else {
             completion(nil)
             return
         }
 
         let startOfDate = Calendar.current.startOfDay(for: date)
-        let fpIds = footprints.map(\.footprintID)
-        let tpIds = transports.map(\.recordID)
 
         Task {
             let context = ModelContext(container)
-            let profile = buildDailySummaryProfile(
+            let profile = await Self.buildDailySummaryProfileOffMain(
+                container: container,
                 fpIds: fpIds,
                 tpIds: tpIds,
-                context: context,
                 includeTodayData: true
             )
 
@@ -479,21 +483,25 @@ class OpenAIService {
     /// without making a network request.  Callers use this before claiming a
     /// rate-limit window, so unchanged timeline refreshes do not consume it.
     func dailyOverviewStatus(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], completion: @escaping (_ needsNetworkRequest: Bool, _ savedSummary: String?) -> Void) {
+        dailyOverviewStatus(for: date, footprintIDs: footprints.map(\.footprintID),
+                            transportIDs: transports.map(\.recordID), completion: completion)
+    }
+
+    /// ID-based variant for callers holding models from a background context.
+    func dailyOverviewStatus(for date: Date, footprintIDs fpIds: [UUID], transportIDs tpIds: [UUID], completion: @escaping (_ needsNetworkRequest: Bool, _ savedSummary: String?) -> Void) {
         guard let container = modelContainer else {
             completion(false, nil)
             return
         }
 
         let startOfDate = Calendar.current.startOfDay(for: date)
-        let fpIds = footprints.map(\.footprintID)
-        let tpIds = transports.map(\.recordID)
 
         Task {
             let context = ModelContext(container)
-            guard let profile = buildDailySummaryProfile(
+            guard let profile = await Self.buildDailySummaryProfileOffMain(
+                container: container,
                 fpIds: fpIds,
                 tpIds: tpIds,
-                context: context,
                 includeTodayData: true
             ) else {
                 await MainActor.run { completion(false, nil) }
@@ -568,10 +576,10 @@ class OpenAIService {
         context: ModelContext,
         includeTodayData: Bool
     ) async -> (content: String, fingerprint: String)? {
-        guard let profile = buildDailySummaryProfile(
+        guard let profile = await Self.buildDailySummaryProfileOffMain(
+            container: context.container,
             fpIds: fpIds,
             tpIds: tpIds,
-            context: context,
             includeTodayData: includeTodayData
         ) else {
             return nil
@@ -589,7 +597,25 @@ class OpenAIService {
         )
     }
 
-    private func buildDailySummaryProfile(fpIds: [UUID], tpIds: [UUID], context: ModelContext, includeTodayData: Bool) -> DailySummaryProfile? {
+    /// Fetches all places/activities plus each record and formats the facts on
+    /// a detached background context; only the result returns to the caller.
+    nonisolated private static func buildDailySummaryProfileOffMain(
+        container: ModelContainer,
+        fpIds: [UUID],
+        tpIds: [UUID],
+        includeTodayData: Bool
+    ) async -> DailySummaryProfile? {
+        await Task.detached(priority: .utility) {
+            buildDailySummaryProfile(
+                fpIds: fpIds,
+                tpIds: tpIds,
+                context: ModelContext(container),
+                includeTodayData: includeTodayData
+            )
+        }.value
+    }
+
+    nonisolated private static func buildDailySummaryProfile(fpIds: [UUID], tpIds: [UUID], context: ModelContext, includeTodayData: Bool) -> DailySummaryProfile? {
         let allPlaces = (try? context.fetch(FetchDescriptor<Place>())) ?? []
         let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
         
@@ -683,7 +709,7 @@ class OpenAIService {
         )
     }
 
-    private func dailySummaryFactLine(for footprint: Footprint, places: [Place], activities: [ActivityType]) -> String {
+    nonisolated private static func dailySummaryFactLine(for footprint: Footprint, places: [Place], activities: [ActivityType]) -> String {
         let start = footprint.startTime.formatted(.dateTime.hour().minute())
         let end = footprint.endTime.formatted(.dateTime.hour().minute())
         var parts: [String] = ["\(start)-\(end)"]
@@ -711,7 +737,7 @@ class OpenAIService {
         return parts.joined(separator: "｜")
     }
 
-    private func dailySummaryPreferredPlaceName(for footprint: Footprint, places: [Place]) -> String {
+    nonisolated private static func dailySummaryPreferredPlaceName(for footprint: Footprint, places: [Place]) -> String {
         let address = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if footprint.isAddressEditedByHand && !address.isEmpty {
             return address
@@ -735,7 +761,7 @@ class OpenAIService {
         return address
     }
 
-    private func dailySummaryTransportLine(for transport: TransportRecord) -> String {
+    nonisolated private static func dailySummaryTransportLine(for transport: TransportRecord) -> String {
         let start = transport.startTime.formatted(.dateTime.hour().minute())
         let end = transport.endTime.formatted(.dateTime.hour().minute())
         let type = transport.manualTypeRaw ?? transport.typeRaw
@@ -745,7 +771,7 @@ class OpenAIService {
         return ["\(start)-\(end)", "移动（\(typeName)）", "里程：\(max(0, transport.distance))米"].joined(separator: "｜")
     }
 
-    private func dailySummaryFallbackSummary(footprintCount: Int) -> String {
+    nonisolated private static func dailySummaryFallbackSummary(footprintCount: Int) -> String {
         switch footprintCount {
         case 1:
             return "没去别的地方"

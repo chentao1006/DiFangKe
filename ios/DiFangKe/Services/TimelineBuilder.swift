@@ -1413,9 +1413,13 @@ enum TransportSplitRouteBuilder {
 }
 
 class PersistentTimelineBuilder {
+    // Day locks are owned by the main-actor syncDay entry; the work itself
+    // runs on SyncDayWorker's background context.
     @MainActor
     private static var syncingDates: Set<Date> = []
+    @MainActor
     private static var pendingSyncDates: Set<Date> = []
+    @MainActor
     private static var pendingConsolidationDates: Set<Date> = []
 
     /// 根据同一地点已有足迹的活动类型历史进行推断：优先同一时间窗，其次总出现次数。
@@ -1737,22 +1741,17 @@ class PersistentTimelineBuilder {
             }
         }
 
-        // Keep uncommitted generated records out of the UI's context and the
-        // persistent store while HealthKit/geocoding suspends this operation.
-        // Pending inserts remain visible to fetches in this working context.
-        let workingContext = ModelContext(context.container)
-        workingContext.autosaveEnabled = false
         do {
             if context.hasChanges { try context.save() }
-            guard await syncDayContents(date: date, in: workingContext, runConsolidation: runConsolidation),
-                  !Task.isCancelled else {
-                workingContext.rollback()
-                return false
-            }
-            try workingContext.save()
         } catch {
-            workingContext.rollback()
             print("[TimelineAuto] failed to commit synchronized day: \(error)")
+            return false
+        }
+        // Fetches, clustering, merge/repair passes and the final save run on a
+        // background context created from the same container; the caller's
+        // context is only saved above and used for the follow-up work below.
+        let container = context.container
+        guard await SyncDayWorker.shared.run(date: date, container: container, runConsolidation: runConsolidation) else {
             return false
         }
 #if !WIDGET_EXTENSION
@@ -1764,9 +1763,37 @@ class PersistentTimelineBuilder {
         return true
     }
 
+    /// Main-actor tracking state captured for one background sync pass.
+    private struct LiveTrackingSnapshot: @unchecked Sendable {
+        let potentialStopStartLocation: CLLocation?
+        let lastLocation: CLLocation?
+        let isHoldingStationaryStay: Bool
+    }
+
+    /// Background half of syncDay. Keep uncommitted generated records out of
+    /// the UI's context and the persistent store while HealthKit/geocoding
+    /// suspends this operation. Pending inserts remain visible to fetches in
+    /// this working context.
+    fileprivate static func commitSynchronizedDay(date: Date, container: ModelContainer, runConsolidation: Bool) async -> Bool {
+        let workingContext = ModelContext(container)
+        workingContext.autosaveEnabled = false
+        do {
+            guard await syncDayContents(date: date, in: workingContext, runConsolidation: runConsolidation),
+                  !Task.isCancelled else {
+                workingContext.rollback()
+                return false
+            }
+            try workingContext.save()
+        } catch {
+            workingContext.rollback()
+            print("[TimelineAuto] failed to commit synchronized day: \(error)")
+            return false
+        }
+        return true
+    }
+
     /// Only the lock-owning syncDay entry may start this work. The consolidation
     /// pass reuses it without releasing or reacquiring the day's write lock.
-    @MainActor
     private static func syncDayContents(date: Date, in context: ModelContext, runConsolidation: Bool) async -> Bool {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -1891,10 +1918,21 @@ class PersistentTimelineBuilder {
         sortedRanges.sort { $0.start < $1.start }
         
 #if !WIDGET_EXTENSION
-        if isToday,
-           let anchor = LocationManager.shared.potentialStopStartLocation,
-           let current = (LocationManager.shared.lastLocation ?? allRawPoints.last).map({ observed in
-               if LocationManager.shared.isHoldingStationaryStay &&
+        // Live tracking state belongs to the main actor; read one snapshot.
+        var liveState: LiveTrackingSnapshot?
+        if isToday {
+            liveState = await MainActor.run {
+                LiveTrackingSnapshot(
+                    potentialStopStartLocation: LocationManager.shared.potentialStopStartLocation,
+                    lastLocation: LocationManager.shared.lastLocation,
+                    isHoldingStationaryStay: LocationManager.shared.isHoldingStationaryStay
+                )
+            }
+        }
+        if isToday, let liveState,
+           let anchor = liveState.potentialStopStartLocation,
+           let current = (liveState.lastLocation ?? allRawPoints.last).map({ observed in
+               if liveState.isHoldingStationaryStay &&
                    Date().timeIntervalSince(observed.timestamp) >= 30 * 60 {
                    return CLLocation(latitude: observed.coordinate.latitude,
                                      longitude: observed.coordinate.longitude)
@@ -1906,7 +1944,7 @@ class PersistentTimelineBuilder {
            Footprint.continueCurrentEditedStay(
                edited, anchor: anchor, current: current,
                rawPoints: allRawPoints, context: context,
-               holdingStationaryStay: LocationManager.shared.isHoldingStationaryStay
+               holdingStationaryStay: liveState.isHoldingStationaryStay
            ) {
             allFps = (try? context.fetch(fpDesc)) ?? []
             sortedRanges = allFps.map { TimeRange(start: $0.startTime, end: $0.endTime) } +
@@ -1936,7 +1974,7 @@ class PersistentTimelineBuilder {
         
         // 如果是今天，获取正在进行的停留开始时间，避免将其作为正式记录生成
 #if !WIDGET_EXTENSION
-        let ongoingStart = isToday ? LocationManager.shared.potentialStopStartLocation?.timestamp : nil
+        let ongoingStart = isToday ? liveState?.potentialStopStartLocation?.timestamp : nil
 #else
         let ongoingStart: Date? = nil
 #endif
@@ -2050,7 +2088,7 @@ class PersistentTimelineBuilder {
         // 按用户要求：在此处（重置最后）调用合并逻辑
         if runConsolidation {
 #if !WIDGET_EXTENSION
-            await LocationManager.shared.consolidateFootprints(in: context, targetDate: date)
+            await LocationManager.consolidateStoredFootprints(in: context, targetDate: date)
             
             // 核心修复：合并或删除了足迹后，会产生新的缺口。
             // 之前尝试手动调用 fillGapsBetweenItems，但无法处理所有边界情况（如末尾缺口、需 processPoints 处理的复杂缺口）。
@@ -2079,7 +2117,6 @@ class PersistentTimelineBuilder {
     }
 
 
-    @MainActor
     private static func mergeConsecutiveTransports(for date: Date, in context: ModelContext, preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle, preferredTransport: TransportType? = nil) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -2229,7 +2266,6 @@ class PersistentTimelineBuilder {
     /// survivor: widening a survivor's time bounds before the next comparison
     /// would make it look temporally far from a later bookend it should still
     /// absorb, breaking `isSameAutomaticTrip`'s 20-minute proximity guard.
-    @MainActor
     static func removeDuplicateRouteTransports(for date: Date, in context: ModelContext) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -2306,7 +2342,6 @@ class PersistentTimelineBuilder {
         }
     }
 
-    @MainActor
     private static func fillGapsBetweenItems(for date: Date, in context: ModelContext, allRawPoints: [CLLocation] = [], preferredAuto: TransportType = .car, preferredCycling: TransportType = .bicycle, preferredTransport: TransportType? = nil) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -2570,14 +2605,18 @@ class PersistentTimelineBuilder {
     
     @MainActor
     static func refreshTransportRoutesForDay(date: Date, in context: ModelContext) async {
-        let allRawPoints = await Task.detached {
-            RawLocationStore.shared.loadAllDevicesLocations(for: date)
+        // Snap on a background context; commit the caller's edits first so the
+        // background pass sees them.
+        if context.hasChanges { try? context.save() }
+        let container = context.container
+        await Task.detached(priority: .userInitiated) {
+            let allRawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
+            let workingContext = ModelContext(container)
+            await snapTransportsToFootprints(for: date, in: workingContext, allRawPoints: allRawPoints)
+            try? workingContext.save()
         }.value
-        await snapTransportsToFootprints(for: date, in: context, allRawPoints: allRawPoints)
-        try? context.save()
     }
     
-    @MainActor
     private static func snapTransportsToFootprints(for date: Date, in context: ModelContext, allRawPoints: [CLLocation] = []) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -2748,7 +2787,6 @@ class PersistentTimelineBuilder {
             >= AppConfig.shared.transportMinDistanceThreshold
     }
 
-    @MainActor
     private static func reopenPrematureAutomaticTransportEnds(
         transports: [TransportRecord], footprints: [Footprint],
         rawPoints: [CLLocation], context: ModelContext
@@ -2812,7 +2850,6 @@ class PersistentTimelineBuilder {
         return "未知位置"
     }
 
-    @MainActor
     private static func splitFootprintsByTransports(for date: Date, in context: ModelContext) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -2940,7 +2977,6 @@ class PersistentTimelineBuilder {
 
 
     
-    @MainActor
     private static func mergeConsecutiveFootprints(for date: Date, in context: ModelContext, allRawPoints: [CLLocation], threshold: Double = 200) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -3079,7 +3115,6 @@ class PersistentTimelineBuilder {
         return FootprintProcessor.shared.shouldMerge(lastFootprint: existing, newCandidate: candidate)
     }
 
-    @MainActor
     private static func latestMergeableFootprint(
         endingBefore candidateEnd: Date,
         startOfDay: Date,
@@ -3095,7 +3130,6 @@ class PersistentTimelineBuilder {
         return try? context.fetch(descriptor).first
     }
 
-    @MainActor
     private static func hasTransportOverlap(
         between start: Date,
         and end: Date,
@@ -3169,7 +3203,6 @@ class PersistentTimelineBuilder {
         return nil
     }
 
-    @MainActor
     private static func processPoints(
         points: [CLLocation],
         date: Date,
@@ -3308,8 +3341,14 @@ class PersistentTimelineBuilder {
 
                 // Re-fetch after the health-data await: the user may have edited
                 // this stay while the automatic candidate was being prepared.
+#if !WIDGET_EXTENSION
+                let stayLiveState = await MainActor.run { Footprint.currentStayLiveState }
+#else
+                let stayLiveState = Footprint.CurrentStayLiveState(anchor: nil, isMoving: true)
+#endif
                 if Footprint.extendActivityEditedStay(start: fp.startTime, end: fp.endTime,
-                                                      coordinate: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude), context: context) {
+                                                      coordinate: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude),
+                                                      liveState: stayLiveState, context: context) {
                     i = split ?? j
                     continue
                 }
@@ -3535,7 +3574,6 @@ class PersistentTimelineBuilder {
         }
     }
 
-    @MainActor
     static func preservingAutomaticRoutesOutsideManualIntervals(
         _ records: [TransportRecord], in context: ModelContext
     ) -> [TransportRecord] {
@@ -3678,7 +3716,6 @@ class PersistentTimelineBuilder {
         }
     }
 
-    @MainActor
     private static func equivalentTransport(
         _ candidate: TransportRecord,
         startOfDay: Date,
@@ -3724,22 +3761,18 @@ class PersistentTimelineBuilder {
                 >= AppConfig.shared.transportMinDurationThreshold else {
             return false
         }
-        guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData) else {
+        switch TransportRouteSpanCache.shared.evidence(for: record.recordID, pointsData: record.pointsData) {
+        case .undecodable:
             return true // Insufficient evidence to remove a legacy record.
+        case .insufficientObservations:
+            return false
+        case .observedSpan(let span):
+            return span >= AppConfig.shared.transportMinDistanceThreshold
         }
-        let valid = decoded.filter {
-            CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon))
-        }
-        let observed = valid.filter { $0.isSyntheticPadding != true }
-        guard observed.count >= 2 else { return false }
-        let coordinates = observed.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-        return TimelineBuilder.calculateMaxDiameter(coordinates)
-            >= AppConfig.shared.transportMinDistanceThreshold
     }
 
     /// Both automatic builders reuse pending records in their shared working
     /// context. The sync owner persists the completed timeline in one save.
-    @MainActor
     static func insertAutomaticallyDetectedTransport(
         _ candidate: TransportRecord,
         startOfDay: Date,
@@ -3761,7 +3794,6 @@ class PersistentTimelineBuilder {
         insertPreparedAutomaticTransport(candidate, startOfDay: startOfDay, context: context)
     }
 
-    @MainActor
     private static func insertPreparedAutomaticTransport(
         _ candidate: TransportRecord,
         startOfDay: Date,
@@ -4136,7 +4168,6 @@ class PersistentTimelineBuilder {
 
     /// Repairs records created by older reconstruction logic, which used the
     /// final location heartbeat before a long stay as the next trip's start.
-    @MainActor
     private static func repairAutomaticTransportStartsAfterDormantGap(
         _ records: [TransportRecord],
         rawPoints: [CLLocation],
@@ -4282,7 +4313,6 @@ class PersistentTimelineBuilder {
         }
     }
 
-    @MainActor
     private static func resolveAddresses(for date: Date, in context: ModelContext) async {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
@@ -4424,8 +4454,35 @@ class PersistentTimelineBuilder {
 }
 
 extension PersistentTimelineBuilder {
+    /// Returns items bound to `context`, so it stays on the caller's actor.
+    /// Callers that only need the persisted repairs or transport values should
+    /// use `repairTimelineDay(for:container:)` / `fetchTimelineTransports(for:container:)`,
+    /// which do the same work on a background context.
     @MainActor
     static func fetchTimeline(for date: Date, in context: ModelContext) -> [TimelineItem] {
+        timelineItems(for: date, in: context)
+    }
+
+    /// Background variant of `fetchTimeline` for callers that only need its
+    /// persisted cross-day/continuation repairs.
+    static func repairTimelineDay(for date: Date, container: ModelContainer) async {
+        await Task.detached(priority: .userInitiated) {
+            _ = timelineItems(for: date, in: ModelContext(container))
+        }.value
+    }
+
+    /// Background variant of `fetchTimeline` returning only the aligned
+    /// transport values (newest first, as in `fetchTimeline`).
+    static func fetchTimelineTransports(for date: Date, container: ModelContainer) async -> [Transport] {
+        await Task.detached(priority: .userInitiated) { () -> [Transport] in
+            timelineItems(for: date, in: ModelContext(container)).compactMap { item -> Transport? in
+                guard case .transport(let transport) = item else { return nil }
+                return transport
+            }
+        }.value
+    }
+
+    private static func timelineItems(for date: Date, in context: ModelContext) -> [TimelineItem] {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
@@ -4507,7 +4564,6 @@ extension PersistentTimelineBuilder {
         return alignedItems.sorted { $0.startTime > $1.startTime }
     }
 
-    @MainActor
     private static func normalizeCrossDayFootprints(_ footprints: [Footprint], calendar: Calendar, context: ModelContext) -> Bool {
         var didChange = false
 
@@ -4531,7 +4587,6 @@ extension PersistentTimelineBuilder {
         return didChange
     }
 
-    @MainActor
     private static func splitCrossDayFootprint(_ footprint: Footprint, calendar: Calendar, context: ModelContext) {
         let originalStart = footprint.startTime
         let originalEnd = footprint.endTime
@@ -4642,6 +4697,77 @@ extension PersistentTimelineBuilder {
         let upperIndex = max(lowerIndex, min(maxIndex, Int(ceil(endRatio * Double(maxIndex)))))
 
         return Array(locations[lowerIndex...upperIndex])
+    }
+}
+
+/// Serializes day synchronizations off the main actor. Previously every
+/// syncDay ran on the main actor; one background job at a time keeps the same
+/// ordering guarantees between days while the per-day lock stays in syncDay.
+private actor SyncDayWorker {
+    static let shared = SyncDayWorker()
+    private var tail: Task<Bool, Never>?
+
+    func run(date: Date, container: ModelContainer, runConsolidation: Bool) async -> Bool {
+        let previous = tail
+        let job = Task.detached(priority: .userInitiated) { () -> Bool in
+            _ = await previous?.value
+            guard !Task.isCancelled else { return false }
+            return await PersistentTimelineBuilder.commitSynchronizedDay(
+                date: date, container: container, runConsolidation: runConsolidation
+            )
+        }
+        tail = job
+        return await withTaskCancellationHandler {
+            await job.value
+        } onCancel: {
+            job.cancel()
+        }
+    }
+}
+
+/// Thread-safe memo of the decoded route evidence used by
+/// `hasMinimumAutomaticTransportSpan`. Keyed by record ID and only served
+/// while the stored pointsData still matches. Never persisted.
+final class TransportRouteSpanCache: @unchecked Sendable {
+    enum Evidence {
+        case undecodable
+        case insufficientObservations
+        case observedSpan(Double)
+    }
+
+    private final class Entry {
+        let pointsData: Data
+        let evidence: Evidence
+        init(pointsData: Data, evidence: Evidence) {
+            self.pointsData = pointsData
+            self.evidence = evidence
+        }
+    }
+
+    static let shared = TransportRouteSpanCache()
+    private let cache = NSCache<NSUUID, Entry>()
+
+    func evidence(for id: UUID, pointsData: Data) -> Evidence {
+        let key = id as NSUUID
+        if let cached = cache.object(forKey: key), cached.pointsData == pointsData {
+            return cached.evidence
+        }
+        let evidence = Self.computeEvidence(pointsData)
+        cache.setObject(Entry(pointsData: pointsData, evidence: evidence), forKey: key)
+        return evidence
+    }
+
+    private static func computeEvidence(_ pointsData: Data) -> Evidence {
+        guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: pointsData) else {
+            return .undecodable
+        }
+        let valid = decoded.filter {
+            CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon))
+        }
+        let observed = valid.filter { $0.isSyntheticPadding != true }
+        guard observed.count >= 2 else { return .insufficientObservations }
+        let coordinates = observed.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        return .observedSpan(TimelineBuilder.calculateMaxDiameter(coordinates))
     }
 }
 

@@ -15,6 +15,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,21 +61,54 @@ fun FootprintPhotoThumbnail(
     modifier: Modifier = Modifier,
     contentDescription: String? = null
 ) {
-    AndroidView(
-        factory = { context ->
-            android.widget.ImageView(context).apply {
-                scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
-                setImageURI(runCatching { android.net.Uri.parse(uri) }.getOrNull())
-                this.contentDescription = contentDescription
-            }
-        },
-        update = { imageView ->
-            imageView.setImageURI(runCatching { android.net.Uri.parse(uri) }.getOrNull())
-            imageView.contentDescription = contentDescription
-        },
-        modifier = modifier
-    )
+    val context = LocalContext.current
+    BoxWithConstraints(modifier) {
+        // Decode a bitmap sampled to the laid-out size on IO; the main thread only assigns it.
+        val boundedSide = maxOf(
+            if (constraints.hasBoundedWidth) constraints.maxWidth else 0,
+            if (constraints.hasBoundedHeight) constraints.maxHeight else 0
+        )
+        val targetPixels = if (boundedSide > 0) boundedSide else context.resources.displayMetrics.widthPixels
+        val bitmap by produceState<android.graphics.Bitmap?>(null, uri, targetPixels) {
+            value = withContext(Dispatchers.IO) { decodeSampledPhotoBitmap(context, uri, targetPixels) }
+        }
+        AndroidView(
+            factory = { ctx ->
+                android.widget.ImageView(ctx).apply {
+                    scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                    this.contentDescription = contentDescription
+                }
+            },
+            update = { imageView ->
+                if (imageView.tag !== bitmap) {
+                    imageView.tag = bitmap
+                    imageView.setImageBitmap(bitmap)
+                }
+                imageView.contentDescription = contentDescription
+            },
+            modifier = Modifier.matchParentSize()
+        )
+    }
 }
+
+/** Decodes a photo URI sampled down so its longer side stays at or above [targetPixels]. Call off main. */
+internal fun decodeSampledPhotoBitmap(
+    context: android.content.Context,
+    uri: String,
+    targetPixels: Int
+): android.graphics.Bitmap? = runCatching {
+    val parsed = android.net.Uri.parse(uri)
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(parsed)?.use {
+        android.graphics.BitmapFactory.decodeStream(it, null, bounds)
+    }
+    var sampleSize = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / (sampleSize * 2) >= targetPixels) sampleSize *= 2
+    val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    context.contentResolver.openInputStream(parsed)?.use {
+        android.graphics.BitmapFactory.decodeStream(it, null, options)
+    }
+}.getOrNull()
 
 @Composable
 fun Modifier.breathing(isActive: Boolean): Modifier {

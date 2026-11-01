@@ -250,7 +250,8 @@ struct DFKFootprintShareTemplateView<QRCode: View>: View {
 
     /// Only the places still switched on in the share list.
     private var places: [Place] {
-        let footprintsByID = Dictionary(payload.mapFootprints.map { ($0.footprintID, $0) }, uniquingKeysWith: { first, _ in first })
+        // Value copies precomputed with the payload; no model walk per body.
+        let footprintsByID = payload.mapFootprintSnapshots
         return payload.entries.filter(\.isIncluded).map { entry in
             let footprints = entry.footprintIDs.compactMap { footprintsByID[$0] }
             let intervals = footprints.map { (start: $0.startTime, end: $0.endTime) }
@@ -274,8 +275,11 @@ struct DFKFootprintShareTemplateView<QRCode: View>: View {
         guard hasAssetIDs else { return payload.heroImages.map { Photo(image: $0, caption: nil) } }
         let includedIDs = Set(payload.entries.filter(\.isIncluded).flatMap(\.footprintIDs))
         var placeByAssetID: [String: (title: String, isIncluded: Bool)] = [:]
+        // Each footprint belongs to one entry, so looking footprints up by the
+        // entry's IDs matches scanning every map footprint per entry.
         for entry in payload.entries {
-            for footprint in payload.mapFootprints where entry.footprintIDs.contains(footprint.footprintID) {
+            for footprintID in Set(entry.footprintIDs) {
+                guard let footprint = payload.mapFootprintSnapshots[footprintID] else { continue }
                 for assetID in footprint.photoAssetIDs {
                     placeByAssetID[assetID] = (entry.title, includedIDs.contains(footprint.footprintID))
                 }
@@ -637,7 +641,6 @@ struct DFKFootprintShareTemplateView<QRCode: View>: View {
         let muted = Color(red: 0.45, green: 0.47, blue: 0.49)
         let places = places
         let rows = Array(places.prefix(8))
-        let totalStay = places.reduce(0) { $0 + $1.stay }
         let photo = photos.first
         let dashed = DFKShareRuleLine()
             .stroke(style: StrokeStyle(lineWidth: u(1), dash: [u(3), u(3)]))
@@ -693,16 +696,13 @@ struct DFKFootprintShareTemplateView<QRCode: View>: View {
                 }
                 dashed
                 receiptLine("地点", "\(places.count) 处")
-                if moveDistance > 0 {
-                    receiptLine("移动", DFKTripShareSummary.distanceText(moveDistance))
-                }
                 if !photos.isEmpty {
                     receiptLine("照片", "\(photos.count) 张")
                 }
                 HStack(alignment: .firstTextBaseline) {
                     Text("合计").font(mono(15))
                     Spacer()
-                    Text(durationText(totalStay)).font(mono(20))
+                    Text(DFKTripShareSummary.distanceText(moveDistance)).font(mono(20))
                 }
                 dashed
                 Text("谢谢光临，生活欢迎再来").font(mono(10, .medium)).foregroundStyle(muted).frame(maxWidth: .infinity)

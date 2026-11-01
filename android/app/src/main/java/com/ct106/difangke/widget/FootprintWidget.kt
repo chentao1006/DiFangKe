@@ -7,6 +7,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -317,9 +319,14 @@ private fun TrackArea(
     val scale = min(density, 2f)
     val wPx = (widthDp.value * scale).toInt()
     val hPx = (heightDp.value * scale).toInt()
-    val bitmap = remember(data, wPx, hPx, isDark) {
-        data?.let { WidgetDataLoader.renderTrack(context, it, wPx, hPx, isDark) }
+    // Render off main; remember which data the bitmap belongs to so the empty text
+    // only shows once rendering for the current day has actually finished.
+    val rendered by produceState<Pair<WidgetDayData?, android.graphics.Bitmap?>?>(null, data, wPx, hPx, isDark) {
+        val track = data?.let { withContext(Dispatchers.Default) { WidgetDataLoader.renderTrack(context, it, wPx, hPx, isDark) } }
+        value = data to track
     }
+    val current = rendered?.takeIf { it.first === data }
+    val bitmap = current?.second
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         if (bitmap != null) {
             Image(
@@ -328,7 +335,7 @@ private fun TrackArea(
                 contentScale = ContentScale.Fit,
                 modifier = GlanceModifier.fillMaxSize()
             )
-        } else if (data != null) {
+        } else if (data != null && current != null) {
             Text(
                 if (data.dayOffset == 0) "今天还没有足迹" else "这一天没有足迹",
                 style = TextStyle(color = secondaryText, fontSize = if (isSmall) 10.sp else 12.sp)

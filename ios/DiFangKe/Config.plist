@@ -522,14 +522,17 @@
     <key>REVIEW_PHOTO_IMPORT_SUGGESTION_MAX_FOOTPRINTS</key>
     <integer>10</integer>
 
-    <!-- 回顾地图轨迹点：初始融合网格（经纬度）与最终最大绘制点数 -->
+    <!-- 回顾地图交通线：最大放大时的抽稀网格（经纬度），缩小时按屏幕跨度逐级放大 -->
     <key>REVIEW_MAP_TRAJECTORY_BASE_CELL_DEGREES</key>
     <real>0.0003</real>
-    <key>REVIEW_MAP_TRAJECTORY_MAX_DRAW_POINTS</key>
-    <integer>450</integer>
-    <!-- 放大到此经纬跨度以内时，改为显示当前区域内的真实实线路径 -->
-    <key>REVIEW_MAP_TRAJECTORY_PATH_MAX_SPAN</key>
-    <real>0.35</real>
+    <!-- 回顾地图交通图标：任意两个图标的最小间距、同类型图标的合并间距（占屏幕长边的比例） -->
+    <key>REVIEW_MAP_TRANSPORT_ICON_MIN_SPACING</key>
+    <real>0.05</real>
+    <key>REVIEW_MAP_TRANSPORT_ICON_SAME_TYPE_SPACING</key>
+    <real>0.18</real>
+    <!-- 回顾地点页：照片默认展示张数，其余点"查看更多"展开 -->
+    <key>REVIEW_PLACE_PHOTO_PREVIEW_COUNT</key>
+    <integer>9</integer>
 
     <!-- ===== TimelineBuilder 调参 ===== -->
 

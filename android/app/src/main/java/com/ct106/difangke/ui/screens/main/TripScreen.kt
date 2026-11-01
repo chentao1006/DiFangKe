@@ -83,7 +83,9 @@ import com.ct106.difangke.ui.components.getIconForName
 import com.ct106.difangke.ui.components.timelineTransportIcon
 import com.ct106.difangke.ui.components.FootprintMapMarker
 import com.ct106.difangke.ui.components.FootprintPhotoThumbnail
-import com.ct106.difangke.ui.components.addFootprintMarkers
+import com.ct106.difangke.ui.components.PreparedFootprintMarker
+import com.ct106.difangke.ui.components.addPreparedFootprintMarkers
+import com.ct106.difangke.ui.components.prepareFootprintMarkers
 import com.ct106.difangke.ui.screens.detail.FootprintDetailContent
 import com.ct106.difangke.ui.theme.DfkAccent
 import com.ct106.difangke.ui.share.GeoPoint
@@ -168,6 +170,12 @@ fun TripScreen() {
         remaining.groupBy { trip -> Calendar.getInstance().apply { time = trip.plannedStartDay }.get(Calendar.YEAR) }
             .toSortedMap(compareByDescending { it })
     }
+    // Per-trip card data (day/item grouping, historical footprint matching, photo JSON) built off main.
+    val cardModels by produceState(emptyMap<String, TripCardModel>(), trips, allDays, allCities, allItems, allFootprints, transportRecords) {
+        value = withContext(Dispatchers.Default) {
+            buildTripCardModels(trips, allDays, allCities, allItems, allFootprints, transportRecords)
+        }
+    }
     val listState = rememberLazyListState()
     val pullRefreshState = rememberPullRefreshState(
         refreshing = scanRunning,
@@ -242,10 +250,7 @@ fun TripScreen() {
                     TripCard(
                         trip = trip,
                         activityType = activityTypes.firstOrNull { it.id == trip.activityTypeValue || it.name == trip.activityTypeValue },
-                        allDays = allDays,
-                        allCities = allCities,
-                        allItems = allItems,
-                        allFootprints = allFootprints,
+                        model = cardModels[trip.id] ?: EmptyTripCardModel,
                         transportRecords = transportRecords,
                         prominent = true,
                         isSelecting = isSelecting,
@@ -291,10 +296,7 @@ fun TripScreen() {
                     TripCard(
                         trip = trip,
                         activityType = activityTypes.firstOrNull { it.id == trip.activityTypeValue || it.name == trip.activityTypeValue },
-                        allDays = allDays,
-                        allCities = allCities,
-                        allItems = allItems,
-                        allFootprints = allFootprints,
+                        model = cardModels[trip.id] ?: EmptyTripCardModel,
                         transportRecords = transportRecords,
                         prominent = false,
                         isSelecting = isSelecting,
@@ -320,10 +322,7 @@ fun TripScreen() {
                     TripCard(
                         trip = trip,
                         activityType = activityTypes.firstOrNull { it.id == trip.activityTypeValue || it.name == trip.activityTypeValue },
-                        allDays = allDays,
-                        allCities = allCities,
-                        allItems = allItems,
-                        allFootprints = allFootprints,
+                        model = cardModels[trip.id] ?: EmptyTripCardModel,
                         transportRecords = transportRecords,
                         prominent = false,
                         isSelecting = isSelecting,
@@ -666,10 +665,7 @@ private fun TripSplitSegmentPreview(title: String, dateRange: String, cities: Li
 private fun TripCard(
     trip: TripEntity,
     activityType: ActivityTypeEntity?,
-    allDays: List<TripDayEntity>,
-    allCities: List<TripDayCityEntity>,
-    allItems: List<TripItemEntity>,
-    allFootprints: List<FootprintEntity>,
+    model: TripCardModel,
     transportRecords: List<TransportRecordEntity>,
     prominent: Boolean,
     isSelecting: Boolean,
@@ -690,21 +686,8 @@ private fun TripCard(
         TripState.CANCELLED -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    val orderedTripDays = allDays.filter { it.tripID == trip.id }
-        .sortedWith(compareBy<TripDayEntity> { it.day }.thenBy { it.orderIndex })
-    val storedItems = orderedTripDays.flatMap { day ->
-        allItems.filter { it.tripDayID == day.id }.sortedBy { it.orderIndex }
-    }
-    val tripItems = if (trip.kindRaw == TripKind.HISTORICAL.raw) {
-        actualTripItems(orderedTripDays, allFootprints, transportRecords)
-    } else storedItems
-    val nextStop = tripItems.firstOrNull {
-        prominent && it.kindRaw == "stop" && it.planStatusRaw == "planned"
-    }
-    val nextStopIndex = nextStop?.let { stop -> tripItems.indexOfFirst { it.id == stop.id } } ?: -1
-    val previousStop = if (nextStopIndex > 0) {
-        tripItems.subList(0, nextStopIndex).lastOrNull { it.kindRaw == "stop" }
-    } else null
+    val nextStop = if (prominent) model.firstPlannedStop else null
+    val previousStop = if (prominent) model.stopBeforeFirstPlanned else null
     val activeRouteKey = listOf(previousStop?.id, nextStop?.id, nextStop?.transportTypeRaw).joinToString("|")
     val activeRoute by produceState<GeocodeService.RoutePlan?>(null, activeRouteKey) {
         val origin = previousStop
@@ -736,10 +719,7 @@ private fun TripCard(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
-        val tripCities = orderedTripDays.flatMap { day ->
-            allCities.filter { it.tripDayID == day.id }.sortedBy { it.orderIndex }
-        }
-        TripCardHero(tripItems, tripCities, allFootprints, transportRecords, prominent)
+        TripCardHero(model, transportRecords, prominent)
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (isSelecting) {
@@ -752,11 +732,7 @@ private fun TripCard(
                 }
                 Text(trip.title.ifBlank { "未命名行程" }, style = if (prominent) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             }
-            val cityText = tripCities.asSequence()
-                .map { it.cityName }
-                .distinct()
-                .take(4)
-                .joinToString(" · ")
+            val cityText = model.cityText
             if (cityText.isNotBlank()) Text(cityText, color = MaterialTheme.colorScheme.onSurfaceVariant)
             activityType?.let {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -769,15 +745,13 @@ private fun TripCard(
                 Text(formatRange(trip.plannedStartDay, trip.plannedEndDay), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (trip.state == TripState.PLANNED) {
-                val tripDays = allDays.filter { it.tripID == trip.id }
-                val arrangedIDs = storedItems.map { it.tripDayID }.toSet()
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     if (trip.datesUserEdited) {
                         Text(plannedTripStatus(trip), color = DfkAccent, fontWeight = FontWeight.SemiBold)
                     }
                     Spacer(Modifier.weight(1f))
                     Text(
-                        "${tripDays.count { it.id in arrangedIDs }}/${tripDays.size.coerceAtLeast(1)} 天有详细安排",
+                        "${model.arrangedDayCount}/${model.tripDayCount.coerceAtLeast(1)} 天有详细安排",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -820,7 +794,7 @@ private fun TripCard(
         )
         if (trip.kindRaw == TripKind.HISTORICAL.raw && trip.state == TripState.HISTORICAL &&
             tripInclusiveDayCount(trip.plannedStartDay, trip.plannedEndDay) > 1 &&
-            allDays.count { it.tripID == trip.id } > 1
+            model.tripDayCount > 1
         ) {
             DropdownMenuItem(
                 text = { Text("拆分") },
@@ -850,44 +824,32 @@ private fun plannedTripStatus(trip: TripEntity): String {
 
 @Composable
 private fun TripCardHero(
-    items: List<TripItemEntity>,
-    cities: List<TripDayCityEntity>,
-    footprints: List<FootprintEntity>,
+    model: TripCardModel,
     transportRecords: List<TransportRecordEntity>,
     prominent: Boolean
 ) {
     val dark = isSystemInDarkTheme()
-    val footprintByID = remember(footprints) { footprints.associateBy { it.footprintID } }
-    val transportByID = remember(transportRecords) { transportRecords.associateBy { it.recordID } }
-    val signature = remember(items, cities) {
-        items.joinToString(";") { "${it.id}:${it.latitude}:${it.longitude}:${it.sourceFootprintID}:${it.sourceTransportRecordID}" } +
-            "#" + cities.joinToString(";") { "${it.id}:${it.latitude}:${it.longitude}" }
-    }
-    val photoUris = remember(signature, footprintByID) {
-        items.asSequence().mapNotNull { it.sourceFootprintID }.distinct().flatMap { id ->
-            val json = footprintByID[id]?.photoAssetIDsJson ?: "[]"
-            runCatching {
-                val array = JSONArray(json)
-                (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
-            }.getOrDefault(emptyList()).asSequence()
-        }.distinct()
-            .sortedBy { "$signature|$it".hashCode() }
-            .take(5)
-            .toList()
-    }
+    val signature = model.heroSignature
+    val photoUris = model.heroPhotoUris
     var mapBitmap by remember(signature, dark) { mutableStateOf<android.graphics.Bitmap?>(null) }
-    LaunchedEffect(signature, dark, transportRecords) {
-        val stops = items.mapNotNull { item ->
-            val lat = item.latitude
-            val lon = item.longitude
-            if (item.kindRaw == "stop" && lat != null && lon != null) GeoPoint(lat, lon) else null
-        } + cities.mapNotNull { city ->
-            val lat = city.latitude
-            val lon = city.longitude
-            if (lat != null && lon != null) GeoPoint(lat, lon) else null
+    LaunchedEffect(signature, dark, model.heroRouteKey) {
+        val items = model.tripItems
+        val cities = model.tripCities
+        val (stops, routes) = withContext(Dispatchers.Default) {
+            val transportByID = transportRecords.associateBy { it.recordID }
+            val stops = items.mapNotNull { item ->
+                val lat = item.latitude
+                val lon = item.longitude
+                if (item.kindRaw == "stop" && lat != null && lon != null) GeoPoint(lat, lon) else null
+            } + cities.mapNotNull { city ->
+                val lat = city.latitude
+                val lon = city.longitude
+                if (lat != null && lon != null) GeoPoint(lat, lon) else null
+            }
+            val routes = items.mapNotNull { it.sourceTransportRecordID }
+                .distinct().mapNotNull { transportByID[it]?.sharePoints()?.takeIf { points -> points.isNotEmpty() } }
+            stops to routes
         }
-        val routes = items.mapNotNull { it.sourceTransportRecordID }
-            .distinct().mapNotNull { transportByID[it]?.sharePoints()?.takeIf { points -> points.isNotEmpty() } }
         val snapshot = ShareMapSnapshotter.snapshot(stops + routes.flatten(), routes = routes, drawsPath = false)
         mapBitmap = if (dark) snapshot?.dark ?: snapshot?.light else snapshot?.light ?: snapshot?.dark
     }
@@ -921,6 +883,97 @@ private fun TripCardHero(
                 }
             }
         }
+    }
+}
+
+/** Card data for one trip, grouped and matched off main by [buildTripCardModels]. */
+private class TripCardModel(
+    val storedItems: List<TripItemEntity>,
+    val tripItems: List<TripItemEntity>,
+    val tripCities: List<TripDayCityEntity>,
+    val cityText: String,
+    val tripDayCount: Int,
+    val arrangedDayCount: Int,
+    /** First still-planned stop and the stop before it (used by the prominent card only). */
+    val firstPlannedStop: TripItemEntity?,
+    val stopBeforeFirstPlanned: TripItemEntity?,
+    val heroSignature: String,
+    val heroPhotoUris: List<String>,
+    /** Changes only when this trip's transport routes change, so unrelated records don't re-snapshot. */
+    val heroRouteKey: String
+)
+
+private val EmptyTripCardModel = TripCardModel(
+    storedItems = emptyList(), tripItems = emptyList(), tripCities = emptyList(), cityText = "",
+    tripDayCount = 0, arrangedDayCount = 0, firstPlannedStop = null, stopBeforeFirstPlanned = null,
+    heroSignature = "#", heroPhotoUris = emptyList(), heroRouteKey = ""
+)
+
+/** Builds every trip card's data in one pass; call from a background dispatcher. */
+private fun buildTripCardModels(
+    trips: List<TripEntity>,
+    allDays: List<TripDayEntity>,
+    allCities: List<TripDayCityEntity>,
+    allItems: List<TripItemEntity>,
+    allFootprints: List<FootprintEntity>,
+    transportRecords: List<TransportRecordEntity>
+): Map<String, TripCardModel> {
+    val daysByTrip = allDays.groupBy { it.tripID }
+    val itemsByDay = allItems.groupBy { it.tripDayID }
+    val citiesByDay = allCities.groupBy { it.tripDayID }
+    val footprintByID = allFootprints.associateBy { it.footprintID }
+    val transportByID = transportRecords.associateBy { it.recordID }
+    return trips.associate { trip ->
+        val tripDays = daysByTrip[trip.id].orEmpty()
+        val orderedTripDays = tripDays.sortedWith(compareBy<TripDayEntity> { it.day }.thenBy { it.orderIndex })
+        val storedItems = orderedTripDays.flatMap { day ->
+            itemsByDay[day.id].orEmpty().sortedBy { it.orderIndex }
+        }
+        val tripItems = if (trip.kindRaw == TripKind.HISTORICAL.raw) {
+            actualTripItems(orderedTripDays, allFootprints, transportRecords)
+        } else storedItems
+        val firstPlannedStop = tripItems.firstOrNull { it.kindRaw == "stop" && it.planStatusRaw == "planned" }
+        val firstPlannedIndex = firstPlannedStop?.let { stop -> tripItems.indexOfFirst { it.id == stop.id } } ?: -1
+        val stopBeforeFirstPlanned = if (firstPlannedIndex > 0) {
+            tripItems.subList(0, firstPlannedIndex).lastOrNull { it.kindRaw == "stop" }
+        } else null
+        val tripCities = orderedTripDays.flatMap { day ->
+            citiesByDay[day.id].orEmpty().sortedBy { it.orderIndex }
+        }
+        val cityText = tripCities.asSequence()
+            .map { it.cityName }
+            .distinct()
+            .take(4)
+            .joinToString(" · ")
+        val arrangedIDs = storedItems.map { it.tripDayID }.toSet()
+        val signature = tripItems.joinToString(";") { "${it.id}:${it.latitude}:${it.longitude}:${it.sourceFootprintID}:${it.sourceTransportRecordID}" } +
+            "#" + tripCities.joinToString(";") { "${it.id}:${it.latitude}:${it.longitude}" }
+        val photoUris = tripItems.asSequence().mapNotNull { it.sourceFootprintID }.distinct().flatMap { id ->
+            val json = footprintByID[id]?.photoAssetIDsJson ?: "[]"
+            runCatching {
+                val array = JSONArray(json)
+                (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
+            }.getOrDefault(emptyList()).asSequence()
+        }.distinct()
+            .sortedBy { "$signature|$it".hashCode() }
+            .take(5)
+            .toList()
+        val routeKey = tripItems.mapNotNull { it.sourceTransportRecordID }.distinct().joinToString(";") { id ->
+            "$id:${transportByID[id]?.pointsJson?.hashCode()}"
+        }
+        trip.id to TripCardModel(
+            storedItems = storedItems,
+            tripItems = tripItems,
+            tripCities = tripCities,
+            cityText = cityText,
+            tripDayCount = tripDays.size,
+            arrangedDayCount = tripDays.count { it.id in arrangedIDs },
+            firstPlannedStop = firstPlannedStop,
+            stopBeforeFirstPlanned = stopBeforeFirstPlanned,
+            heroSignature = signature,
+            heroPhotoUris = photoUris,
+            heroRouteKey = routeKey
+        )
     }
 }
 
@@ -1013,23 +1066,24 @@ private fun PlannedTripScreen(
     val planTimelineScrollObserver = remember {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput) userDidScrollPlanTimeline = true
+                if (source == NestedScrollSource.Drag) userDidScrollPlanTimeline = true
                 return Offset.Zero
             }
         }
     }
     val nextDestinationBringIntoViewRequester = remember { BringIntoViewRequester() }
-    val orderedDays = days.sortedWith(compareBy<TripDayEntity> { it.day }.thenBy { it.orderIndex })
-    val dayIDs = orderedDays.map { it.id }.toSet()
-    val cities = allCities.filter { it.tripDayID in dayIDs }
-    val storedPlanItems = allItems.filter { it.tripDayID in dayIDs }
-    val items = migrateLegacyPlannedTransportItems(orderedDays, storedPlanItems)
-    val arrangedDays = items.map { it.tripDayID }.toSet().size
-    val orderedPlanItems = orderedDays.flatMap { day -> items.filter { it.tripDayID == day.id }.sortedBy { it.orderIndex } }
-    val routeRequestKey = remember(orderedPlanItems, homeCity, routePreferenceVersion) {
-        "${homeCity?.latitude},${homeCity?.longitude}|" + orderedPlanItems.joinToString("|") { item ->
-            listOf(item.id, item.latitude, item.longitude, item.transportTypeRaw).joinToString(":")
-        } + "|$routePreferenceVersion"
+    // Day ordering, per-day filtering, legacy transport migration and lookups run off main.
+    val plan by produceState(EmptyPlannedTripModel, days, allCities, allItems) {
+        value = withContext(Dispatchers.Default) { buildPlannedTripModel(days, allCities, allItems) }
+    }
+    val orderedDays = plan.orderedDays
+    val cities = plan.cities
+    val storedPlanItems = plan.storedPlanItems
+    val items = plan.items
+    val arrangedDays = plan.arrangedDays
+    val orderedPlanItems = plan.orderedPlanItems
+    val routeRequestKey = remember(plan, homeCity, routePreferenceVersion) {
+        "${homeCity?.latitude},${homeCity?.longitude}|" + plan.routeItemsKey + "|$routePreferenceVersion"
     }
     val plannedRoutePlans by produceState<Map<String, GeocodeService.RoutePlan>>(
         initialValue = emptyMap(),
@@ -1060,13 +1114,9 @@ private fun PlannedTripScreen(
         }
         value = loaded
     }
-    val nextDestinationID = orderedPlanItems.firstOrNull {
-        it.kindRaw == "stop" && it.stopScopeRaw == "place" && it.planStatusRaw == "planned"
-    }?.id
-    val nextDestination = orderedPlanItems.firstOrNull { it.id == nextDestinationID }
-    val nextDestinationDayIndex = orderedDays.indexOfFirst { day ->
-        nextDestinationID != null && items.any { it.tripDayID == day.id && it.id == nextDestinationID }
-    }
+    val nextDestinationID = plan.nextDestinationID
+    val nextDestination = plan.nextDestination
+    val nextDestinationDayIndex = plan.nextDestinationDayIndex
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
     val planPanelHeight = if (isPlanPanelCollapsed) 176.dp else configuration.screenHeightDp.dp * 0.68f
@@ -1254,9 +1304,7 @@ private fun PlannedTripScreen(
                             if (trip.datesUserEdited) {
                                 Text(formatRange(trip.plannedStartDay, trip.plannedEndDay), color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            val cityNames = orderedDays.flatMap { day ->
-                                cities.filter { it.tripDayID == day.id }.sortedBy { it.orderIndex }
-                            }.map { it.cityName }.distinct()
+                            val cityNames = plan.cityNames
                             if (cityNames.isNotEmpty()) {
                                 Text(cityNames.joinToString(" · "), color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
@@ -1271,8 +1319,8 @@ private fun PlannedTripScreen(
                     }
                 }
                 items(orderedDays, key = { it.id }) { day ->
-                    val dayIndex = orderedDays.indexOf(day)
-                    val dayItems = items.filter { it.tripDayID == day.id }.sortedBy { it.orderIndex }
+                    val dayIndex = plan.dayIndexByID[day.id] ?: -1
+                    val dayItems = plan.itemsByDay[day.id].orEmpty()
                     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
                         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             TripDayTitleChip(
@@ -1545,6 +1593,69 @@ private fun PlannedTripScreen(
     }
 }
 
+/** PlannedTripScreen data derived from the observed rows; built off main by [buildPlannedTripModel]. */
+private class PlannedTripModel(
+    val orderedDays: List<TripDayEntity>,
+    val cities: List<TripDayCityEntity>,
+    val storedPlanItems: List<TripItemEntity>,
+    val items: List<TripItemEntity>,
+    val arrangedDays: Int,
+    val orderedPlanItems: List<TripItemEntity>,
+    /** Items of each day sorted by order index. */
+    val itemsByDay: Map<String, List<TripItemEntity>>,
+    val dayIndexByID: Map<String, Int>,
+    val cityNames: List<String>,
+    val nextDestinationID: String?,
+    val nextDestination: TripItemEntity?,
+    val nextDestinationDayIndex: Int,
+    /** Item part of the route request key (id, coordinate, transport type of every ordered item). */
+    val routeItemsKey: String
+)
+
+private val EmptyPlannedTripModel = PlannedTripModel(
+    orderedDays = emptyList(), cities = emptyList(), storedPlanItems = emptyList(), items = emptyList(),
+    arrangedDays = 0, orderedPlanItems = emptyList(), itemsByDay = emptyMap(), dayIndexByID = emptyMap(),
+    cityNames = emptyList(), nextDestinationID = null, nextDestination = null, nextDestinationDayIndex = -1,
+    routeItemsKey = ""
+)
+
+/** Builds [PlannedTripModel]; call from a background dispatcher. */
+private fun buildPlannedTripModel(
+    days: List<TripDayEntity>,
+    allCities: List<TripDayCityEntity>,
+    allItems: List<TripItemEntity>
+): PlannedTripModel {
+    val orderedDays = days.sortedWith(compareBy<TripDayEntity> { it.day }.thenBy { it.orderIndex })
+    val dayIDs = orderedDays.map { it.id }.toSet()
+    val cities = allCities.filter { it.tripDayID in dayIDs }
+    val storedPlanItems = allItems.filter { it.tripDayID in dayIDs }
+    val items = migrateLegacyPlannedTransportItems(orderedDays, storedPlanItems)
+    val arrangedDays = items.map { it.tripDayID }.toSet().size
+    val itemsByDay = items.groupBy { it.tripDayID }.mapValues { (_, dayItems) -> dayItems.sortedBy { it.orderIndex } }
+    val orderedPlanItems = orderedDays.flatMap { day -> itemsByDay[day.id].orEmpty() }
+    val citiesByDay = cities.groupBy { it.tripDayID }
+    val cityNames = orderedDays.flatMap { day ->
+        citiesByDay[day.id].orEmpty().sortedBy { it.orderIndex }
+    }.map { it.cityName }.distinct()
+    val nextDestinationID = orderedPlanItems.firstOrNull {
+        it.kindRaw == "stop" && it.stopScopeRaw == "place" && it.planStatusRaw == "planned"
+    }?.id
+    val nextDestination = orderedPlanItems.firstOrNull { it.id == nextDestinationID }
+    val nextDestinationDayIndex = orderedDays.indexOfFirst { day ->
+        nextDestinationID != null && items.any { it.tripDayID == day.id && it.id == nextDestinationID }
+    }
+    // indexOf semantics: first occurrence wins.
+    val dayIndexByID = HashMap<String, Int>()
+    orderedDays.forEachIndexed { index, day -> dayIndexByID.putIfAbsent(day.id, index) }
+    val routeItemsKey = orderedPlanItems.joinToString("|") { item ->
+        listOf(item.id, item.latitude, item.longitude, item.transportTypeRaw).joinToString(":")
+    }
+    return PlannedTripModel(
+        orderedDays, cities, storedPlanItems, items, arrangedDays, orderedPlanItems, itemsByDay,
+        dayIndexByID, cityNames, nextDestinationID, nextDestination, nextDestinationDayIndex, routeItemsKey
+    )
+}
+
 private data class TripPlaceDetailSelection(
     val id: String,
     val title: String,
@@ -1602,6 +1713,7 @@ private fun TripPlaceDetailDialog(selection: TripPlaceDetailSelection, onDismiss
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             BoxWithConstraints {
+            val mapHeight = maxHeight * 0.4f
             Column {
                 TopAppBar(
                     title = { Text("地点详情") },
@@ -1609,7 +1721,7 @@ private fun TripPlaceDetailDialog(selection: TripPlaceDetailSelection, onDismiss
                 )
                 AndroidView(
                     factory = { mapView },
-                    modifier = Modifier.fillMaxWidth().height(maxHeight * 0.4f),
+                    modifier = Modifier.fillMaxWidth().height(mapHeight),
                     update = { view ->
                         val map = view.map
                         map.uiSettings.isZoomControlsEnabled = false
@@ -1734,8 +1846,24 @@ private fun TripPlanRouteDialog(
         value = TripRouteLoadState(isLoading = false, plans = plans)
     }
     val navigationPlan = routeLoadState.plans.getOrNull(selectedRouteIndex) ?: routeLoadState.plans.firstOrNull()
-    val navigationRoute = navigationPlan?.points.orEmpty()
-        .map { (latitude, longitude) -> LatLng(latitude, longitude) }
+    // Route geometry, per-instruction segments and endpoint bitmaps are prepared off main; the map
+    // redraws once per prepared display instead of on every recomposition.
+    val routeMapHolder = remember { TripRouteMapHolder() }
+    val routeDisplay by produceState<TripRouteMapDisplay?>(null, selection, navigationPlan, selectedInstructionIndex, markerBackground) {
+        value = withContext(Dispatchers.Default) {
+            val currentPlan = navigationPlan
+            TripRouteMapDisplay(
+                selection = selection,
+                route = currentPlan?.points.orEmpty().map { (latitude, longitude) -> LatLng(latitude, longitude) },
+                instructionSegments = currentPlan?.instructions?.mapIndexed { index, instruction ->
+                    routeInstructionPoints(currentPlan, index, instruction)
+                }.orEmpty(),
+                selectedInstructionIndex = selectedInstructionIndex,
+                selectedEndpointBitmap = tripRouteEndpointMarkerBitmap(context, isSelected = true, backgroundColor = markerBackground),
+                endpointBitmap = tripRouteEndpointMarkerBitmap(context, isSelected = false, backgroundColor = markerBackground)
+            )
+        }
+    }
     LaunchedEffect(selection.id, selectedTransportTypeRaw, routeLoadState.plans.size) {
         selectedRouteIndex = if (routeLoadState.plans.isEmpty()) 0 else {
             preferences.getTripRouteOptionIndex(selection.id)
@@ -1768,6 +1896,12 @@ private fun TripPlanRouteDialog(
                     factory = { mapView },
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     update = { view ->
+                        val display = routeDisplay ?: return@AndroidView
+                        if (routeMapHolder.display === display) return@AndroidView
+                        routeMapHolder.display = display
+                        val selection = display.selection
+                        val navigationRoute = display.route
+                        val selectedStepIndex = display.selectedInstructionIndex
                         val map = view.map
                         map.uiSettings.isZoomControlsEnabled = false
                         map.uiSettings.isMyLocationButtonEnabled = false
@@ -1792,13 +1926,10 @@ private fun TripPlanRouteDialog(
                         if (navigationRoute.size > 1) {
                             map.addPolyline(PolylineOptions().addAll(navigationRoute).width(12f).color(accent))
                         }
-                        val currentPlan = navigationPlan
-                        val instructionSegments = currentPlan?.instructions?.mapIndexed { index, instruction ->
-                            routeInstructionPoints(currentPlan, index, instruction)
-                        }.orEmpty()
+                        val instructionSegments = display.instructionSegments
                         instructionSegments.forEachIndexed { index, points ->
                             if (points.size < 2) return@forEachIndexed
-                            val selected = selectedInstructionIndex == index
+                            val selected = selectedStepIndex == index
                             map.addPolyline(
                                 PolylineOptions()
                                     .addAll(points)
@@ -1812,11 +1943,7 @@ private fun TripPlanRouteDialog(
                                         .anchor(0.5f, 0.5f)
                                         .icon(
                                             BitmapDescriptorFactory.fromBitmap(
-                                                tripRouteEndpointMarkerBitmap(
-                                                    context,
-                                                    isSelected = selected,
-                                                    backgroundColor = markerBackground
-                                                )
+                                                if (selected) display.selectedEndpointBitmap else display.endpointBitmap
                                             )
                                         )
                                         .zIndex(if (selected) 200f else 120f)
@@ -1832,7 +1959,7 @@ private fun TripPlanRouteDialog(
                             true
                         }
                         if (navigationRoute.size > 1) {
-                            val selectedSegment = selectedInstructionIndex?.let { instructionSegments.getOrNull(it) }
+                            val selectedSegment = selectedStepIndex?.let { instructionSegments.getOrNull(it) }
                             if (selectedSegment != null && selectedSegment.size > 1) {
                                 val selectedBounds = LatLngBounds.Builder().also { builder ->
                                     selectedSegment.forEach(builder::include)
@@ -2039,6 +2166,20 @@ private fun TripPlanRouteDialog(
     }
 }
 
+/** TripPlanRouteDialog map content prepared off main. */
+private class TripRouteMapDisplay(
+    val selection: TripPlanRouteSelection,
+    val route: List<LatLng>,
+    val instructionSegments: List<List<LatLng>>,
+    val selectedInstructionIndex: Int?,
+    val selectedEndpointBitmap: android.graphics.Bitmap,
+    val endpointBitmap: android.graphics.Bitmap
+)
+
+private class TripRouteMapHolder {
+    var display: TripRouteMapDisplay? = null
+}
+
 private fun tripRouteEndpointMarkerBitmap(
     context: Context,
     isSelected: Boolean,
@@ -2118,12 +2259,14 @@ private fun TripDetailScreen(
     val allCities by dao.observeAllCities().collectAsState(initial = emptyList())
     val allItems by dao.observeAllItems().collectAsState(initial = emptyList())
     val allFootprints by AppDatabase.getInstance(context).footprintDao().observeAll().collectAsState(initial = emptyList())
-    val dayIDs = remember(days) { days.map { it.id }.toSet() }
-    val cities = allCities.filter { it.tripDayID in dayIDs }
-    val storedItems = allItems.filter { it.tripDayID in dayIDs }
-    val items = if (trip.kindRaw == TripKind.HISTORICAL.raw) {
-        actualTripItems(days, allFootprints, transportRecords)
-    } else storedItems
+    // Day grouping, historical footprint matching and photo JSON run off main.
+    val detail by produceState(EmptyTripDetailModel, trip, days, allCities, allItems, allFootprints, transportRecords) {
+        value = withContext(Dispatchers.Default) {
+            buildTripDetailModel(trip, days, allCities, allItems, allFootprints, transportRecords)
+        }
+    }
+    val cities = detail.cities
+    val items = detail.items
     val scope = rememberCoroutineScope()
     var selectedTimelineItem by remember { mutableStateOf<TripItemEntity?>(null) }
     var selectedFootprintID by remember { mutableStateOf<String?>(null) }
@@ -2165,27 +2308,21 @@ private fun TripDetailScreen(
                         )
                     }
                     if (trip.notes.isNotBlank()) Text(trip.notes, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    days.forEachIndexed { dayIndex, day ->
-                        val dayItems = items.filter { it.tripDayID == day.id }.sortedWith(
-                            compareBy<TripItemEntity> { it.startTime }.thenBy { it.orderIndex }
-                        )
+                    detail.dayRows.forEachIndexed { dayIndex, (day, dayItems) ->
                         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             TripDayTitleChip(
                                 dayNumber = dayIndex + 1,
                                 dateText = SimpleDateFormat("M月d日 E", Locale.SIMPLIFIED_CHINESE).format(day.day)
                             )
-                            dayItems.forEach { item ->
+                            dayItems.forEach { row ->
+                                val item = row.item
                                 TripTimelineRow(
                                     item = item,
                                     activityType = activityTypes.firstOrNull {
                                         it.id == item.activityTypeValue || it.name == item.activityTypeValue
                                     },
-                                    transportRecord = item.sourceTransportRecordID?.let { sourceID ->
-                                        transportRecords.firstOrNull { it.recordID == sourceID }
-                                    },
-                                    photoUris = item.sourceFootprintID?.let { sourceID ->
-                                        allFootprints.firstOrNull { it.footprintID == sourceID }?.let(::tripFootprintPhotoUris)
-                                    }.orEmpty(),
+                                    transportRecord = row.transportRecord,
+                                    photoUris = row.photoUris,
                                     onSelect = { selectedTimelineItem = item }
                                 )
                             }
@@ -2240,6 +2377,57 @@ private fun TripDetailScreen(
             )
         }
     }
+}
+
+private class TripDetailRow(
+    val item: TripItemEntity,
+    val transportRecord: TransportRecordEntity?,
+    val photoUris: List<String>
+)
+
+/** TripDetailScreen data: map inputs plus per-day timeline rows with their record and photos resolved. */
+private class TripDetailModel(
+    val cities: List<TripDayCityEntity>,
+    val items: List<TripItemEntity>,
+    val dayRows: List<Pair<TripDayEntity, List<TripDetailRow>>>
+)
+
+private val EmptyTripDetailModel = TripDetailModel(emptyList(), emptyList(), emptyList())
+
+/** Builds [TripDetailModel]; call from a background dispatcher. */
+private fun buildTripDetailModel(
+    trip: TripEntity,
+    days: List<TripDayEntity>,
+    allCities: List<TripDayCityEntity>,
+    allItems: List<TripItemEntity>,
+    allFootprints: List<FootprintEntity>,
+    transportRecords: List<TransportRecordEntity>
+): TripDetailModel {
+    val dayIDs = days.map { it.id }.toSet()
+    val cities = allCities.filter { it.tripDayID in dayIDs }
+    val storedItems = allItems.filter { it.tripDayID in dayIDs }
+    val items = if (trip.kindRaw == TripKind.HISTORICAL.raw) {
+        actualTripItems(days, allFootprints, transportRecords)
+    } else storedItems
+    // firstOrNull semantics: keep the first record per ID.
+    val transportByID = HashMap<String, TransportRecordEntity>()
+    transportRecords.forEach { transportByID.putIfAbsent(it.recordID, it) }
+    val footprintByID = HashMap<String, FootprintEntity>()
+    allFootprints.forEach { footprintByID.putIfAbsent(it.footprintID, it) }
+    val itemsByDay = items.groupBy { it.tripDayID }
+    val dayRows = days.map { day ->
+        val dayItems = itemsByDay[day.id].orEmpty().sortedWith(
+            compareBy<TripItemEntity> { it.startTime }.thenBy { it.orderIndex }
+        )
+        day to dayItems.map { item ->
+            TripDetailRow(
+                item = item,
+                transportRecord = item.sourceTransportRecordID?.let(transportByID::get),
+                photoUris = item.sourceFootprintID?.let(footprintByID::get)?.let(::tripFootprintPhotoUris).orEmpty()
+            )
+        }
+    }
+    return TripDetailModel(cities, items, dayRows)
 }
 
 @Composable
@@ -2304,6 +2492,59 @@ private data class TripEditorCityGroup(
     val stops: List<TripItemEntity>
 )
 
+private class TripEditorDayLayout(
+    val day: TripDayEntity,
+    val stops: List<TripItemEntity>,
+    val cityGroups: List<TripEditorCityGroup>
+)
+
+private class TripEditorLayout(
+    val orderedDraftStops: List<TripItemEntity>,
+    val dayLayouts: List<TripEditorDayLayout>
+)
+
+private val EmptyTripEditorLayout = TripEditorLayout(emptyList(), emptyList())
+
+/** Builds the editor's per-day city groups; call from a background dispatcher. */
+private fun buildTripEditorLayout(
+    days: List<TripDayEntity>,
+    allCities: List<TripDayCityEntity>,
+    allItems: List<TripItemEntity>
+): TripEditorLayout {
+    val itemsByDay = allItems.groupBy { it.tripDayID }
+    val citiesByDay = allCities.groupBy { it.tripDayID }
+    val orderedDraftStops = days.sortedWith(compareBy<TripDayEntity> { it.day }.thenBy { it.orderIndex })
+        .flatMap { day -> itemsByDay[day.id].orEmpty().filter { it.kindRaw == "stop" }.sortedBy { it.orderIndex } }
+    val dayLayouts = days.map { day ->
+        val dayItems = itemsByDay[day.id].orEmpty().sortedBy { it.orderIndex }
+        val stops = dayItems.filter { it.kindRaw == "stop" }
+        val storedCities = citiesByDay[day.id].orEmpty().sortedBy { it.orderIndex }
+        val storedByKey = storedCities.associateBy { tripCityIdentityKey(it.cityIdentifier, it.countryCode, it.cityName) }
+        val cityGroups = mutableListOf<TripEditorCityGroup>()
+        val representedCityKeys = mutableSetOf<String>()
+        stops.forEach { stop ->
+            val cityName = stop.cityName?.takeIf(String::isNotBlank) ?: "未识别城市"
+            val key = tripCityIdentityKey(stop.cityIdentifier, stop.countryCode, cityName)
+            representedCityKeys += key
+            val last = cityGroups.lastOrNull()
+            if (last?.key == key) {
+                cityGroups[cityGroups.lastIndex] = last.copy(stops = last.stops + stop)
+            } else {
+                cityGroups += TripEditorCityGroup("$key#${cityGroups.size}", key, cityName, storedByKey[key]?.id, listOf(stop))
+            }
+        }
+        val appendedEmptyCityKeys = mutableSetOf<String>()
+        storedCities.filterNot { tripCityIdentityKey(it.cityIdentifier, it.countryCode, it.cityName) in representedCityKeys }.forEach { city ->
+            val key = tripCityIdentityKey(city.cityIdentifier, city.countryCode, city.cityName)
+            if (appendedEmptyCityKeys.add(key)) {
+                cityGroups += TripEditorCityGroup("$key#empty", key, city.cityName, city.id, emptyList())
+            }
+        }
+        TripEditorDayLayout(day, stops, cityGroups)
+    }
+    return TripEditorLayout(orderedDraftStops, dayLayouts)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TripEditorScreen(
@@ -2325,30 +2566,35 @@ private fun TripEditorScreen(
     var draftLoaded by remember(trip.id) { mutableStateOf(!editsPlan) }
     LaunchedEffect(trip.id) {
         if (editsPlan) {
-            val loadedDays = dao.getAllDays().filter { it.tripID == trip.id }.sortedBy { it.day }
-            val dayIDs = loadedDays.map { it.id }.toSet()
-            val loadedCities = dao.getAllCities().filter { it.tripDayID in dayIDs }.map { city ->
-                val latitude = city.latitude
-                val longitude = city.longitude
-                if (!city.cityIdentifier.isNullOrBlank() || latitude == null || longitude == null) city
-                else city.copy(cityIdentifier = runCatching {
-                    GeocodeService.shared.resolveCityIdentifier(latitude, longitude, city.cityName, city.countryCode)
-                }.getOrNull())
+            // Filtering, legacy migration and city identifier resolution run off main; only the
+            // draft list assignment below happens on the main thread.
+            val (loadedDays, loadedCities, loadedItems) = withContext(Dispatchers.Default) {
+                val loadedDays = dao.getAllDays().filter { it.tripID == trip.id }.sortedBy { it.day }
+                val dayIDs = loadedDays.map { it.id }.toSet()
+                val loadedCities = dao.getAllCities().filter { it.tripDayID in dayIDs }.map { city ->
+                    val latitude = city.latitude
+                    val longitude = city.longitude
+                    if (!city.cityIdentifier.isNullOrBlank() || latitude == null || longitude == null) city
+                    else city.copy(cityIdentifier = runCatching {
+                        GeocodeService.shared.resolveCityIdentifier(latitude, longitude, city.cityName, city.countryCode)
+                    }.getOrNull())
+                }
+                val loadedItems = migrateLegacyPlannedTransportItems(
+                    loadedDays,
+                    dao.getAllItems().filter { it.tripDayID in dayIDs }
+                ).map { item ->
+                    val latitude = item.latitude
+                    val longitude = item.longitude
+                    val cityName = item.cityName
+                    if (!item.cityIdentifier.isNullOrBlank() || latitude == null || longitude == null || cityName.isNullOrBlank()) item
+                    else item.copy(cityIdentifier = runCatching {
+                        GeocodeService.shared.resolveCityIdentifier(latitude, longitude, cityName, item.countryCode.orEmpty())
+                    }.getOrNull())
+                }
+                loadedCities.filter { it.cityIdentifier != null }.forEach { dao.upsertCity(it) }
+                loadedItems.filter { it.cityIdentifier != null }.forEach { dao.upsertItem(it) }
+                Triple(loadedDays, loadedCities, loadedItems)
             }
-            val loadedItems = migrateLegacyPlannedTransportItems(
-                loadedDays,
-                dao.getAllItems().filter { it.tripDayID in dayIDs }
-            ).map { item ->
-                val latitude = item.latitude
-                val longitude = item.longitude
-                val cityName = item.cityName
-                if (!item.cityIdentifier.isNullOrBlank() || latitude == null || longitude == null || cityName.isNullOrBlank()) item
-                else item.copy(cityIdentifier = runCatching {
-                    GeocodeService.shared.resolveCityIdentifier(latitude, longitude, cityName, item.countryCode.orEmpty())
-                }.getOrNull())
-            }
-            loadedCities.filter { it.cityIdentifier != null }.forEach { dao.upsertCity(it) }
-            loadedItems.filter { it.cityIdentifier != null }.forEach { dao.upsertItem(it) }
             if (!draftDirty) {
                 draftDays.clear(); draftDays.addAll(loadedDays)
                 draftCities.clear(); draftCities.addAll(loadedCities)
@@ -2360,8 +2606,15 @@ private fun TripEditorScreen(
     val days: List<TripDayEntity> = if (editsPlan) draftDays else observedDays
     val allCities: List<TripDayCityEntity> = if (editsPlan) draftCities else observedCities
     val allItems: List<TripItemEntity> = if (editsPlan) draftItems else observedItems
-    val orderedDraftStops = days.sortedWith(compareBy<TripDayEntity> { it.day }.thenBy { it.orderIndex })
-        .flatMap { day -> allItems.filter { it.tripDayID == day.id && it.kindRaw == "stop" }.sortedBy { it.orderIndex } }
+    // Draft ordering and per-day city grouping run off main on value snapshots of the draft lists
+    // (snapshot-list identity never changes, so the copies also serve as content keys).
+    val daysSnapshot = days.toList()
+    val citiesSnapshot = allCities.toList()
+    val itemsSnapshot = allItems.toList()
+    val editorLayout by produceState(EmptyTripEditorLayout, daysSnapshot, citiesSnapshot, itemsSnapshot) {
+        value = withContext(Dispatchers.Default) { buildTripEditorLayout(daysSnapshot, citiesSnapshot, itemsSnapshot) }
+    }
+    val orderedDraftStops = editorLayout.orderedDraftStops
     var title by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(trip.title)) }
     var notes by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(trip.notes)) }
     var itemTarget by remember { mutableStateOf<TripItemEditTarget?>(null) }
@@ -2536,38 +2789,16 @@ private fun TripEditorScreen(
                             CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                         }
                     }
-                    days.forEachIndexed { dayIndex, day ->
-                    val dayItems = allItems.filter { it.tripDayID == day.id }.sortedBy { it.orderIndex }
-                    val stops = dayItems.filter { it.kindRaw == "stop" }
+                    editorLayout.dayLayouts.forEachIndexed { dayIndex, dayLayout ->
+                    val day = dayLayout.day
+                    val stops = dayLayout.stops
                     TripDayTitleChip(
                         dayNumber = dayIndex + 1,
                         dateText = SimpleDateFormat("M月d日 EEEE", Locale.SIMPLIFIED_CHINESE)
                             .format(day.day)
                             .takeIf { hasPlannedDates }
                     )
-                    val storedCities = allCities.filter { it.tripDayID == day.id }.sortedBy { it.orderIndex }
-                    val storedByKey = storedCities.associateBy { tripCityIdentityKey(it.cityIdentifier, it.countryCode, it.cityName) }
-                    val cityGroups = mutableListOf<TripEditorCityGroup>()
-                    val representedCityKeys = mutableSetOf<String>()
-                    stops.forEach { stop ->
-                        val cityName = stop.cityName?.takeIf(String::isNotBlank) ?: "未识别城市"
-                        val key = tripCityIdentityKey(stop.cityIdentifier, stop.countryCode, cityName)
-                        representedCityKeys += key
-                        val last = cityGroups.lastOrNull()
-                        if (last?.key == key) {
-                            cityGroups[cityGroups.lastIndex] = last.copy(stops = last.stops + stop)
-                        } else {
-                            cityGroups += TripEditorCityGroup("$key#${cityGroups.size}", key, cityName, storedByKey[key]?.id, listOf(stop))
-                        }
-                    }
-                    val appendedEmptyCityKeys = mutableSetOf<String>()
-                    storedCities.filterNot { tripCityIdentityKey(it.cityIdentifier, it.countryCode, it.cityName) in representedCityKeys }.forEach { city ->
-                        val key = tripCityIdentityKey(city.cityIdentifier, city.countryCode, city.cityName)
-                        if (appendedEmptyCityKeys.add(key)) {
-                            cityGroups += TripEditorCityGroup("$key#empty", key, city.cityName, city.id, emptyList())
-                        }
-                    }
-                    cityGroups.forEach { group ->
+                    dayLayout.cityGroups.forEach { group ->
                         val cityStops = group.stops
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text(group.name, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
@@ -3438,11 +3669,6 @@ private fun TripMap(
     val preferences = remember { AppPreferences(context) }
     val mapView = remember { mutableStateOf<TextureMapView?>(null) }
     val holder = remember { TripMapHolder() }
-    val footprintByID = remember(footprints) { footprints.associateBy { it.footprintID } }
-    val tripTransportIDs = remember(items) { items.mapNotNull { it.sourceTransportRecordID }.toSet() }
-    val tripTransports = remember(transportRecords, tripTransportIDs) {
-        transportRecords.filter { it.recordID in tripTransportIDs }
-    }
     val plannedStops = remember(items) {
         items.filter { it.kindRaw == "stop" && it.latitude != null && it.longitude != null }
     }
@@ -3477,10 +3703,13 @@ private fun TripMap(
     }
     val routeColor = MaterialTheme.colorScheme.primary.toArgb()
     val isDark = isSystemInDarkTheme()
-    val photoUris = remember(items, footprintByID) {
-        items.mapNotNull { item ->
-            item.sourceFootprintID?.let(footprintByID::get)?.let(::tripFootprintPhotoUris)?.lastOrNull()
-        }.distinct()
+    val photoUris by produceState(emptyList<String>(), items, footprints) {
+        value = withContext(Dispatchers.Default) {
+            val footprintByID = footprints.associateBy { it.footprintID }
+            items.mapNotNull { item ->
+                item.sourceFootprintID?.let(footprintByID::get)?.let(::tripFootprintPhotoUris)?.lastOrNull()
+            }.distinct()
+        }
     }
     var photoBitmaps by remember { mutableStateOf<Map<String, android.graphics.Bitmap>>(emptyMap()) }
     LaunchedEffect(photoUris) {
@@ -3491,140 +3720,73 @@ private fun TripMap(
         }
         if (loaded.isNotEmpty()) photoBitmaps = photoBitmaps + loaded
     }
+    // Marker bitmaps, route parsing/smoothing and camera coordinates are prepared off main;
+    // the AndroidView update only replays a new display model onto the map.
+    val display by produceState<TripMapDisplay?>(
+        null, cities, items, footprints, activityTypes, transportRecords, plannedNavigationRoutes,
+        selectedItem, isDark, photoBitmaps, routeColor
+    ) {
+        value = withContext(Dispatchers.Default) {
+            buildTripMapDisplay(
+                context, cities, items, footprints, activityTypes, transportRecords, plannedStops,
+                plannedNavigationRoutes, selectedItem, isDark, photoBitmaps, routeColor
+            )
+        }
+    }
     DisposableEffect(Unit) { onDispose { mapView.value?.onPause(); mapView.value?.onDestroy() } }
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx -> TextureMapView(ctx).also { it.onResume(); mapView.value = it } },
         update = { view ->
             val map = view.map
-            val photoBitmapKey = photoBitmaps.keys.sorted().joinToString(",")
-            val overlayKey = cities.joinToString("|") { "${it.id}:${it.latitude},${it.longitude}" } +
-                items.joinToString("|") { "${it.id}:${it.latitude},${it.longitude}:${it.activityTypeValue}" } +
-                activityTypes.joinToString("|") { "${it.id}:${it.icon}:${it.colorHex}" } +
-                tripTransports.joinToString("|") { "${it.recordID}:${it.pointsJson.hashCode()}" } +
-                "|${plannedNavigationRoutes.hashCode()}|${selectedItem?.id}|$isDark|$photoBitmapKey"
-            if (holder.overlayKey != overlayKey) {
-                holder.overlayKey = overlayKey
-                map.clear()
-                val usesPlannedMarkers = items.any { it.planStatusRaw != "actual" } && tripTransports.isEmpty()
-                val footprintMarkers = items.filter { it.kindRaw == "stop" }.mapNotNull { item ->
-                    val latitude = item.latitude ?: return@mapNotNull null
-                    val longitude = item.longitude ?: return@mapNotNull null
-                    val activity = activityTypes.firstOrNull { it.id == item.activityTypeValue || it.name == item.activityTypeValue }
-                    val footprint = item.sourceFootprintID?.let(footprintByID::get)
-                    FootprintMapMarker(
-                        id = footprint?.footprintID,
-                        latitude = latitude,
-                        longitude = longitude,
-                        icon = activity?.icon ?: "place",
-                        colorHex = activity?.colorHex ?: "#00A0AC",
-                        durationSeconds = if (item.startTime != null && item.endTime != null) ((item.endTime.time - item.startTime.time) / 1000).coerceAtLeast(0) else 0,
-                        memberIDs = listOf(item.id),
-                        photoUri = footprint?.let(::tripFootprintPhotoUris)?.lastOrNull(),
-                        scale = if (selectedItem?.id == item.id) 1.5f else 1f
-                    )
-                }
-                if (footprintMarkers.isEmpty()) {
-                    cities.forEach { city ->
-                        val lat = city.latitude; val lon = city.longitude
-                        if (lat != null && lon != null) map.addMarker(MarkerOptions(LatLng(lat, lon)).title(city.cityName))
+            val current = display ?: return@AndroidView
+            if (holder.display !== current) {
+                holder.display = current
+                if (holder.overlayKey != current.overlayKey) {
+                    holder.overlayKey = current.overlayKey
+                    map.clear()
+                    current.cityMarkers.forEach { (position, title) ->
+                        map.addMarker(MarkerOptions(position).title(title))
                     }
-                }
-                val mapMarkers = footprintMarkers.toMutableList()
-                val plannedCoordinates = items.filter { it.kindRaw == "stop" }
-                    .mapNotNull { item ->
-                        val latitude = item.latitude ?: return@mapNotNull null
-                        val longitude = item.longitude ?: return@mapNotNull null
-                        LatLng(latitude, longitude)
+                    current.plannedPolylines.forEach { polyline ->
+                        map.addPolyline(
+                            PolylineOptions().addAll(polyline.points).width(polyline.width).color(polyline.color).apply {
+                                if (polyline.dotted) lineType(PolylineOptions.LineType.LINE_TYPE_DOTTEDLINE)
+                            }
+                        )
                     }
-                if (items.any { it.planStatusRaw != "actual" } && tripTransports.isEmpty() && plannedCoordinates.size > 1) {
-                    val plannedRouteColor = (routeColor and 0x00FFFFFF) or 0x99000000.toInt()
-                    plannedStops.zipWithNext().forEach { (origin, destination) ->
-                        val route = plannedNavigationRoutes[destination.id]
-                        if (route != null) {
-                            map.addPolyline(PolylineOptions().addAll(route).width(6f).color(plannedRouteColor))
-                        } else {
-                            map.addPolyline(
-                                PolylineOptions()
-                                    .addAll(
-                                        listOf(
-                                            LatLng(origin.latitude!!, origin.longitude!!),
-                                            LatLng(destination.latitude!!, destination.longitude!!)
-                                        )
-                                    )
-                                    .width(4f)
-                                    .color((routeColor and 0x00FFFFFF) or (0x66 shl 24))
-                                    .lineType(PolylineOptions.LineType.LINE_TYPE_DOTTEDLINE)
-                            )
+                    current.transportRoutes.forEach { addSmoothedTimelineRoute(map, it, routeColor) }
+                    if (current.usesPlannedMarkers) {
+                        current.sequenceMarkers.forEach { marker ->
+                            map.addMarker(
+                                MarkerOptions()
+                                    .position(marker.position)
+                                    .anchor(0.5f, 0.5f)
+                                    .icon(BitmapDescriptorFactory.fromBitmap(marker.bitmap))
+                                    .zIndex(marker.zIndex)
+                            ).setTag(marker.itemID)
                         }
-                    }
-                }
-                tripTransports.forEach { transport ->
-                    drawSmoothedTimelineRoute(map, transport.pointsJson, routeColor)
-                    val points = parseRouteSegments(transport.pointsJson).flatten()
-                    if (points.size > 1) {
-                        val item = items.firstOrNull { it.sourceTransportRecordID == transport.recordID }
-                        val type = TransportType.from(item?.transportTypeRaw ?: transport.manualTypeRaw ?: transport.typeRaw)
-                        val midpoint = routeDistanceMidpoint(points) ?: return@forEach
-                        mapMarkers += FootprintMapMarker(
-                            id = "transport:${item?.id ?: transport.recordID}",
-                            latitude = midpoint.latitude,
-                            longitude = midpoint.longitude,
-                            icon = type.icon,
-                            colorHex = "#00A0AC",
-                            scale = if (selectedItem?.sourceTransportRecordID == transport.recordID) 1.5f else 1f
+                        map.setOnMarkerClickListener { marker ->
+                            val itemID = marker.tag as? String ?: return@setOnMarkerClickListener false
+                            onOpenPlannedPlace(itemID)
+                            true
+                        }
+                    } else {
+                        map.addPreparedFootprintMarkers(
+                            current.footprintMarkers,
+                            onMarkerClick = { markerID ->
+                                if (!markerID.startsWith("transport:")) onOpenFootprint(markerID)
+                            }
                         )
                     }
                 }
-                if (usesPlannedMarkers) {
-                    items.filter { it.kindRaw == "stop" && it.latitude != null && it.longitude != null }
-                        .forEachIndexed { index, item ->
-                            map.addMarker(
-                                MarkerOptions()
-                                    .position(LatLng(item.latitude!!, item.longitude!!))
-                                    .anchor(0.5f, 0.5f)
-                                    .icon(BitmapDescriptorFactory.fromBitmap(tripSequenceMarkerBitmap(context, index + 1)))
-                                    .zIndex(if (selectedItem?.id == item.id) 150f else 100f)
-                            ).setTag(item.id)
-                        }
-                    map.setOnMarkerClickListener { marker ->
-                        val itemID = marker.tag as? String ?: return@setOnMarkerClickListener false
-                        onOpenPlannedPlace(itemID)
-                        true
-                    }
-                } else {
-                    map.addFootprintMarkers(
-                        mapMarkers,
-                        isDark = isDark,
-                        onMarkerClick = { markerID ->
-                            if (!markerID.startsWith("transport:")) onOpenFootprint(markerID)
-                        },
-                        photoBitmaps = photoBitmaps
-                    )
-                }
             }
-            val selectedCoordinate = selectedItem?.let { item ->
-                if (item.latitude != null && item.longitude != null) LatLng(item.latitude, item.longitude) else null
-            }
-            val selectedRoute = selectedItem?.sourceTransportRecordID?.let { selectedID ->
-                tripTransports.firstOrNull { it.recordID == selectedID }
-            }?.let { parseRouteSegments(it.pointsJson).flatten() }.orEmpty()
-            val allCoordinates = buildList {
-                cities.forEach { city ->
-                    if (city.latitude != null && city.longitude != null) add(LatLng(city.latitude, city.longitude))
-                }
-                items.forEach { item ->
-                    if (item.latitude != null && item.longitude != null) add(LatLng(item.latitude, item.longitude))
-                }
-                tripTransports.forEach { transport ->
-                    parseRouteSegments(transport.pointsJson).forEach { addAll(it) }
-                }
-                plannedNavigationRoutes.values.forEach { addAll(it) }
-            }
-            val cameraKey = (selectedItem?.id ?: allCoordinates.joinToString("|") { "${it.latitude},${it.longitude}" }) +
-                "|bottom:$bottomPaddingPx"
-            if (cameraKey != holder.cameraKey) {
-                holder.cameraKey = cameraKey
+            if (current.cameraBaseKey != holder.cameraBaseKey || bottomPaddingPx != holder.cameraBottom) {
+                holder.cameraBaseKey = current.cameraBaseKey
+                holder.cameraBottom = bottomPaddingPx
+                val selectedRoute = current.selectedRoute
+                val selectedCoordinate = current.selectedCoordinate
+                val allCoordinates = current.allCoordinates
                 when {
                     selectedRoute.size > 1 -> runCatching {
                         val builder = LatLngBounds.Builder()
@@ -3643,6 +3805,168 @@ private fun TripMap(
                 }
             }
         }
+    )
+}
+
+private class TripMapPolyline(val points: List<LatLng>, val width: Float, val color: Int, val dotted: Boolean)
+private class TripMapSequenceMarker(val position: LatLng, val bitmap: android.graphics.Bitmap, val zIndex: Float, val itemID: String)
+
+/** Everything TripMap draws, prepared off main. A new instance is replayed once onto the map. */
+private class TripMapDisplay(
+    val overlayKey: String,
+    val cityMarkers: List<Pair<LatLng, String>>,
+    val plannedPolylines: List<TripMapPolyline>,
+    val transportRoutes: List<List<List<LatLng>>>,
+    val usesPlannedMarkers: Boolean,
+    val sequenceMarkers: List<TripMapSequenceMarker>,
+    val footprintMarkers: List<PreparedFootprintMarker>,
+    val selectedCoordinate: LatLng?,
+    val selectedRoute: List<LatLng>,
+    val allCoordinates: List<LatLng>,
+    val cameraBaseKey: String
+)
+
+/** Builds [TripMapDisplay]; pure data/bitmap work, call from a background dispatcher. */
+private fun buildTripMapDisplay(
+    context: Context,
+    cities: List<TripDayCityEntity>,
+    items: List<TripItemEntity>,
+    footprints: List<FootprintEntity>,
+    activityTypes: List<ActivityTypeEntity>,
+    transportRecords: List<TransportRecordEntity>,
+    plannedStops: List<TripItemEntity>,
+    plannedNavigationRoutes: Map<String, List<LatLng>>,
+    selectedItem: TripItemEntity?,
+    isDark: Boolean,
+    photoBitmaps: Map<String, android.graphics.Bitmap>,
+    routeColor: Int
+): TripMapDisplay {
+    val footprintByID = footprints.associateBy { it.footprintID }
+    val tripTransportIDs = items.mapNotNull { it.sourceTransportRecordID }.toSet()
+    val tripTransports = transportRecords.filter { it.recordID in tripTransportIDs }
+    val transportSegments = tripTransports.associate { it.recordID to parseRouteSegments(it.pointsJson) }
+    val photoBitmapKey = photoBitmaps.keys.sorted().joinToString(",")
+    val overlayKey = cities.joinToString("|") { "${it.id}:${it.latitude},${it.longitude}" } +
+        items.joinToString("|") { "${it.id}:${it.latitude},${it.longitude}:${it.activityTypeValue}" } +
+        activityTypes.joinToString("|") { "${it.id}:${it.icon}:${it.colorHex}" } +
+        tripTransports.joinToString("|") { "${it.recordID}:${it.pointsJson.hashCode()}" } +
+        "|${plannedNavigationRoutes.hashCode()}|${selectedItem?.id}|$isDark|$photoBitmapKey"
+
+    val usesPlannedMarkers = items.any { it.planStatusRaw != "actual" } && tripTransports.isEmpty()
+    val footprintMarkers = items.filter { it.kindRaw == "stop" }.mapNotNull { item ->
+        val latitude = item.latitude ?: return@mapNotNull null
+        val longitude = item.longitude ?: return@mapNotNull null
+        val activity = activityTypes.firstOrNull { it.id == item.activityTypeValue || it.name == item.activityTypeValue }
+        val footprint = item.sourceFootprintID?.let(footprintByID::get)
+        FootprintMapMarker(
+            id = footprint?.footprintID,
+            latitude = latitude,
+            longitude = longitude,
+            icon = activity?.icon ?: "place",
+            colorHex = activity?.colorHex ?: "#00A0AC",
+            durationSeconds = if (item.startTime != null && item.endTime != null) ((item.endTime.time - item.startTime.time) / 1000).coerceAtLeast(0) else 0,
+            memberIDs = listOf(item.id),
+            photoUri = footprint?.let(::tripFootprintPhotoUris)?.lastOrNull(),
+            scale = if (selectedItem?.id == item.id) 1.5f else 1f
+        )
+    }
+    val cityMarkers = if (footprintMarkers.isEmpty()) {
+        cities.mapNotNull { city ->
+            val lat = city.latitude; val lon = city.longitude
+            if (lat != null && lon != null) LatLng(lat, lon) to city.cityName else null
+        }
+    } else emptyList()
+    val mapMarkers = footprintMarkers.toMutableList()
+    val plannedCoordinates = items.filter { it.kindRaw == "stop" }
+        .mapNotNull { item ->
+            val latitude = item.latitude ?: return@mapNotNull null
+            val longitude = item.longitude ?: return@mapNotNull null
+            LatLng(latitude, longitude)
+        }
+    val plannedPolylines = mutableListOf<TripMapPolyline>()
+    if (items.any { it.planStatusRaw != "actual" } && tripTransports.isEmpty() && plannedCoordinates.size > 1) {
+        val plannedRouteColor = (routeColor and 0x00FFFFFF) or 0x99000000.toInt()
+        plannedStops.zipWithNext().forEach { (origin, destination) ->
+            val route = plannedNavigationRoutes[destination.id]
+            if (route != null) {
+                plannedPolylines += TripMapPolyline(route, 6f, plannedRouteColor, dotted = false)
+            } else {
+                plannedPolylines += TripMapPolyline(
+                    listOf(
+                        LatLng(origin.latitude!!, origin.longitude!!),
+                        LatLng(destination.latitude!!, destination.longitude!!)
+                    ),
+                    4f,
+                    (routeColor and 0x00FFFFFF) or (0x66 shl 24),
+                    dotted = true
+                )
+            }
+        }
+    }
+    val transportRoutes = tripTransports.map { transport ->
+        val segments = transportSegments[transport.recordID].orEmpty()
+        val points = segments.flatten()
+        if (points.size > 1) {
+            val item = items.firstOrNull { it.sourceTransportRecordID == transport.recordID }
+            val type = TransportType.from(item?.transportTypeRaw ?: transport.manualTypeRaw ?: transport.typeRaw)
+            routeDistanceMidpoint(points)?.let { midpoint ->
+                mapMarkers += FootprintMapMarker(
+                    id = "transport:${item?.id ?: transport.recordID}",
+                    latitude = midpoint.latitude,
+                    longitude = midpoint.longitude,
+                    icon = type.icon,
+                    colorHex = "#00A0AC",
+                    scale = if (selectedItem?.sourceTransportRecordID == transport.recordID) 1.5f else 1f
+                )
+            }
+        }
+        segments.map(::smoothTimelineRoute).filter { it.size >= 2 }
+    }
+    val sequenceMarkers = if (usesPlannedMarkers) {
+        items.filter { it.kindRaw == "stop" && it.latitude != null && it.longitude != null }
+            .mapIndexed { index, item ->
+                TripMapSequenceMarker(
+                    position = LatLng(item.latitude!!, item.longitude!!),
+                    bitmap = tripSequenceMarkerBitmap(context, index + 1),
+                    zIndex = if (selectedItem?.id == item.id) 150f else 100f,
+                    itemID = item.id
+                )
+            }
+    } else emptyList()
+    val preparedFootprintMarkers = if (usesPlannedMarkers) emptyList()
+    else prepareFootprintMarkers(mapMarkers, isDark, photoBitmaps)
+
+    val selectedCoordinate = selectedItem?.let { item ->
+        if (item.latitude != null && item.longitude != null) LatLng(item.latitude, item.longitude) else null
+    }
+    val selectedRoute = selectedItem?.sourceTransportRecordID?.let { selectedID ->
+        tripTransports.firstOrNull { it.recordID == selectedID }
+    }?.let { transportSegments[it.recordID].orEmpty().flatten() }.orEmpty()
+    val allCoordinates = buildList {
+        cities.forEach { city ->
+            if (city.latitude != null && city.longitude != null) add(LatLng(city.latitude, city.longitude))
+        }
+        items.forEach { item ->
+            if (item.latitude != null && item.longitude != null) add(LatLng(item.latitude, item.longitude))
+        }
+        tripTransports.forEach { transport ->
+            transportSegments[transport.recordID].orEmpty().forEach { addAll(it) }
+        }
+        plannedNavigationRoutes.values.forEach { addAll(it) }
+    }
+    val cameraBaseKey = selectedItem?.id ?: allCoordinates.joinToString("|") { "${it.latitude},${it.longitude}" }
+    return TripMapDisplay(
+        overlayKey = overlayKey,
+        cityMarkers = cityMarkers,
+        plannedPolylines = plannedPolylines,
+        transportRoutes = transportRoutes,
+        usesPlannedMarkers = usesPlannedMarkers,
+        sequenceMarkers = sequenceMarkers,
+        footprintMarkers = preparedFootprintMarkers,
+        selectedCoordinate = selectedCoordinate,
+        selectedRoute = selectedRoute,
+        allCoordinates = allCoordinates,
+        cameraBaseKey = cameraBaseKey
     )
 }
 
@@ -3700,8 +4024,10 @@ private fun routeDistanceMidpoint(points: List<LatLng>): LatLng? {
 }
 
 private class TripMapHolder {
+    var display: TripMapDisplay? = null
     var overlayKey: String? = null
-    var cameraKey: String? = null
+    var cameraBaseKey: String? = null
+    var cameraBottom: Int = Int.MIN_VALUE
 }
 
 @Composable
@@ -4221,7 +4547,11 @@ private fun CitySearchDialog(onDismiss: () -> Unit, onSelect: (SelectedHomeCity)
     var searching by remember { mutableStateOf(false) }
     var resolvingCityKey by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    val localMatches = remember(queryValue.text) { localCatalogMatches(queryValue.text) }
+    // The city catalog (parsed lazily on first access) is searched off main; the text field state is untouched.
+    val localQuery = queryValue.text
+    val localMatches by produceState(emptyList<SelectedHomeCity>(), localQuery) {
+        value = withContext(Dispatchers.Default) { localCatalogMatches(localQuery) }
+    }
     val selectResolvedCity: (SelectedHomeCity) -> Unit = { city ->
         if (resolvingCityKey == null) {
             resolvingCityKey = city.key
@@ -4328,7 +4658,11 @@ private fun HomeCitySearchField(selected: SelectedHomeCity?, onSelect: (Selected
     var queryValue by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue()) }
     var results by remember { mutableStateOf<List<GeocodeService.CitySearchResult>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
-    val localMatches = remember(queryValue.text) { localCatalogMatches(queryValue.text) }
+    // The city catalog (parsed lazily on first access) is searched off main; the text field state is untouched.
+    val localQuery = queryValue.text
+    val localMatches by produceState(emptyList<SelectedHomeCity>(), localQuery) {
+        value = withContext(Dispatchers.Default) { localCatalogMatches(localQuery) }
+    }
     val trackingState by LocationTrackingService.stateFlow.collectAsState()
     val currentCoordinates = when (val state = trackingState) {
         is LocationTrackingService.TrackingState.Tracking -> state.lat?.let { lat -> state.lon?.let { lon -> lat to lon } }
@@ -4427,12 +4761,15 @@ private fun HomeCitySearchField(selected: SelectedHomeCity?, onSelect: (Selected
                         ) { Text(item.second) }
                     }
                 }
-                val groupedCities = remember(majorCityScope) {
-                    AppConfig.TRIP_MAJOR_CITIES
-                        .filter { it.scope == majorCityScope }
-                        .groupBy { tripCityInitial(it.cityName) }
-                        .toSortedMap()
-                        .mapValues { (_, cities) -> cities.sortedBy { it.cityName } }
+                val scopeForGrouping = majorCityScope
+                val groupedCities by produceState(emptyMap<String, List<ConfiguredTripCity>>(), scopeForGrouping) {
+                    value = withContext(Dispatchers.Default) {
+                        AppConfig.TRIP_MAJOR_CITIES
+                            .filter { it.scope == scopeForGrouping }
+                            .groupBy { tripCityInitial(it.cityName) }
+                            .toSortedMap()
+                            .mapValues { (_, cities) -> cities.sortedBy { it.cityName } }
+                    }
                 }
                 val groupStartIndices = remember(groupedCities) {
                     var itemIndex = 0
@@ -4647,8 +4984,8 @@ private fun TripOptionsDialog(context: Context, dao: com.ct106.difangke.data.db.
     }
 }
 
-private suspend fun suppressAutomaticRanges(preferences: AppPreferences, trips: List<TripEntity>) {
-    if (trips.isEmpty()) return
+private suspend fun suppressAutomaticRanges(preferences: AppPreferences, trips: List<TripEntity>) = withContext<Unit>(Dispatchers.Default) {
+    if (trips.isEmpty()) return@withContext
     val ranges = mutableListOf<Pair<Long, Long>>()
     runCatching {
         val stored = JSONArray(preferences.getTripSuppressedRanges() ?: "[]")

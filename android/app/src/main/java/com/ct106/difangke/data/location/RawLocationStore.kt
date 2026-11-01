@@ -21,7 +21,9 @@ class RawLocationStore private constructor(context: Context) {
     companion object {
         private const val TAG = "RawLocationStore"
         private const val DIR_NAME = "RawLocations"
-        private val DATE_FMT = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        // SimpleDateFormat is not thread-safe and the store is used from several dispatchers.
+        private val DATE_FMT: ThreadLocal<SimpleDateFormat> =
+            ThreadLocal.withInitial { SimpleDateFormat("yyyy-MM-dd", Locale.US) }
 
         @Volatile private var INSTANCE: RawLocationStore? = null
 
@@ -37,7 +39,7 @@ class RawLocationStore private constructor(context: Context) {
 
     private val baseDir: File = File(context.filesDir, DIR_NAME).also { it.mkdirs() }
 
-    private fun getFile(date: Date): File = File(baseDir, "${DATE_FMT.format(date)}.csv")
+    private fun getFile(date: Date): File = File(baseDir, "${DATE_FMT.get()!!.format(date)}.csv")
 
     /** 存储单个定位点（通过原始坐标） */
     fun saveRawPoint(lat: Double, lon: Double, accuracy: Double, speed: Double, timeMs: Long) {
@@ -166,7 +168,7 @@ class RawLocationStore private constructor(context: Context) {
             runCatching {
                 val dateStr = file.nameWithoutExtension.take(10)
                 val cal = Calendar.getInstance()
-                DATE_FMT.parse(dateStr)?.let {
+                DATE_FMT.get()!!.parse(dateStr)?.let {
                     cal.time = it
                     cal.set(Calendar.HOUR_OF_DAY, 0)
                     cal.set(Calendar.MINUTE, 0)

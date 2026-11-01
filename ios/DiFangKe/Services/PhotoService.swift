@@ -75,6 +75,44 @@ private final class PhotoScanClusterCompletion: @unchecked Sendable {
     }
 }
 
+/// Carries Photos objects (immutable, thread-safe in practice) out of a detached task.
+private struct PhotoUncheckedSendable<Value>: @unchecked Sendable {
+    let value: Value
+}
+
+/// Handle for an image request whose asset lookup runs off the main thread.
+/// `cancel()` stops a pending lookup and cancels the PHImageManager request;
+/// once cancelled, no further completion or progress callbacks are delivered.
+final class PhotoImageRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isCancelledStorage = false
+    private var requestID: PHImageRequestID?
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isCancelledStorage
+    }
+
+    func cancel() {
+        lock.lock()
+        isCancelledStorage = true
+        let id = requestID
+        requestID = nil
+        lock.unlock()
+        if let id { PHImageManager.default().cancelImageRequest(id) }
+    }
+
+    /// Starts the image request unless already cancelled. The lock is held
+    /// while starting so a concurrent cancel() always sees the request ID.
+    fileprivate func start(_ makeRequest: () -> PHImageRequestID) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isCancelledStorage else { return }
+        requestID = makeRequest()
+    }
+}
+
 /// An import preview contains detached models. Keep their IDs across an
 /// unexpected app termination so a legacy edit path can never resurrect one
 /// into the timeline on the following launch.
@@ -356,29 +394,39 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         return PHAsset.fetchAssets(with: .image, options: options).count
     }
     
-    func fetchAssets(startTime: Date, endTime: Date, near location: CLLocationCoordinate2D? = nil, maxDistance: CLLocationDistance = 1000, completion: @escaping ([PHAsset]) -> Void) {
+    /// Default radius used when matching a stay's photos by location.
+    static let defaultAssetMatchDistance: CLLocationDistance = 1000
+
+    func fetchAssets(startTime: Date, endTime: Date, near location: CLLocationCoordinate2D? = nil, maxDistance: CLLocationDistance = PhotoService.defaultAssetMatchDistance, completion: @escaping ([PHAsset]) -> Void) {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else {
             completion([])
             return
         }
 
+        // The Photos query itself also runs off the caller's thread.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let assets = Self.matchingAssets(startTime: startTime, endTime: endTime, near: location, maxDistance: maxDistance)
+            DispatchQueue.main.async { completion(assets) }
+        }
+    }
+
+    /// Synchronous core of `fetchAssets`; call only off the main thread.
+    private static func matchingAssets(startTime: Date, endTime: Date, near location: CLLocationCoordinate2D?, maxDistance: CLLocationDistance) -> [PHAsset] {
         let options = PHFetchOptions()
-        let bufferStart = startTime.addingTimeInterval(-Self.linkingTimeBuffer)
-        let bufferEnd = endTime.addingTimeInterval(Self.linkingTimeBuffer)
+        let bufferStart = startTime.addingTimeInterval(-linkingTimeBuffer)
+        let bufferEnd = endTime.addingTimeInterval(linkingTimeBuffer)
         options.predicate = NSPredicate(format: "creationDate > %@ AND creationDate < %@", bufferStart as NSDate, bufferEnd as NSDate)
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         
         let result = PHAsset.fetchAssets(with: .image, options: options)
-        DispatchQueue.global(qos: .userInitiated).async {
-            var assets: [PHAsset] = []
-            result.enumerateObjects { asset, _, _ in
-                if Self.asset(asset, belongsToStayFrom: startTime, to: endTime, near: location, maxDistance: maxDistance) {
-                    assets.append(asset)
-                }
+        var assets: [PHAsset] = []
+        result.enumerateObjects { asset, _, _ in
+            if Self.asset(asset, belongsToStayFrom: startTime, to: endTime, near: location, maxDistance: maxDistance) {
+                assets.append(asset)
             }
-            DispatchQueue.main.async { completion(assets) }
         }
+        return assets
     }
 
     /// A footprint's representative photo: the most recently taken one.
@@ -472,23 +520,93 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     /// rule as automatic photo linking to recover old records whose Photos
     /// local identifiers changed before cloud identifier metadata was stored.
     /// This is display-only recovery and never rewrites the footprint store.
+    ///
+    /// Reads the footprint on the main actor (where the main-context models
+    /// passed here live), then does all Photos work off main. Callers holding a
+    /// background-context footprint should use the snapshot overload below.
+    @MainActor
     func displayableAssetIDs(for footprint: Footprint) async -> [String] {
-        let storedAssetIDs = footprint.photoAssetIDs
-        let resolvedAssetIDs = displayableAssetIDs(storedAssetIDs)
-        guard resolvedAssetIDs.count < Set(storedAssetIDs).count else { return resolvedAssetIDs }
+        await displayableAssetIDs(
+            storedAssetIDs: footprint.photoAssetIDs,
+            startTime: footprint.startTime,
+            endTime: footprint.endTime,
+            coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+        )
+    }
 
-        let matchedAssets: [PHAsset] = await withCheckedContinuation { continuation in
-            fetchAssets(
-                startTime: footprint.startTime,
-                endTime: footprint.endTime,
-                near: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
-            ) { assets in
-                continuation.resume(returning: assets)
-            }
-        }
-        var seenIdentifiers = Set<String>()
-        return (resolvedAssetIDs + matchedAssets.map(\.localIdentifier))
-            .filter { seenIdentifiers.insert($0).inserted }
+    /// Snapshot form of `displayableAssetIDs(for:)`; every Photos query runs off main.
+    func displayableAssetIDs(
+        storedAssetIDs: [String],
+        startTime: Date,
+        endTime: Date,
+        coordinate: CLLocationCoordinate2D
+    ) async -> [String] {
+        await Task.detached(priority: .userInitiated) { [self] in
+            let resolvedAssetIDs = displayableAssetIDs(storedAssetIDs)
+            guard resolvedAssetIDs.count < Set(storedAssetIDs).count else { return resolvedAssetIDs }
+
+            // Same query and rule as fetchAssets(startTime:endTime:near:), run inline.
+            let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+            guard status == .authorized || status == .limited else { return resolvedAssetIDs }
+            let matchedAssetIDs = Self.matchingAssets(
+                startTime: startTime, endTime: endTime, near: coordinate,
+                maxDistance: Self.defaultAssetMatchDistance
+            ).map(\.localIdentifier)
+            var seenIdentifiers = Set<String>()
+            return (resolvedAssetIDs + matchedAssetIDs)
+                .filter { seenIdentifiers.insert($0).inserted }
+        }.value
+    }
+
+    // MARK: - Off-main counterparts
+    // Each shares the synchronous implementation (and its caches) above but
+    // runs the PHAsset query in a detached task, so main-actor callers only
+    // await the result.
+
+    func getEarliestAssetDateAsync() async -> Date? {
+        await Task.detached(priority: .userInitiated) { [self] in
+            getEarliestAssetDate()
+        }.value
+    }
+
+    func validateAssetIDsAsync(_ assetIDs: [String]) async -> Bool {
+        if assetIDs.isEmpty { return true }
+        return await Task.detached(priority: .userInitiated) { [self] in
+            validateAssetIDs(assetIDs)
+        }.value
+    }
+
+    func fetchCountAsync(startTime: Date, endTime: Date) async -> Int {
+        await Task.detached(priority: .userInitiated) { [self] in
+            fetchCount(startTime: startTime, endTime: endTime)
+        }.value
+    }
+
+    func latestAssetAsync(among assetIDs: [String]) async -> PHAsset? {
+        guard !assetIDs.isEmpty else { return nil }
+        return await Task.detached(priority: .userInitiated) { [self] in
+            PhotoUncheckedSendable(value: latestAsset(among: assetIDs))
+        }.value.value
+    }
+
+    func earliestAssetAsync(among assetIDs: [String]) async -> PHAsset? {
+        guard !assetIDs.isEmpty else { return nil }
+        return await Task.detached(priority: .userInitiated) { [self] in
+            PhotoUncheckedSendable(value: earliestAsset(among: assetIDs))
+        }.value.value
+    }
+
+    func assetIDsOldestFirstAsync(_ assetIDs: [String]) async -> [String] {
+        await Task.detached(priority: .userInitiated) { [self] in
+            assetIDsOldestFirst(assetIDs)
+        }.value
+    }
+
+    func displayableAssetIDsAsync(_ assetIDs: [String]) async -> [String] {
+        guard !assetIDs.isEmpty else { return [] }
+        return await Task.detached(priority: .userInitiated) { [self] in
+            displayableAssetIDs(assetIDs)
+        }.value
     }
 
     /// Photos taken this long before/after a stay still belong to it.
@@ -550,20 +668,16 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     
     @discardableResult
     func loadImage(for assetID: String, targetSize: CGSize, contentMode: PHImageContentMode = .aspectFill, progressHandler: ((Double) -> Void)? = nil, completion: @escaping (UIImage?, Bool, PHAuthorizationStatus, Bool) -> Void) -> PHImageRequestID? {
+        // Returns the PHImageManager request ID synchronously, so the asset
+        // lookup happens on the caller's thread. Prefer `requestImage(...)`
+        // below, which performs the lookup off main and returns a cancellable handle.
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else {
             DispatchQueue.main.async { completion(nil, true, status, false) }
             return nil
         }
         
-        let fetchOptions = PHFetchOptions()
-        fetchOptions.includeHiddenAssets = true
-        fetchOptions.includeAllBurstAssets = true
-        
-        let resolvedAssetID = resolvedAssetIdentifier(for: assetID)
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [resolvedAssetID], options: fetchOptions)
-
-        guard let asset = assets.firstObject else {
+        guard let asset = imageAsset(for: assetID) else {
             DispatchQueue.main.async {
                 let exists = (status == .limited)
                 completion(nil, exists, status, false)
@@ -571,6 +685,59 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             return nil
         }
         
+        return startImageRequest(for: asset, targetSize: targetSize, contentMode: contentMode, status: status,
+                                 progressHandler: progressHandler, completion: completion)
+    }
+
+    /// Same contract as `loadImage` (callbacks on main, identical arguments),
+    /// but the PHAsset lookup runs off the main thread. Cancel through the
+    /// returned handle; after `cancel()` no callbacks are delivered.
+    @discardableResult
+    func requestImage(for assetID: String, targetSize: CGSize, contentMode: PHImageContentMode = .aspectFill, progressHandler: ((Double) -> Void)? = nil, completion: @escaping (UIImage?, Bool, PHAuthorizationStatus, Bool) -> Void) -> PhotoImageRequest {
+        let request = PhotoImageRequest()
+        let guardedProgress: ((Double) -> Void)? = progressHandler.map { handler in
+            { progress in
+                guard !request.isCancelled else { return }
+                handler(progress)
+            }
+        }
+        let guardedCompletion: (UIImage?, Bool, PHAuthorizationStatus, Bool) -> Void = { image, exists, status, isDegraded in
+            guard !request.isCancelled else { return }
+            completion(image, exists, status, isDegraded)
+        }
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else {
+            DispatchQueue.main.async { guardedCompletion(nil, true, status, false) }
+            return request
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard !request.isCancelled else { return }
+            guard let asset = self.imageAsset(for: assetID) else {
+                DispatchQueue.main.async {
+                    let exists = (status == .limited)
+                    guardedCompletion(nil, exists, status, false)
+                }
+                return
+            }
+            request.start {
+                self.startImageRequest(for: asset, targetSize: targetSize, contentMode: contentMode, status: status,
+                                       progressHandler: guardedProgress, completion: guardedCompletion)
+            }
+        }
+        return request
+    }
+
+    private func imageAsset(for assetID: String) -> PHAsset? {
+        let fetchOptions = PHFetchOptions()
+        fetchOptions.includeHiddenAssets = true
+        fetchOptions.includeAllBurstAssets = true
+
+        let resolvedAssetID = resolvedAssetIdentifier(for: assetID)
+        return PHAsset.fetchAssets(withLocalIdentifiers: [resolvedAssetID], options: fetchOptions).firstObject
+    }
+
+    private func startImageRequest(for asset: PHAsset, targetSize: CGSize, contentMode: PHImageContentMode, status: PHAuthorizationStatus, progressHandler: ((Double) -> Void)?, completion: @escaping (UIImage?, Bool, PHAuthorizationStatus, Bool) -> Void) -> PHImageRequestID {
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = true
         options.deliveryMode = .opportunistic

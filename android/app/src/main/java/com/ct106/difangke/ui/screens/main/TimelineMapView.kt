@@ -6,13 +6,17 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.viewinterop.AndroidView
 import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.ui.components.FootprintMapMarker
-import com.ct106.difangke.ui.components.addFootprintMarkers
+import com.ct106.difangke.ui.components.PreparedFootprintMarker
+import com.ct106.difangke.ui.components.addPreparedFootprintMarkers
+import com.ct106.difangke.ui.components.prepareFootprintMarkers
 import com.ct106.difangke.ui.components.addImportantPlaceCircles
 import com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory
 import com.tencent.tencentmap.mapsdk.maps.TencentMap
@@ -21,9 +25,12 @@ import com.tencent.tencentmap.mapsdk.maps.model.BitmapDescriptorFactory
 import com.tencent.tencentmap.mapsdk.maps.model.CameraPosition
 import com.tencent.tencentmap.mapsdk.maps.model.LatLng
 import com.tencent.tencentmap.mapsdk.maps.model.LatLngBounds
+import com.tencent.tencentmap.mapsdk.maps.model.Marker
 import com.tencent.tencentmap.mapsdk.maps.model.MarkerOptions
 import com.tencent.tencentmap.mapsdk.maps.model.PolylineOptions
 import com.tencent.tencentmap.mapsdk.maps.model.TencentMapGestureListener
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** Everything drawn on the home map. A new instance triggers one redraw. */
 data class TimelineMapOverlays(
@@ -45,9 +52,16 @@ data class TimelineCameraFit(
     val skipMove: Boolean = false
 )
 
+/** Overlays with routes smoothed and pin bitmaps rendered off main; a new instance triggers one redraw. */
+private class PreparedTimelineMapOverlays(
+    val places: List<PlaceEntity>,
+    val routes: List<List<List<LatLng>>>,
+    val markers: List<PreparedFootprintMarker>
+)
+
 private class TimelineMapHolder {
-    var lastOverlays: TimelineMapOverlays? = null
-    var lastPhotos: Map<String, Bitmap>? = null
+    var lastPrepared: PreparedTimelineMapOverlays? = null
+    var userMarker: Marker? = null
     var lastFitKey: String? = null
     var lastFollowRequest: Int = 0
     var lastUser: LatLng? = null
@@ -84,6 +98,16 @@ fun TimelineMapView(
     holder.onMarkerClick = onMarkerClick
     val isDark = isSystemInDarkTheme()
     val routeColor = MaterialTheme.colorScheme.primary.toArgb()
+    val prepared by produceState<PreparedTimelineMapOverlays?>(null, overlays, photoBitmaps, isDark) {
+        value = withContext(Dispatchers.Default) {
+            PreparedTimelineMapOverlays(
+                places = overlays.places,
+                routes = overlays.routes.map(::prepareSmoothedTimelineRoute),
+                markers = if (overlays.markers.isEmpty()) emptyList()
+                else prepareFootprintMarkers(overlays.markers, isDark, photoBitmaps)
+            )
+        }
+    }
 
     AndroidView(
         factory = { ctx -> TextureMapView(ctx).apply { onResume() } },
@@ -127,16 +151,27 @@ fun TimelineMapView(
             map.mapType = if (isDark) TencentMap.MAP_TYPE_DARK else TencentMap.MAP_TYPE_NORMAL
         }
 
-        val needsRedraw = holder.lastOverlays != overlays || holder.lastPhotos != photoBitmaps ||
-            holder.lastUser != userLocation
-        if (needsRedraw) {
-            holder.lastOverlays = overlays
-            holder.lastPhotos = photoBitmaps
-            holder.lastUser = userLocation
+        val current = prepared
+        val needsRedraw = current != null && holder.lastPrepared !== current
+        if (needsRedraw && current != null) {
+            holder.lastPrepared = current
             map.clear()
-            map.addImportantPlaceCircles(overlays.places)
-            overlays.routes.forEach { drawSmoothedTimelineRoute(map, it, routeColor) }
-            userLocation?.let {
+            holder.userMarker = null
+            map.addImportantPlaceCircles(current.places)
+            current.routes.forEach { addSmoothedTimelineRoute(map, it, routeColor) }
+            if (current.markers.isNotEmpty()) {
+                map.addPreparedFootprintMarkers(
+                    current.markers,
+                    onMarkerClick = { id -> holder.onMarkerClick(id) }
+                )
+            }
+        }
+        // The user marker moves on every GPS fix; update it alone instead of redrawing everything.
+        val userChanged = holder.lastUser != userLocation
+        if (needsRedraw || userChanged) {
+            holder.lastUser = userLocation
+            holder.userMarker?.remove()
+            holder.userMarker = userLocation?.let {
                 map.addMarker(
                     MarkerOptions()
                         .position(it)
@@ -144,14 +179,6 @@ fun TimelineMapView(
                         .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE))
                         .zIndex(200f)
                         .title("当前位置")
-                )
-            }
-            if (overlays.markers.isNotEmpty()) {
-                map.addFootprintMarkers(
-                    overlays.markers,
-                    isDark = isDark,
-                    onMarkerClick = { id -> holder.onMarkerClick(id) },
-                    photoBitmaps = photoBitmaps
                 )
             }
         }
@@ -162,7 +189,7 @@ fun TimelineMapView(
         if (!suspendCameraUpdates && followUserRequest != holder.lastFollowRequest && userLocation != null) {
             holder.lastFollowRequest = followUserRequest
             map.animateCamera(CameraUpdateFactory.newLatLngZoom(userLocation, 15f))
-        } else if (!suspendCameraUpdates && isFollowingUser && userLocation != null && needsRedraw) {
+        } else if (!suspendCameraUpdates && isFollowingUser && userLocation != null && (needsRedraw || userChanged)) {
             map.animateCamera(CameraUpdateFactory.newLatLng(userLocation))
         }
 
@@ -302,7 +329,15 @@ internal fun smoothTimelineRoute(segment: List<LatLng>): List<LatLng> {
     return out
 }
 
-internal fun drawSmoothedTimelineRoute(map: TencentMap, pointsJson: String, color: Int) {
-    val segments = parseRouteSegments(pointsJson).map(::smoothTimelineRoute).filter { it.size >= 2 }
+/** Parses and smooths a route JSON; pure geometry, call from a background dispatcher. */
+internal fun prepareSmoothedTimelineRoute(pointsJson: String): List<List<LatLng>> =
+    parseRouteSegments(pointsJson).map(::smoothTimelineRoute).filter { it.size >= 2 }
+
+/** Adds segments produced by [prepareSmoothedTimelineRoute]; map mutation only (main thread). */
+internal fun addSmoothedTimelineRoute(map: TencentMap, segments: List<List<LatLng>>, color: Int) {
     segments.forEach { map.addPolyline(PolylineOptions().addAll(it).width(12f).color(color)) }
+}
+
+internal fun drawSmoothedTimelineRoute(map: TencentMap, pointsJson: String, color: Int) {
+    addSmoothedTimelineRoute(map, prepareSmoothedTimelineRoute(pointsJson), color)
 }

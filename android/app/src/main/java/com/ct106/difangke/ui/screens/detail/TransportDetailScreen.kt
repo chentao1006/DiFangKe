@@ -32,6 +32,8 @@ import com.ct106.difangke.ui.components.NearbyPlacePickerSheet
 import com.ct106.difangke.ui.components.addImportantPlaceCircles
 import com.ct106.difangke.ui.shared.TimelineEditActions
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -108,12 +110,19 @@ internal fun TransportDetailContent(
             return@Column
         }
 
-        val pathPoints = remember(t.pointsJson) { parseTransportDetailPathPoints(t.pointsJson) }
+        // Route JSON is parsed off main; coordinates are derived in the same pass.
+        val route by produceState(TransportDetailRoute.Empty, t.pointsJson) {
+            value = withContext(Dispatchers.Default) {
+                val parsed = parseTransportDetailPathPoints(t.pointsJson)
+                TransportDetailRoute(parsed, parsed.map { it.coordinate })
+            }
+        }
+        val pathPoints = route.pathPoints
         if (showMap) {
             // iOS: map fills the sheet, summary card floats over it via safeAreaInset(.bottom).
             Box(Modifier.fillMaxWidth().weight(1f)) {
                 TransportDetailMapView(
-                    points = pathPoints.map { it.coordinate },
+                    points = route.coordinates,
                     pathPoints = pathPoints,
                     isDark = isSystemInDarkTheme(),
                     primaryColor = DfkAccent.toArgb(),
@@ -322,6 +331,28 @@ fun TransportDetailMapView(
         endLocation: String? = null,
         allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity> = emptyList()
 ) {
+    // Polyline segments (with >5 min gap detection) are built off main.
+    val preparedSegments by produceState<List<Pair<List<com.tencent.tencentmap.mapsdk.maps.model.LatLng>, Boolean>>?>(
+        null, points, pathPoints
+    ) {
+        value = withContext(Dispatchers.Default) {
+            if (points.isEmpty()) emptyList()
+            else if (pathPoints.size >= 2) {
+                pathPoints.zipWithNext { previous, current ->
+                    val isDashed =
+                            previous.timestamp != null &&
+                                    current.timestamp != null &&
+                                    kotlin.math.abs(
+                                            current.timestamp - previous.timestamp
+                                    ) > 5 * 60 * 1000L
+                    listOf(previous.coordinate, current.coordinate) to isDashed
+                }
+            } else {
+                listOf(points to false)
+            }
+        }
+    }
+    val drawn = remember { TransportDetailDrawState() }
     AndroidView(
             factory = { ctx ->
                 com.tencent.tencentmap.mapsdk.maps.TextureMapView(ctx).apply {
@@ -346,23 +377,21 @@ fun TransportDetailMapView(
             isTiltGesturesEnabled = false
         }
 
+        // Redraw (and refit the camera) only when the prepared content or its look changes.
+        val segments = preparedSegments ?: return@AndroidView
+        if (drawn.segments === segments && drawn.isDark == isDark && drawn.primaryColor == primaryColor &&
+            drawn.allPlaces == allPlaces && drawn.startLocation == startLocation && drawn.endLocation == endLocation
+        ) return@AndroidView
+        drawn.segments = segments
+        drawn.isDark = isDark
+        drawn.primaryColor = primaryColor
+        drawn.allPlaces = allPlaces
+        drawn.startLocation = startLocation
+        drawn.endLocation = endLocation
+
         amap.clear()
         amap.addImportantPlaceCircles(allPlaces)
         if (points.isNotEmpty()) {
-            val segments =
-                    if (pathPoints.size >= 2) {
-                        pathPoints.zipWithNext { previous, current ->
-                            val isDashed =
-                                    previous.timestamp != null &&
-                                            current.timestamp != null &&
-                                            kotlin.math.abs(
-                                                    current.timestamp - previous.timestamp
-                                            ) > 5 * 60 * 1000L
-                            listOf(previous.coordinate, current.coordinate) to isDashed
-                        }
-                    } else {
-                        listOf(points to false)
-                    }
 
             segments.forEach { (segment, isDashed) ->
                 // iOS: accent stroke, 0.7 opacity solid / 0.4 opacity dashed for >5 min gaps.
@@ -443,6 +472,26 @@ fun TransportDetailMapView(
             }
         }
     }
+}
+
+/** Parsed route for the detail sheet: raw path points plus their coordinates. */
+private class TransportDetailRoute(
+        val pathPoints: List<TransportDetailPathPoint>,
+        val coordinates: List<com.tencent.tencentmap.mapsdk.maps.model.LatLng>
+) {
+    companion object {
+        val Empty = TransportDetailRoute(emptyList(), emptyList())
+    }
+}
+
+/** Inputs last drawn by [TransportDetailMapView]; plain fields so drawing never triggers recomposition. */
+private class TransportDetailDrawState {
+    var segments: List<Pair<List<com.tencent.tencentmap.mapsdk.maps.model.LatLng>, Boolean>>? = null
+    var isDark: Boolean? = null
+    var primaryColor: Int? = null
+    var allPlaces: List<com.ct106.difangke.data.db.entity.PlaceEntity>? = null
+    var startLocation: String? = null
+    var endLocation: String? = null
 }
 
 data class TransportDetailPathPoint(

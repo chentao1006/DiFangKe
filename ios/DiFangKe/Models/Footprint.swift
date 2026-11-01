@@ -16,6 +16,79 @@ struct PhotoMetadata: Codable, Equatable {
     var cloudIdentifier: String?
 }
 
+/// Decoded, derived coordinate data for one footprint. Immutable once built.
+final class FootprintGeometry: @unchecked Sendable {
+    let latitudeData: Data
+    let longitudeData: Data
+    let latitudes: [Double]
+    let longitudes: [Double]
+    let coordinates: [CLLocationCoordinate2D]
+    let meanLatitude: Double
+    let meanLongitude: Double
+
+    init(latitudeData: Data, longitudeData: Data, latitudes: [Double], longitudes: [Double]) {
+        self.latitudeData = latitudeData
+        self.longitudeData = longitudeData
+        self.latitudes = latitudes
+        self.longitudes = longitudes
+        self.coordinates = zip(latitudes, longitudes).map { CLLocationCoordinate2D(latitude: $0, longitude: $1) }
+        self.meanLatitude = latitudes.isEmpty ? 0 : latitudes.reduce(0, +) / Double(latitudes.count)
+        self.meanLongitude = longitudes.isEmpty ? 0 : longitudes.reduce(0, +) / Double(longitudes.count)
+    }
+
+    convenience init(latitudeData: Data, longitudeData: Data) {
+        self.init(
+            latitudeData: latitudeData,
+            longitudeData: longitudeData,
+            latitudes: (try? JSONDecoder().decode([Double].self, from: latitudeData)) ?? [],
+            longitudes: (try? JSONDecoder().decode([Double].self, from: longitudeData)) ?? []
+        )
+    }
+}
+
+/// Process-wide, thread-safe memo of decoded footprint geometry. Entries are
+/// keyed by footprintID and only served while the stored Data still matches,
+/// so another context's edits or a sync refresh never return stale geometry.
+/// Never persisted; NSCache evicts under memory pressure.
+final class FootprintGeometryCache: @unchecked Sendable {
+    static let shared = FootprintGeometryCache()
+
+    private let cache = NSCache<NSUUID, FootprintGeometry>()
+
+    func geometry(for id: UUID, latitudeData: Data, longitudeData: Data) -> FootprintGeometry {
+        let key = id as NSUUID
+        if let cached = cache.object(forKey: key),
+           cached.latitudeData == latitudeData,
+           cached.longitudeData == longitudeData {
+            return cached
+        }
+        let built = FootprintGeometry(latitudeData: latitudeData, longitudeData: longitudeData)
+        cache.setObject(built, forKey: key)
+        return built
+    }
+
+    /// Setter path: reuse the already-known values instead of decoding again.
+    func updateLatitudes(for id: UUID, latitudeData: Data, latitudes: [Double], longitudeData: Data) {
+        let key = id as NSUUID
+        guard let cached = cache.object(forKey: key), cached.longitudeData == longitudeData else {
+            cache.removeObject(forKey: key)
+            return
+        }
+        cache.setObject(FootprintGeometry(latitudeData: latitudeData, longitudeData: longitudeData,
+                                          latitudes: latitudes, longitudes: cached.longitudes), forKey: key)
+    }
+
+    func updateLongitudes(for id: UUID, longitudeData: Data, longitudes: [Double], latitudeData: Data) {
+        let key = id as NSUUID
+        guard let cached = cache.object(forKey: key), cached.latitudeData == latitudeData else {
+            cache.removeObject(forKey: key)
+            return
+        }
+        cache.setObject(FootprintGeometry(latitudeData: latitudeData, longitudeData: longitudeData,
+                                          latitudes: cached.latitudes, longitudes: longitudes), forKey: key)
+    }
+}
+
 @Model
 final class Footprint {
     var footprintID: UUID = UUID()
@@ -86,48 +159,49 @@ final class Footprint {
         return allActivities.first { $0.id.uuidString == val || $0.name == val }
     }
     
+    // Decoded geometry is memoized outside the model (see FootprintGeometryCache)
+    // and validated against the stored Data, so repeated reads from sort
+    // comparators, filters and view bodies are O(1) without schema changes.
+    private var geometry: FootprintGeometry {
+        FootprintGeometryCache.shared.geometry(
+            for: footprintID, latitudeData: latitudeData, longitudeData: longitudeData
+        )
+    }
+
     // Computed property to reconstruct CLLocationCoordinate2D
     var coordinates: [CLLocationCoordinate2D] {
-        zip(latitudeArray, longitudeArray).map { CLLocationCoordinate2D(latitude: $0, longitude: $1) }
+        geometry.coordinates
     }
     
     var latitude: Double {
-        guard !latitudeArray.isEmpty else { return 0 }
-        return latitudeArray.reduce(0, +) / Double(latitudeArray.count)
+        geometry.meanLatitude
     }
     
     var longitude: Double {
-        guard !longitudeArray.isEmpty else { return 0 }
-        return longitudeArray.reduce(0, +) / Double(longitudeArray.count)
+        geometry.meanLongitude
     }
     
-    @Transient private var _cachedLatitudes: [Double]?
-    @Transient private var _cachedLongitudes: [Double]?
     @Transient private var _cachedPhotoIDs: [String]?
  
     var latitudeArray: [Double] {
-        get { 
-            if let cached = _cachedLatitudes { return cached }
-            let decoded = (try? JSONDecoder().decode([Double].self, from: latitudeData)) ?? []
-            _cachedLatitudes = decoded
-            return decoded
-        }
+        get { geometry.latitudes }
         set { 
-            _cachedLatitudes = newValue
-            latitudeData = (try? JSONEncoder().encode(newValue)) ?? Data() 
+            let encoded = (try? JSONEncoder().encode(newValue)) ?? Data()
+            latitudeData = encoded
+            FootprintGeometryCache.shared.updateLatitudes(
+                for: footprintID, latitudeData: encoded, latitudes: newValue, longitudeData: longitudeData
+            )
         }
     }
  
     var longitudeArray: [Double] {
-        get { 
-            if let cached = _cachedLongitudes { return cached }
-            let decoded = (try? JSONDecoder().decode([Double].self, from: longitudeData)) ?? []
-            _cachedLongitudes = decoded
-            return decoded
-        }
+        get { geometry.longitudes }
         set { 
-            _cachedLongitudes = newValue
-            longitudeData = (try? JSONEncoder().encode(newValue)) ?? Data() 
+            let encoded = (try? JSONEncoder().encode(newValue)) ?? Data()
+            longitudeData = encoded
+            FootprintGeometryCache.shared.updateLongitudes(
+                for: footprintID, longitudeData: encoded, longitudes: newValue, latitudeData: latitudeData
+            )
         }
     }
  
@@ -162,7 +236,7 @@ final class Footprint {
     
     var footprintLocations: [CLLocationCoordinate2D] {
         get {
-            zip(latitudeArray, longitudeArray).map { CLLocationCoordinate2D(latitude: $0, longitude: $1) }
+            geometry.coordinates
         }
         set {
             self.latitudeArray = newValue.map { $0.latitude }
@@ -234,16 +308,43 @@ final class Footprint {
 
     /// Extend only a continuous, observed stay. Never cross a transport or a
     /// separately persisted stay (especially either side of a manual split).
+    /// Main-actor tracking state that `extendActivityEditedStay` depends on.
+    struct CurrentStayLiveState: @unchecked Sendable {
+        let anchor: CLLocation?
+        let isMoving: Bool
+    }
+
+    #if !WIDGET_EXTENSION
+    @MainActor
+    static var currentStayLiveState: CurrentStayLiveState {
+        CurrentStayLiveState(anchor: LocationManager.shared.potentialStopStartLocation,
+                             isMoving: LocationManager.shared.uiIsMoving)
+    }
+    #endif
+
     @MainActor
     static func extendActivityEditedStay(start: Date, end: Date, coordinate: CLLocationCoordinate2D,
+                                        context: ModelContext) -> Bool {
+        #if !WIDGET_EXTENSION
+        let liveState = currentStayLiveState
+        #else
+        let liveState = CurrentStayLiveState(anchor: nil, isMoving: true)
+        #endif
+        return extendActivityEditedStay(start: start, end: end, coordinate: coordinate,
+                                        liveState: liveState, context: context)
+    }
+
+    /// Background-safe variant: the caller captures live tracking state on main.
+    static func extendActivityEditedStay(start: Date, end: Date, coordinate: CLLocationCoordinate2D,
+                                        liveState: CurrentStayLiveState,
                                         context: ModelContext) -> Bool {
         guard end > start else { return false }
         // Successive GPS batches do not share a timestamp. Allow a short
         // sampling gap while still checking every intervening persisted boundary.
         #if !WIDGET_EXTENSION
-        let anchor = LocationManager.shared.potentialStopStartLocation
+        let anchor = liveState.anchor
         let activeCurrentStay = Calendar.current.isDateInToday(end) &&
-            !LocationManager.shared.uiIsMoving &&
+            !liveState.isMoving &&
             anchor.map { $0.timestamp <= start &&
                 $0.distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)) < AppConfig.shared.stayDistanceThreshold
             } == true
@@ -312,13 +413,18 @@ final class Footprint {
         let radius = AppConfig.shared.stayDistanceThreshold
         guard center.distance(from: anchor) < radius,
               center.distance(from: current) < radius else { return }
-        let otherManual = (try? context.fetch(FetchDescriptor<Footprint>()))?.contains {
-            $0.footprintID != merged.footprintID && $0.status == .manual &&
-            $0.startTime >= merged.endTime.addingTimeInterval(-5 * 60) && $0.startTime <= Date()
-        } ?? true
-        let interveningTrip = (try? context.fetch(FetchDescriptor<TransportRecord>()))?.contains {
-            $0.statusRaw != "ignored" && $0.startTime < Date() && $0.endTime > merged.endTime
-        } ?? true
+        // Count only matching rows instead of loading every footprint/trip.
+        let mergedID = merged.footprintID
+        let mergedEnd = merged.endTime
+        let manualWindowStart = mergedEnd.addingTimeInterval(-5 * 60)
+        let now = Date()
+        let otherManual = (try? context.fetchCount(FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.footprintID != mergedID && $0.statusValue == "manual" &&
+            $0.startTime >= manualWindowStart && $0.startTime <= now
+        }))).map { $0 > 0 } ?? true
+        let interveningTrip = (try? context.fetchCount(FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.statusRaw != "ignored" && $0.startTime < now && $0.endTime > mergedEnd
+        }))).map { $0 > 0 } ?? true
         guard !otherManual, !interveningTrip else { return }
         merged.allowsAutomaticDurationExtension = true
         if LocationManager.shared.isHoldingStationaryStay {
@@ -353,8 +459,18 @@ final class Footprint {
         guard center.distance(from: anchor) < radius,
               center.distance(from: current) < radius else { return false }
 
-        let allStays = (try? context.fetch(FetchDescriptor<Footprint>())) ?? []
-        let allTransports = (try? context.fetch(FetchDescriptor<TransportRecord>())) ?? []
+        // Every check below only concerns stays ending at/after
+        // min(start, end) - 5 min or starting at/after end - 5 min, and trips
+        // ending after the (only ever growing) manual end. Fetch just those.
+        let initialEnd = manual.endTime
+        let stayEndLowerBound = min(manual.startTime, initialEnd).addingTimeInterval(-5 * 60)
+        let stayStartLowerBound = initialEnd.addingTimeInterval(-5 * 60)
+        let allStays = (try? context.fetch(FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.endTime >= stayEndLowerBound || $0.startTime >= stayStartLowerBound
+        }))) ?? []
+        let allTransports = (try? context.fetch(FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.statusRaw != "ignored" && $0.endTime > initialEnd
+        }))) ?? []
         let ownID = manual.footprintID
         // A later manual stay is an explicit split/visit boundary.
         guard !allStays.contains(where: {
@@ -465,7 +581,6 @@ final class Footprint {
     /// Repair a near-contiguous automatic fragment beside a manually kept stay.
     /// The user's manual record keeps its identity and edited fields; a second
     /// manual stay or a trip remains an explicit boundary.
-    @MainActor
     static func absorbAdjacentAutomaticContinuations(
         _ footprints: [Footprint], transports: [TransportRecord], context: ModelContext
     ) -> Bool {

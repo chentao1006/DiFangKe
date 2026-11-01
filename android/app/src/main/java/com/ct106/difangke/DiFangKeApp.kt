@@ -7,6 +7,9 @@ import android.os.Build
 import com.ct106.difangke.data.db.AppDatabase
 import com.ct106.difangke.data.prefs.AppPreferences
 import com.ct106.difangke.service.NotificationHelper
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import com.aptabase.Aptabase
@@ -21,6 +24,9 @@ class DiFangKeApp : Application() {
     // 延迟初始化数据库（避免在 Application.onCreate 卡主线程）
     val database: AppDatabase by lazy { AppDatabase.getInstance(this) }
     val preferences: AppPreferences by lazy { AppPreferences(this) }
+
+    /** Process-lifetime scope for startup work that must stay off the main thread. */
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
         super.onCreate()
@@ -39,7 +45,7 @@ class DiFangKeApp : Application() {
         com.ct106.difangke.widget.FootprintWidgetUpdater.ensureScheduled(this)
         
         // 调度每日任务
-        kotlinx.coroutines.MainScope().launch {
+        appScope.launch {
             val hour = preferences.notificationHour.first()
             val minute = preferences.notificationMinute.first()
             if (preferences.isDailyNotificationEnabled.first()) {
@@ -53,6 +59,10 @@ class DiFangKeApp : Application() {
             androidx.work.WorkManager.getInstance(this@DiFangKeApp)
                 .cancelAllWorkByTag("com.ct106.difangke.service.FutureTripReminderWorker")
         }
+
+        // Parse the bundled trip city catalog once in the background so the
+        // first trip city search never reads and decodes it on the main thread.
+        appScope.launch(Dispatchers.Default) { AppConfig.TRIP_MAJOR_CITIES }
     }
 
     private fun createNotificationChannels() {

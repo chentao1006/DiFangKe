@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -44,7 +45,6 @@ import kotlin.math.abs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
@@ -55,7 +55,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -73,6 +72,14 @@ class LocationTrackingService : Service() {
                 private const val TAG = "LocationTrackingService"
                 const val ACTION_START = "START_TRACKING"
                 const val ACTION_STOP = "STOP_TRACKING"
+
+                /**
+                 * Outlives the service: stopTracking() clears the persisted stay
+                 * here instead of blocking the main thread, and a later restore
+                 * waits for [pendingStayClear] so an old stay is never resurrected.
+                 */
+                private val stayClearScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+                @Volatile private var pendingStayClear: Job? = null
                 const val ACTION_SET_ONGOING_PLACE = "SET_ONGOING_PLACE"
                 const val ACTION_CONFIRM_ARRIVAL = "CONFIRM_ARRIVAL"
                 private const val EXTRA_ONGOING_PLACE_ID = "ongoing_place_id"
@@ -208,7 +215,8 @@ class LocationTrackingService : Service() {
         private var locationClient: TencentLocationManager? = null
         private val stateMutex = Mutex()
         private val siftMutex = Mutex()
-        private val fixChannel = Channel<Pair<TrackingFix, String?>>(Channel.UNLIMITED)
+        /** Fix plus the raw SDK name candidates; the address is derived on the processing coroutine. */
+        private val fixChannel = Channel<Pair<TrackingFix, List<String?>>>(Channel.UNLIMITED)
 
         // ── Live state (guarded by stateMutex) ──
         private val trackingPoints = ArrayList<TrackingFix>()
@@ -245,6 +253,8 @@ class LocationTrackingService : Service() {
         @Volatile private var initialLocationAcquisitionTimedOut = false
         @Volatile private var appliedProfileKey: String? = null
         private var wasVpnOrProxyActive: Boolean? = null
+        /** VPN/proxy state refreshed by the default-network callback, so fixes skip binder queries. */
+        @Volatile private var cachedVpnOrProxyActive: Boolean? = null
         private var lastWasWifi: Boolean? = null
 
         // ── Jobs ──
@@ -280,9 +290,11 @@ class LocationTrackingService : Service() {
                 return !host.isNullOrEmpty() && !port.isNullOrEmpty()
         }
 
+        private fun currentVpnOrProxyActive(): Boolean = cachedVpnOrProxyActive ?: isVpnOrProxyActive()
+
         /** VPN/proxy makes network positioning drift; use GPS only once a first fix exists. */
         private fun preciseLocationMode(): Int =
-                if (isVpnOrProxyActive() && hasAcquiredFirstLocation) TencentLocationRequest.ONLY_GPS_MODE
+                if (currentVpnOrProxyActive() && hasAcquiredFirstLocation) TencentLocationRequest.ONLY_GPS_MODE
                 else TencentLocationRequest.HIGH_ACCURACY_MODE
 
         private fun desiredProfile(): LocationProfile = when {
@@ -319,7 +331,7 @@ class LocationTrackingService : Service() {
                         LocationProfile.LOW_POWER_WATCH ->
                                 // With a hardware significant-motion wake-up the watch can stay
                                 // network-only; otherwise keep a sparse GPS-allowed watch.
-                                if (motion.hasSignificantMotionSensor && !(isVpnOrProxyActive())) {
+                                if (motion.hasSignificantMotionSensor && !(currentVpnOrProxyActive())) {
                                         Triple(TencentLocationRequest.ONLY_NETWORK_MODE, TrackingConfig.LOW_POWER_WATCH_INTERVAL_MS, false)
                                 } else {
                                         Triple(preciseLocationMode(), TrackingConfig.LOW_POWER_WATCH_GPS_INTERVAL_MS, true)
@@ -358,7 +370,7 @@ class LocationTrackingService : Service() {
                 override fun onStatusUpdate(name: String?, status: Int, desc: String?) = Unit
 
                 override fun onLocationChanged(location: TencentLocation?, errorCode: Int, errorInfo: String?) {
-                        val vpn = isVpnOrProxyActive()
+                        val vpn = currentVpnOrProxyActive()
                         val networkStateChanged = wasVpnOrProxyActive != vpn
                         if (networkStateChanged) wasVpnOrProxyActive = vpn
 
@@ -378,7 +390,7 @@ class LocationTrackingService : Service() {
                                         accuracy = location.accuracy.toDouble(),
                                         speed = location.speed.toDouble()
                                 )
-                                fixChannel.trySend(fix to getShortAddress(location))
+                                fixChannel.trySend(fix to addressCandidates(location))
                         } else {
                                 Log.e(TAG, "定位失败: $errorCode - $errorInfo (VPN/代理: $vpn)")
                                 if (networkStateChanged) applyLocationProfile(force = true)
@@ -393,19 +405,21 @@ class LocationTrackingService : Service() {
                         if (location == null || errorCode != TencentLocation.ERROR_OK) return
                         fixChannel.trySend(
                                 TrackingFix(location.time, location.latitude, location.longitude,
-                                        location.accuracy.toDouble(), location.speed.toDouble()) to getShortAddress(location)
+                                        location.accuracy.toDouble(), location.speed.toDouble()) to addressCandidates(location)
                         )
                 }
         }
 
-        private fun getShortAddress(location: TencentLocation): String? =
-                geocoder.coarseAutomaticPlaceName(
-                        listOf(
-                                location.poiList?.firstOrNull()?.name,
-                                location.name,
-                                listOfNotNull(location.district, location.street).joinToString("")
-                        )
+        /** Raw name candidates read on the SDK callback; matching happens in [getShortAddress]. */
+        private fun addressCandidates(location: TencentLocation): List<String?> =
+                listOf(
+                        location.poiList?.firstOrNull()?.name,
+                        location.name,
+                        listOfNotNull(location.district, location.street).joinToString("")
                 )
+
+        private fun getShortAddress(candidates: List<String?>): String? =
+                geocoder.coarseAutomaticPlaceName(candidates)
 
         // ────────────────────────────────────────────────────────────
         // Lifecycle
@@ -438,7 +452,8 @@ class LocationTrackingService : Service() {
                         db.placeDao().observeAll().collect { cachedPlaces = it }
                 }
                 serviceScope.launch {
-                        for ((fix, address) in fixChannel) {
+                        for ((fix, candidates) in fixChannel) {
+                                val address = runCatching { getShortAddress(candidates) }.getOrNull()
                                 runCatching { stateMutex.withLock { processFix(fix, address) } }
                                         .onFailure { Log.e(TAG, "Failed to process location", it) }
                         }
@@ -477,7 +492,7 @@ class LocationTrackingService : Service() {
         override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                 val action = intent?.action ?: ACTION_START
                 if (action == ACTION_STOP) {
-                        stopTracking()
+                        stopTracking(startId)
                         return START_NOT_STICKY
                 }
                 if (!startForegroundSafely()) {
@@ -529,7 +544,7 @@ class LocationTrackingService : Service() {
                 Log.i(TAG, "Tracking started")
         }
 
-        private fun stopTracking() {
+        private fun stopTracking(stopStartId: Int) {
                 isTrackingActive = false
                 initialLocationFallbackJob?.cancel()
                 initialLocationFallbackJob = null
@@ -539,16 +554,19 @@ class LocationTrackingService : Service() {
                 locationClient?.removeUpdates(locationListener)
                 appliedProfileKey = null
                 stopForeground(STOP_FOREGROUND_REMOVE)
-                // Clear the persisted stay before stopSelf(): onDestroy cancels
-                // serviceScope, so a launched clear could be dropped and a restart
-                // within 24 h would resurrect the old stay with its old start time.
-                runBlocking(NonCancellable + Dispatchers.IO) {
+                // Clear the persisted stay before stopping the service: onDestroy
+                // cancels serviceScope, so a clear launched there could be dropped and
+                // a restart within 24 h would resurrect the old stay with its old start
+                // time. The process-scoped job keeps the write off the main thread.
+                val clear = stayClearScope.launch {
                         prefs.savePendingStay(null, null, null, null)
                         prefs.setPendingStayPlaceOverride(null)
                 }
+                pendingStayClear = clear
                 stateFlow.value = TrackingState.Idle
                 liveStatusState.value = LiveTrackingStatus()
-                stopSelf()
+                // stopSelfResult keeps the service alive if a newer start arrived meanwhile.
+                clear.invokeOnCompletion { stopSelfResult(stopStartId) }
                 Log.i(TAG, "Tracking stopped")
         }
 
@@ -924,7 +942,21 @@ class LocationTrackingService : Service() {
         private fun registerNetworkCallback() {
                 val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
                 val callback = object : ConnectivityManager.NetworkCallback() {
+                        override fun onAvailable(network: Network) {
+                                cachedVpnOrProxyActive = isVpnOrProxyActive()
+                        }
+
+                        override fun onLost(network: Network) {
+                                cachedVpnOrProxyActive = isVpnOrProxyActive()
+                        }
+
+                        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                                // Proxy settings live in LinkProperties.
+                                cachedVpnOrProxyActive = isVpnOrProxyActive()
+                        }
+
                         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                                cachedVpnOrProxyActive = isVpnOrProxyActive()
                                 val isWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
                                 val isCellular = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
                                 val previous = lastWasWifi
@@ -948,6 +980,7 @@ class LocationTrackingService : Service() {
                 val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
                 networkCallback?.let { runCatching { cm.unregisterNetworkCallback(it) } }
                 networkCallback = null
+                cachedVpnOrProxyActive = null
         }
 
         // ────────────────────────────────────────────────────────────
@@ -1134,6 +1167,7 @@ class LocationTrackingService : Service() {
                 if (hasAttemptedPersistedStayRestore) return
                 hasAttemptedPersistedStayRestore = true
                 serviceScope.launch {
+                        pendingStayClear?.join()
                         val lat = prefs.getPendingStayLat()
                         val lon = prefs.getPendingStayLon()
                         val time = prefs.getPendingStayStartTime()

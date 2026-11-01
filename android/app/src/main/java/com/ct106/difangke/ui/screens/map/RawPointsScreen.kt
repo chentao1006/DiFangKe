@@ -107,10 +107,15 @@ fun RawPointsScreen(
         }
     }
 
-    val driftCount = remember(entries) { entries.count { it.isDriftPoint } }
-    val filteredEntries = remember(entries, showOnlySuspicious) {
-        if (!showOnlySuspicious) entries
-        else entries.filter { entry -> entry.isDriftPoint || isSuspiciousEntry(entry, entries) }
+    // Counting/filtering a day of raw points runs off main.
+    val driftCount by produceState(0, entries) {
+        value = withContext(Dispatchers.Default) { entries.count { it.isDriftPoint } }
+    }
+    val filteredEntries by produceState(entries, entries, showOnlySuspicious) {
+        value = if (!showOnlySuspicious) entries
+        else withContext(Dispatchers.Default) {
+            entries.filter { entry -> entry.isDriftPoint || isSuspiciousEntry(entry, entries) }
+        }
     }
 
     LaunchedEffect(date) {
@@ -208,10 +213,14 @@ fun RawPointsScreen(
                     onMapReady = { amapInstance = it },
                     onRecenter = {
                         selectedPoint = null
-                        val validLatLngs = entries.filter { !it.isDriftPoint }.map { LatLng(it.point.latitude, it.point.longitude) }
-                        if (validLatLngs.isNotEmpty()) {
-                            val bounds = LatLngBounds.builder().apply { validLatLngs.forEach { include(it) } }.build()
-                            scope.launch { amapInstance?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100)) }
+                        val snapshot = entries
+                        scope.launch {
+                            val bounds = withContext(Dispatchers.Default) {
+                                val validLatLngs = snapshot.filter { !it.isDriftPoint }.map { LatLng(it.point.latitude, it.point.longitude) }
+                                if (validLatLngs.isEmpty()) null
+                                else LatLngBounds.builder().apply { validLatLngs.forEach { include(it) } }.build()
+                            }
+                            if (bounds != null) amapInstance?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100))
                         }
                     }
                 )
@@ -306,6 +315,18 @@ fun RawPointsScreen(
     }
 }
 
+private class RawPointsMapModel(
+    val hasEntries: Boolean,
+    val validLatLngs: List<LatLng>,
+    val driftLatLngs: List<LatLng>,
+    val selectedLatLngs: List<LatLng>,
+    val bounds: LatLngBounds?
+)
+
+private class RawPointsMapHolder {
+    var lastDrawKey: List<Any?>? = null
+}
+
 @Composable
 private fun RawPointsMapPreview(
     entries: List<RawLocationStore.RawPointEntry>,
@@ -320,6 +341,23 @@ private fun RawPointsMapPreview(
 ) {
     val allPlaces by remember { DiFangKeApp.instance.database.placeDao().observeAll() }
         .collectAsState(initial = emptyList())
+    val holder = remember { RawPointsMapHolder() }
+    val mapScope = rememberCoroutineScope()
+    // Polyline/circle coordinates and bounds are derived off main; the map only redraws on change.
+    val displayModel by produceState<RawPointsMapModel?>(null, entries, selectedIndexes) {
+        value = withContext(Dispatchers.Default) {
+            val validLatLngs = entries.filter { !it.isDriftPoint }.map { LatLng(it.point.latitude, it.point.longitude) }
+            RawPointsMapModel(
+                hasEntries = entries.isNotEmpty(),
+                validLatLngs = validLatLngs,
+                driftLatLngs = entries.filter { it.isDriftPoint }.map { LatLng(it.point.latitude, it.point.longitude) },
+                selectedLatLngs = entries.filter { selectedIndexes.contains(it.originalIndex) }
+                    .map { LatLng(it.point.latitude, it.point.longitude) },
+                bounds = if (validLatLngs.isEmpty()) null
+                else LatLngBounds.builder().apply { validLatLngs.forEach { include(it) } }.build()
+            )
+        }
+    }
 
     Box(modifier = Modifier.fillMaxWidth().height(220.dp)) {
         AndroidView(
@@ -334,51 +372,65 @@ private fun RawPointsMapPreview(
             val map = view.map
             map.mapType = if (isDark) TencentMap.MAP_TYPE_DARK else TencentMap.MAP_TYPE_NORMAL
             map.setOnMapClickListener { latLng ->
-                selectNearestEntry(latLng, filteredEntries, onPointSelected)
+                val candidates = filteredEntries
+                mapScope.launch {
+                    // Nearest-point search over the day's points runs off main; selection is applied on main.
+                    val picked = withContext(Dispatchers.Default) {
+                        var result: RawLocationStore.RawPoint? = null
+                        selectNearestEntry(latLng, candidates) { result = it }
+                        result
+                    }
+                    picked?.let(onPointSelected)
+                }
             }
 
-            map.clear()
-            map.addImportantPlaceCircles(allPlaces)
+            val model = displayModel
+            if (model != null) {
+                val drawKey = listOf(model, selectedPoint, allPlaces, isDark, primaryColor)
+                if (holder.lastDrawKey != drawKey) {
+                    holder.lastDrawKey = drawKey
+                    map.clear()
+                    map.addImportantPlaceCircles(allPlaces)
 
-            if (entries.isNotEmpty()) {
-                val validLatLngs = entries.filter { !it.isDriftPoint }.map { LatLng(it.point.latitude, it.point.longitude) }
-                if (validLatLngs.isNotEmpty()) {
-                    map.addPolyline(PolylineOptions().addAll(validLatLngs).width(10f).color(primaryColor.toArgb()).gradient(true))
-                }
+                    if (model.hasEntries) {
+                        if (model.validLatLngs.isNotEmpty()) {
+                            map.addPolyline(PolylineOptions().addAll(model.validLatLngs).width(10f).color(primaryColor.toArgb()).gradient(true))
+                        }
 
-                entries.filter { it.isDriftPoint }.forEach { entry ->
-                    map.addCircle(
-                        CircleOptions()
-                            .center(LatLng(entry.point.latitude, entry.point.longitude))
-                            .radius(8.0)
-                            .fillColor(Color.Gray.copy(alpha = 0.5f).toArgb())
-                            .strokeColor(Color.Gray.copy(alpha = 0.3f).toArgb())
-                            .strokeWidth(1f)
-                    )
-                }
+                        model.driftLatLngs.forEach { latLng ->
+                            map.addCircle(
+                                CircleOptions()
+                                    .center(latLng)
+                                    .radius(8.0)
+                                    .fillColor(Color.Gray.copy(alpha = 0.5f).toArgb())
+                                    .strokeColor(Color.Gray.copy(alpha = 0.3f).toArgb())
+                                    .strokeWidth(1f)
+                            )
+                        }
 
-                selectedPoint?.let { point ->
-                    map.addMarker(
-                        MarkerOptions()
-                            .position(LatLng(point.latitude, point.longitude))
-                            .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
-                    )
-                }
+                        selectedPoint?.let { point ->
+                            map.addMarker(
+                                MarkerOptions()
+                                    .position(LatLng(point.latitude, point.longitude))
+                                    .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
+                            )
+                        }
 
-                entries.filter { selectedIndexes.contains(it.originalIndex) }.forEach { entry ->
-                    map.addCircle(
-                        CircleOptions()
-                            .center(LatLng(entry.point.latitude, entry.point.longitude))
-                            .radius(10.0)
-                            .fillColor(primaryColor.copy(alpha = 0.35f).toArgb())
-                            .strokeColor(primaryColor.toArgb())
-                            .strokeWidth(2f)
-                    )
-                }
+                        model.selectedLatLngs.forEach { latLng ->
+                            map.addCircle(
+                                CircleOptions()
+                                    .center(latLng)
+                                    .radius(10.0)
+                                    .fillColor(primaryColor.copy(alpha = 0.35f).toArgb())
+                                    .strokeColor(primaryColor.toArgb())
+                                    .strokeWidth(2f)
+                            )
+                        }
 
-                if (selectedPoint == null && validLatLngs.isNotEmpty()) {
-                    val bounds = LatLngBounds.builder().apply { validLatLngs.forEach { include(it) } }.build()
-                    map.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100))
+                        if (selectedPoint == null && model.bounds != null) {
+                            map.moveCamera(CameraUpdateFactory.newLatLngBounds(model.bounds, 100))
+                        }
+                    }
                 }
             }
         }

@@ -1296,14 +1296,17 @@ private struct CurrentActivityPhotoStack: View {
     private var stackWidth: CGFloat { 34 + CGFloat(max(0, visibleCount - 1)) * 21 }
 
     var body: some View {
+        // Resolve the App Group container and read each thumbnail once per
+        // render instead of once per lookup inside the ForEach.
+        let images = currentActivityPhotoImages(
+            sessionID: sessionID,
+            revision: revision,
+            count: visibleCount
+        )
         HStack(spacing: 5) {
             ZStack(alignment: .leading) {
                 ForEach(0..<visibleCount, id: \.self) { index in
-                    if let image = currentActivityPhotoImage(
-                        sessionID: sessionID,
-                        revision: revision,
-                        index: index
-                    ) {
+                    if let image = images[index] {
                         Image(uiImage: image)
                             .resizable()
                             .scaledToFill()
@@ -1512,19 +1515,22 @@ private struct CurrentActivityMapImage: View {
     }
 }
 
-private func currentActivityPhotoImage(
+private func currentActivityPhotoImages(
     sessionID: String,
     revision: Int,
-    index: Int
-) -> UIImage? {
+    count: Int
+) -> [UIImage?] {
+    guard count > 0 else { return [] }
     guard let container = FileManager.default.containerURL(
         forSecurityApplicationGroupIdentifier: "group.com.ct106.difangke"
-    ) else { return nil }
-    let url = container.appendingPathComponent(
-        "current_activity_\(sessionID)_photo_\(revision)_\(index).jpg"
-    )
-    guard let data = try? Data(contentsOf: url) else { return nil }
-    return UIImage(data: data)
+    ) else { return Array(repeating: nil, count: count) }
+    return (0..<count).map { index in
+        let url = container.appendingPathComponent(
+            "current_activity_\(sessionID)_photo_\(revision)_\(index).jpg"
+        )
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return UIImage(data: data)
+    }
 }
 
 private func currentActivityColor(_ hex: String?) -> Color {

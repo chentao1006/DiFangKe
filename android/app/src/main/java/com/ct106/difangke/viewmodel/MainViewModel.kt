@@ -101,7 +101,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             _initialTimelineLoadCompleted.value = true
             dates.toList().sortedBy { it.time }
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val timelineItems: StateFlow<List<TimelineItem>> = _currentDate.flatMapLatest { date ->
@@ -241,7 +241,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (normalizedDates.isEmpty()) return flowOf(emptyList())
         return combine(normalizedDates.map(::getTimelineItems)) { days ->
             days.flatMap { it }.sortedBy { it.startTime }
-        }
+        }.flowOn(Dispatchers.Default)
     }
 
     fun getDailyTrajectoryForDates(dates: Set<Date>): Flow<String?> {
@@ -256,7 +256,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             combined.takeIf { it.length() > 0 }?.toString()
-        }
+        }.flowOn(Dispatchers.Default)
     }
 
     // 获取指定日期的每日洞察
@@ -396,7 +396,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 rawMileage
             }
-        }
+        }.flowOn(Dispatchers.Default)
     }
 
     // 获取指定日期的点数

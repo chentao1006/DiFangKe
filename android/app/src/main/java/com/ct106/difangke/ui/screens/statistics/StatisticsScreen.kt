@@ -51,6 +51,9 @@ import com.ct106.difangke.ui.share.ShareStatEntry
 import com.ct106.difangke.ui.share.ShareStatsReview
 import com.ct106.difangke.ui.theme.DfkAccent
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Calendar
 import java.util.Date
 import kotlin.math.ceil
@@ -235,6 +238,7 @@ fun StatisticsContent(
     var showingFullMap by remember { mutableStateOf(false) }
     var selectedPlace by remember { mutableStateOf<ReviewPlaceSelection?>(null) }
     var selectedPlaceList by remember { mutableStateOf<ReviewPlaceListSelection?>(null) }
+    val placeSelectionScope = rememberCoroutineScope()
     var selectedBentoDetail by remember { mutableStateOf<ReviewBentoDetail?>(null) }
     var showingAllFavorites by remember { mutableStateOf(false) }
 
@@ -291,8 +295,11 @@ fun StatisticsContent(
                         when {
                             memory.isFavorite -> showingAllFavorites = true
                             memory.isPastMemory -> onDateSelected(memory.date)
-                            else -> snapshot.placeSelection(memory)?.let { selectedPlace = it }
-                                ?: onDateSelected(memory.date)
+                            // The footprint scan for the place runs off main; only the result is assigned here.
+                            else -> placeSelectionScope.launch {
+                                val place = withContext(Dispatchers.Default) { snapshot.placeSelection(memory) }
+                                if (place != null) selectedPlace = place else onDateSelected(memory.date)
+                            }
                         }
                     }
                 )

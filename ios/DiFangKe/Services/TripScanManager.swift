@@ -85,35 +85,116 @@ final class TripScanManager {
         refreshActiveTripProgress(at: LocationManager.shared.lastLocation)
     }
 
+    private struct ProgressStopSnapshot: Sendable {
+        let id: UUID
+        let tripDayID: UUID
+        let latitude: Double?
+        let longitude: Double?
+        let placeName: String?
+        let address: String?
+        let cityName: String?
+        let notes: String
+        let startTime: Date?
+        let transportTypeRaw: String?
+        var planStatusRaw: String
+    }
+
+    private struct ProgressSnapshot: Sendable {
+        let tripID: UUID
+        let title: String
+        let dayDates: [UUID: Date]
+        /// Stops ordered by day, then by their order within the day.
+        var orderedStops: [ProgressStopSnapshot]
+        let homeCityName: String?
+        let homeLatitude: Double?
+        let homeLongitude: Double?
+        let activityStyle: TripActivityStyle?
+    }
+
+    private var progressRefreshGeneration = 0
+    private var progressNextStopID: UUID?
+
     /// Only the next unfinished destination is eligible. Lifecycle and movement
     /// transitions may complete it, but a later stop must never skip the plan ahead.
     private func refreshActiveTripProgress(at location: CLLocation?) {
         guard let tripContainer else { return }
-        let now = Date()
-        let context = tripContainer.mainContext
+        let legacyContainer = legacyContainer
+        progressRefreshGeneration += 1
+        let generation = progressRefreshGeneration
+        Task { @MainActor in
+            let snapshot = await Task.detached(priority: .utility) {
+                Self.loadActiveTripProgress(tripContainer: tripContainer, legacyContainer: legacyContainer)
+            }.value
+            // A newer refresh supersedes this one.
+            guard generation == self.progressRefreshGeneration else { return }
+            self.applyActiveTripProgress(snapshot, at: location, tripContainer: tripContainer)
+        }
+    }
+
+    nonisolated private static func loadActiveTripProgress(
+        tripContainer: ModelContainer,
+        legacyContainer: ModelContainer?
+    ) -> ProgressSnapshot? {
+        let context = ModelContext(tripContainer)
         let activeTrips = (try? context.fetch(FetchDescriptor<Trip>()))?.filter { $0.state == .active } ?? []
         guard let trip = activeTrips.sorted(by: { ($0.actualStartedAt ?? .distantPast) > ($1.actualStartedAt ?? .distantPast) }).first else {
-            progressRouteByStopID.removeAll()
-#if canImport(ActivityKit)
-            if #available(iOS 16.1, *) { TripProgressLiveActivityManager.shared.stop() }
-#endif
-            return
+            return nil
         }
-        let days = ((try? context.fetch(FetchDescriptor<TripDay>())) ?? [])
-            .filter { $0.tripID == trip.id }
+        let tripID = trip.id
+        let days = ((try? context.fetch(FetchDescriptor<TripDay>(predicate: #Predicate { $0.tripID == tripID }))) ?? [])
             .sorted { $0.day == $1.day ? $0.orderIndex < $1.orderIndex : $0.day < $1.day }
         let dayOrder = Dictionary(uniqueKeysWithValues: days.enumerated().map { ($0.element.id, $0.offset) })
-        let orderedStops = ((try? context.fetch(FetchDescriptor<TripItem>())) ?? [])
-            .filter {
-                dayOrder[$0.tripDayID] != nil &&
-                $0.kindRaw == TripItemKind.stop.rawValue
-            }
+        let stopKind = TripItemKind.stop.rawValue
+        let orderedStops = ((try? context.fetch(FetchDescriptor<TripItem>(predicate: #Predicate { $0.kindRaw == stopKind }))) ?? [])
+            .filter { dayOrder[$0.tripDayID] != nil }
             .sorted(by: {
                 let leftDay = dayOrder[$0.tripDayID] ?? .max
                 let rightDay = dayOrder[$1.tripDayID] ?? .max
                 return leftDay == rightDay ? $0.orderIndex < $1.orderIndex : leftDay < rightDay
             })
-        var next = orderedStops.first { $0.planStatusRaw == "planned" }
+            .map {
+                ProgressStopSnapshot(
+                    id: $0.id,
+                    tripDayID: $0.tripDayID,
+                    latitude: $0.latitude,
+                    longitude: $0.longitude,
+                    placeName: $0.placeName,
+                    address: $0.address,
+                    cityName: $0.cityName,
+                    notes: $0.notes,
+                    startTime: $0.startTime,
+                    transportTypeRaw: $0.transportTypeRaw,
+                    planStatusRaw: $0.planStatusRaw
+                )
+            }
+        let homeCity = ((try? context.fetch(FetchDescriptor<HomeCity>())) ?? []).first
+        return ProgressSnapshot(
+            tripID: trip.id,
+            title: trip.title,
+            dayDates: Dictionary(days.map { ($0.id, $0.day) }, uniquingKeysWith: { first, _ in first }),
+            orderedStops: orderedStops,
+            homeCityName: homeCity?.cityName,
+            homeLatitude: homeCity?.latitude,
+            homeLongitude: homeCity?.longitude,
+            activityStyle: resolvedActivityStyle(for: trip.activityTypeValue, legacyContainer: legacyContainer)
+        )
+    }
+
+    private func applyActiveTripProgress(
+        _ loaded: ProgressSnapshot?,
+        at location: CLLocation?,
+        tripContainer: ModelContainer
+    ) {
+        let now = Date()
+        guard var snapshot = loaded else {
+            progressRouteByStopID.removeAll()
+            progressNextStopID = nil
+#if canImport(ActivityKit)
+            if #available(iOS 16.1, *) { TripProgressLiveActivityManager.shared.stop() }
+#endif
+            return
+        }
+        var nextIndex = snapshot.orderedStops.firstIndex { $0.planStatusRaw == "planned" }
         let arrivalRadius = AppConfig.shared.tripPlanArrivalRadiusMeters
         let hasFreshLocation = location.map {
             abs($0.timestamp.timeIntervalSinceNow) <= AppConfig.shared.currentLocationFreshnessThreshold
@@ -123,33 +204,48 @@ final class TripScanManager {
            location.horizontalAccuracy >= 0,
            location.horizontalAccuracy <= arrivalRadius,
            arrivalRadius > 0,
-           let currentNext = next,
-           let latitude = currentNext.latitude,
-           let longitude = currentNext.longitude,
+           let currentIndex = nextIndex,
+           let latitude = snapshot.orderedStops[currentIndex].latitude,
+           let longitude = snapshot.orderedStops[currentIndex].longitude,
            location.distance(from: CLLocation(latitude: latitude, longitude: longitude)) <= arrivalRadius {
-            currentNext.planStatusRaw = "completed"
-            trip.updatedAt = now
+            // The mutation stays on the main context so the trip queries refresh;
+            // it touches only the two rows being changed.
+            let context = tripContainer.mainContext
+            let stopID = snapshot.orderedStops[currentIndex].id
+            let tripID = snapshot.tripID
+            var itemDescriptor = FetchDescriptor<TripItem>(predicate: #Predicate { $0.id == stopID })
+            itemDescriptor.fetchLimit = 1
+            var tripDescriptor = FetchDescriptor<Trip>(predicate: #Predicate { $0.id == tripID })
+            tripDescriptor.fetchLimit = 1
+            if let item = (try? context.fetch(itemDescriptor))?.first {
+                item.planStatusRaw = "completed"
+            }
+            if let trip = (try? context.fetch(tripDescriptor))?.first {
+                trip.updatedAt = now
+            }
             try? context.save()
-            next = orderedStops.first { $0.planStatusRaw == "planned" }
+            snapshot.orderedStops[currentIndex].planStatusRaw = "completed"
+            nextIndex = snapshot.orderedStops.firstIndex { $0.planStatusRaw == "planned" }
         }
+        progressNextStopID = nextIndex.map { snapshot.orderedStops[$0].id }
 
 #if canImport(ActivityKit)
         guard #available(iOS 16.1, *) else { return }
-        guard let next else {
-            TripProgressLiveActivityManager.shared.endActivity(for: trip.id)
+        guard let nextIndex else {
+            TripProgressLiveActivityManager.shared.endActivity(for: snapshot.tripID)
             return
         }
+        let orderedStops = snapshot.orderedStops
+        let next = orderedStops[nextIndex]
         let coordinate = next.latitude.flatMap { latitude in
             next.longitude.map { longitude in CLLocation(latitude: latitude, longitude: longitude) }
         }
         let distance = location.flatMap { current in coordinate.map { current.distance(from: $0) } }
-        let day = days.first { $0.id == next.tripDayID }
+        let dayDate = snapshot.dayDates[next.tripDayID]
         let arrivalDate = next.startTime.flatMap { value -> Date? in
-            guard let day else { return value }
-            return value == Calendar.autoupdatingCurrent.startOfDay(for: day.day) ? nil : value
+            guard let dayDate else { return value }
+            return value == Calendar.autoupdatingCurrent.startOfDay(for: dayDate) ? nil : value
         }
-        let nextIndex = orderedStops.firstIndex(where: { $0.id == next.id }) ?? 0
-        let homeCity = ((try? context.fetch(FetchDescriptor<HomeCity>())) ?? []).first
         let segmentOrigin: (name: String, location: CLLocation)? = {
             if nextIndex > 0,
                let latitude = orderedStops[nextIndex - 1].latitude,
@@ -160,11 +256,11 @@ final class TripScanManager {
                     CLLocation(latitude: latitude, longitude: longitude)
                 )
             }
-            if let homeCity,
-               let latitude = homeCity.latitude,
-               let longitude = homeCity.longitude {
+            if let homeCityName = snapshot.homeCityName,
+               let latitude = snapshot.homeLatitude,
+               let longitude = snapshot.homeLongitude {
                 return (
-                    homeCity.cityName.isEmpty ? "常居地" : homeCity.cityName,
+                    homeCityName.isEmpty ? "常居地" : homeCityName,
                     CLLocation(latitude: latitude, longitude: longitude)
                 )
             }
@@ -174,7 +270,7 @@ final class TripScanManager {
             coordinate.map { origin.location.distance(from: $0) }
         }
         let cachedRoute = progressRouteByStopID[next.id]
-        let tripActivityStyle = resolvedActivityStyle(for: trip.activityTypeValue)
+        let tripActivityStyle = snapshot.activityStyle
         let state = TripProgressActivityAttributes.ContentState(
             stopID: next.id.uuidString,
             placeName: next.placeName ?? next.address ?? next.cityName ?? "地点",
@@ -198,11 +294,13 @@ final class TripScanManager {
             latitude: next.latitude,
             longitude: next.longitude
         )
+        let tripID = snapshot.tripID
+        let tripTitle = snapshot.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "进行中的行程"
+            : snapshot.title
         TripProgressLiveActivityManager.shared.update(
-            tripID: trip.id,
-            tripTitle: trip.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? "进行中的行程"
-                : trip.title,
+            tripID: tripID,
+            tripTitle: tripTitle,
             state: state,
             originCoordinate: segmentOrigin?.location.coordinate,
             destinationCoordinate: coordinate?.coordinate,
@@ -213,10 +311,6 @@ final class TripScanManager {
            let destinationLatitude = next.latitude,
            let destinationLongitude = next.longitude,
            next.transportTypeRaw?.isEmpty == false {
-            let tripID = trip.id
-            let tripTitle = trip.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? "进行中的行程"
-                : trip.title
             let nextID = next.id
             let transportTypeRaw = next.transportTypeRaw
             Task { @MainActor in
@@ -226,7 +320,7 @@ final class TripScanManager {
                     transportTypeRaw: transportTypeRaw
                 )
                 guard !routes.isEmpty,
-                      orderedStops.first(where: { $0.planStatusRaw == "planned" })?.id == nextID else { return }
+                      self.progressNextStopID == nextID else { return }
                 let preferredIndex = TripRouteOptionSelectionStore.selectedIndex(
                     for: nextID,
                     optionCount: routes.count
@@ -255,7 +349,10 @@ final class TripScanManager {
 #endif
     }
 
-    private func resolvedActivityStyle(for value: String?) -> TripActivityStyle? {
+    nonisolated private static func resolvedActivityStyle(
+        for value: String?,
+        legacyContainer: ModelContainer?
+    ) -> TripActivityStyle? {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty,
               let legacyContainer else { return nil }
@@ -1235,9 +1332,13 @@ final class TripProgressLiveActivityManager {
             routeIdentity,
             transportIcon
         ].joined(separator: "|")
-        guard mapSnapshotKeyByTripID[tripID] != snapshotKey
-                || !FileManager.default.fileExists(atPath: lightURL.path)
-                || !FileManager.default.fileExists(atPath: darkURL.path) else { return }
+        if mapSnapshotKeyByTripID[tripID] == snapshotKey {
+            let filesExist = await Task.detached(priority: .utility) {
+                FileManager.default.fileExists(atPath: lightURL.path)
+                    && FileManager.default.fileExists(atPath: darkURL.path)
+            }.value
+            guard !filesExist else { return }
+        }
 
         let options = MKMapSnapshotter.Options()
         options.region = remainingRouteRegion(current: current, destination: destination)
@@ -1248,27 +1349,33 @@ final class TripProgressLiveActivityManager {
         do {
             options.traitCollection = UITraitCollection(userInterfaceStyle: .light)
             let lightSnapshot = try await MKMapSnapshotter(options: options).start()
-            let lightImage = renderedTripProgressMap(
-                lightSnapshot,
-                routeCoordinates: route,
-                currentCoordinate: current,
-                destinationCoordinate: destination,
-                drawsDirectConnection: drawsDirectConnection,
-                interfaceStyle: .light
-            )
-            try lightImage.pngData()?.write(to: lightURL, options: .atomic)
+            // Route drawing, PNG encoding and the file write run off the main thread.
+            try await Task.detached(priority: .utility) {
+                let lightImage = Self.renderedTripProgressMap(
+                    lightSnapshot,
+                    routeCoordinates: route,
+                    currentCoordinate: current,
+                    destinationCoordinate: destination,
+                    drawsDirectConnection: drawsDirectConnection,
+                    interfaceStyle: .light
+                )
+                try lightImage.pngData()?.write(to: lightURL, options: .atomic)
+            }.value
 
             options.traitCollection = UITraitCollection(userInterfaceStyle: .dark)
             let darkSnapshot = try await MKMapSnapshotter(options: options).start()
-            let darkImage = renderedTripProgressMap(
-                darkSnapshot,
-                routeCoordinates: route,
-                currentCoordinate: current,
-                destinationCoordinate: destination,
-                drawsDirectConnection: drawsDirectConnection,
-                interfaceStyle: .dark
-            )
-            try darkImage.pngData()?.write(to: darkURL, options: .atomic)
+            // Route drawing, PNG encoding and the file write run off the main thread.
+            try await Task.detached(priority: .utility) {
+                let darkImage = Self.renderedTripProgressMap(
+                    darkSnapshot,
+                    routeCoordinates: route,
+                    currentCoordinate: current,
+                    destinationCoordinate: destination,
+                    drawsDirectConnection: drawsDirectConnection,
+                    interfaceStyle: .dark
+                )
+                try darkImage.pngData()?.write(to: darkURL, options: .atomic)
+            }.value
             mapSnapshotKeyByTripID[tripID] = snapshotKey
         } catch {
             print("[TripProgressLiveActivity] map snapshot failed: \(error)")
@@ -1291,7 +1398,7 @@ final class TripProgressLiveActivityManager {
         )
     }
 
-    private func renderedTripProgressMap(
+    nonisolated private static func renderedTripProgressMap(
         _ snapshot: MKMapSnapshotter.Snapshot,
         routeCoordinates: [CLLocationCoordinate2D],
         currentCoordinate: CLLocationCoordinate2D,
@@ -1334,13 +1441,13 @@ final class TripProgressLiveActivityManager {
 
             }
 
-            drawTripProgressMapMarker(
+            Self.drawTripProgressMapMarker(
                 at: snapshot.point(for: currentCoordinate),
                 color: UIColor.systemGreen,
                 backgroundColor: markerBackground,
                 in: snapshot.image.size
             )
-            drawTripProgressMapMarker(
+            Self.drawTripProgressMapMarker(
                 at: snapshot.point(for: destinationCoordinate),
                 color: UIColor(red: 0, green: 0.73, blue: 0.78, alpha: 1),
                 backgroundColor: markerBackground,
@@ -1349,7 +1456,7 @@ final class TripProgressLiveActivityManager {
         }
     }
 
-    private func drawTripProgressMapMarker(
+    nonisolated private static func drawTripProgressMapMarker(
         at point: CGPoint,
         color: UIColor,
         backgroundColor: UIColor,

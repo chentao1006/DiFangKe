@@ -154,7 +154,7 @@ struct RawLogsManagerView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: isSelecting)
-        .onAppear(perform: loadFiles)
+        .task { await loadFiles() }
         .sheet(isPresented: $showingExportAllShareSheet) {
             if let exportAllURL {
                 ActivityView(activityItems: [exportAllURL])
@@ -233,9 +233,9 @@ struct RawLogsManagerView: View {
         Task {
             do {
                 try await RawLocationStore.shared.deleteLocalFiles(at: fileURLs)
+                await loadFiles()
                 await MainActor.run {
                     selectedFileURLs.subtract(fileURLs)
-                    loadFiles()
                     locationManager.refreshAvailableRawDates()
                     if files.isEmpty {
                         endSelection()
@@ -243,8 +243,8 @@ struct RawLogsManagerView: View {
                     isDeleting = false
                 }
             } catch {
+                await loadFiles()
                 await MainActor.run {
-                    loadFiles()
                     deleteError = error.localizedDescription
                     isDeleting = false
                 }
@@ -260,7 +260,10 @@ struct RawLogsManagerView: View {
 
         Task {
             do {
-                let archiveURL = try makeZipArchive(from: fileURLs)
+                // Copies and zips via NSFileCoordinator: file IO off main.
+                let archiveURL = try await Task.detached(priority: .userInitiated) {
+                    try Self.makeZipArchive(from: fileURLs)
+                }.value
                 await MainActor.run {
                     exportAllURL = archiveURL
                     showingExportAllShareSheet = true
@@ -275,7 +278,7 @@ struct RawLogsManagerView: View {
         }
     }
 
-    private func makeZipArchive(from fileURLs: [URL]) throws -> URL {
+    nonisolated private static func makeZipArchive(from fileURLs: [URL]) throws -> URL {
         let fileManager = FileManager.default
         let exportRoot = fileManager.temporaryDirectory.appendingPathComponent("RawLocationsExport-\(UUID().uuidString)", isDirectory: true)
         let payloadDirectory = exportRoot.appendingPathComponent("RawLocations", isDirectory: true)
@@ -315,33 +318,53 @@ struct RawLogsManagerView: View {
         return archiveURL
     }
     
+    /// Lists the CSV files and counts their points off main, then assigns.
     @MainActor
-    private func loadFiles() {
+    private func loadFiles() async {
+        guard let items = await Task.detached(priority: .userInitiated, operation: { Self.scanFiles() }).value else { return }
+        self.files = items
+    }
+
+    /// Nil when the directory cannot be read (the list is then left as is).
+    nonisolated private static func scanFiles() -> [RawFileItem]? {
         let fileManager = FileManager.default
         let documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let baseDirectory = documentsDirectory.appendingPathComponent("RawLocations")
         
         guard let contents = try? fileManager.contentsOfDirectory(at: baseDirectory, includingPropertiesForKeys: [.fileSizeKey]) else {
-            return
+            return nil
         }
         
-        self.files = contents.filter { $0.pathExtension == "csv" }.map { url in
+        return contents.filter { $0.pathExtension == "csv" }.map { url in
             let attributes = try? fileManager.attributesOfItem(atPath: url.path)
             let size = attributes?[.size] as? Int64 ?? 0
-            
-            // 简单估算点数 (一行约 60-80 字符)
-            var count = 0
-            if let content = try? String(contentsOf: url, encoding: .utf8) {
-                count = content.components(separatedBy: .newlines).filter { !$0.isEmpty }.count
-            }
             
             return RawFileItem(
                 url: url,
                 dateString: url.deletingPathExtension().lastPathComponent,
                 size: size,
-                pointCount: count
+                pointCount: nonEmptyLineCount(at: url)
             )
         }.sorted { $0.dateString > $1.dateString }
+    }
+
+    /// Non-empty lines, counted on the raw bytes without building a String:
+    /// the same as splitting the (app-written UTF-8) CSV text on LF/CR and
+    /// dropping empty pieces. Unreadable files count as 0.
+    nonisolated private static func nonEmptyLineCount(at url: URL) -> Int {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return 0 }
+        var count = 0
+        var lineHasContent = false
+        for byte in data {
+            if byte == 0x0A || byte == 0x0D {
+                if lineHasContent { count += 1 }
+                lineHasContent = false
+            } else {
+                lineHasContent = true
+            }
+        }
+        if lineHasContent { count += 1 }
+        return count
     }
     
     private func startSync() async {
@@ -356,7 +379,7 @@ struct RawLogsManagerView: View {
         do {
             let count = try await RawLocationStore.shared.syncToiCloud(onlyRecent: false)
             syncStatus = "同步成功：共同步 \(count) 个文件"
-            loadFiles()
+            await loadFiles()
             locationManager.refreshAvailableRawDates()
         } catch {
             syncStatus = "同步失败：\(error.localizedDescription)"

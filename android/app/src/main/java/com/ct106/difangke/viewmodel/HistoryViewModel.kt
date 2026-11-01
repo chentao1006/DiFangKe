@@ -39,7 +39,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             cal.set(Calendar.MILLISECOND, 0)
             cal.time
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
     private val _summaries = MutableStateFlow<Map<Date, DaySummary>>(emptyMap())
     val summaries: StateFlow<Map<Date, DaySummary>> = _summaries.asStateFlow()
@@ -53,7 +53,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     val favoriteFootprints = _footprints.map { list ->
         list.filter { it.isHighlight == true && it.statusValue != "ignored" }
             .sortedByDescending { it.startTime }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
@@ -198,15 +198,19 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     fun scanPhotos(photoUris: List<android.net.Uri>) {
         viewModelScope.launch {
             _isScanningPhotos.value = true
-            val activeFootprints = db.footprintDao().getAll().filter { it.status != FootprintStatus.IGNORED }
-            val existingPhotoUris = activeFootprints
-                .flatMap { footprint ->
-                    runCatching {
-                        val ids = org.json.JSONArray(footprint.photoAssetIDsJson)
-                        (0 until ids.length()).mapNotNull { ids.optString(it).takeIf(String::isNotBlank) }
-                    }.getOrDefault(emptyList())
-                }
-                .toSet()
+            val activeFootprints = withContext(Dispatchers.Default) {
+                db.footprintDao().getAll().filter { it.status != FootprintStatus.IGNORED }
+            }
+            val existingPhotoUris = withContext(Dispatchers.Default) {
+                activeFootprints
+                    .flatMap { footprint ->
+                        runCatching {
+                            val ids = org.json.JSONArray(footprint.photoAssetIDsJson)
+                            (0 until ids.length()).mapNotNull { ids.optString(it).takeIf(String::isNotBlank) }
+                        }.getOrDefault(emptyList())
+                    }
+                    .toSet()
+            }
             val rawCandidates = PhotoService.getInstance(getApplication())
                 .scanFootprintCandidates(photoUris, existingPhotoUris, activeFootprints)
             val places = db.placeDao().getAll()

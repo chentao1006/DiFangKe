@@ -21,6 +21,13 @@ class HealthManager: ObservableObject {
     private var lastPedometerStepCount: Int?
     private var lastPedometerMovementAt: Date = .distantPast
     private var motionTrackingGeneration = 0
+    /// Historical activity queries are aggregated here instead of on main.
+    private let historicalActivityQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "HealthManager.historicalActivity"
+        queue.qualityOfService = .utility
+        return queue
+    }()
 
     private var isActivityClassifiedAsMoving: Bool {
         currentMotionType == .walking || currentMotionType == .running
@@ -161,7 +168,7 @@ class HealthManager: ObservableObject {
         guard CMMotionActivityManager.isActivityAvailable() else { return .unknown }
         
         return await withCheckedContinuation { continuation in
-            activityManager.queryActivityStarting(from: start, to: end, to: .main) { activities, error in
+            activityManager.queryActivityStarting(from: start, to: end, to: historicalActivityQueue) { activities, error in
                 guard let activities = activities, error == nil else {
                     continuation.resume(returning: .unknown)
                     return

@@ -8,8 +8,8 @@ import android.graphics.Path
 import com.ct106.difangke.DiFangKeApp
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.google.gson.Gson
-import java.io.File
-import java.io.FileOutputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Calendar
 import java.util.Date
 import kotlin.math.cos
@@ -66,7 +66,7 @@ object WidgetDataLoader {
         }
     }
 
-    suspend fun load(context: Context, offset: Int): WidgetDayData {
+    suspend fun load(context: Context, offset: Int): WidgetDayData = withContext(Dispatchers.Default) {
         val clamped = offset.coerceIn(FootprintWidget.MIN_OFFSET, 0)
         val start = dayStart(clamped)
         val end = Calendar.getInstance().apply {
@@ -77,7 +77,7 @@ object WidgetDataLoader {
         val db = (context.applicationContext as? DiFangKeApp)?.database
             ?: DiFangKeApp.instance.database
 
-        return try {
+        try {
             val footprints = db.footprintDao().getForDay(Date(start), Date(end))
             val transports = db.transportRecordDao().getForDay(Date(start), Date(end))
             val places = db.placeDao().getAll()
@@ -150,8 +150,8 @@ object WidgetDataLoader {
 
     /**
      * Draws the day's track on a transparent bitmap (equirectangular projection fit to
-     * bounds), so it reads on both light and dark widget backgrounds. The result is also
-     * cached to filesDir/widget for debugging / reuse.
+     * bounds), so it reads on both light and dark widget backgrounds. Pure Canvas work:
+     * call from a background dispatcher.
      */
     fun renderTrack(
         context: Context,
@@ -226,14 +226,6 @@ object WidgetDataLoader {
             canvas.drawCircle(x, y, r + 2f * density, ring)
             fill.color = dot.color
             canvas.drawCircle(x, y, r, fill)
-        }
-
-        runCatching {
-            val dir = File(context.filesDir, "widget").apply { mkdirs() }
-            val file = File(dir, "track_${-data.dayOffset}_${if (isDark) "dark" else "light"}_${w}x$h.png")
-            dir.listFiles()?.filter { it.name.startsWith("track_${-data.dayOffset}_") && it.name != file.name }
-                ?.forEach { it.delete() }
-            FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
         }
         return bitmap
     }

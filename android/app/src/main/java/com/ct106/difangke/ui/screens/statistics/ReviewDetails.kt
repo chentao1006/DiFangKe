@@ -48,6 +48,7 @@ import com.ct106.difangke.ui.share.shareCenter
 import com.ct106.difangke.ui.theme.DfkAccent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -323,6 +324,7 @@ private fun ReviewBarCanvas(values: List<Double>, modifier: Modifier, denseThres
 internal fun ReviewBentoDetailDialog(detail: ReviewBentoDetail, snapshot: ReviewSnapshot, onDismiss: () -> Unit) {
     var selectedPlace by remember { mutableStateOf<ReviewPlaceSelection?>(null) }
     var selectedPlaceList by remember { mutableStateOf<ReviewPlaceListSelection?>(null) }
+    val placeSelectionScope = rememberCoroutineScope()
 
     ReviewDialogScaffold("${snapshot.rangeText} · ${detail.title}", onDismiss) {
         Column(
@@ -336,10 +338,12 @@ internal fun ReviewBentoDetailDialog(detail: ReviewBentoDetail, snapshot: Review
                 ReviewBentoDetail.TRANSPORT -> ReviewTransportDetail(snapshot)
                 ReviewBentoDetail.REGIONS -> ReviewRegionsDetail(snapshot) { item, scope ->
                     // iOS openReviewRegionItem.
-                    val places = snapshot.placeSelections(item.footprintIDs)
-                    if (places.isEmpty()) return@ReviewRegionsDetail
-                    if (scope == FrequentPlaceRankScope.PLACE) selectedPlace = places.first()
-                    else selectedPlaceList = ReviewPlaceListSelection("${scope.label}:${item.id}", item.name, places)
+                    placeSelectionScope.launch {
+                        val places = withContext(Dispatchers.Default) { snapshot.placeSelections(item.footprintIDs) }
+                        if (places.isEmpty()) return@launch
+                        if (scope == FrequentPlaceRankScope.PLACE) selectedPlace = places.first()
+                        else selectedPlaceList = ReviewPlaceListSelection("${scope.label}:${item.id}", item.name, places)
+                    }
                 }
             }
         }
@@ -997,9 +1001,11 @@ internal fun ReviewFavoritesDialog(
     onDismiss: () -> Unit,
     onFootprintSelected: (FootprintEntity) -> Unit
 ) {
-    val favorites = remember(snapshot) {
-        snapshot.footprints.filter { it.isHighlight == true && it.status != FootprintStatus.IGNORED }
-            .sortedByDescending { it.startTime }
+    val favorites by produceState(emptyList<FootprintEntity>(), snapshot) {
+        value = withContext(Dispatchers.Default) {
+            snapshot.footprints.filter { it.isHighlight == true && it.status != FootprintStatus.IGNORED }
+                .sortedByDescending { it.startTime }
+        }
     }
     ReviewDialogScaffold("${snapshot.rangeText} · 收藏足迹", onDismiss, background = MaterialTheme.colorScheme.background) {
         HistoryFavoritesView(

@@ -13,6 +13,8 @@ import com.ct106.difangke.service.GeocodeService
 import com.ct106.difangke.ui.shared.TimelineEditActions
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.util.Date
 
@@ -43,7 +45,7 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
         combine(_footprint, activityTypes, allPlaces, _placeHistory) { fp, types, places, history ->
             if (fp == null) emptyList()
             else ActivitySuggestion.getSuggestedActivities(fp, types, places, history, includeFallback = false)
-        }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private val _previousFootprint = MutableStateFlow<FootprintEntity?>(null)
     val previousFootprint: StateFlow<FootprintEntity?> = _previousFootprint.asStateFlow()
@@ -81,8 +83,13 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
         }
         _footprint.value = fp
         refreshAdjacent(fp)
-        _placeHistory.value = fp.placeID?.let { pid -> db.footprintDao().getAll().filter { it.placeID == pid } }.orEmpty()
+        _placeHistory.value = loadPlaceHistory(fp.placeID)
         if (fp.address == null) refreshAddress(fp)
+    }
+
+    /** Every footprint at [placeID]; the full-table scan runs off main. */
+    private suspend fun loadPlaceHistory(placeID: String?): List<FootprintEntity> = withContext(Dispatchers.Default) {
+        placeID?.let { pid -> db.footprintDao().getAll().filter { it.placeID == pid } }.orEmpty()
     }
 
     private suspend fun refreshAdjacent(fp: FootprintEntity) {
@@ -144,7 +151,7 @@ class FootprintDetailViewModel(application: Application) : AndroidViewModel(appl
 
     fun selectPlace(result: GeocodeService.SearchResult) = edit { fp ->
         TimelineEditActions.applyPlaceSelection(db, fp, result).also {
-            _placeHistory.value = it.placeID?.let { pid -> db.footprintDao().getAll().filter { f -> f.placeID == pid } }.orEmpty()
+            _placeHistory.value = loadPlaceHistory(it.placeID)
         }
     }
 

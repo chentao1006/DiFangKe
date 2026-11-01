@@ -174,7 +174,7 @@ private struct WatchComplicationTimelineItem: Codable {
 @MainActor
 final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     static let shared = WatchSyncManager()
-    static let provisionalMovingType = "moving"
+    nonisolated static let provisionalMovingType = "moving"
     private var modelContext: ModelContext?
     private let pendingActivityFootprintKey = "pendingWatchActivityFootprintID"
     private let pendingActivityIDKey = "pendingWatchActivityID"
@@ -227,20 +227,139 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         }
     }
 
+    /// Live LocationManager state copied on the main actor so the snapshot
+    /// itself can be built on a background context.
+    private struct WatchLiveState: @unchecked Sendable {
+        let isCurrentlyMoving: Bool
+        let isTracking: Bool
+        let movingStartedAt: Date?
+        let potentialStopStartLocation: CLLocation?
+        let lastLocation: CLLocation?
+        let liveStayStart: Date?
+        let livePlaceName: String?
+        let matchedPlaceID: UUID?
+        let allTodayPoints: [CLLocation]
+    }
+
+    private struct WatchBuiltSnapshot: @unchecked Sendable {
+        let snapshot: WatchSnapshot
+        let statistics: WatchStatisticsSnapshot?
+        let complicationData: Data?
+        let fingerprint: Data?
+        let fullData: Data?
+    }
+
+    private var snapshotPublishTask: Task<Void, Never>?
+    private var snapshotRequestGeneration = 0
+
+    private func makeLiveState() -> WatchLiveState {
+        let locationManager = LocationManager.shared
+        let liveStayStart = locationManager.isCurrentlyMoving ? nil : locationManager.currentStatusStartedAt
+        let livePlaceName: String? = {
+            guard liveStayStart != nil else { return nil }
+            if let place = locationManager.matchedPlace, !place.isIgnored { return place.name }
+            if let title = locationManager.ongoingTitle,
+               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
+            let address = locationManager.currentAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !address.isEmpty && address != "正在解析位置..." && address != "未知位置" { return address }
+            return "正在停留"
+        }()
+        return WatchLiveState(
+            isCurrentlyMoving: locationManager.isCurrentlyMoving,
+            isTracking: locationManager.isTracking,
+            movingStartedAt: locationManager.uiMovingStartedAt,
+            potentialStopStartLocation: locationManager.potentialStopStartLocation,
+            lastLocation: locationManager.lastLocation,
+            liveStayStart: liveStayStart,
+            livePlaceName: livePlaceName,
+            matchedPlaceID: locationManager.matchedPlace?.placeID,
+            allTodayPoints: locationManager.allTodayPoints
+        )
+    }
+
+    /// Builds (fetch, decode, statistics, JSON encode) on a detached background
+    /// context; only the statistics cache bookkeeping touches main state.
+    private func buildSnapshotOffMain(context: ModelContext) async -> WatchBuiltSnapshot {
+        let container = context.container
+        let live = makeLiveState()
+        let now = Date()
+        let refreshStatistics = needsStatisticsRefresh
+            || cachedStatistics == nil
+            || statisticsCacheDay.map { !Calendar.current.isDate($0, inSameDayAs: now) } == true
+        // Cleared before the build: an invalidation arriving meanwhile sets it
+        // again so the next sync recomputes.
+        if refreshStatistics { needsStatisticsRefresh = false }
+        let cached = cachedStatistics
+        let built = await Task.detached(priority: .utility) {
+            let backgroundContext = ModelContext(container)
+            let snapshot = Self.makeSnapshot(
+                context: backgroundContext,
+                live: live,
+                now: now,
+                refreshStatistics: refreshStatistics,
+                cachedStatistics: cached
+            )
+            let complicationSnapshot = WatchComplicationSnapshot(snapshot: snapshot)
+            let complicationData = try? JSONEncoder().encode(complicationSnapshot)
+            let fingerprint = try? JSONEncoder().encode(ComplicationBudgetFingerprint(complicationSnapshot))
+            return WatchBuiltSnapshot(
+                snapshot: snapshot,
+                statistics: refreshStatistics ? snapshot.statistics : nil,
+                complicationData: complicationData,
+                fingerprint: fingerprint,
+                fullData: try? JSONEncoder().encode(snapshot)
+            )
+        }.value
+        if refreshStatistics, let statistics = built.statistics {
+            cachedStatistics = statistics
+            statisticsCacheDay = now
+        }
+        return built
+    }
+
+    /// Fire-and-forget publish used by timeline/location callers.
+    func syncSnapshot(forceCurrentStateDelivery: Bool = false) {
+        Task { @MainActor [weak self] in
+            _ = await self?.publishSnapshot(forceCurrentStateDelivery: forceCurrentStateDelivery)
+        }
+    }
+
     /// Returns the compact current-state payload that was published, if any.
+    /// Requests are serialized so payloads reach the Watch in order; a queued
+    /// non-forced request is skipped when a newer one will publish fresher state.
     @discardableResult
-    func syncSnapshot(forceCurrentStateDelivery: Bool = false) -> [String: Any]? {
+    func publishSnapshot(forceCurrentStateDelivery: Bool = false) async -> [String: Any]? {
+        snapshotRequestGeneration += 1
+        let generation = snapshotRequestGeneration
+        let previous = snapshotPublishTask
+        let task = Task { @MainActor [weak self] () -> WatchPayloadBox in
+            await previous?.value
+            guard let self else { return WatchPayloadBox(payload: nil) }
+            if !forceCurrentStateDelivery && generation != self.snapshotRequestGeneration {
+                return WatchPayloadBox(payload: nil)
+            }
+            return WatchPayloadBox(payload: await self.publishSnapshotNow(forceCurrentStateDelivery: forceCurrentStateDelivery))
+        }
+        snapshotPublishTask = Task { _ = await task.value }
+        return await task.value.payload
+    }
+
+    private struct WatchPayloadBox: @unchecked Sendable {
+        let payload: [String: Any]?
+    }
+
+    private func publishSnapshotNow(forceCurrentStateDelivery: Bool) async -> [String: Any]? {
         guard let context = modelContext,
               WCSession.isSupported(),
               WCSession.default.activationState == .activated,
               WCSession.default.isWatchAppInstalled else { return nil }
-        let snapshot = makeSnapshot(context: context)
+        let built = await buildSnapshotOffMain(context: context)
+        let snapshot = built.snapshot
         if snapshot.currentTransportType != nil, snapshot.currentAverageSpeed != nil {
             lastMovingAverageSpeedSyncAt = Date()
         }
-        let complicationSnapshot = WatchComplicationSnapshot(snapshot: snapshot)
-        guard let complicationData = try? JSONEncoder().encode(complicationSnapshot) else { return nil }
-        guard let fingerprint = try? JSONEncoder().encode(ComplicationBudgetFingerprint(complicationSnapshot)) else { return nil }
+        guard let complicationData = built.complicationData else { return nil }
+        guard let fingerprint = built.fingerprint else { return nil }
         let stateChanged = fingerprint != lastComplicationFingerprint
         let generatedAt = Date().timeIntervalSince1970
         let complicationPayload: [String: Any] = ["complicationSnapshot": complicationData, "generatedAt": generatedAt]
@@ -258,8 +377,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
 
         // The complete payload is for the Watch app UI only; it is never sent through
         // the budgeted complication channel below because it includes historical routes.
-        let fullData = try? JSONEncoder().encode(snapshot)
-        if let fullData {
+        if let fullData = built.fullData {
             // updateApplicationContext is a latest-value cache: it reaches the Watch
             // process the moment it is next running, but never wakes a suspended one.
             try? session.updateApplicationContext(["snapshot": fullData, "generatedAt": generatedAt])
@@ -310,25 +428,39 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     func syncMovingAverageSpeedIfNeeded(now: Date = Date()) {
         guard let context = modelContext,
               LocationManager.shared.isCurrentlyMoving,
-              Self.currentMovementAverageSpeed(
-                persistedAverageSpeed: Self.currentTransportRecord(
-                    in: context,
-                    now: now,
-                    isCurrentlyMoving: true,
-                    movingStartedAt: LocationManager.shared.uiMovingStartedAt
-                )?.averageSpeed,
-                locations: LocationManager.shared.allTodayPoints,
-                movingStartedAt: LocationManager.shared.uiMovingStartedAt,
-                now: now,
-                isCurrentlyMoving: true
-              ) != nil,
               now.timeIntervalSince(lastMovingAverageSpeedSyncAt)
                 >= AppConfig.shared.watchMovingSpeedSyncInterval,
               WCSession.isSupported(),
               WCSession.default.activationState == .activated,
               WCSession.default.isWatchAppInstalled,
               WCSession.default.isReachable else { return }
-        syncSnapshot()
+        // The record lookup and the route filter/sort run on a background
+        // context over a copied point array.
+        let container = context.container
+        let locations = LocationManager.shared.allTodayPoints
+        let movingStartedAt = LocationManager.shared.uiMovingStartedAt
+        Task { @MainActor [weak self] in
+            let hasSpeed = await Task.detached(priority: .utility) { () -> Bool in
+                let backgroundContext = ModelContext(container)
+                return Self.currentMovementAverageSpeed(
+                    persistedAverageSpeed: Self.currentTransportRecord(
+                        in: backgroundContext,
+                        now: now,
+                        isCurrentlyMoving: true,
+                        movingStartedAt: movingStartedAt
+                    )?.averageSpeed,
+                    locations: locations,
+                    movingStartedAt: movingStartedAt,
+                    now: now,
+                    isCurrentlyMoving: true
+                ) != nil
+            }.value
+            guard hasSpeed, let self,
+                  LocationManager.shared.isCurrentlyMoving,
+                  now.timeIntervalSince(self.lastMovingAverageSpeedSyncAt)
+                    >= AppConfig.shared.watchMovingSpeedSyncInterval else { return }
+            self.syncSnapshot()
+        }
     }
 
     /// A best-effort hourly catch-up for the installed companion app. Location-triggered
@@ -346,17 +478,24 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         guard let context = modelContext,
               WCSession.isSupported(),
               WCSession.default.activationState == .activated,
-              WCSession.default.isWatchAppInstalled,
-              let data = try? JSONEncoder().encode(makeSnapshot(context: context)) else { return }
-        try? WCSession.default.updateApplicationContext([
-            "snapshot": data,
-            "activityPickerFootprintID": footprintID,
-            "generatedAt": Date().timeIntervalSince1970
-        ])
+              WCSession.default.isWatchAppInstalled else { return }
+        Task { @MainActor [weak self] in
+            guard let self, let data = await self.buildSnapshotOffMain(context: context).fullData else { return }
+            try? WCSession.default.updateApplicationContext([
+                "snapshot": data,
+                "activityPickerFootprintID": footprintID,
+                "generatedAt": Date().timeIntervalSince1970
+            ])
+        }
     }
 
-    private func makeSnapshot(context: ModelContext) -> WatchSnapshot {
-        let now = Date()
+    nonisolated private static func makeSnapshot(
+        context: ModelContext,
+        live: WatchLiveState,
+        now: Date,
+        refreshStatistics: Bool,
+        cachedStatistics: WatchStatisticsSnapshot?
+    ) -> WatchSnapshot {
         let calendar = Calendar.current
         let todayStart = calendar.startOfDay(for: now)
         let todayEnd = calendar.date(byAdding: .day, value: 1, to: todayStart) ?? now
@@ -370,28 +509,28 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         // A recently persisted transport may still end within the five-minute
         // lookup window after the user has explicitly arrived. Live stay state
         // is authoritative for whether Watch should continue showing "moving".
-        let liveStayAnchor = LocationManager.shared.potentialStopStartLocation
-        let movingStartedAt = LocationManager.shared.uiMovingStartedAt
+        let liveStayAnchor = live.potentialStopStartLocation
+        let movingStartedAt = live.movingStartedAt
         let currentTransport = Self.currentTransportRecord(
             in: context,
             now: now,
-            isCurrentlyMoving: LocationManager.shared.isCurrentlyMoving,
+            isCurrentlyMoving: live.isCurrentlyMoving,
             movingStartedAt: movingStartedAt
         )
         let currentTransportPresentation = Self.currentTransportPresentation(
             persistedType: currentTransport.map { $0.manualTypeRaw ?? $0.typeRaw },
             persistedStartedAt: currentTransport?.startTime,
-            isCurrentlyMoving: LocationManager.shared.isCurrentlyMoving,
+            isCurrentlyMoving: live.isCurrentlyMoving,
             provisionalType: Self.provisionalMovingType,
             provisionalStartedAt: movingStartedAt
-                ?? LocationManager.shared.lastLocation?.timestamp
+                ?? live.lastLocation?.timestamp
         )
         let currentAverageSpeed = Self.currentMovementAverageSpeed(
             persistedAverageSpeed: currentTransport?.averageSpeed,
-            locations: LocationManager.shared.allTodayPoints,
+            locations: live.allTodayPoints,
             movingStartedAt: movingStartedAt,
             now: now,
-            isCurrentlyMoving: LocationManager.shared.isCurrentlyMoving
+            isCurrentlyMoving: live.isCurrentlyMoving
         )
         let todayTransports = (try? context.fetch(FetchDescriptor<TransportRecord>(
             predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < todayEnd && $0.endTime >= todayStart },
@@ -409,9 +548,6 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             predicate: #Predicate { $0.statusRaw != "ignored" && $0.startTime < todayEnd && $0.endTime >= historyStart },
             sortBy: [SortDescriptor(\.startTime)]
         ))) ?? []
-        let refreshStatistics = needsStatisticsRefresh
-            || cachedStatistics == nil
-            || statisticsCacheDay.map { !calendar.isDate($0, inSameDayAs: now) } == true
         let statisticsFootprints = refreshStatistics
             ? ((try? context.fetch(FetchDescriptor<Footprint>(sortBy: [SortDescriptor(\.startTime)]))) ?? [])
             : []
@@ -550,40 +686,38 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
                 calendar.component(.year, from: $0) == year
             }
         }
+        // The cache bookkeeping happens on the main actor after this returns.
         let statistics: WatchStatisticsSnapshot
         if refreshStatistics {
             statistics = WatchStatisticsSnapshot(summaries: statisticsSummaries, availableYears: statisticsYears)
-            cachedStatistics = statistics
-            statisticsCacheDay = now
-            needsStatisticsRefresh = false
         } else if let cachedStatistics {
             statistics = cachedStatistics
         } else {
             statistics = WatchStatisticsSnapshot(summaries: statisticsSummaries, availableYears: statisticsYears)
         }
-        let currentFootprint = LocationManager.shared.currentStayFootprint(in: context, now: now)
-        let currentLocation = LocationManager.shared.lastLocation
-            ?? LocationManager.shared.potentialStopStartLocation
-        let liveStayStart = LocationManager.shared.isCurrentlyMoving ? nil : LocationManager.shared.currentStatusStartedAt
-        let livePlaceName: String? = {
-            guard liveStayStart != nil else { return nil }
-            if let place = LocationManager.shared.matchedPlace, !place.isIgnored { return place.name }
-            if let title = LocationManager.shared.ongoingTitle,
-               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
-            let address = LocationManager.shared.currentAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !address.isEmpty && address != "正在解析位置..." && address != "未知位置" { return address }
-            return "正在停留"
+        // Same selection as LocationManager.currentStayFootprint(in:now:),
+        // evaluated with the live values copied on the main actor.
+        let currentFootprint: Footprint? = {
+            guard live.isTracking, !live.isCurrentlyMoving, let anchor = live.potentialStopStartLocation else { return nil }
+            return Self.currentStayFootprint(
+                in: context, anchor: anchor, placeID: live.matchedPlaceID,
+                now: now, distanceThreshold: AppConfig.shared.stayDistanceThreshold
+            )
         }()
+        let currentLocation = live.lastLocation
+            ?? live.potentialStopStartLocation
+        let liveStayStart = live.liveStayStart
+        let livePlaceName = live.livePlaceName
 
         return WatchSnapshot(
             currentFootprintID: currentFootprint?.footprintID.uuidString
-                ?? (LocationManager.shared.isTracking ? liveStayAnchor.map { "ongoing-\($0.timestamp.timeIntervalSince1970)" } : nil),
+                ?? (live.isTracking ? liveStayAnchor.map { "ongoing-\($0.timestamp.timeIntervalSince1970)" } : nil),
             currentLatitude: currentLocation?.coordinate.latitude,
             currentLongitude: currentLocation?.coordinate.longitude,
             placeName: livePlaceName ?? "正在定位",
             address: currentFootprint?.reason,
             startedAt: liveStayStart,
-            isTracking: LocationManager.shared.isTracking,
+            isTracking: live.isTracking,
             currentActivityID: currentFootprint?.getActivityType(from: activityTypes)?.id.uuidString,
             currentTransportType: currentTransportPresentation.type,
             currentTransportStartedAt: currentTransportPresentation.startedAt,
@@ -597,7 +731,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         )
     }
 
-    static func currentTransportPresentation(
+    nonisolated static func currentTransportPresentation(
         persistedType: String?,
         persistedStartedAt: Date?,
         isCurrentlyMoving: Bool,
@@ -614,7 +748,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     /// Matches the iPhone transport model: accumulated route distance divided
     /// by elapsed route time. A persisted TransportRecord is authoritative;
     /// before one exists, calculate the same formula from the current route.
-    static func currentMovementAverageSpeed(
+    nonisolated static func currentMovementAverageSpeed(
         persistedAverageSpeed: Double?,
         locations: [CLLocation],
         movingStartedAt: Date?,
@@ -647,7 +781,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     /// Single source of truth for the current persisted trip. Both Watch and
     /// Live Activity must select the same record; otherwise one surface can
     /// retain the previous trip while another independently classifies the new one.
-    static func currentTransportRecord(
+    nonisolated static func currentTransportRecord(
         in context: ModelContext,
         now: Date,
         isCurrentlyMoving: Bool,
@@ -667,7 +801,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         }
     }
 
-    static func currentStayFootprint(
+    nonisolated static func currentStayFootprint(
         in context: ModelContext,
         anchor: CLLocation,
         placeID: UUID?,
@@ -715,7 +849,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         })
     }
 
-    static func latestStayInterruptionEnd(in context: ModelContext, after start: Date, now: Date) -> Date? {
+    nonisolated static func latestStayInterruptionEnd(in context: ModelContext, after start: Date, now: Date) -> Date? {
         var descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate {
             $0.statusRaw != "ignored" && $0.endTime > start && $0.endTime <= now
         }, sortBy: [SortDescriptor(\.endTime, order: .reverse)])
@@ -726,7 +860,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     /// A persisted footprint that overlaps the provisional anchor is the same
     /// ongoing stay. Prefer its earlier start so an in-memory anchor recovery
     /// cannot reset the duration shown by iPhone, Watch, or Live Activity.
-    static func continuousStayStart(
+    nonisolated static func continuousStayStart(
         anchorStart: Date,
         persistedStart: Date?,
         persistedEnd: Date?,
@@ -789,7 +923,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
 
     /// Watch map routes only need to convey the shape of a trip on a tiny screen, so the
     /// full GPS trace is thinned to a fixed point budget to keep the WatchConnectivity payload small.
-    private static func downsampledRoute(from pointsData: Data, maxCount: Int = 40) -> [WatchCoordinate]? {
+    nonisolated private static func downsampledRoute(from pointsData: Data, maxCount: Int = 40) -> [WatchCoordinate]? {
         guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: pointsData), decoded.count >= 2 else { return nil }
         guard decoded.count > maxCount else {
             return decoded.map { WatchCoordinate(lat: $0.lat, lon: $0.lon) }
@@ -852,7 +986,9 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
                 // to persist and reload the complication. The complete snapshot
                 // can exceed the message size limit; it still arrives through
                 // the application context updated by the same call.
-                replyHandler(self.syncSnapshot() ?? [:])
+                Task { @MainActor in
+                    replyHandler(await self.publishSnapshot(forceCurrentStateDelivery: true) ?? [:])
+                }
             }
             return
         }

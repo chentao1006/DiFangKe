@@ -7,10 +7,8 @@ import Aptabase
 struct DataManagerView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(LocationManager.self) private var locationManager
-    @Query(sort: \Footprint.startTime, order: .reverse) private var allFootprints: [Footprint]
-    @Query(sort: \Place.name) private var allPlaces: [Place]
-    @Query(sort: \ActivityType.sortOrder) private var allActivities: [ActivityType]
-    @Query(sort: \TransportRecord.startTime, order: .reverse) private var allTransports: [TransportRecord]
+    // Export reads the whole store on a background context at export time
+    // instead of keeping every record loaded through @Query.
     
     @State private var showDeleteAlert = false
     @State private var showingImportFilePicker = false
@@ -124,9 +122,7 @@ struct DataManagerView: View {
                 }
                 
                 Button(role: .destructive) {
-                    DFKMapSnapshotCache.shared.clearCache()
-                    updateCacheSize()
-                    clearAllIgnoredData()
+                    clearMapCacheAndIgnoredData()
                 } label: {
                     Label("清空地图缓存", systemImage: "trash")
                 }
@@ -191,78 +187,88 @@ struct DataManagerView: View {
     private func prepareExport() {
         Aptabase.shared.trackEvent("data_export_started")
         isExporting = true
+        let container = modelContext.container
         
-        Task {
+        Task { @MainActor in
             do {
-                // Generate backup in background
-                let data = try BackupService.shared.generateBackup(
-                    footprints: allFootprints, 
-                    places: allPlaces,
-                    activities: allActivities,
-                    transports: allTransports
-                )
-                
-                let filename = "DiFangKe_Backup_\(Date().formatted(.dateTime.year().month().day())).json"
-                let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-                try data.write(to: tempURL)
-                
-                await MainActor.run {
-                    self.exportURL = tempURL
-                    self.isExporting = false
-                    self.showingShareSheet = true
-                }
+                // Fetch, DTO mapping, encoding and the file write all run on a
+                // detached background context.
+                let tempURL = try await BackupService.shared.writeBackupFile(container: container)
+                self.exportURL = tempURL
+                self.isExporting = false
+                self.showingShareSheet = true
             } catch {
-                await MainActor.run {
-                    self.isExporting = false
-                    self.alertTitle = "导出失败"
-                    self.alertMessage = error.localizedDescription
-                    self.showAlert = true
-                }
+                self.isExporting = false
+                self.alertTitle = "导出失败"
+                self.alertMessage = error.localizedDescription
+                self.showAlert = true
             }
         }
     }
     
     private func importData(from result: Result<[URL], Error>) {
         Aptabase.shared.trackEvent("data_import_started")
+        let url: URL
         do {
             let urls = try result.get()
-            guard let url = urls.first else {
+            guard let first = urls.first else {
                 self.alertMessage = "未选择任何文件。"
                 self.showAlert = true
                 return
             }
-            
-            let canAccess = url.startAccessingSecurityScopedResource()
-            defer { if canAccess { url.stopAccessingSecurityScopedResource() } }
-            
-            let data = try Data(contentsOf: url)
-            let report = try BackupService.shared.restoreBackup(data: data, context: modelContext)
-            if report.newFootprints == 0 && report.newPlacesUser == 0 && report.newPlacesSystem == 0 && report.newTransports == 0 {
-                self.alertTitle = "导入结果"
-                self.alertMessage = "文件中未发现任何新数据（已跳过重复项）。"
-            } else {
-                self.alertTitle = "导入完成"
-                var message = ""
-                message += "• 足迹: 新增 \(report.newFootprints), 跳过 \(report.skippedFootprints)"
-                message += "\n• 交通: 新增 \(report.newTransports), 跳过 \(report.skippedTransports)"
-                message += "\n• 重要地点: 新增 \(report.newPlacesUser), 跳过 \(report.skippedPlacesUser)"
-                message += "\n• 其他地点: 新增 \(report.newPlacesSystem), 跳过 \(report.skippedPlacesSystem)"
-                message += "\n• 活动类型: 新增 \(report.newActivityTypes)"
-                
-                self.alertMessage = message
-            }
-            self.showAlert = true
-            
+            url = first
         } catch {
             self.alertTitle = "导入失败"
             self.alertMessage = error.localizedDescription
             self.showAlert = true
+            return
+        }
+        let container = modelContext.container
+
+        Task { @MainActor in
+            do {
+                // File read, decode and per-record lookups run on a background
+                // context; the data-changed notification is posted on main.
+                let report = try await BackupService.shared.restoreBackup(contentsOf: url, container: container)
+                if report.newFootprints == 0 && report.newPlacesUser == 0 && report.newPlacesSystem == 0 && report.newTransports == 0 {
+                    self.alertTitle = "导入结果"
+                    self.alertMessage = "文件中未发现任何新数据（已跳过重复项）。"
+                } else {
+                    self.alertTitle = "导入完成"
+                    var message = ""
+                    message += "• 足迹: 新增 \(report.newFootprints), 跳过 \(report.skippedFootprints)"
+                    message += "\n• 交通: 新增 \(report.newTransports), 跳过 \(report.skippedTransports)"
+                    message += "\n• 重要地点: 新增 \(report.newPlacesUser), 跳过 \(report.skippedPlacesUser)"
+                    message += "\n• 其他地点: 新增 \(report.newPlacesSystem), 跳过 \(report.skippedPlacesSystem)"
+                    message += "\n• 活动类型: 新增 \(report.newActivityTypes)"
+
+                    self.alertMessage = message
+                }
+                self.showAlert = true
+            } catch {
+                self.alertTitle = "导入失败"
+                self.alertMessage = error.localizedDescription
+                self.showAlert = true
+            }
         }
     }
     
     private func runDeduplication() {
         Aptabase.shared.trackEvent("data_deduplication_started")
-        let report = DataDeduplicationService.run(context: modelContext)
+        let container = modelContext.container
+        Task { @MainActor in
+            // Whole-store fetch and pairwise comparison run on a background
+            // context; refresh the timeline the same way the launch pass does.
+            let report = await DataDeduplicationService.run(in: container)
+            if report.didChange {
+                TimelineBuilder.timelineCache.removeAll()
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            }
+            presentDeduplicationResult(report)
+        }
+    }
+
+    private func presentDeduplicationResult(_ report: DataDeduplicationService.Report) {
         if report.didChange {
             self.alertTitle = "清理完成"
             let total = report.importedDuplicatesDeleted + report.footprintsDeleted
@@ -322,26 +328,50 @@ struct DataManagerView: View {
         }
     }
     
-    private func clearAllIgnoredData() {
-        do {
-            let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate { $0.statusValue == "ignored" })
-            if let fps = try? modelContext.fetch(fpDesc) {
-                for f in fps {
-                    modelContext.delete(f)
-                }
+    private func clearMapCacheAndIgnoredData() {
+        let container = modelContext.container
+        let cache = DFKMapSnapshotCache.shared
+        Task { @MainActor in
+            await Task.detached(priority: .utility) {
+                cache.clearCache()
+            }.value
+            updateCacheSize()
+            let deletedCount = await Self.clearAllIgnoredData(container: container)
+            if deletedCount > 0 {
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
             }
-            
-            let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.statusRaw == "ignored" })
-            if let tps = try? modelContext.fetch(tpDesc) {
-                for t in tps {
-                    modelContext.delete(t)
-                }
-            }
-            
-            try modelContext.save()
-        } catch {
-            print("清理遗留 ignored 记录失败: \(error)")
         }
+    }
+
+    /// Deletes ignored records on a background context; returns how many.
+    private static func clearAllIgnoredData(container: ModelContainer) async -> Int {
+        await Task.detached(priority: .utility) {
+            let context = ModelContext(container)
+            var deletedCount = 0
+            do {
+                let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate { $0.statusValue == "ignored" })
+                if let fps = try? context.fetch(fpDesc) {
+                    for f in fps {
+                        context.delete(f)
+                        deletedCount += 1
+                    }
+                }
+
+                let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.statusRaw == "ignored" })
+                if let tps = try? context.fetch(tpDesc) {
+                    for t in tps {
+                        context.delete(t)
+                        deletedCount += 1
+                    }
+                }
+
+                try context.save()
+            } catch {
+                print("清理遗留 ignored 记录失败: \(error)")
+                return 0
+            }
+            return deletedCount
+        }.value
     }
     
     private func rebuildAllTimelines() {
@@ -350,7 +380,12 @@ struct DataManagerView: View {
     }
 
     private func updateCacheSize() {
-        cacheSize = DFKMapSnapshotCache.shared.calculateCacheSize()
+        let cache = DFKMapSnapshotCache.shared
+        Task { @MainActor in
+            cacheSize = await Task.detached(priority: .utility) {
+                cache.calculateCacheSize()
+            }.value
+        }
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
@@ -490,8 +525,30 @@ struct BackupDTO: Codable {
 @MainActor
 final class BackupService {
     static let shared = BackupService()
+
+    /// Fetches the whole store on a detached background context (same sort
+    /// order the export view's queries used), encodes it and writes the file.
+    func writeBackupFile(container: ModelContainer) async throws -> URL {
+        try await Task.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            let data = try BackupService.generateBackupData(
+                footprints: try context.fetch(FetchDescriptor<Footprint>(sortBy: [SortDescriptor(\.startTime, order: .reverse)])),
+                places: try context.fetch(FetchDescriptor<Place>(sortBy: [SortDescriptor(\.name)])),
+                activities: try context.fetch(FetchDescriptor<ActivityType>(sortBy: [SortDescriptor(\.sortOrder)])),
+                transports: try context.fetch(FetchDescriptor<TransportRecord>(sortBy: [SortDescriptor(\.startTime, order: .reverse)]))
+            )
+            let filename = "DiFangKe_Backup_\(Date().formatted(.dateTime.year().month().day())).json"
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+            try data.write(to: tempURL)
+            return tempURL
+        }.value
+    }
     
     func generateBackup(footprints: [Footprint], places: [Place], activities: [ActivityType], transports: [TransportRecord]) throws -> Data {
+        try Self.generateBackupData(footprints: footprints, places: places, activities: activities, transports: transports)
+    }
+
+    nonisolated static func generateBackupData(footprints: [Footprint], places: [Place], activities: [ActivityType], transports: [TransportRecord]) throws -> Data {
         let dto = BackupDTO(
             version: 2,
             places: places.map { BackupDTO.PlaceDTO(id: $0.placeID.uuidString, name: $0.name, lat: $0.latitude, lon: $0.longitude, rad: $0.radius, addr: $0.address, isPriority: $0.isPriority, isIgnored: $0.isIgnored, isUserDefined: $0.isUserDefined) },
@@ -551,6 +608,27 @@ final class BackupService {
     }
     
     func restoreBackup(data: Data, context: ModelContext) throws -> RestoreReport {
+        let report = try Self.restoreBackupRecords(data: data, context: context)
+        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+        return report
+    }
+
+    /// Reads, decodes and inserts on a detached background context, then posts
+    /// the same notifications on the main actor.
+    func restoreBackup(contentsOf url: URL, container: ModelContainer) async throws -> RestoreReport {
+        let report = try await Task.detached(priority: .userInitiated) {
+            let canAccess = url.startAccessingSecurityScopedResource()
+            defer { if canAccess { url.stopAccessingSecurityScopedResource() } }
+            let data = try Data(contentsOf: url)
+            return try BackupService.restoreBackupRecords(data: data, context: ModelContext(container))
+        }.value
+        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+        return report
+    }
+
+    nonisolated static func restoreBackupRecords(data: Data, context: ModelContext) throws -> RestoreReport {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let backup = try decoder.decode(BackupDTO.self, from: data)
@@ -670,8 +748,6 @@ final class BackupService {
         // Later CloudKit imports run the same identity pass from LocationManager.
         _ = try DataDeduplicationService.reconcileBackupIdentities(context: context)
         try context.save()
-        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
-        CloudSettingsManager.shared.triggerDataSyncPulse()
         return RestoreReport(
             newFootprints: newFootprints, 
             skippedFootprints: skippedFootprints,

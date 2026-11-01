@@ -126,14 +126,27 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     @Published private(set) var snapshot = WatchSnapshot.placeholder
     @Published private(set) var requestedActivityPickerFootprintID: String?
     @Published private(set) var isConfirmingArrival = false
+    /// Snapshot JSON is decoded here, in delivery order, instead of on main.
+    private let decodeQueue = DispatchQueue(label: "WatchStore.decode", qos: .userInitiated)
+    /// Set on main once a phone delivery has been applied, so the persisted
+    /// launch copy (decoded asynchronously) can never overwrite newer state.
+    private var hasAppliedDelivery = false
 
     override init() {
         super.init()
-        if let data = UserDefaults(suiteName: complicationGroupID)?.data(forKey: complicationSnapshotKey) {
-            if let saved = try? JSONDecoder().decode(WatchSnapshot.self, from: data) {
-                snapshot = saved
-            } else if let saved = try? JSONDecoder().decode(WatchCompactSnapshot.self, from: data) {
-                mergeCurrentState(saved)
+        let groupID = complicationGroupID
+        let key = complicationSnapshotKey
+        decodeQueue.async { [weak self] in
+            guard let data = UserDefaults(suiteName: groupID)?.data(forKey: key) else { return }
+            let saved = try? JSONDecoder().decode(WatchSnapshot.self, from: data)
+            let savedCompact = saved == nil ? (try? JSONDecoder().decode(WatchCompactSnapshot.self, from: data)) : nil
+            DispatchQueue.main.async {
+                guard let self, !self.hasAppliedDelivery else { return }
+                if let saved {
+                    self.snapshot = saved
+                } else if let savedCompact {
+                    self.mergeCurrentState(savedCompact)
+                }
             }
         }
         activateSession()
@@ -237,11 +250,32 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) { apply(message) }
 
     private func apply(_ context: [String: Any]) {
-        let full = (context["snapshot"] as? Data).flatMap { try? JSONDecoder().decode(WatchSnapshot.self, from: $0) }
+        let fullData = context["snapshot"] as? Data
         let compactData = context["complicationSnapshot"] as? Data
-        let compact = compactData.flatMap { try? JSONDecoder().decode(WatchCompactSnapshot.self, from: $0) }
         let generatedAt = context["generatedAt"] as? Double
         let requestedPickerID = context["activityPickerFootprintID"] as? String
+        decodeQueue.async {
+            let full = fullData.flatMap { try? JSONDecoder().decode(WatchSnapshot.self, from: $0) }
+            let compact = compactData.flatMap { try? JSONDecoder().decode(WatchCompactSnapshot.self, from: $0) }
+            self.applyDecoded(
+                full: full,
+                fullData: fullData,
+                compact: compact,
+                compactData: compactData,
+                generatedAt: generatedAt,
+                requestedPickerID: requestedPickerID
+            )
+        }
+    }
+
+    private func applyDecoded(
+        full: WatchSnapshot?,
+        fullData: Data?,
+        compact: WatchCompactSnapshot?,
+        compactData: Data?,
+        generatedAt: Double?,
+        requestedPickerID: String?
+    ) {
         DispatchQueue.main.async {
             defer { WatchAppDelegate.completeConnectivityBackgroundTasks() }
             guard full != nil || compact != nil else { return }
@@ -252,10 +286,12 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
             if let last {
                 guard let generatedAt, generatedAt >= last else { return }
             }
-            if let full {
+            if let full, let fullData {
+                self.hasAppliedDelivery = true
                 self.snapshot = full
-                self.persistForComplications(full)
+                self.persistForComplications(fullData)
             } else if let compact, let compactData {
+                self.hasAppliedDelivery = true
                 self.mergeCurrentState(compact)
                 defaults?.set(compactData, forKey: self.complicationSnapshotKey)
                 WidgetCenter.shared.reloadTimelines(ofKind: "DiFangKeWatchComplication")
@@ -267,8 +303,9 @@ final class WatchStore: NSObject, ObservableObject, WCSessionDelegate {
 
     /// A Watch complication extension cannot receive WatchConnectivity messages
     /// itself. The companion app is the receiver and shares this compact copy.
-    private func persistForComplications(_ snapshot: WatchSnapshot) {
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+    /// Persists the phone's already-encoded snapshot bytes (the same JSON the
+    /// decoder just accepted) instead of re-encoding the full snapshot on main.
+    private func persistForComplications(_ data: Data) {
         UserDefaults(suiteName: complicationGroupID)?.set(data, forKey: complicationSnapshotKey)
         WidgetCenter.shared.reloadTimelines(ofKind: "DiFangKeWatchComplication")
     }

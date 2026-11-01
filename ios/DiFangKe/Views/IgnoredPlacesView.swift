@@ -5,11 +5,9 @@ import CoreLocation
 
 struct IgnoredPlacesView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \Place.name) private var allPlacesList: [Place]
-    
-    private var ignoredPlaces: [Place] {
-        allPlacesList.filter { $0.isIgnored && !$0.isUserDefined }
-    }
+    // Filtered by the store so body never scans every Place on main.
+    @Query(filter: #Predicate<Place> { $0.isIgnored == true && $0.isUserDefined == false }, sort: \Place.name)
+    private var ignoredPlaces: [Place]
     
     @State private var placeToDelete: Place?
     @State private var showDeleteConfirm = false

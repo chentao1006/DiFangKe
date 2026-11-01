@@ -786,30 +786,31 @@ class GeocodeService private constructor() {
     private fun isCoarseAutomaticPlaceName(name: String): Boolean {
         if (hasFinePlaceSignal(name)) return false
 
-        val coarseKeywords = listOf(
-            "景区", "景点", "公园", "广场", "博物馆", "美术馆", "图书馆", "体育馆", "展览馆",
-            "商场", "购物中心", "中心", "大厦", "大楼", "写字楼", "园区", "科技园", "产业园",
-            "大学", "学院", "学校", "医院", "酒店", "机场", "火车站", "高铁站", "地铁站",
-            "车站", "码头", "社区", "小区", "花园", "公寓", "住宅", "村", "镇", "街道"
-        )
-
-        return coarseKeywords.any { name.contains(it) }
+        return COARSE_PLACE_KEYWORDS.any { name.contains(it) }
     }
 
     private fun hasFinePlaceSignal(name: String): Boolean {
-        val finePatterns = listOf(
-            Regex("""\d+\s*号"""),
-            Regex("""\d+\s*弄"""),
-            Regex("""\d+\s*室"""),
-            Regex("""\d+\s*层"""),
-            Regex("""\d+\s*楼"""),
-            Regex("""[\dA-Za-z一二三四五六七八九十]+号楼"""),
-            Regex("""[\dA-Za-z一二三四五六七八九十]+栋"""),
-            Regex("""单元|门牌|入口|出口|柜台|摊|铺|档口"""),
-            Regex("""店$|分店|便利店|超市|餐厅|饭店|咖啡|奶茶|茶饮|甜品|小吃|烧烤|火锅|面馆|粉店|酒吧"""),
-            Regex("""药房|药店|诊所|理发|美甲|洗衣|快递|驿站""")
-        )
-
-        return finePatterns.any { it.containsMatchIn(name) }
+        return FINE_PLACE_PATTERNS.any { it.containsMatchIn(name) }
     }
 }
+
+// Compiled once: the tracking service evaluates these for every location fix.
+private val COARSE_PLACE_KEYWORDS = listOf(
+    "景区", "景点", "公园", "广场", "博物馆", "美术馆", "图书馆", "体育馆", "展览馆",
+    "商场", "购物中心", "中心", "大厦", "大楼", "写字楼", "园区", "科技园", "产业园",
+    "大学", "学院", "学校", "医院", "酒店", "机场", "火车站", "高铁站", "地铁站",
+    "车站", "码头", "社区", "小区", "花园", "公寓", "住宅", "村", "镇", "街道"
+)
+
+private val FINE_PLACE_PATTERNS = listOf(
+    Regex("""\d+\s*号"""),
+    Regex("""\d+\s*弄"""),
+    Regex("""\d+\s*室"""),
+    Regex("""\d+\s*层"""),
+    Regex("""\d+\s*楼"""),
+    Regex("""[\dA-Za-z一二三四五六七八九十]+号楼"""),
+    Regex("""[\dA-Za-z一二三四五六七八九十]+栋"""),
+    Regex("""单元|门牌|入口|出口|柜台|摊|铺|档口"""),
+    Regex("""店$|分店|便利店|超市|餐厅|饭店|咖啡|奶茶|茶饮|甜品|小吃|烧烤|火锅|面馆|粉店|酒吧"""),
+    Regex("""药房|药店|诊所|理发|美甲|洗衣|快递|驿站""")
+)

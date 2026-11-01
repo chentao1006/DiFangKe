@@ -44,39 +44,62 @@ data class FootprintMapMarker(
     val centerText: String? = null
 )
 
-fun TencentMap.addFootprintMarkers(
+/** A footprint pin whose bitmap and anchor were rendered ahead of time (safe to build off main). */
+class PreparedFootprintMarker(
+    val marker: FootprintMapMarker,
+    val bitmap: Bitmap,
+    val anchorV: Float
+)
+
+/** Renders pin bitmaps for [markers]; pure Canvas work, call from a background dispatcher. */
+fun prepareFootprintMarkers(
     markers: List<FootprintMapMarker>,
     isDark: Boolean = false,
-    onMarkerClick: ((String) -> Unit)? = null,
     photoBitmaps: Map<String, Bitmap> = emptyMap()
+): List<PreparedFootprintMarker> = markers
+    .filter { it.latitude.isFinite() && it.longitude.isFinite() }
+    .map { marker ->
+        val bitmap = createFootprintMarkerBitmap(marker, isDark, marker.photoUri?.let { photoBitmaps[it] })
+
+        // Calculate anchor based on uniform size
+        val scale = 2.9f * marker.scale
+        val size = (34f * scale).toInt()
+        val bitmapHeight = (size * 1.4f).toInt() + 8
+        val radius = size / 2f
+        val pinTopCenterY = radius + 4f
+        val pinBottomY = pinTopCenterY + radius * 1.4f
+        val anchorV = pinBottomY / bitmapHeight.toFloat()
+        PreparedFootprintMarker(marker, bitmap, anchorV)
+    }
+
+/** Adds already-rendered pins; only the map mutation happens here (main thread). */
+fun TencentMap.addPreparedFootprintMarkers(
+    prepared: List<PreparedFootprintMarker>,
+    onMarkerClick: ((String) -> Unit)? = null
 ) {
     setOnMarkerClickListener { marker ->
         val id = marker.tag as? String
         if (id != null) onMarkerClick?.invoke(id)
         id != null
     }
-    markers
-        .filter { it.latitude.isFinite() && it.longitude.isFinite() }
-        .forEach { marker ->
-            val bitmap = createFootprintMarkerBitmap(marker, isDark, marker.photoUri?.let { photoBitmaps[it] })
-            
-            // Calculate anchor based on uniform size
-            val scale = 2.9f * marker.scale
-            val size = (34f * scale).toInt()
-            val bitmapHeight = (size * 1.4f).toInt() + 8
-            val radius = size / 2f
-            val pinTopCenterY = radius + 4f
-            val pinBottomY = pinTopCenterY + radius * 1.4f
-            val anchorV = pinBottomY / bitmapHeight.toFloat()
-            
-            addMarker(
-                MarkerOptions()
-                    .position(LatLng(marker.latitude, marker.longitude))
-                    .anchor(0.5f, anchorV)
-                    .icon(BitmapDescriptorFactory.fromBitmap(bitmap))
-                    .zIndex(if (marker.scale > 1f) 150f else 100f)
-            ).setTag(marker.id)
-        }
+    prepared.forEach { item ->
+        addMarker(
+            MarkerOptions()
+                .position(LatLng(item.marker.latitude, item.marker.longitude))
+                .anchor(0.5f, item.anchorV)
+                .icon(BitmapDescriptorFactory.fromBitmap(item.bitmap))
+                .zIndex(if (item.marker.scale > 1f) 150f else 100f)
+        ).setTag(item.marker.id)
+    }
+}
+
+fun TencentMap.addFootprintMarkers(
+    markers: List<FootprintMapMarker>,
+    isDark: Boolean = false,
+    onMarkerClick: ((String) -> Unit)? = null,
+    photoBitmaps: Map<String, Bitmap> = emptyMap()
+) {
+    addPreparedFootprintMarkers(prepareFootprintMarkers(markers, isDark, photoBitmaps), onMarkerClick)
 }
 
 fun buildFootprintMapMarkers(

@@ -57,7 +57,9 @@ import com.ct106.difangke.data.db.entity.ActivityTypeEntity
 import com.ct106.difangke.data.db.entity.FootprintEntity
 import com.ct106.difangke.data.db.entity.PlaceEntity
 import com.ct106.difangke.ui.components.NearbyPlacePickerSheet
-import com.ct106.difangke.ui.components.addFootprintMarkers
+import com.ct106.difangke.ui.components.PreparedFootprintMarker
+import com.ct106.difangke.ui.components.addPreparedFootprintMarkers
+import com.ct106.difangke.ui.components.prepareFootprintMarkers
 import com.ct106.difangke.ui.components.addImportantPlaceCircles
 import com.ct106.difangke.ui.components.buildFootprintMapMarkers
 import com.ct106.difangke.ui.components.getIconForName
@@ -609,6 +611,18 @@ fun AsyncPhotoThumb(uri: String, modifier: Modifier = Modifier, sizePx: Int = 36
     }
 }
 
+private class DetailMapModel(
+    val points: List<com.tencent.tencentmap.mapsdk.maps.model.LatLng>,
+    val markers: List<PreparedFootprintMarker>
+)
+
+/** Inputs last drawn by [DetailMapView]; plain fields so drawing never triggers recomposition. */
+private class DetailMapDrawState {
+    var model: DetailMapModel? = null
+    var allPlaces: List<PlaceEntity>? = null
+    var primaryColor: Int? = null
+}
+
 @Composable
 fun DetailMapView(
     footprint: FootprintEntity,
@@ -617,6 +631,20 @@ fun DetailMapView(
 ) {
     val isDark = androidx.compose.foundation.isSystemInDarkTheme()
     val primaryColor = MaterialTheme.colorScheme.primary.toArgb()
+    // Coordinate JSON, marker aggregation and pin bitmaps are prepared off main.
+    val model by produceState<DetailMapModel?>(null, footprint, activityTypes, isDark) {
+        value = withContext(Dispatchers.Default) {
+            val lats = TimelineEditActions.jsonDoubles(footprint.latitudeJson)
+            val lons = TimelineEditActions.jsonDoubles(footprint.longitudeJson)
+            val points = (0 until minOf(lats.size, lons.size)).map { com.tencent.tencentmap.mapsdk.maps.model.LatLng(lats[it], lons[it]) }
+            DetailMapModel(
+                points = points,
+                markers = if (points.isEmpty()) emptyList()
+                else prepareFootprintMarkers(buildFootprintMapMarkers(listOf(footprint), activityTypes), isDark)
+            )
+        }
+    }
+    val drawn = remember { DetailMapDrawState() }
     AndroidView(
         factory = { ctx -> com.tencent.tencentmap.mapsdk.maps.TextureMapView(ctx).apply { onResume() } },
         modifier = Modifier.fillMaxSize(),
@@ -630,16 +658,19 @@ fun DetailMapView(
             isRotateGesturesEnabled = false
             isTiltGesturesEnabled = false
         }
-        val lats = TimelineEditActions.jsonDoubles(footprint.latitudeJson)
-        val lons = TimelineEditActions.jsonDoubles(footprint.longitudeJson)
-        val points = (0 until minOf(lats.size, lons.size)).map { com.tencent.tencentmap.mapsdk.maps.model.LatLng(lats[it], lons[it]) }
+        val current = model ?: return@AndroidView
+        if (drawn.model === current && drawn.allPlaces == allPlaces && drawn.primaryColor == primaryColor) return@AndroidView
+        drawn.model = current
+        drawn.allPlaces = allPlaces
+        drawn.primaryColor = primaryColor
+        val points = current.points
         amap.clear()
         amap.addImportantPlaceCircles(allPlaces)
         if (points.isNotEmpty()) {
             if (points.size > 1) {
                 amap.addPolyline(com.tencent.tencentmap.mapsdk.maps.model.PolylineOptions().addAll(points).width(12f).color(primaryColor))
             }
-            amap.addFootprintMarkers(buildFootprintMapMarkers(listOf(footprint), activityTypes), isDark = isDark)
+            amap.addPreparedFootprintMarkers(current.markers)
             if (points.size == 1) {
                 amap.moveCamera(com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory.newLatLngZoom(points[0], 17f))
             } else {

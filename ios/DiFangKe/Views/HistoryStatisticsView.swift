@@ -33,6 +33,17 @@ enum StatisticsRange: Hashable {
         default: return nil
         }
     }
+
+    /// The review page's range wording, e.g. in titles.
+    var reviewTitle: String {
+        switch self {
+        case .last7Days: return "最近7天"
+        case .last30Days: return "最近30天"
+        case .last90Days: return "最近90天"
+        case .lastYear: return "过去一年"
+        case .customYear(let year): return "\(year)年"
+        }
+    }
 }
 
 private enum FrequentPlaceRankScope: String, CaseIterable, Identifiable {
@@ -80,7 +91,9 @@ private struct StatisticsGeographyResult: Sendable {
 private struct ReviewMemoryCandidate: Identifiable {
     let id: String
     let date: Date
-    let footprint: Footprint?
+    let footprintID: UUID?
+    /// The footprint's integrated place key, used to keep one memory per place.
+    let placeKey: String?
     let title: String
     let evidence: String
     let reason: String
@@ -90,15 +103,42 @@ private struct ReviewMemoryCandidate: Identifiable {
 }
 
 private struct ReviewMemoryPhotoCarousel: View {
-    let assetIDs: [String]
+    let sourceAssetIDs: [String]
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedIndex = 0
+    /// Oldest first, resolved through Photos off main.
+    @State private var orderedAssetIDs: [String]?
 
     init(assetIDs: [String]) {
-        self.assetIDs = PhotoService.shared.assetIDsOldestFirst(assetIDs)
+        self.sourceAssetIDs = assetIDs
     }
 
+    private var assetIDs: [String] { orderedAssetIDs ?? [] }
+
     var body: some View {
+        Group {
+            if orderedAssetIDs == nil {
+                // Until the order is known, show the same earliest photo the
+                // carousel starts with.
+                ContinuousTimelinePhotoThumbnail(
+                    assetIDs: sourceAssetIDs,
+                    targetSide: 420,
+                    fillsAvailableSpace: true,
+                    usesHighQualityThumbnail: true,
+                    prefersEarliestPhoto: true
+                )
+            } else {
+                carousel
+            }
+        }
+        .task(id: sourceAssetIDs) {
+            let ordered = await PhotoService.shared.assetIDsOldestFirstAsync(sourceAssetIDs)
+            guard !Task.isCancelled else { return }
+            orderedAssetIDs = ordered
+        }
+    }
+
+    private var carousel: some View {
         TabView(selection: $selectedIndex) {
             ForEach(Array(assetIDs.enumerated()), id: \.element) { index, assetID in
                 ContinuousTimelinePhotoThumbnail(
@@ -132,11 +172,154 @@ private struct ReviewPlaceSelection: Identifiable {
     let rangeText: String
     let visits: [Footprint]
     let photoAssetIDs: [String]
+    /// Precomputed off main with the selection.
+    let stats: ReviewPlaceStats
+
+    /// Maps a background place group back to the caller's models.
+    init?(group: ReviewPlaceGroup, rangeText: String, footprintsByID: [UUID: Footprint]) {
+        let visits = group.visitIDs.compactMap { footprintsByID[$0] }
+        guard !visits.isEmpty else { return nil }
+        self.id = group.id
+        self.title = group.title
+        self.rangeText = rangeText
+        self.visits = visits
+        self.photoAssetIDs = group.photoAssetIDs
+        self.stats = group.stats
+    }
 }
 
-private struct ReviewMapPlaceCluster: Identifiable {
+/// The places a review sheet shows, re-resolved whenever the sheet's own
+/// range changes: by place key, or by a ranking item.
+private struct ReviewPlaceQuery: Hashable {
+    enum Source: Hashable {
+        case placeKeys([String])
+        case rankItem(FrequentPlaceRankScope, String)
+    }
+
     let id: String
-    let places: [ReviewPlaceSelection]
+    let source: Source
+    /// List title; a single place uses its own title.
+    let title: String
+    /// Full review map places use map titles, everything else place names.
+    let usesMapTitle: Bool
+    /// Shown as a list even when one place remains.
+    let presentsList: Bool
+}
+
+/// Every sheet the review page opens. Each is hosted by its own
+/// `HistoryStatisticsView` in sheet mode, so its range picker never changes
+/// the page or any other sheet.
+private enum ReviewSheetContent: Identifiable {
+    case map
+    case bento(ReviewBentoDetail)
+    case favorites
+    /// The query, and its places as resolved for the opening range.
+    case places(ReviewPlaceQuery, [ReviewPlaceSelection])
+
+    var id: String {
+        switch self {
+        case .map: return "map"
+        case .bento(let detail): return "bento-\(detail.rawValue)"
+        case .favorites: return "favorites"
+        case .places(let query, _): return "places-\(query.id)"
+        }
+    }
+}
+
+/// The presenter's current review state, so a sheet opens with it at once
+/// and only rebuilds when its own range changes.
+private struct ReviewSheetSeed {
+    let source: ReviewSourceSnapshot?
+    let sourceFingerprint: Int?
+    let range: StatisticsRange
+    let activeYear: Int
+    let derived: ReviewDerivedData
+    let rangeFootprints: [Footprint]
+    let rangeFootprintsByID: [UUID: Footprint]
+    let tripActivityDays: [Date: String]
+    let timelineItems: [TimelineItem]
+    let mapRegion: MKCoordinateRegion?
+    let mapPosition: MapCameraPosition
+    let routesReady: Bool
+    let frequentPlaceRankScope: FrequentPlaceRankScope
+    /// Only sheets opened straight from the review page pick their own range;
+    /// sheets opened from a sheet keep their presenter's range.
+    let allowsRangeSelection: Bool
+}
+
+/// A sheet's own range selection, shown under its navigation title.
+private struct ReviewRangeControl {
+    let selection: Binding<StatisticsRange>
+    let years: [Int]
+    let activeYear: Int
+}
+
+/// The review page's segmented range picker; the last segment opens a year menu.
+private struct ReviewRangePicker: View {
+    @Binding var selection: StatisticsRange
+    let years: [Int]
+    let activeYear: Int
+
+    private var isCustomYear: Bool {
+        if case .customYear = selection { return true }
+        return false
+    }
+
+    var body: some View {
+        Picker("时间范围", selection: $selection) {
+            Text("7天").tag(StatisticsRange.last7Days)
+            Text("30天").tag(StatisticsRange.last30Days)
+            Text("90天").tag(StatisticsRange.last90Days)
+            Text("1年").tag(StatisticsRange.lastYear)
+            Text(isCustomYear ? "\(String(activeYear)) ▾" : "年份 ▾")
+                .tag(StatisticsRange.customYear(activeYear))
+        }
+        .pickerStyle(.segmented)
+        .overlay {
+            GeometryReader { geometry in
+                HStack(spacing: 0) {
+                    Spacer()
+                    if !years.isEmpty {
+                        Menu {
+                            ForEach(years, id: \.self) { year in
+                                Button(String(year)) {
+                                    selection = .customYear(year)
+                                }
+                            }
+                        } label: {
+                            Color.white.opacity(0.001)
+                        }
+                        .frame(width: geometry.size.width / 5)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+    }
+}
+
+private extension View {
+    /// Puts the sheet's range picker into its navigation bar, under the title.
+    @ViewBuilder
+    func reviewRangeBar(_ control: ReviewRangeControl?) -> some View {
+        if let control {
+            let picker = ReviewRangePicker(selection: control.selection, years: control.years, activeYear: control.activeYear)
+                .padding(.bottom, 8)
+            if #available(iOS 26.0, *) {
+                // Joins the navigation bar's own edge effect, like system pages
+                // with a segmented control under the title.
+                safeAreaBar(edge: .top, spacing: 0) { picker }
+            } else {
+                safeAreaInset(edge: .top, spacing: 0) {
+                    picker
+                        .padding(.top, 8)
+                        .background { ReviewNavigationBarBlur() }
+                }
+            }
+        } else {
+            self
+        }
+    }
 }
 
 private struct ReviewPlaceListSelection: Identifiable {
@@ -159,6 +342,44 @@ private struct ReviewActivityBarValue: Identifiable {
     let value: Double
     let valueText: String
     var id: String { slice.id }
+}
+
+/// Ranked horizontal bars per activity type (review activity details and place pages).
+private struct ReviewActivityHorizontalBars: View {
+    let title: String
+    let icon: String
+    let values: [ReviewActivityBarValue]
+
+    var body: some View {
+        let rankedValues = values.sorted {
+            if $0.value != $1.value { return $0.value > $1.value }
+            return $0.slice.name.localizedStandardCompare($1.slice.name) == .orderedAscending
+        }
+        let maximum = max(1, rankedValues.first?.value ?? 1)
+        return VStack(alignment: .leading, spacing: 14) {
+            Label(title, systemImage: icon).font(.headline)
+            ForEach(rankedValues.prefix(6)) { item in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Label(item.slice.name, systemImage: item.slice.icon)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(item.valueText).fontWeight(.semibold).foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                    GeometryReader { geometry in
+                        Capsule().fill(item.slice.color.opacity(0.14))
+                        Capsule()
+                            .fill(item.slice.color)
+                            .frame(width: max(5, geometry.size.width * item.value / maximum))
+                    }
+                    .frame(height: 8)
+                }
+            }
+        }
+        .padding(16)
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
 }
 
 private struct ReviewActivityHeatmapRow: Identifiable {
@@ -388,18 +609,1525 @@ private actor StatisticsGeographyResolver {
     }
 }
 
+// MARK: - Background review data
+
+/// Value copy of the footprint fields the review page reads. Taken in a
+/// background context so grouping, ranking and scoring never walk models on
+/// the main actor.
+private struct ReviewFootprintSnapshot: @unchecked Sendable {
+    let footprintID: UUID
+    let startTime: Date
+    let endTime: Date
+    let latitude: Double
+    let longitude: Double
+    let photoAssetIDs: [String]
+    let placeID: UUID?
+    let address: String?
+    let reason: String?
+    let countryCode: String?
+    let countryName: String?
+    let cityName: String?
+    let activityTypeValue: String?
+    /// `activityTypeValue` resolved against the activity table with the snapshot.
+    let activity: ReviewActivitySnapshot?
+    let status: FootprintStatus
+    let isHighlight: Bool?
+    let isAddressEditedByHand: Bool
+    /// The linked saved place's raw name and address; nil name when the
+    /// footprint has no saved place.
+    let savedPlaceName: String?
+    let savedPlaceAddress: String?
+    /// `reviewIntegratedPlaceKey(for:allPlaces:)`, resolved with the snapshot.
+    let placeKey: String
+    /// Saved place name, else the trimmed address (review titles).
+    let placeName: String
+    /// Saved place name, address or city (full review map titles).
+    let mapTitle: String
+
+    // Same rule as `Footprint.duration`.
+    var duration: TimeInterval { max(0, endTime.timeIntervalSince(startTime)) }
+}
+
+private struct ReviewTransportSnapshot: Sendable {
+    let id: UUID
+    let startTime: Date
+    let endTime: Date
+    let typeRaw: String
+    let manualTypeRaw: String?
+    let distance: Double
+
+    // Same rule as the former `reviewTransportType(for:)`.
+    var type: TransportType {
+        manualTypeRaw.flatMap(TransportType.init(rawValue:))
+            ?? TransportType(rawValue: typeRaw)
+            ?? .slow
+    }
+}
+
+private struct ReviewActivitySnapshot: @unchecked Sendable {
+    let id: UUID
+    let name: String
+    let icon: String
+    let color: Color
+}
+
+/// Database-wide review source, fetched and fingerprinted off main.
+private struct ReviewSourceSnapshot: @unchecked Sendable {
+    let fingerprint: Int
+    /// Non-ignored footprints, newest first (the former `allFootprints` order).
+    let footprints: [ReviewFootprintSnapshot]
+    let transports: [ReviewTransportSnapshot]
+    let activities: [ReviewActivitySnapshot]
+    let priorityPlaceIDs: Set<UUID>
+}
+
+/// AppConfig values the background builders read, captured on main.
+private struct ReviewConfigSnapshot: Sendable {
+    let longStayMinDuration: Double
+    let photoMinCount: Int
+    let firstVisitPhotoMinCount: Int
+    let frequentVisitMinCount: Int
+    let unusualDurationRatio: Double
+    let minimumScore: Double
+    let maximumCount: Int
+    let longTimeNoSeeDays: Int
+    let travelDistanceMin: Double
+    let walkDistanceMin: Double
+    let diverseTransportMinCount: Int
+
+    static func current() -> ReviewConfigSnapshot {
+        let config = AppConfig.shared
+        return ReviewConfigSnapshot(
+            longStayMinDuration: config.reviewMemoryLongStayMinDuration,
+            photoMinCount: config.reviewMemoryPhotoMinCount,
+            firstVisitPhotoMinCount: config.reviewMemoryFirstVisitPhotoMinCount,
+            frequentVisitMinCount: config.reviewMemoryFrequentVisitMinCount,
+            unusualDurationRatio: config.reviewMemoryUnusualDurationRatio,
+            minimumScore: config.reviewMemoryMinimumScore,
+            maximumCount: config.reviewMemoryMaximumCount,
+            longTimeNoSeeDays: config.longTimeNoSeeDays,
+            travelDistanceMin: config.reviewMemoryTravelDistanceMin,
+            walkDistanceMin: config.reviewMemoryWalkDistanceMin,
+            diverseTransportMinCount: config.reviewMemoryDiverseTransportMinCount
+        )
+    }
+}
+
+/// The applied range resolved once against a fixed `now`, so the background
+/// filter and the main-context range fetch select the same records.
+private struct ReviewRangeWindow: Sendable {
+    let range: StatisticsRange
+    let now: Date
+    /// Inclusive lower bound of `startTime`.
+    let lowerBound: Date
+    /// Exclusive upper bound of `startTime` (custom years only).
+    let upperBound: Date?
+    /// The former `reviewRangeStart` / `reviewRangeEnd`.
+    let rangeStart: Date
+    let rangeEnd: Date
+
+    init(range: StatisticsRange, now: Date = Date()) {
+        let calendar = Calendar.current
+        self.range = range
+        self.now = now
+        switch range {
+        case .last7Days, .last30Days, .last90Days, .lastYear:
+            let days = range.days ?? 0
+            let cutoff = calendar.date(byAdding: .day, value: -days, to: now) ?? now
+            lowerBound = cutoff
+            upperBound = nil
+            rangeStart = cutoff
+            rangeEnd = now
+        case .customYear(let year):
+            let yearStart = calendar.date(from: DateComponents(year: year, month: 1, day: 1)) ?? now
+            lowerBound = yearStart
+            upperBound = calendar.date(from: DateComponents(year: year + 1, month: 1, day: 1))
+            rangeStart = yearStart
+            rangeEnd = calendar.date(from: DateComponents(year: year, month: 12, day: 31)) ?? now
+        }
+    }
+
+    /// Same membership rule as the former `filteredFootprints` /
+    /// `filteredTransportRecords`.
+    func contains(_ date: Date) -> Bool {
+        if case .customYear(let year) = range {
+            return Calendar.current.component(.year, from: date) == year
+        }
+        return date >= lowerBound
+    }
+}
+
+/// Declared outside the view so the background builder can create it
+/// without touching the view's main-actor isolation.
+private struct ReviewFrequentPlaceItem: Identifiable {
+    let id: String
+    let name: String
+    let address: String
+    let count: Int
+    let duration: TimeInterval
+    let footprintIDs: [UUID]
+}
+
+private struct ReviewGeographyMetric {
+    let icon: String
+    let value: String
+    let label: String
+}
+
+private struct ReviewRhythmMetrics {
+    let dailyCounts: [(date: Date, count: Int)]
+    let activeDayCount: Int
+    let activeDayRate: Int
+    let weeklyAverageText: String
+    let activeDayAverageText: String
+    let peakCount: Int
+    let longestStreak: Int
+    let weekdayAverages: [CGFloat]
+    let hourlyCounts: [Int]
+}
+
+private struct ReviewPlaceStats {
+    let totalDuration: TimeInterval
+    let geographyText: String?
+    let weekdayCounts: [Int]
+    let hourlyCounts: [Int]
+    /// Visit durations in chronological order.
+    let durationTrend: [Double]
+    let averageDuration: TimeInterval
+    let firstVisitDate: Date?
+    let lastVisitDate: Date?
+    /// Total stay per activity type, longest first.
+    let activitySlices: [ReviewActivitySlice]
+    let activityVisitCounts: [String: Int]
+    let visitActivities: [UUID: ReviewActivitySnapshot]
+}
+
+/// A place's visits grouped and summarised in the background; the main actor
+/// only maps `visitIDs` back to its own models.
+private struct ReviewPlaceGroup: @unchecked Sendable {
+    let id: String
+    let title: String
+    /// Newest first.
+    let visitIDs: [UUID]
+    let photoAssetIDs: [String]
+    let stats: ReviewPlaceStats
+}
+
+/// Everything the review page derives from the source for one applied range.
+/// Built in the background; `body` and its sections only read it.
+private struct ReviewDerivedData: @unchecked Sendable {
+    var range: StatisticsRange?
+    /// Range footprints in source order (newest first).
+    var rangeFootprints: [ReviewFootprintSnapshot] = []
+    var rangeTransports: [ReviewTransportSnapshot] = []
+    var rangeSnapshotsByID: [UUID: ReviewFootprintSnapshot] = [:]
+    var footprintIDsByPlaceKey: [String: [UUID]] = [:]
+    var favoriteFootprintIDs: Set<UUID> = []
+    var availableYears: [Int] = []
+    var transportCount = 0
+    var totalDistance = 0.0
+    var mapRevision = 0
+    var geographyMetric = ReviewGeographyMetric(icon: "mappin.and.ellipse", value: "0", label: "个地点")
+    var activitySlices: [ReviewActivitySlice] = []
+    var activityRecognizedCount = 0
+    var activityVisitCounts: [String: Int] = [:]
+    var activityWeekdayCounts: [String: [Int]] = [:]
+    var activityHourlyCounts: [String: [Int]] = [:]
+    var transportSlices: [ReviewTransportSlice] = []
+    var transportActiveDays: [String: Int] = [:]
+    var transportWeekdayCounts: [String: [Int]] = [:]
+    var transportHourlyCounts: [String: [Int]] = [:]
+    var topRegions: [(name: String, duration: TimeInterval)] = []
+    var pastMemoryCandidate: ReviewMemoryCandidate?
+    var activityBuckets: [Int] = Array(repeating: 0, count: 24)
+    var rhythm = ReviewRhythmMetrics(
+        dailyCounts: [],
+        activeDayCount: 0,
+        activeDayRate: 0,
+        weeklyAverageText: "0次",
+        activeDayAverageText: "0次",
+        peakCount: 0,
+        longestStreak: 0,
+        weekdayAverages: Array(repeating: 0, count: 7),
+        hourlyCounts: Array(repeating: 0, count: 24)
+    )
+    var mileage = ReviewMileageMetrics(
+        dailyValues: [],
+        total: 0,
+        dailyAverage: 0,
+        peakDay: nil,
+        activeDayCount: 0,
+        weekdayAverages: Array(repeating: 0, count: 7)
+    )
+    var frequentPlaces: [FrequentPlaceRankScope: [ReviewFrequentPlaceItem]] = [:]
+    var defaultFrequentPlaceRankScope: FrequentPlaceRankScope = .city
+    var shareCoordinates: [CLLocationCoordinate2D] = []
+    var photoCaptions: [String: String] = [:]
+
+    func placeKey(for footprintID: UUID) -> String? {
+        rangeSnapshotsByID[footprintID]?.placeKey
+    }
+}
+
+private enum ReviewTimelineSlot: Sendable {
+    case footprint(UUID)
+    case transport(Int)
+}
+
+/// Routes, map bounds and timeline order for one applied range.
+private struct ReviewDerivedResult: @unchecked Sendable {
+    let derived: ReviewDerivedData
+    let transports: [Transport]
+    /// `(footprints + transports)` sorted by start time.
+    let timelineSlots: [ReviewTimelineSlot]
+    let bounds: ReviewMapBounds?
+}
+
+/// Runs `operation` detached and forwards cancellation of the awaiting task.
+private func reviewDetached<T: Sendable>(
+    priority: TaskPriority = .utility,
+    _ operation: @escaping @Sendable () async -> T
+) async -> T {
+    let task = Task.detached(priority: priority, operation: operation)
+    return await withTaskCancellationHandler {
+        await task.value
+    } onCancel: {
+        task.cancel()
+    }
+}
+
+/// Pure, nonisolated builders for the review page. Every function here runs
+/// off the main actor and works only on snapshots or a private ModelContext.
+private enum ReviewDataBuilder {
+    static let weekdaySymbols = ["一", "二", "三", "四", "五", "六", "日"]
+
+    // MARK: Formatting (shared with the view)
+
+    static func formatRankDuration(_ duration: TimeInterval) -> String {
+        let totalMinutes = Int(duration / 60)
+        guard totalMinutes >= 60 else {
+            return "\(totalMinutes)分钟"
+        }
+
+        let totalHours = totalMinutes / 60
+        if totalHours >= 24 {
+            let days = totalHours / 24
+            if duration > 3 * 24 * 60 * 60 {
+                return "\(days)天"
+            }
+            return "\(days)天\(totalHours % 24)小时"
+        }
+
+        let hours = Double(totalMinutes) / 60
+        if hours < 10 {
+            return String(format: "%.1f小时", hours)
+        }
+        return "\(Int(hours))小时"
+    }
+
+    static func formatRankMileage(_ distance: Double) -> String {
+        if distance < 1_000 {
+            return "\(Int(distance.rounded()))米"
+        }
+        return String(format: "%.1f公里", distance / 1_000)
+    }
+
+    static func compactNumber<T: BinaryFloatingPoint>(_ value: T) -> String {
+        let number = Double(value)
+        if abs(number.rounded() - number) < 0.05 {
+            return String(Int(number.rounded()))
+        }
+        return String(format: "%.1f", number)
+    }
+
+    static func flagEmoji(for countryCode: String) -> String {
+        let base: UInt32 = 127397
+        return countryCode.uppercased().unicodeScalars.compactMap {
+            UnicodeScalar(base + $0.value).map(String.init)
+        }.joined()
+    }
+
+    static func rankName(
+        for scope: FrequentPlaceRankScope,
+        placeName: String,
+        countryName: String?,
+        countryCode: String?,
+        cityName: String?
+    ) -> String? {
+        switch scope {
+        case .place:
+            return placeName
+        case .country:
+            guard let countryName, let countryCode else { return nil }
+            return "\(flagEmoji(for: countryCode)) \(simplifiedChineseName(countryName))"
+        case .city:
+            return cityName.map(simplifiedChineseName)
+        }
+    }
+
+    // MARK: Source
+
+    /// Fetches the review source in its own context and fingerprints it.
+    /// Returns nil when a fetch fails so the caller keeps its current source.
+    static func fetchSource(in container: ModelContainer) -> ReviewSourceSnapshot? {
+        let context = ModelContext(container)
+        let footprintDescriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate<Footprint> { $0.statusValue != "ignored" },
+            sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
+        )
+        let transportRecordDescriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate<TransportRecord> { $0.statusRaw == "active" }
+        )
+        let activityDescriptor = FetchDescriptor<ActivityType>(
+            sortBy: [SortDescriptor(\ActivityType.sortOrder)]
+        )
+        guard let fetchedFootprints = try? context.fetch(footprintDescriptor),
+              let fetchedTransports = try? context.fetch(transportRecordDescriptor),
+              let fetchedActivities = try? context.fetch(activityDescriptor),
+              let fetchedPlaces = try? context.fetch(FetchDescriptor<Place>()) else {
+            return nil
+        }
+
+        var hasher = Hasher()
+        for footprint in fetchedFootprints {
+            hasher.combine(footprint.footprintID)
+            hasher.combine(footprint.startTime)
+            hasher.combine(footprint.endTime)
+            hasher.combine(footprint.latitudeData.count)
+            hasher.combine(footprint.longitudeData.count)
+            hasher.combine(footprint.photoAssetIDsData)
+            hasher.combine(footprint.placeID)
+            hasher.combine(footprint.activityTypeValue)
+            hasher.combine(footprint.countryCode)
+            hasher.combine(footprint.cityName)
+            hasher.combine(footprint.statusValue)
+        }
+        for transport in fetchedTransports {
+            hasher.combine(transport.recordID)
+            hasher.combine(transport.startTime)
+            hasher.combine(transport.endTime)
+            hasher.combine(transport.typeRaw)
+            hasher.combine(transport.manualTypeRaw)
+            hasher.combine(transport.distance)
+            // Route payloads can be very large. Their identity, time range and
+            // byte count are sufficient to detect normal edits without hashing
+            // the entire JSON blob for every app-wide signal.
+            hasher.combine(transport.pointsData.count)
+        }
+        for activity in fetchedActivities {
+            hasher.combine(activity.id)
+            hasher.combine(activity.name)
+            hasher.combine(activity.icon)
+            hasher.combine(activity.colorHex)
+            hasher.combine(activity.sortOrder)
+        }
+        for place in fetchedPlaces {
+            hasher.combine(place.placeID)
+            hasher.combine(place.name)
+            hasher.combine(place.latitude)
+            hasher.combine(place.longitude)
+            hasher.combine(place.address)
+            hasher.combine(place.category)
+        }
+
+        // `allPlaces.first(where:)` semantics: the first place per ID wins.
+        var placesByID: [UUID: Place] = [:]
+        for place in fetchedPlaces where placesByID[place.placeID] == nil {
+            placesByID[place.placeID] = place
+        }
+
+        let activities = fetchedActivities.map {
+            ReviewActivitySnapshot(id: $0.id, name: $0.name, icon: $0.icon, color: $0.color)
+        }
+        let footprints = fetchedFootprints.map { footprint -> ReviewFootprintSnapshot in
+            let place = footprint.placeID.flatMap { placesByID[$0] }
+            let address = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let placeName: String
+            if let place, !place.name.isEmpty {
+                placeName = place.name
+            } else {
+                placeName = address.isEmpty ? "这个地方" : address
+            }
+            let mapTitle = [
+                place?.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines),
+                footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ]
+                .compactMap { $0 }
+                .first { !$0.isEmpty } ?? "地点"
+            return ReviewFootprintSnapshot(
+                footprintID: footprint.footprintID,
+                startTime: footprint.startTime,
+                endTime: footprint.endTime,
+                latitude: footprint.latitude,
+                longitude: footprint.longitude,
+                photoAssetIDs: footprint.photoAssetIDs,
+                placeID: footprint.placeID,
+                address: footprint.address,
+                reason: footprint.reason,
+                countryCode: footprint.countryCode,
+                countryName: footprint.countryName,
+                cityName: footprint.cityName,
+                activityTypeValue: footprint.activityTypeValue,
+                activity: activityType(value: footprint.activityTypeValue, in: activities),
+                status: footprint.status,
+                isHighlight: footprint.isHighlight,
+                isAddressEditedByHand: footprint.isAddressEditedByHand,
+                savedPlaceName: place?.name,
+                savedPlaceAddress: place?.address,
+                placeKey: reviewIntegratedPlaceKey(for: footprint, allPlaces: fetchedPlaces),
+                placeName: placeName,
+                mapTitle: mapTitle
+            )
+        }
+        let transports = fetchedTransports.map {
+            ReviewTransportSnapshot(
+                id: $0.recordID,
+                startTime: $0.startTime,
+                endTime: $0.endTime,
+                typeRaw: $0.typeRaw,
+                manualTypeRaw: $0.manualTypeRaw,
+                distance: $0.distance
+            )
+        }
+        return ReviewSourceSnapshot(
+            fingerprint: hasher.finalize(),
+            footprints: footprints,
+            transports: transports,
+            activities: activities,
+            priorityPlaceIDs: Set(fetchedPlaces.filter(\.isPriority).map(\.placeID))
+        )
+    }
+
+    // MARK: Derived data
+
+    /// Same rule as `Footprint.getActivityType(from:)`.
+    static func activityType(value: String?, in activities: [ReviewActivitySnapshot]) -> ReviewActivitySnapshot? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else { return nil }
+        return activities.first { $0.id.uuidString == value || $0.name == value }
+    }
+
+    static func derive(
+        source: ReviewSourceSnapshot,
+        window: ReviewRangeWindow,
+        tripActivityDays: [Date: String],
+        config: ReviewConfigSnapshot,
+        container: ModelContainer
+    ) -> ReviewDerivedResult {
+        let calendar = Calendar.current
+        let activities = source.activities
+        let rangeFootprints = source.footprints.filter { window.contains($0.startTime) }
+        let rangeTransports = source.transports.filter { window.contains($0.startTime) }
+
+        var derived = ReviewDerivedData()
+        derived.range = window.range
+        derived.rangeFootprints = rangeFootprints
+        derived.rangeTransports = rangeTransports
+        derived.availableYears = Set(source.footprints.map { calendar.component(.year, from: $0.startTime) })
+            .sorted(by: >)
+
+        var snapshotsByID: [UUID: ReviewFootprintSnapshot] = [:]
+        var idsByPlaceKey: [String: [UUID]] = [:]
+        for footprint in rangeFootprints {
+            snapshotsByID[footprint.footprintID] = footprint
+            idsByPlaceKey[footprint.placeKey, default: []].append(footprint.footprintID)
+        }
+        derived.rangeSnapshotsByID = snapshotsByID
+        derived.footprintIDsByPlaceKey = idsByPlaceKey
+        derived.favoriteFootprintIDs = Set(rangeFootprints.lazy
+            .filter { $0.isHighlight == true && $0.status != .ignored }
+            .map(\.footprintID))
+
+        // Hero metrics.
+        derived.transportCount = rangeTransports.count
+        derived.totalDistance = rangeTransports.reduce(0) { $0 + $1.distance }
+        let latestFootprint = rangeFootprints.map(\.endTime).max()?.timeIntervalSince1970 ?? 0
+        let latestTransport = rangeTransports.map(\.endTime).max()?.timeIntervalSince1970 ?? 0
+        let rangeCode: Int
+        switch window.range {
+        case .last7Days: rangeCode = 7
+        case .last30Days: rangeCode = 30
+        case .last90Days: rangeCode = 90
+        case .lastYear: rangeCode = 365
+        case .customYear(let year): rangeCode = year
+        }
+        let dataRevision = rangeCode &* 1_000_003
+            &+ rangeFootprints.count &* 10_007
+            &+ rangeTransports.count &* 101
+            &+ Int(max(latestFootprint, latestTransport))
+        derived.mapRevision = dataRevision &* 31 &+ 6
+
+        // Former `getTopLocations(delta: 0.01).count`: 3-decimal grid, top 200.
+        let topLocationFactor = pow(10.0, 3.0)
+        var topLocationKeys = Set<String>()
+        for footprint in rangeFootprints {
+            let lat = (footprint.latitude * topLocationFactor).rounded() / topLocationFactor
+            let lon = (footprint.longitude * topLocationFactor).rounded() / topLocationFactor
+            topLocationKeys.insert("\(lat),\(lon)")
+        }
+        let placeCount = min(200, topLocationKeys.count)
+
+        let countryCodes = Set(rangeFootprints.compactMap { footprint -> String? in
+            let value = footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return value.isEmpty ? nil : value.uppercased()
+        })
+        let metricCities = Set(rangeFootprints.compactMap { footprint -> String? in
+            let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !city.isEmpty else { return nil }
+            return "\(footprint.countryCode?.uppercased() ?? "")|\(city)"
+        })
+        if countryCodes.count > 1 {
+            derived.geographyMetric = ReviewGeographyMetric(icon: "globe.asia.australia.fill", value: "\(countryCodes.count)", label: "个国家")
+        } else if metricCities.count > 1 {
+            derived.geographyMetric = ReviewGeographyMetric(icon: "building.2.fill", value: "\(metricCities.count)", label: "座城市")
+        } else {
+            derived.geographyMetric = ReviewGeographyMetric(icon: "mappin.and.ellipse", value: "\(placeCount)", label: "个地点")
+        }
+
+        // Activities.
+        var activityTotals: [String: TimeInterval] = [:]
+        var recognizedCount = 0
+        var visitCounts: [String: Int] = [:]
+        var activityWeekdays: [String: [Int]] = [:]
+        var activityHours: [String: [Int]] = [:]
+        for footprint in rangeFootprints {
+            guard let activity = footprint.activity else { continue }
+            recognizedCount += 1
+            visitCounts[activity.name, default: 0] += 1
+            let mondayFirstIndex = (calendar.component(.weekday, from: footprint.startTime) + 5) % 7
+            activityWeekdays[activity.name, default: Array(repeating: 0, count: 7)][mondayFirstIndex] += 1
+            activityHours[activity.name, default: Array(repeating: 0, count: 24)][calendar.component(.hour, from: footprint.startTime)] += 1
+            // A trip day counts whole toward the trip's own type below, so
+            // its individual stops are not counted a second time.
+            guard tripActivityDays[calendar.startOfDay(for: footprint.startTime)] == nil else { continue }
+            activityTotals[activity.name, default: 0] += footprint.duration
+        }
+        for value in tripActivityDays.values {
+            guard let activity = activities.first(where: { $0.id.uuidString == value || $0.name == value }) else { continue }
+            activityTotals[activity.name, default: 0] += 86_400
+        }
+        derived.activitySlices = activityTotals.compactMap { name, duration in
+            guard let activity = activities.first(where: { $0.name == name }) else { return nil }
+            return ReviewActivitySlice(id: name, name: name, duration: duration, color: activity.color, icon: activity.icon)
+        }.sorted { $0.duration > $1.duration }
+        derived.activityRecognizedCount = recognizedCount
+        derived.activityVisitCounts = visitCounts
+        derived.activityWeekdayCounts = activityWeekdays
+        derived.activityHourlyCounts = activityHours
+
+        // Transport.
+        var transportCounts: [TransportType: Int] = [:]
+        var transportDistances: [TransportType: Double] = [:]
+        var transportDays: [String: Set<Date>] = [:]
+        var transportWeekdays: [String: [Int]] = [:]
+        var transportHours: [String: [Int]] = [:]
+        for record in rangeTransports {
+            let type = record.type
+            transportCounts[type, default: 0] += 1
+            transportDistances[type, default: 0] += record.distance
+            transportDays[type.rawValue, default: []].insert(calendar.startOfDay(for: record.startTime))
+            let mondayFirstIndex = (calendar.component(.weekday, from: record.startTime) + 5) % 7
+            transportWeekdays[type.rawValue, default: Array(repeating: 0, count: 7)][mondayFirstIndex] += 1
+            transportHours[type.rawValue, default: Array(repeating: 0, count: 24)][calendar.component(.hour, from: record.startTime)] += 1
+        }
+        let transportColors: [Color] = [.dfkAccent, .blue, .green, .orange, .purple]
+        derived.transportSlices = transportCounts.map { type, count in
+            let index = TransportType.allCases.firstIndex(of: type) ?? 0
+            return ReviewTransportSlice(
+                id: type.rawValue,
+                name: type.localizedName,
+                count: count,
+                distance: transportDistances[type, default: 0],
+                color: transportColors[index % transportColors.count],
+                icon: type.sfSymbol
+            )
+        }.sorted {
+            if $0.count != $1.count { return $0.count > $1.count }
+            return $0.distance > $1.distance
+        }
+        derived.transportActiveDays = transportDays.mapValues(\.count)
+        derived.transportWeekdayCounts = transportWeekdays
+        derived.transportHourlyCounts = transportHours
+
+        // Regions.
+        var regionTotals: [String: TimeInterval] = [:]
+        for footprint in rangeFootprints {
+            let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let name = city.isEmpty ? footprint.placeName : city
+            regionTotals[name, default: 0] += footprint.duration
+        }
+        derived.topRegions = regionTotals.map { (name: $0.key, duration: $0.value) }.sorted { $0.duration > $1.duration }
+
+        derived.pastMemoryCandidate = pastMemoryCandidate(
+            history: source.footprints,
+            priorityPlaceIDs: source.priorityPlaceIDs,
+            now: window.now
+        )
+
+        // Rhythm.
+        let rangeDuration = max(1, window.rangeEnd.timeIntervalSince(window.rangeStart))
+        var buckets = Array(repeating: 0, count: 24)
+        var hourlyCounts = Array(repeating: 0, count: 24)
+        for footprint in rangeFootprints {
+            let progress = footprint.startTime.timeIntervalSince(window.rangeStart) / rangeDuration
+            let index = min(23, max(0, Int(progress * 24)))
+            buckets[index] += 1
+            hourlyCounts[calendar.component(.hour, from: footprint.startTime)] += 1
+        }
+        derived.activityBuckets = buckets
+
+        let endDate = calendar.startOfDay(for: min(window.rangeEnd, window.now))
+        let dayCount: Int
+        if let fixedDays = window.range.days {
+            dayCount = fixedDays
+        } else {
+            let rangeStart = calendar.startOfDay(for: window.rangeStart)
+            dayCount = max(1, (calendar.dateComponents([.day], from: rangeStart, to: endDate).day ?? 0) + 1)
+        }
+        let firstDate = calendar.date(byAdding: .day, value: -(dayCount - 1), to: endDate) ?? endDate
+        let countsByDate = Dictionary(grouping: rangeFootprints) {
+            calendar.startOfDay(for: $0.startTime)
+        }.mapValues(\.count)
+        let dailyCounts: [(date: Date, count: Int)] = (0..<dayCount).map { offset in
+            let date = calendar.date(byAdding: .day, value: offset, to: firstDate) ?? firstDate
+            return (date, countsByDate[date, default: 0])
+        }
+        let activeDayCount = dailyCounts.filter { $0.count > 0 }.count
+        let totalCount = dailyCounts.reduce(0) { $0 + $1.count }
+        let rhythmDays = max(1, dailyCounts.count)
+        var longestStreak = 0
+        var currentStreak = 0
+        var weekdayTotals = Array(repeating: 0, count: 7)
+        var weekdayOccurrences = Array(repeating: 0, count: 7)
+        for item in dailyCounts {
+            if item.count > 0 {
+                currentStreak += 1
+                longestStreak = max(longestStreak, currentStreak)
+            } else {
+                currentStreak = 0
+            }
+            let mondayFirstIndex = (calendar.component(.weekday, from: item.date) + 5) % 7
+            weekdayTotals[mondayFirstIndex] += item.count
+            weekdayOccurrences[mondayFirstIndex] += 1
+        }
+        derived.rhythm = ReviewRhythmMetrics(
+            dailyCounts: dailyCounts,
+            activeDayCount: activeDayCount,
+            activeDayRate: Int((Double(activeDayCount) / Double(rhythmDays) * 100).rounded()),
+            weeklyAverageText: "\(compactNumber(Double(totalCount) * 7 / Double(rhythmDays)))次",
+            activeDayAverageText: "\(compactNumber(Double(totalCount) / Double(max(1, activeDayCount))))次",
+            peakCount: dailyCounts.map(\.count).max() ?? 0,
+            longestStreak: longestStreak,
+            weekdayAverages: weekdayTotals.indices.map { index in
+                CGFloat(weekdayTotals[index]) / CGFloat(max(1, weekdayOccurrences[index]))
+            },
+            hourlyCounts: hourlyCounts
+        )
+
+        // Mileage.
+        let distanceByDate = Dictionary(grouping: rangeTransports) {
+            calendar.startOfDay(for: $0.startTime)
+        }.mapValues { records in
+            records.reduce(0) { $0 + $1.distance }
+        }
+        let dailyValues = dailyCounts.map { item in
+            (date: item.date, distance: distanceByDate[item.date, default: 0])
+        }
+        let mileageTotal = dailyValues.reduce(0) { $0 + $1.distance }
+        var mileageTotals = Array(repeating: 0.0, count: 7)
+        var mileageOccurrences = Array(repeating: 0, count: 7)
+        for item in dailyValues {
+            let mondayFirstIndex = (calendar.component(.weekday, from: item.date) + 5) % 7
+            mileageTotals[mondayFirstIndex] += item.distance
+            mileageOccurrences[mondayFirstIndex] += 1
+        }
+        derived.mileage = ReviewMileageMetrics(
+            dailyValues: dailyValues,
+            total: mileageTotal,
+            dailyAverage: dailyValues.isEmpty ? 0 : mileageTotal / Double(dailyValues.count),
+            peakDay: dailyValues.max { $0.distance < $1.distance },
+            activeDayCount: dailyValues.filter { $0.distance > 0 }.count,
+            weekdayAverages: mileageTotals.indices.map { index in
+                mileageTotals[index] / Double(max(1, mileageOccurrences[index]))
+            }
+        )
+
+        // Rankings.
+        for scope in FrequentPlaceRankScope.allCases {
+            derived.frequentPlaces[scope] = frequentPlaces(for: scope, footprints: rangeFootprints)
+        }
+        let rankCountries = Set(rangeFootprints.compactMap { footprint in
+            footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty })
+        if rankCountries.count > 1 {
+            derived.defaultFrequentPlaceRankScope = .country
+        } else {
+            let rankCities = Set(rangeFootprints.compactMap { footprint -> String? in
+                guard let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines), !city.isEmpty else {
+                    return nil
+                }
+                return "\(footprint.countryCode ?? "")|\(city)"
+            })
+            derived.defaultFrequentPlaceRankScope = rankCities.count == 1 ? .place : .city
+        }
+
+        // Share inputs.
+        derived.shareCoordinates = rangeFootprints.map {
+            CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+        }
+        var photoCaptions: [String: String] = [:]
+        for footprint in rangeFootprints {
+            let place = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let caption = (place?.isEmpty == false ? place : footprint.cityName) else { continue }
+            for assetID in footprint.photoAssetIDs where photoCaptions[assetID] == nil {
+                photoCaptions[assetID] = caption
+            }
+        }
+        derived.photoCaptions = photoCaptions
+
+        // Routes: decode only this range's payloads from a private context.
+        let routes = decodeRoutes(
+            for: rangeTransports,
+            window: window,
+            footprints: rangeFootprints,
+            config: config,
+            container: container
+        )
+
+        var combined: [(startTime: Date, slot: ReviewTimelineSlot)] = rangeFootprints.map {
+            (startTime: $0.startTime, slot: ReviewTimelineSlot.footprint($0.footprintID))
+        }
+        for (index, transport) in routes.transports.enumerated() {
+            combined.append((startTime: transport.startTime, slot: ReviewTimelineSlot.transport(index)))
+        }
+        combined.sort { $0.startTime < $1.startTime }
+
+        return ReviewDerivedResult(
+            derived: derived,
+            transports: routes.transports,
+            timelineSlots: combined.map(\.slot),
+            bounds: routes.bounds
+        )
+    }
+
+    private static func frequentPlaces(
+        for scope: FrequentPlaceRankScope,
+        footprints: [ReviewFootprintSnapshot]
+    ) -> [ReviewFrequentPlaceItem] {
+        var groups: [String: (name: String, address: String, count: Int, duration: TimeInterval, footprintIDs: [UUID])] = [:]
+        let hasMultipleCountries = Set(footprints.compactMap { footprint in
+            footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }).count > 1
+
+        for fp in footprints {
+            var address = ""
+            var placeName = ""
+            if let savedPlaceName = fp.savedPlaceName {
+                placeName = savedPlaceName
+                address = fp.savedPlaceAddress ?? fp.address ?? ""
+            } else if let addr = fp.address, !addr.isEmpty {
+                let parts = addr.components(separatedBy: "市").last?.components(separatedBy: "区").last?.components(separatedBy: "县").last ?? addr
+                placeName = parts.components(separatedBy: " ").first ?? addr
+                address = addr
+            }
+
+            guard let name = rankName(
+                for: scope,
+                placeName: placeName,
+                countryName: fp.countryName,
+                countryCode: fp.countryCode,
+                cityName: fp.cityName
+            ) else {
+                continue
+            }
+
+            // Only the place scope requires a place/address. Country and city
+            // come from their own persisted hierarchy, including old overseas
+            // footprints that were recorded before an address was available.
+            if name.isEmpty || name.contains("未知") || (scope == .place && address.isEmpty) { continue }
+
+            let subtitle: String
+            let key: String
+            switch scope {
+            case .country:
+                subtitle = ""
+                key = fp.countryCode ?? name
+            case .city:
+                subtitle = hasMultipleCountries ? simplifiedChineseName(fp.countryName ?? "") : ""
+                key = "\(fp.countryCode ?? "")|\(name)"
+            case .place:
+                subtitle = address
+                key = fp.placeKey
+            }
+            if let existing = groups[key] {
+                groups[key] = (existing.name, existing.address, existing.count + 1, existing.duration + fp.duration, existing.footprintIDs + [fp.footprintID])
+            } else {
+                groups[key] = (name, subtitle, 1, fp.duration, [fp.footprintID])
+            }
+        }
+
+        return groups
+            .filter { _, value in
+                scope != .place || value.duration >= 3600
+            }
+            .map { key, value in
+                ReviewFrequentPlaceItem(
+                    id: key,
+                    name: value.name,
+                    address: value.address,
+                    count: value.count,
+                    duration: value.duration,
+                    footprintIDs: value.footprintIDs
+                )
+            }
+            .sorted { $0.duration > $1.duration }
+    }
+
+    private static func pastMemoryCandidate(
+        history: [ReviewFootprintSnapshot],
+        priorityPlaceIDs: Set<UUID>,
+        now: Date
+    ) -> ReviewMemoryCandidate? {
+        let calendar = Calendar.current
+        let today = calendar.dateComponents([.month, .day, .year], from: now)
+        let match = history.filter { footprint in
+            let components = calendar.dateComponents([.month, .day, .year], from: footprint.startTime)
+            guard components.month == today.month,
+                  components.day == today.day,
+                  (components.year ?? today.year ?? 0) < (today.year ?? 0),
+                  let placeID = footprint.placeID,
+                  !priorityPlaceIDs.contains(placeID),
+                  !(footprint.activityTypeValue ?? "").isEmpty else {
+                return false
+            }
+            return true
+        }
+        .sorted { $0.startTime < $1.startTime }
+        .first
+        guard let footprint = match else { return nil }
+        let years = max(1, calendar.dateComponents([.year], from: footprint.startTime, to: now).year ?? 1)
+        return ReviewMemoryCandidate(
+            id: "past-memory-\(footprint.footprintID.uuidString)",
+            date: footprint.startTime,
+            footprintID: footprint.footprintID,
+            placeKey: footprint.placeKey,
+            title: footprint.placeName,
+            evidence: "\(years)年前",
+            reason: "往年今日",
+            systemImage: "clock.arrow.circlepath",
+            photoAssetIDs: footprint.photoAssetIDs,
+            score: 0
+        )
+    }
+
+    private static func decodeRoutes(
+        for records: [ReviewTransportSnapshot],
+        window: ReviewRangeWindow,
+        footprints: [ReviewFootprintSnapshot],
+        config: ReviewConfigSnapshot,
+        container: ModelContainer
+    ) -> (transports: [Transport], bounds: ReviewMapBounds?) {
+        // One range query; payloads are matched back by ID so the source
+        // order and membership stay authoritative.
+        let context = ModelContext(container)
+        let lowerBound = window.lowerBound
+        let descriptor: FetchDescriptor<TransportRecord>
+        if let upperBound = window.upperBound {
+            descriptor = FetchDescriptor<TransportRecord>(
+                predicate: #Predicate<TransportRecord> {
+                    $0.statusRaw == "active" && $0.startTime >= lowerBound && $0.startTime < upperBound
+                }
+            )
+        } else {
+            descriptor = FetchDescriptor<TransportRecord>(
+                predicate: #Predicate<TransportRecord> {
+                    $0.statusRaw == "active" && $0.startTime >= lowerBound
+                }
+            )
+        }
+        var recordsByID: [UUID: TransportRecord] = [:]
+        for record in (try? context.fetch(descriptor)) ?? [] where recordsByID[record.recordID] == nil {
+            recordsByID[record.recordID] = record
+        }
+
+        var transports: [Transport] = []
+        transports.reserveCapacity(records.count)
+        var decodedPoints: [[CodableCoordinate]] = []
+        decodedPoints.reserveCapacity(records.count)
+        for snapshot in records {
+            let record = recordsByID[snapshot.id]
+            let points = record.flatMap {
+                try? JSONDecoder().decode([CodableCoordinate].self, from: $0.pointsData)
+            } ?? []
+            decodedPoints.append(points)
+            let pathPoints = points.map {
+                TransportPathPoint(
+                    coordinate: CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon),
+                    timestamp: $0.timestamp,
+                    isSyntheticPadding: $0.isSyntheticPadding ?? false
+                )
+            }
+            transports.append(Transport(
+                id: snapshot.id,
+                startTime: snapshot.startTime,
+                endTime: snapshot.endTime,
+                startLocation: record?.startLocation ?? "起点",
+                endLocation: record?.endLocation ?? "终点",
+                type: TransportType(rawValue: snapshot.typeRaw) ?? .slow,
+                distance: snapshot.distance,
+                averageSpeed: record?.averageSpeed ?? 0,
+                points: pathPoints.map(\.coordinate),
+                pathPoints: pathPoints,
+                manualType: snapshot.manualTypeRaw.flatMap(TransportType.init(rawValue:)),
+                stepCount: record?.stepCount
+            ))
+        }
+
+        var minimumLatitude = Double.greatestFiniteMagnitude
+        var maximumLatitude = -Double.greatestFiniteMagnitude
+        var minimumLongitude = Double.greatestFiniteMagnitude
+        var maximumLongitude = -Double.greatestFiniteMagnitude
+
+        func include(latitude: Double, longitude: Double) {
+            guard latitude.isFinite, longitude.isFinite,
+                  (-90...90).contains(latitude), (-180...180).contains(longitude),
+                  !(latitude == 0 && longitude == 0) else { return }
+            minimumLatitude = min(minimumLatitude, latitude)
+            maximumLatitude = max(maximumLatitude, latitude)
+            minimumLongitude = min(minimumLongitude, longitude)
+            maximumLongitude = max(maximumLongitude, longitude)
+        }
+
+        for footprint in footprints {
+            include(latitude: footprint.latitude, longitude: footprint.longitude)
+        }
+        for points in decodedPoints {
+            for point in points where point.isSyntheticPadding != true {
+                guard point.lat.isFinite, point.lon.isFinite,
+                      (-90...90).contains(point.lat), (-180...180).contains(point.lon),
+                      !(point.lat == 0 && point.lon == 0) else { continue }
+                include(latitude: point.lat, longitude: point.lon)
+            }
+        }
+
+        let bounds: ReviewMapBounds? = minimumLatitude == Double.greatestFiniteMagnitude
+            ? nil
+            : ReviewMapBounds(
+                minimumLatitude: minimumLatitude,
+                maximumLatitude: maximumLatitude,
+                minimumLongitude: minimumLongitude,
+                maximumLongitude: maximumLongitude
+            )
+        return (transports, bounds)
+    }
+
+    // MARK: Place groups
+
+    /// Groups `footprints` by place and summarises each group, newest visits
+    /// first, sorted by total stay. Resolves photos through Photos off main.
+    static func placeGroups(
+        from footprints: [ReviewFootprintSnapshot],
+        titleKeyPath: KeyPath<ReviewFootprintSnapshot, String>
+    ) -> [ReviewPlaceGroup] {
+        Dictionary(grouping: footprints, by: \.placeKey)
+            .compactMap { key, visits in
+                placeGroup(id: key, visits: visits, titleKeyPath: titleKeyPath, resolvedPhotoAssetIDs: nil)
+            }
+            .sorted { $0.stats.totalDuration > $1.stats.totalDuration }
+    }
+
+    static func placeGroup(
+        id: String,
+        visits: [ReviewFootprintSnapshot],
+        titleKeyPath: KeyPath<ReviewFootprintSnapshot, String>,
+        resolvedPhotoAssetIDs: [String]?
+    ) -> ReviewPlaceGroup? {
+        let orderedVisits = visits.sorted { $0.startTime > $1.startTime }
+        guard let representative = orderedVisits.first else { return nil }
+
+        var seenPhotoIDs: Set<String> = []
+        let storedPhotoAssetIDs = orderedVisits
+            .flatMap(\.photoAssetIDs)
+            .filter { seenPhotoIDs.insert($0).inserted }
+        let photoAssetIDs = resolvedPhotoAssetIDs ?? PhotoService.shared.displayableAssetIDs(storedPhotoAssetIDs)
+        return ReviewPlaceGroup(
+            id: id,
+            title: representative[keyPath: titleKeyPath],
+            visitIDs: orderedVisits.map(\.footprintID),
+            photoAssetIDs: photoAssetIDs,
+            stats: placeStats(for: orderedVisits)
+        )
+    }
+
+    /// The former `ReviewPlaceView` computed statistics, for visits ordered
+    /// newest first.
+    private static func placeStats(for visits: [ReviewFootprintSnapshot]) -> ReviewPlaceStats {
+        let calendar = Calendar.current
+        let representative = visits.max {
+            if $0.photoAssetIDs.count != $1.photoAssetIDs.count {
+                return $0.photoAssetIDs.count < $1.photoAssetIDs.count
+            }
+            return $0.duration < $1.duration
+        }
+        let geographyText: String? = representative.flatMap { footprint in
+            let values = [footprint.countryName, footprint.cityName]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            return values.isEmpty ? nil : values.joined(separator: " · ")
+        }
+        var weekdayCounts = Array(repeating: 0, count: 7)
+        var hourlyCounts = Array(repeating: 0, count: 24)
+        for visit in visits {
+            let mondayFirstIndex = (calendar.component(.weekday, from: visit.startTime) + 5) % 7
+            weekdayCounts[mondayFirstIndex] += 1
+            hourlyCounts[calendar.component(.hour, from: visit.startTime)] += 1
+        }
+        var activityTotals: [String: TimeInterval] = [:]
+        var activityVisitCounts: [String: Int] = [:]
+        var activitiesByName: [String: ReviewActivitySnapshot] = [:]
+        var visitActivities: [UUID: ReviewActivitySnapshot] = [:]
+        for visit in visits {
+            guard let activity = visit.activity else { continue }
+            activityTotals[activity.name, default: 0] += max(0, visit.duration)
+            activityVisitCounts[activity.name, default: 0] += 1
+            activitiesByName[activity.name] = activity
+            visitActivities[visit.footprintID] = activity
+        }
+        let activitySlices = activityTotals.compactMap { name, duration -> ReviewActivitySlice? in
+            guard let activity = activitiesByName[name] else { return nil }
+            return ReviewActivitySlice(id: name, name: name, duration: duration, color: activity.color, icon: activity.icon)
+        }.sorted { $0.duration > $1.duration }
+        let chronological = visits.sorted { $0.startTime < $1.startTime }
+        let trend = chronological.map { max(0, $0.duration) }
+        return ReviewPlaceStats(
+            totalDuration: visits.reduce(0) { $0 + $1.duration },
+            geographyText: geographyText,
+            weekdayCounts: weekdayCounts,
+            hourlyCounts: hourlyCounts,
+            durationTrend: trend,
+            averageDuration: trend.isEmpty ? 0 : trend.reduce(0, +) / Double(trend.count),
+            firstVisitDate: chronological.first?.startTime,
+            lastVisitDate: chronological.last?.startTime,
+            activitySlices: activitySlices,
+            activityVisitCounts: activityVisitCounts,
+            visitActivities: visitActivities
+        )
+    }
+
+    // MARK: Memories
+
+    static func memoryCacheKey(for range: StatisticsRange) -> String {
+        "review.memory.v8.\(range.rawValue)"
+    }
+
+    static func loadCachedMemories(for range: StatisticsRange) -> [ReviewMemoryCandidate] {
+        guard let data = UserDefaults.standard.data(forKey: memoryCacheKey(for: range)),
+              let payload = try? JSONDecoder().decode(ReviewMemoryCachePayload.self, from: data) else { return [] }
+        return payload.entries.filter {
+            !$0.photoAssetIDs.isEmpty || $0.id.hasPrefix("favorite-")
+        }.map { entry in
+            ReviewMemoryCandidate(
+                id: entry.id,
+                date: entry.date,
+                footprintID: entry.footprintID,
+                placeKey: nil,
+                title: entry.title,
+                evidence: entry.evidence,
+                reason: entry.reason,
+                systemImage: entry.systemImage,
+                photoAssetIDs: entry.photoAssetIDs,
+                score: entry.score
+            )
+        }
+    }
+
+    static func saveCachedMemories(_ candidates: [ReviewMemoryCandidate], revision: Int, range: StatisticsRange) {
+        let entries = candidates.filter {
+            !$0.photoAssetIDs.isEmpty || $0.id.hasPrefix("favorite-")
+        }.map {
+            ReviewMemoryCacheEntry(
+                id: $0.id,
+                date: $0.date,
+                footprintID: $0.footprintID,
+                title: $0.title,
+                evidence: $0.evidence,
+                reason: $0.reason,
+                systemImage: $0.systemImage,
+                photoAssetIDs: $0.photoAssetIDs,
+                score: $0.score
+            )
+        }
+        let payload = ReviewMemoryCachePayload(revision: revision, entries: entries)
+        if let data = try? JSONEncoder().encode(payload) {
+            UserDefaults.standard.set(data, forKey: memoryCacheKey(for: range))
+        }
+    }
+
+    private static func displayablePhotoAssetIDs(for footprint: ReviewFootprintSnapshot) async -> [String] {
+        await PhotoService.shared.displayableAssetIDs(
+            storedAssetIDs: footprint.photoAssetIDs,
+            startTime: footprint.startTime,
+            endTime: footprint.endTime,
+            coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+        )
+    }
+
+    static func buildMemoryCandidates(
+        history: [ReviewFootprintSnapshot],
+        derived: ReviewDerivedData,
+        config: ReviewConfigSnapshot
+    ) async -> [ReviewMemoryCandidate] {
+        var candidates: [ReviewMemoryCandidate] = []
+        let calendar = Calendar.current
+        let footprintsInRange = derived.rangeFootprints
+
+        let historyByPlace = Dictionary(grouping: history, by: \.placeKey)
+        let visitsByPlace = Dictionary(grouping: footprintsInRange, by: \.placeKey)
+        var photosByPlace: [String: [String]] = [:]
+        for (placeKey, visits) in visitsByPlace {
+            var seenPhotoIDs = Set<String>()
+            var photoAssetIDs: [String] = []
+            for visit in visits {
+                let visitPhotoAssetIDs = await displayablePhotoAssetIDs(for: visit)
+                photoAssetIDs.append(contentsOf: visitPhotoAssetIDs.filter { seenPhotoIDs.insert($0).inserted })
+            }
+            photosByPlace[placeKey] = photoAssetIDs
+            if Task.isCancelled { return [] }
+        }
+        let durationByPlace = visitsByPlace.mapValues { $0.reduce(0) { $0 + $1.duration } }
+        let visitCountByPlace = visitsByPlace.mapValues(\.count)
+        let representativeIDByPlace = visitsByPlace.compactMapValues { visits in
+            visits.max {
+                if $0.photoAssetIDs.count != $1.photoAssetIDs.count {
+                    return $0.photoAssetIDs.count < $1.photoAssetIDs.count
+                }
+                return $0.duration < $1.duration
+            }?.footprintID
+        }
+        let rankedDurationPlaces = durationByPlace
+            .filter { $0.value >= config.longStayMinDuration }
+            .sorted { $0.value > $1.value }
+            .prefix(3)
+        let longStayPlaceKeys = Set(rankedDurationPlaces.map(\.key))
+        let longestPlaceKey = rankedDurationPlaces.first?.key
+        let mostVisitedPlaceKey = visitCountByPlace.max {
+            if $0.value != $1.value { return $0.value < $1.value }
+            return (durationByPlace[$0.key] ?? 0) < (durationByPlace[$1.key] ?? 0)
+        }?.key
+        let mostPhotoPlaceKey = photosByPlace.max { $0.value.count < $1.value.count }?.key
+        let frequentVisitMinCount = config.frequentVisitMinCount
+        let longestFootprintID = footprintsInRange.max {
+            if $0.duration != $1.duration { return $0.duration < $1.duration }
+            return $0.startTime > $1.startTime
+        }?.footprintID
+        var previousVisitByID: [UUID: Date] = [:]
+        var firstVisitIDByPlace: [String: UUID] = [:]
+        var averageDurationByPlace: [String: TimeInterval] = [:]
+        for (placeKey, placeHistory) in historyByPlace {
+            let ordered = placeHistory.sorted {
+                if $0.startTime != $1.startTime { return $0.startTime < $1.startTime }
+                return $0.footprintID.uuidString < $1.footprintID.uuidString
+            }
+            firstVisitIDByPlace[placeKey] = ordered.first?.footprintID
+            var previousDate: Date?
+            for footprint in ordered {
+                if let previousDate { previousVisitByID[footprint.footprintID] = previousDate }
+                previousDate = footprint.startTime
+            }
+            averageDurationByPlace[placeKey] = placeHistory.reduce(0) { $0 + $1.duration } / Double(max(1, placeHistory.count))
+        }
+        if Task.isCancelled { return [] }
+
+        var firstCountryDate: [String: Date] = [:]
+        var firstCityDate: [String: Date] = [:]
+        for footprint in history {
+            let country = footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
+            if !country.isEmpty {
+                firstCountryDate[country] = min(firstCountryDate[country] ?? footprint.startTime, footprint.startTime)
+            }
+            let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !city.isEmpty {
+                let key = "\(country)|\(city)"
+                firstCityDate[key] = min(firstCityDate[key] ?? footprint.startTime, footprint.startTime)
+            }
+        }
+
+        for footprint in footprintsInRange {
+            if Task.isCancelled { return [] }
+            let placeKey = footprint.placeKey
+            let placePhotoAssetIDs = photosByPlace[placeKey] ?? []
+            let footprintPhotoAssetIDs = await displayablePhotoAssetIDs(for: footprint)
+            let placeDuration = durationByPlace[placeKey] ?? 0
+            let placeVisitCount = visitsByPlace[placeKey]?.count ?? 0
+            let isPlaceRepresentative = representativeIDByPlace[placeKey] == footprint.footprintID
+            let previousVisit = previousVisitByID[footprint.footprintID]
+            let averageDuration = averageDurationByPlace[placeKey] ?? 0
+            // “第一次来到这里”只属于该地点全部历史记录中的最早一次，
+            // 不能因为当前统计周期或候选顺序改变而重新产生。
+            let firstVisit = firstVisitIDByPlace[placeKey] == footprint.footprintID
+            let daysSincePrevious = previousVisit.map {
+                calendar.dateComponents([.day], from: $0, to: footprint.startTime).day ?? 0
+            } ?? 0
+            let countryCode = footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
+            let cityName = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let firstCountry = !countryCode.isEmpty && firstCountryDate[countryCode] == footprint.startTime
+            let firstCity = !cityName.isEmpty && firstCityDate["\(countryCode)|\(cityName)"] == footprint.startTime
+
+            var score = 0.0
+            var reason = ""
+            var evidence = ""
+            var icon = "sparkles"
+
+            if firstVisit && footprintPhotoAssetIDs.count >= config.firstVisitPhotoMinCount {
+                score += 6
+                reason = "第一次来到这里"
+                evidence = "\(footprintPhotoAssetIDs.count)张照片 · \(formatRankDuration(footprint.duration))"
+                icon = "flag.fill"
+            }
+            if firstCountry {
+                score += 7
+                reason = "第一次来到这个国家"
+                evidence = footprint.countryName ?? countryCode
+                icon = "globe.asia.australia.fill"
+            } else if firstCity {
+                score += 5
+                if reason.isEmpty {
+                    reason = "第一次来到这座城市"
+                    evidence = cityName
+                    icon = "building.2.fill"
+                }
+            }
+            if footprint.footprintID == longestFootprintID,
+               footprint.duration >= config.longStayMinDuration {
+                score += 4
+                if !firstCountry && !firstCity {
+                    reason = "停留最久的一次"
+                    evidence = "停留\(formatRankDuration(footprint.duration))"
+                    icon = "hourglass.bottomhalf.filled"
+                }
+            }
+            if isPlaceRepresentative,
+               placeKey == mostVisitedPlaceKey,
+               placeVisitCount > 1 {
+                score += 3
+                if !firstCountry && !firstCity && footprint.footprintID != longestFootprintID {
+                    reason = "停留最多的地方"
+                    evidence = "\(placeVisitCount)次到访 · 累计\(formatRankDuration(placeDuration))"
+                    icon = "repeat.circle.fill"
+                }
+            }
+            if isPlaceRepresentative && longStayPlaceKeys.contains(placeKey) {
+                let durationScore = min(4, placeDuration / config.longStayMinDuration)
+                score += durationScore
+                if reason.isEmpty || (reason == "第一次来到这里" && placeVisitCount >= frequentVisitMinCount) {
+                    reason = placeKey == longestPlaceKey
+                        ? "这段时间最常停留"
+                        : (placeVisitCount >= frequentVisitMinCount ? "常常回到这里" : "在这里度过了不少时间")
+                    evidence = "累计\(formatRankDuration(placeDuration)) · \(placeVisitCount)次到访"
+                    icon = "clock.fill"
+                }
+            }
+            if averageDuration > 0 && footprint.duration >= averageDuration * config.unusualDurationRatio {
+                score += 2
+                if reason.isEmpty || reason == "第一次来到这里" {
+                    reason = "这次停留得格外久"
+                    evidence = "停留\(formatRankDuration(footprint.duration))"
+                    icon = "hourglass"
+                }
+            }
+            if isPlaceRepresentative && placePhotoAssetIDs.count >= config.photoMinCount {
+                score += min(4, Double(placePhotoAssetIDs.count) / Double(max(1, config.photoMinCount)))
+                if reason.isEmpty || (placeKey == mostPhotoPlaceKey && reason == "第一次来到这里") {
+                    reason = placeKey == mostPhotoPlaceKey ? "照片最多的地方" : "用照片记下这里"
+                    evidence = "累计拍了\(placePhotoAssetIDs.count)张照片"
+                    icon = "photo.on.rectangle.angled"
+                }
+            }
+            if daysSincePrevious >= config.longTimeNoSeeDays {
+                score += 4
+                if !firstCountry && !firstCity {
+                    reason = "很久以后又回来"
+                    evidence = "相隔\(daysSincePrevious)天"
+                    icon = "arrow.uturn.backward.circle.fill"
+                }
+            }
+            if footprint.status == .manual || footprint.status == .confirmed { score += 0.8 }
+            if footprint.isAddressEditedByHand { score += 0.8 }
+            let personalNote = footprint.reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !personalNote.isEmpty {
+                score += 1.2
+                if reason == "第一次来到这里" || reason == "用照片记下这里" {
+                    reason = "你特别记下的一次停留"
+                    evidence = personalNote
+                    icon = "note.text"
+                }
+            }
+            if footprint.isHighlight == true { score += 0.4 }
+
+            guard score >= config.minimumScore,
+                  !reason.isEmpty,
+                  !placePhotoAssetIDs.isEmpty else { continue }
+            candidates.append(ReviewMemoryCandidate(
+                id: "footprint-\(footprint.footprintID.uuidString)",
+                date: footprint.startTime,
+                footprintID: footprint.footprintID,
+                placeKey: placeKey,
+                title: footprint.placeName,
+                evidence: evidence,
+                reason: reason,
+                systemImage: icon,
+                photoAssetIDs: placePhotoAssetIDs,
+                score: score
+            ))
+        }
+
+        let transportsByDay = Dictionary(grouping: derived.rangeTransports) { calendar.startOfDay(for: $0.startTime) }
+        func photoIDs(on date: Date) -> [String] {
+            footprintsInRange.filter { calendar.isDate($0.startTime, inSameDayAs: date) }.flatMap(\.photoAssetIDs)
+        }
+
+        // Farthest day.
+        if let item = transportsByDay.map({ (date: $0.key, distance: $0.value.reduce(0) { $0 + $1.distance }) }).max(by: { $0.distance < $1.distance }),
+           item.distance >= config.travelDistanceMin {
+            let farthestPhotoIDs = photoIDs(on: item.date)
+            if !farthestPhotoIDs.isEmpty {
+                candidates.append(ReviewMemoryCandidate(
+                    id: "distance-\(item.date.timeIntervalSince1970)",
+                    date: item.date,
+                    footprintID: nil,
+                    placeKey: nil,
+                    title: item.date.formatted(.dateTime.month().day()),
+                    evidence: formatRankMileage(item.distance),
+                    reason: "走得最远的一天",
+                    systemImage: "point.topleft.down.to.point.bottomright.curvepath",
+                    photoAssetIDs: farthestPhotoIDs,
+                    score: 5
+                ))
+            }
+        }
+
+        // Transport memories.
+        var transportCandidates: [ReviewMemoryCandidate] = []
+        if let walking = transportsByDay.map({ day, records -> (Date, Double) in
+            let distance = records.filter {
+                let type = $0.manualTypeRaw.flatMap(TransportType.init(rawValue:)) ?? TransportType(rawValue: $0.typeRaw) ?? .slow
+                return type == .slow || type == .running
+            }.reduce(0) { $0 + $1.distance }
+            return (day, distance)
+        }).max(by: { $0.1 < $1.1 }), walking.1 >= config.walkDistanceMin {
+            transportCandidates.append(ReviewMemoryCandidate(
+                id: "walking-\(walking.0.timeIntervalSince1970)", date: walking.0, footprintID: nil, placeKey: nil,
+                title: walking.0.formatted(.dateTime.month().day()), evidence: formatRankMileage(walking.1),
+                reason: "步行最多的一天", systemImage: "figure.walk", photoAssetIDs: photoIDs(on: walking.0), score: 4.8
+            ))
+        }
+        if let diverse = transportsByDay.map({ day, records -> (Date, Int) in
+            let types = Set(records.compactMap { $0.manualTypeRaw ?? $0.typeRaw }.filter { !$0.isEmpty })
+            return (day, types.count)
+        }).max(by: { $0.1 < $1.1 }), diverse.1 >= config.diverseTransportMinCount {
+            transportCandidates.append(ReviewMemoryCandidate(
+                id: "modes-\(diverse.0.timeIntervalSince1970)", date: diverse.0, footprintID: nil, placeKey: nil,
+                title: diverse.0.formatted(.dateTime.month().day()), evidence: "用了\(diverse.1)种交通方式",
+                reason: "出行方式最丰富的一天", systemImage: "arrow.triangle.branch", photoAssetIDs: photoIDs(on: diverse.0), score: 4.4
+            ))
+        }
+        candidates.append(contentsOf: transportCandidates.filter { !$0.photoAssetIDs.isEmpty })
+
+        // A favorite is an explicit user choice, so keep one visible as a
+        // compact memory card even when its automatic score is not high enough.
+        let favoriteFootprints = footprintsInRange.filter {
+            $0.isHighlight == true && $0.status != .ignored
+        }
+        let orderedFavoriteFootprints = favoriteFootprints.sorted {
+            if $0.startTime != $1.startTime { return $0.startTime < $1.startTime }
+            return $0.footprintID.uuidString < $1.footprintID.uuidString
+        }
+        var favoriteCandidate: ReviewMemoryCandidate?
+        for footprint in orderedFavoriteFootprints {
+            if Task.isCancelled { return [] }
+            let favoritePhotoAssetIDs = await displayablePhotoAssetIDs(for: footprint)
+            guard !favoritePhotoAssetIDs.isEmpty else { continue }
+            favoriteCandidate = ReviewMemoryCandidate(
+                id: "favorite-\(footprint.footprintID.uuidString)",
+                date: footprint.startTime,
+                footprintID: nil,
+                placeKey: nil,
+                title: "\(favoriteFootprints.count)个重要片段",
+                evidence: "点开查看全部收藏",
+                reason: "收藏足迹",
+                systemImage: "star.fill",
+                photoAssetIDs: favoritePhotoAssetIDs,
+                score: 0
+            )
+            break
+        }
+        if favoriteCandidate == nil, let footprint = orderedFavoriteFootprints.first {
+            favoriteCandidate = ReviewMemoryCandidate(
+                id: "favorite-\(footprint.footprintID.uuidString)",
+                date: footprint.startTime,
+                footprintID: nil,
+                placeKey: nil,
+                title: "\(favoriteFootprints.count)个重要片段",
+                evidence: "点开查看全部收藏",
+                reason: "收藏足迹",
+                systemImage: "star.fill",
+                photoAssetIDs: [],
+                score: 0
+            )
+        }
+
+        var usedDays: Set<Date> = []
+        var usedPlaces: Set<String> = []
+        var usedReasons: Set<String> = []
+        var selected: [ReviewMemoryCandidate] = []
+        let automaticLimit = max(0, config.maximumCount - (favoriteCandidate == nil ? 0 : 1))
+        let rankedCandidates = candidates.sorted {
+            if $0.score != $1.score { return $0.score > $1.score }
+            if $0.date != $1.date { return $0.date < $1.date }
+            return $0.id < $1.id
+        }
+        func appendCandidateIfAvailable(_ candidate: ReviewMemoryCandidate, requiresNewReason: Bool) {
+            guard selected.count < automaticLimit else { return }
+            let day = calendar.startOfDay(for: candidate.date)
+            let placeKey = candidate.placeKey
+            guard !usedDays.contains(day),
+                  (placeKey.map({ !usedPlaces.contains($0) }) ?? true),
+                  !requiresNewReason || !usedReasons.contains(candidate.reason) else { return }
+            selected.append(candidate)
+            usedDays.insert(day)
+            usedReasons.insert(candidate.reason)
+            if let placeKey { usedPlaces.insert(placeKey) }
+        }
+        for candidate in rankedCandidates {
+            appendCandidateIfAvailable(candidate, requiresNewReason: true)
+        }
+        if selected.count < automaticLimit {
+            for candidate in rankedCandidates {
+                appendCandidateIfAvailable(candidate, requiresNewReason: false)
+            }
+        }
+        if let favoriteCandidate { selected.append(favoriteCandidate) }
+        return selected
+    }
+}
+
 struct HistoryStatisticsView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
     var onFootprintSelected: ((Footprint) -> Void)? = nil
     var onDateSelected: ((Date) -> Void)? = nil
-    
-    @State private var allFootprints: [Footprint] = []
-    @State private var transportRecords: [TransportRecord] = []
-    @State private var activityTypes: [ActivityType] = []
-    @State private var allPlaces: [Place] = []
-    
+
+    /// Database-wide value snapshot, fetched and fingerprinted off main.
+    @State private var reviewSource: ReviewSourceSnapshot?
+    /// Everything the sections show for the applied range, built off main.
+    @State private var reviewDerived = ReviewDerivedData()
+    /// Main-context models for the applied range (map items and selections).
+    @State private var rangeFootprints: [Footprint] = []
+    @State private var rangeFootprintsByID: [UUID: Footprint] = [:]
+
     @State private var selectedRange: StatisticsRange = .last30Days
     @State private var appliedRange: StatisticsRange = .last30Days
     /// Days spent on trips in the range, with each trip's activity type.
@@ -407,21 +2135,22 @@ struct HistoryStatisticsView: View {
     @State private var mapPosition: MapCameraPosition = .automatic
     @State private var reviewMapRegion: MKCoordinateRegion?
     @State private var reviewTimelineItemsCache: [TimelineItem] = []
-    @State private var reviewTransportOverviewPoints: [DFKTransportOverviewPoint] = []
     @State private var reviewMemoryCandidatesCache: [ReviewMemoryCandidate] = []
-    @State private var selectedReviewPlace: ReviewPlaceSelection?
-    @State private var selectedBentoDetail: ReviewBentoDetail?
-    @State private var selectedReviewPlaceList: ReviewPlaceListSelection?
-    @State private var selectedBentoReviewPlace: ReviewPlaceSelection?
-    @State private var selectedBentoReviewPlaceList: ReviewPlaceListSelection?
-    @State private var showingAllFavorites = false
+    /// The sheet this view presents; each hosts its own range.
+    @State private var presentedSheet: ReviewSheetContent?
     @State private var pendingFavoriteFootprint: Footprint?
+    /// Sheet mode: the content this instance hosts instead of the page, and
+    /// its places as resolved for `sheetPlacesRange`.
+    private let sheet: ReviewSheetContent?
+    private let allowsRangeSelection: Bool
+    @State private var sheetPlaces: [ReviewPlaceSelection] = []
+    @State private var sheetPlacesRange: StatisticsRange?
     @State private var reviewRoutesReady = false
     @State private var reviewDerivedDataTask: Task<Void, Never>?
     @State private var reviewDerivedDataRequestID = UUID()
     @State private var scheduledReviewRefreshTask: Task<Void, Never>?
     @State private var reviewSourceFingerprint: Int?
-    
+
     // AI Summary State
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
     @State private var aiSummary: String? = nil
@@ -431,8 +2160,7 @@ struct HistoryStatisticsView: View {
     @State private var aiSummaryRequestID = UUID()
     // Cache structure: [RangeRawValue: (text: String, timestamp: Double)]
     @State private var summaryCache: [String: [String: Any]] = (UserDefaults.standard.dictionary(forKey: "statistics_ai_cache") as? [String: [String: Any]]) ?? [:]
-    
-    @State private var showingFullMap = false
+
     @State private var activeYearForSegment: Int = Calendar.current.component(.year, from: Date())
     @State private var sharePayload: DFKShareCardPayload?
     @State private var frequentPlaceRankScope: FrequentPlaceRankScope = .city
@@ -442,37 +2170,103 @@ struct HistoryStatisticsView: View {
     @State private var geographyBackfillTask: Task<Void, Never>?
     @State private var geographyBackfillResolver: StatisticsGeographyResolver?
     @State private var geographyBackfillRequestID = UUID()
-    
-    // Filtered footprints based on range
-    private var filteredFootprints: [Footprint] {
-        let calendar = Calendar.current
-        switch appliedRange {
-        case .last7Days:
-            let cutoff = calendar.date(byAdding: .day, value: -7, to: Date())!
-            return allFootprints.filter { $0.startTime >= cutoff }
-        case .last30Days:
-            let cutoff = calendar.date(byAdding: .day, value: -30, to: Date())!
-            return allFootprints.filter { $0.startTime >= cutoff }
-        case .last90Days:
-            let cutoff = calendar.date(byAdding: .day, value: -90, to: Date())!
-            return allFootprints.filter { $0.startTime >= cutoff }
-        case .lastYear:
-            let cutoff = calendar.date(byAdding: .day, value: -365, to: Date())!
-            return allFootprints.filter { $0.startTime >= cutoff }
-        case .customYear(let year):
-            return allFootprints.filter { calendar.component(.year, from: $0.startTime) == year }
+
+    init(onFootprintSelected: ((Footprint) -> Void)? = nil, onDateSelected: ((Date) -> Void)? = nil) {
+        self.onFootprintSelected = onFootprintSelected
+        self.onDateSelected = onDateSelected
+        self.sheet = nil
+        self.allowsRangeSelection = true
+    }
+
+    /// Sheet mode: starts from the presenter's state and rebuilds only for
+    /// its own range changes.
+    fileprivate init(sheet: ReviewSheetContent, seed: ReviewSheetSeed, onFootprintSelected: ((Footprint) -> Void)?) {
+        self.onFootprintSelected = onFootprintSelected
+        self.onDateSelected = nil
+        self.sheet = sheet
+        self.allowsRangeSelection = seed.allowsRangeSelection
+        _reviewSource = State(initialValue: seed.source)
+        _reviewSourceFingerprint = State(initialValue: seed.sourceFingerprint)
+        _selectedRange = State(initialValue: seed.range)
+        _appliedRange = State(initialValue: seed.range)
+        _activeYearForSegment = State(initialValue: seed.activeYear)
+        _reviewDerived = State(initialValue: seed.derived)
+        _rangeFootprints = State(initialValue: seed.rangeFootprints)
+        _rangeFootprintsByID = State(initialValue: seed.rangeFootprintsByID)
+        _reviewTripActivityDays = State(initialValue: seed.tripActivityDays)
+        _reviewTimelineItemsCache = State(initialValue: seed.timelineItems)
+        _reviewMapRegion = State(initialValue: seed.mapRegion)
+        _mapPosition = State(initialValue: seed.mapPosition)
+        _reviewRoutesReady = State(initialValue: seed.routesReady)
+        _frequentPlaceRankScope = State(initialValue: seed.frequentPlaceRankScope)
+        if case .places(_, let places) = sheet {
+            _sheetPlaces = State(initialValue: places)
+            _sheetPlacesRange = State(initialValue: seed.range)
         }
     }
-    
+
+    // Footprints in the applied range, fetched once per derived refresh.
+    private var filteredFootprints: [Footprint] {
+        rangeFootprints
+    }
+
     private var availableYears: [Int] {
-        let years = Set(allFootprints.map { Calendar.current.component(.year, from: $0.startTime) })
-        return years.sorted(by: >)
+        reviewDerived.availableYears
     }
     private var usesIPadLayout: Bool {
         UIDevice.current.userInterfaceIdiom == .pad
     }
-    
+
     var body: some View {
+        Group {
+            if let sheet {
+                sheetBody(sheet)
+            } else {
+                reviewPage
+            }
+        }
+        .onChange(of: selectedRange) { _, range in
+            // Invalidate the previous range synchronously. Waiting for the
+            // deferred refresh would leave a short window in which its result
+            // could still update the map after the picker has already moved.
+            if case .customYear(let year) = range {
+                activeYearForSegment = year
+            }
+            reviewDerivedDataRequestID = UUID()
+            reviewDerivedDataTask?.cancel()
+            reviewRoutesReady = false
+            reviewMapRegion = nil
+            mapPosition = .automatic
+            scheduleReviewRefresh(applying: range)
+        }
+        // Every level (page and each open sheet) drops its own working set;
+        // a sheet's copy must not wait for its dismissal to be processed.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background {
+                releaseReviewWorkingSet()
+                if sheet != nil { dismiss() }
+            } else if phase == .active, sheet == nil, reviewSourceFingerprint == nil {
+                scheduleReviewRefresh(fetchesData: true)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            releaseReviewWorkingSet()
+            if sheet != nil { dismiss() }
+        }
+        .sheet(item: $presentedSheet, onDismiss: {
+            guard let footprint = pendingFavoriteFootprint else { return }
+            pendingFavoriteFootprint = nil
+            onFootprintSelected?(footprint)
+        }) { content in
+            HistoryStatisticsView(sheet: content, seed: sheetSeed) { footprint in
+                // Open the footprint once this sheet has gone.
+                pendingFavoriteFootprint = footprint
+                presentedSheet = nil
+            }
+        }
+    }
+
+    private var reviewPage: some View {
         ScrollView {
             LazyVStack(spacing: 22, pinnedViews: [.sectionHeaders]) {
                 Section {
@@ -510,77 +2304,11 @@ struct HistoryStatisticsView: View {
             }
         }
         .background(Color(uiColor: .systemGroupedBackground))
-        .onChange(of: selectedRange) { _, range in
-            // Invalidate the previous range synchronously. Waiting for the
-            // deferred refresh would leave a short window in which its result
-            // could still update the map after the picker has already moved.
-            reviewDerivedDataRequestID = UUID()
-            reviewDerivedDataTask?.cancel()
-            reviewRoutesReady = false
-            reviewMapRegion = nil
-            mapPosition = .automatic
-            scheduleReviewRefresh(applying: range)
-        }
         .onReceive(NotificationCenter.default.publisher(for: .dfkShareHistoryStatistics)) { _ in
             prepareStatsShare()
         }
         .onAppear {
             scheduleReviewRefresh(fetchesData: true)
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .background {
-                releaseReviewWorkingSet()
-            } else if phase == .active, reviewSourceFingerprint == nil {
-                scheduleReviewRefresh(fetchesData: true)
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
-            releaseReviewWorkingSet()
-        }
-        .sheet(isPresented: $showingFullMap) {
-            FullReviewMapView(
-                title: "\(statisticsRangeText) · \(reviewGeographyMetric.value)\(reviewGeographyMetric.label)",
-                rangeText: statisticsRangeText,
-                timelineItems: reviewTimelineItemsCache,
-                transportOverviewPoints: reviewTransportOverviewPoints,
-                initialRegion: reviewMapRegion,
-                initialPosition: mapPosition
-            )
-        }
-        .sheet(item: $selectedReviewPlace) { selection in
-            ReviewPlaceView(selection: selection)
-        }
-        .sheet(item: $selectedBentoDetail) { detail in
-            reviewBentoDetailView(detail)
-        }
-        .sheet(item: $selectedReviewPlaceList) { selection in
-            ReviewPlaceListSheet(selection: selection)
-        }
-        .sheet(isPresented: $showingAllFavorites, onDismiss: {
-            guard let footprint = pendingFavoriteFootprint else { return }
-            pendingFavoriteFootprint = nil
-            onFootprintSelected?(footprint)
-        }) {
-            NavigationStack {
-                HistoryFavoritesView(
-                    includedFootprintIDs: Set(filteredFootprints.lazy
-                        .filter { $0.isHighlight == true && $0.status != .ignored }
-                        .map(\.footprintID))
-                ) { footprint in
-                    pendingFavoriteFootprint = footprint
-                    showingAllFavorites = false
-                }
-                .navigationTitle("\(statisticsRangeText) · 收藏足迹")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button { showingAllFavorites = false } label: {
-                            Image(systemName: "xmark").dfkToolbarDismissIcon()
-                        }
-                    }
-                }
-            }
-            .presentationDetents([.large])
         }
         .sheet(item: $sharePayload) { _ in
             DFKShareCardSheet(payload: $sharePayload)
@@ -589,7 +2317,12 @@ struct HistoryStatisticsView: View {
 
     private func prepareStatsShare() {
         let footprints = filteredFootprints
-        let coordinates = footprints.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+        let coordinates = reviewDerived.shareCoordinates
+        // The map snapshot loader takes models; these are one range query and
+        // two small tables, fetched only when the user shares.
+        let shareTransports = fetchRangeTransportRecords()
+        let shareActivities = fetchMainActivityTypes()
+        let sharePlaces = fetchMainPlaces()
         let rangeText = statisticsRangeText
         let rhythmValues = reviewActivityBuckets
         let rhythmStartText = reviewRhythmAxisStartText
@@ -637,7 +2370,7 @@ struct HistoryStatisticsView: View {
         let stats = [
             DFKShareStatEntry(label: metric.label, value: metric.value, detail: nil),
             DFKShareStatEntry(label: "路程", value: reviewDistanceText, detail: nil),
-            DFKShareStatEntry(label: "段路程", value: "\(filteredTransportRecords.count)", detail: nil)
+            DFKShareStatEntry(label: "段路程", value: "\(reviewDerived.transportCount)", detail: nil)
         ]
 
         let group = DispatchGroup()
@@ -657,9 +2390,9 @@ struct HistoryStatisticsView: View {
         group.enter()
         DFKShareImageLoader.loadReviewMapImages(
             footprints: footprints,
-            transports: filteredTransportRecords,
-            activities: activityTypes,
-            places: allPlaces
+            transports: shareTransports,
+            activities: shareActivities,
+            places: sharePlaces
         ) { images in
             loadedMapImages = images
             group.leave()
@@ -669,9 +2402,9 @@ struct HistoryStatisticsView: View {
             group.enter()
             DFKShareImageLoader.loadReviewMapImages(
                 footprints: footprints,
-                transports: filteredTransportRecords,
-                activities: activityTypes,
-                places: allPlaces,
+                transports: shareTransports,
+                activities: shareActivities,
+                places: sharePlaces,
                 size: size,
                 markerScale: 1.5 * DFKShareTemplateStyle.portraitMapMarkerBoost
             ) { images in
@@ -694,15 +2427,8 @@ struct HistoryStatisticsView: View {
         }
 
         // A random set from every photo of the period, each captioned with
-        // the place it was taken.
-        var photoCaptions: [String: String] = [:]
-        for footprint in footprints {
-            let place = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let caption = (place?.isEmpty == false ? place : footprint.cityName) else { continue }
-            for assetID in footprint.photoAssetIDs where photoCaptions[assetID] == nil {
-                photoCaptions[assetID] = caption
-            }
-        }
+        // the place it was taken (built with the derived data).
+        let photoCaptions = reviewDerived.photoCaptions
         // Not resolved against the library up front: a year can hold thousands
         // of IDs, and a missing one simply fails to load from the sample.
         let photoPool = Array(photoCaptions.keys)
@@ -747,15 +2473,9 @@ struct HistoryStatisticsView: View {
     }
 
     private var statisticsRangeText: String {
-        switch appliedRange {
-        case .last7Days: return "最近7天"
-        case .last30Days: return "最近30天"
-        case .last90Days: return "最近90天"
-        case .lastYear: return "过去一年"
-        case .customYear(let year): return "\(year)年"
-        }
+        appliedRange.reviewTitle
     }
-    
+
     // MARK: - Review Home
 
     private var reviewHeroSection: some View {
@@ -777,7 +2497,6 @@ struct HistoryStatisticsView: View {
                 showsUserDefinedPlaceRadii: false,
                 topContentInset: 32,
                 bottomContentInset: 76,
-                transportOverviewPoints: reviewTransportOverviewPoints,
                 timelineUpdateIdentifier: reviewMapRevision,
                 showsMapControls: false
             )
@@ -789,7 +2508,7 @@ struct HistoryStatisticsView: View {
                 Divider().frame(height: 36)
                 reviewMetric(icon: "road.lanes", value: reviewDistanceText, label: "")
                 Divider().frame(height: 36)
-                reviewMetric(icon: "point.topleft.down.to.point.bottomright.curvepath", value: "\(filteredTransportRecords.count)", label: "段路程")
+                reviewMetric(icon: "point.topleft.down.to.point.bottomright.curvepath", value: "\(reviewDerived.transportCount)", label: "段路程")
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 15)
@@ -806,7 +2525,7 @@ struct HistoryStatisticsView: View {
                 .stroke(Color.primary.opacity(0.07), lineWidth: 0.5)
         }
         .overlay(alignment: .topTrailing) {
-            Button { showingFullMap = true } label: {
+            Button { presentedSheet = .map } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                     .font(.subheadline.bold())
                     .foregroundStyle(.primary)
@@ -817,7 +2536,7 @@ struct HistoryStatisticsView: View {
             .accessibilityLabel("打开完整生活地图")
         }
         .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .onTapGesture { showingFullMap = true }
+        .onTapGesture { presentedSheet = .map }
         .padding(.horizontal, 16)
     }
 
@@ -878,18 +2597,14 @@ struct HistoryStatisticsView: View {
     private func reviewMemoryCard(_ candidate: ReviewMemoryCandidate, isLarge: Bool) -> some View {
         Button {
             if candidate.id.hasPrefix("favorite-") {
-                showingAllFavorites = true
+                presentedSheet = .favorites
                 return
             }
             if candidate.id.hasPrefix("past-memory-") {
                 onDateSelected?(candidate.date)
                 return
             }
-            if let selection = reviewPlaceSelection(for: candidate) {
-                selectedReviewPlace = selection
-            } else {
-                onDateSelected?(candidate.date)
-            }
+            openReviewPlace(for: candidate)
         } label: {
             Group {
                 if isLarge {
@@ -952,62 +2667,64 @@ struct HistoryStatisticsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func reviewPlaceSelection(for candidate: ReviewMemoryCandidate) -> ReviewPlaceSelection? {
-        guard let footprint = candidate.footprint else { return nil }
-        let placeKey = reviewPlaceKey(for: footprint)
-        let visits = filteredFootprints
-            .filter { reviewPlaceKey(for: $0) == placeKey }
-        return reviewPlaceSelection(id: placeKey, visits: visits, photoAssetIDs: candidate.photoAssetIDs)
-    }
-
-    private func reviewPlaceSelection(id: String, visits: [Footprint], photoAssetIDs resolvedPhotoAssetIDs: [String]? = nil) -> ReviewPlaceSelection? {
-        let orderedVisits = visits.sorted { $0.startTime > $1.startTime }
-        guard let representative = orderedVisits.first else { return nil }
-
-        var seenPhotoIDs: Set<String> = []
-        let storedPhotoAssetIDs = orderedVisits
-            .flatMap(\.photoAssetIDs)
-            .filter { seenPhotoIDs.insert($0).inserted }
-        let photoAssetIDs = resolvedPhotoAssetIDs ?? PhotoService.shared.displayableAssetIDs(storedPhotoAssetIDs)
-        return ReviewPlaceSelection(
-            id: id,
-            title: reviewPlaceName(for: representative),
-            rangeText: statisticsRangeText,
-            visits: orderedVisits,
-            photoAssetIDs: photoAssetIDs
-        )
+    /// Opens the candidate's place; grouping, sorting and statistics run off
+    /// main, and only the resulting selection is assigned here.
+    private func openReviewPlace(for candidate: ReviewMemoryCandidate) {
+        guard let footprintID = candidate.footprintID,
+              let placeKey = reviewDerived.placeKey(for: footprintID) else {
+            onDateSelected?(candidate.date)
+            return
+        }
+        let derived = reviewDerived
+        let rangeText = statisticsRangeText
+        let resolvedPhotoAssetIDs = candidate.photoAssetIDs
+        Task { @MainActor in
+            let group = await reviewDetached(priority: .userInitiated) {
+                ReviewDataBuilder.placeGroup(
+                    id: placeKey,
+                    visits: (derived.footprintIDsByPlaceKey[placeKey] ?? []).compactMap { derived.rangeSnapshotsByID[$0] },
+                    titleKeyPath: \.placeName,
+                    resolvedPhotoAssetIDs: resolvedPhotoAssetIDs
+                )
+            }
+            if let group,
+               let selection = ReviewPlaceSelection(group: group, rangeText: rangeText, footprintsByID: rangeFootprintsByID) {
+                presentedSheet = .places(
+                    ReviewPlaceQuery(id: placeKey, source: .placeKeys([placeKey]), title: selection.title, usesMapTitle: false, presentsList: false),
+                    [selection]
+                )
+            } else {
+                onDateSelected?(candidate.date)
+            }
+        }
     }
 
     private func openReviewRegionItem(_ item: FrequentPlaceItem, scope: FrequentPlaceRankScope) {
-        let footprintIDs = Set(item.footprintIDs)
-        let grouped = Dictionary(grouping: filteredFootprints.filter { footprintIDs.contains($0.footprintID) }, by: reviewPlaceKey)
-        let places = grouped.compactMap { key, visits in
-            reviewPlaceSelection(id: key, visits: visits)
-        }.sorted { left, right in
-            let leftDuration = left.visits.reduce(0) { $0 + $1.duration }
-            let rightDuration = right.visits.reduce(0) { $0 + $1.duration }
-            return leftDuration > rightDuration
-        }
-        guard !places.isEmpty else { return }
+        let derived = reviewDerived
+        let rangeText = statisticsRangeText
+        let footprintIDs = item.footprintIDs
+        Task { @MainActor in
+            let groups = await reviewDetached(priority: .userInitiated) {
+                ReviewDataBuilder.placeGroups(
+                    from: footprintIDs.compactMap { derived.rangeSnapshotsByID[$0] },
+                    titleKeyPath: \.placeName
+                )
+            }
+            let places = groups.compactMap {
+                ReviewPlaceSelection(group: $0, rangeText: rangeText, footprintsByID: rangeFootprintsByID)
+            }
+            guard !places.isEmpty else { return }
 
-        if scope == .place, let place = places.first {
-            if selectedBentoDetail == .regions {
-                selectedBentoReviewPlace = place
-            } else {
-                selectedReviewPlace = place
-            }
-        } else {
-            let selection = ReviewPlaceListSelection(
-                id: "\(scope.rawValue):\(item.id)",
-                title: item.name,
-                rangeText: statisticsRangeText,
-                places: places
+            presentedSheet = .places(
+                ReviewPlaceQuery(
+                    id: "\(scope.rawValue):\(item.id)",
+                    source: .rankItem(scope, item.id),
+                    title: item.name,
+                    usesMapTitle: false,
+                    presentsList: scope != .place
+                ),
+                places
             )
-            if selectedBentoDetail == .regions {
-                selectedBentoReviewPlaceList = selection
-            } else {
-                selectedReviewPlaceList = selection
-            }
         }
     }
 
@@ -1083,16 +2800,16 @@ struct HistoryStatisticsView: View {
                 ),
                 spacing: 12
             ) {
-                Button { selectedBentoDetail = .activity } label: { reviewActivityCompositionCard }
+                Button { presentedSheet = .bento(.activity) } label: { reviewActivityCompositionCard }
                     .buttonStyle(.plain)
                     .contentShape(Rectangle())
-                Button { selectedBentoDetail = .rhythm } label: { reviewRhythmCard }
+                Button { presentedSheet = .bento(.rhythm) } label: { reviewRhythmCard }
                     .buttonStyle(.plain)
                     .contentShape(Rectangle())
-                Button { selectedBentoDetail = .transport } label: { reviewTransportCard }
+                Button { presentedSheet = .bento(.transport) } label: { reviewTransportCard }
                     .buttonStyle(.plain)
                     .contentShape(Rectangle())
-                Button { selectedBentoDetail = .regions } label: { reviewRegionCard }
+                Button { presentedSheet = .bento(.regions) } label: { reviewRegionCard }
                     .buttonStyle(.plain)
                     .contentShape(Rectangle())
             }
@@ -1258,6 +2975,11 @@ struct HistoryStatisticsView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.dfkAccent)
 
+                    if !reviewRoutesReady {
+                        ProgressView()
+                            .controlSize(.large)
+                            .frame(maxWidth: .infinity, minHeight: 320)
+                    } else {
                     switch detail {
                     case .activity:
                         reviewActivityDetail
@@ -1268,26 +2990,180 @@ struct HistoryStatisticsView: View {
                     case .regions:
                         reviewRegionsDetail
                     }
+                    }
                 }
                 .padding(20)
             }
             .background(Color.dfkBackground)
             .navigationTitle("\(statisticsRangeText) · \(reviewBentoDetailTitle(detail))")
             .navigationBarTitleDisplayMode(.inline)
+            .reviewRangeBar(rangeControl)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { selectedBentoDetail = nil } label: {
+                    Button { dismiss() } label: {
                         Image(systemName: "xmark").dfkToolbarDismissIcon()
                     }
                 }
             }
         }
-        .sheet(item: $selectedBentoReviewPlace) { selection in
-            ReviewPlaceView(selection: selection)
+    }
+
+    // MARK: - Review Sheets
+
+    private var sheetSeed: ReviewSheetSeed {
+        ReviewSheetSeed(
+            source: reviewSource,
+            sourceFingerprint: reviewSourceFingerprint,
+            range: appliedRange,
+            activeYear: activeYearForSegment,
+            derived: reviewDerived,
+            rangeFootprints: rangeFootprints,
+            rangeFootprintsByID: rangeFootprintsByID,
+            tripActivityDays: reviewTripActivityDays,
+            timelineItems: reviewTimelineItemsCache,
+            mapRegion: reviewMapRegion,
+            mapPosition: mapPosition,
+            routesReady: reviewRoutesReady,
+            frequentPlaceRankScope: frequentPlaceRankScope,
+            allowsRangeSelection: sheet == nil
+        )
+    }
+
+    private var rangeControl: ReviewRangeControl? {
+        guard allowsRangeSelection else { return nil }
+        return ReviewRangeControl(selection: $selectedRange, years: availableYears, activeYear: activeYearForSegment)
+    }
+
+    @ViewBuilder
+    private func sheetBody(_ content: ReviewSheetContent) -> some View {
+        switch content {
+        case .map:
+            if reviewRoutesReady {
+                FullReviewMapView(
+                    title: "\(statisticsRangeText) · \(reviewGeographyMetric.value)\(reviewGeographyMetric.label)",
+                    rangeText: statisticsRangeText,
+                    timelineItems: reviewTimelineItemsCache,
+                    footprintSnapshots: reviewDerived.rangeSnapshotsByID,
+                    initialRegion: reviewMapRegion,
+                    initialPosition: mapPosition,
+                    rangeControl: rangeControl,
+                    onOpenPlaces: { query, places in
+                        presentedSheet = .places(query, places)
+                    }
+                )
+            } else {
+                reviewSheetLoading(title: statisticsRangeText)
+            }
+        case .bento(let detail):
+            reviewBentoDetailView(detail)
+        case .favorites:
+            NavigationStack {
+                Group {
+                    if reviewRoutesReady {
+                        HistoryFavoritesView(
+                            includedFootprintIDs: reviewDerived.favoriteFootprintIDs
+                        ) { footprint in
+                            onFootprintSelected?(footprint)
+                        }
+                    } else {
+                        ProgressView()
+                            .controlSize(.large)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+                .navigationTitle("\(statisticsRangeText) · 收藏足迹")
+                .navigationBarTitleDisplayMode(.inline)
+                .reviewRangeBar(rangeControl)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark").dfkToolbarDismissIcon()
+                        }
+                    }
+                }
+            }
+            .presentationDetents([.large])
+        case .places(let query, _):
+            Group {
+                if !reviewRoutesReady || sheetPlacesRange != appliedRange {
+                    reviewSheetLoading(title: "\(statisticsRangeText) · \(query.title)")
+                } else if query.presentsList {
+                    ReviewPlaceListSheet(
+                        selection: ReviewPlaceListSelection(id: query.id, title: query.title, rangeText: statisticsRangeText, places: sheetPlaces),
+                        rangeControl: rangeControl,
+                        onSelectPlace: { place in
+                            presentedSheet = .places(
+                                ReviewPlaceQuery(id: place.id, source: .placeKeys([place.id]), title: place.title, usesMapTitle: query.usesMapTitle, presentsList: false),
+                                [place]
+                            )
+                        }
+                    )
+                } else if let place = sheetPlaces.first {
+                    ReviewPlaceView(selection: place, rangeControl: rangeControl)
+                } else {
+                    reviewSheetChrome(title: "\(statisticsRangeText) · \(query.title)") {
+                        ContentUnavailableView("这段时间没有到访", systemImage: "mappin.slash", description: Text("换一个时间范围看看"))
+                    }
+                }
+            }
+            .presentationDetents(query.presentsList ? Set<PresentationDetent>([.medium, .large]) : [.large])
+            .task(id: "\(appliedRange.rawValue)|\(reviewRoutesReady)") {
+                await resolveSheetPlaces(query)
+            }
         }
-        .sheet(item: $selectedBentoReviewPlaceList) { selection in
-            ReviewPlaceListSheet(selection: selection)
+    }
+
+    private func reviewSheetLoading(title: String) -> some View {
+        reviewSheetChrome(title: title) {
+            ProgressView()
+                .controlSize(.large)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func reviewSheetChrome<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        NavigationStack {
+            content()
+                .background(Color.dfkBackground)
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
+                .reviewRangeBar(rangeControl)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark").dfkToolbarDismissIcon()
+                        }
+                    }
+                }
+        }
+    }
+
+    /// Re-resolves a place sheet for the sheet's range, off main, once that
+    /// range's data is ready.
+    private func resolveSheetPlaces(_ query: ReviewPlaceQuery) async {
+        let range = appliedRange
+        guard reviewRoutesReady, sheetPlacesRange != range else { return }
+        let derived = reviewDerived
+        let rangeText = statisticsRangeText
+        let groups = await reviewDetached(priority: .userInitiated) {
+            let footprintIDs: [UUID]
+            switch query.source {
+            case .placeKeys(let keys):
+                footprintIDs = keys.flatMap { derived.footprintIDsByPlaceKey[$0] ?? [] }
+            case .rankItem(let scope, let itemID):
+                footprintIDs = derived.frequentPlaces[scope]?.first(where: { $0.id == itemID })?.footprintIDs ?? []
+            }
+            let titleKeyPath: KeyPath<ReviewFootprintSnapshot, String> = query.usesMapTitle ? \.mapTitle : \.placeName
+            return ReviewDataBuilder.placeGroups(
+                from: footprintIDs.compactMap { derived.rangeSnapshotsByID[$0] },
+                titleKeyPath: titleKeyPath
+            )
+        }
+        guard !Task.isCancelled, range == appliedRange, reviewRoutesReady else { return }
+        sheetPlaces = groups.compactMap {
+            ReviewPlaceSelection(group: $0, rangeText: rangeText, footprintsByID: rangeFootprintsByID)
+        }
+        sheetPlacesRange = range
     }
 
     private func reviewBentoDetailTitle(_ detail: ReviewBentoDetail) -> String {
@@ -1417,13 +3293,13 @@ struct HistoryStatisticsView: View {
 
     private var reviewActivitySummaryGrid: some View {
         let slices = reviewActivitySlices
-        let visits = reviewActivityRecognizedFootprints
+        let visitCount = reviewDerived.activityRecognizedCount
         let totalDuration = slices.reduce(0) { $0 + $1.duration }
         let dominantShare = totalDuration > 0 ? Int(((slices.first?.duration ?? 0) / totalDuration * 100).rounded()) : 0
-        let averageDuration = visits.isEmpty ? 0 : totalDuration / Double(visits.count)
+        let averageDuration = visitCount == 0 ? 0 : totalDuration / Double(visitCount)
         return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 2), spacing: 10) {
             reviewActivityMetricCard(title: "活动类型", value: "\(slices.count)种", icon: "square.grid.2x2.fill")
-            reviewActivityMetricCard(title: "活动记录", value: "\(visits.count)次", icon: "list.number")
+            reviewActivityMetricCard(title: "活动记录", value: "\(visitCount)次", icon: "list.number")
             reviewActivityMetricCard(title: "单次平均", value: formatRankDuration(averageDuration), icon: "timer")
             reviewActivityMetricCard(title: "头部活动占比", value: "\(dominantShare)%", icon: "chart.pie.fill")
         }
@@ -1472,34 +3348,7 @@ struct HistoryStatisticsView: View {
         icon: String,
         values: [ReviewActivityBarValue]
     ) -> some View {
-        let rankedValues = values.sorted {
-            if $0.value != $1.value { return $0.value > $1.value }
-            return $0.slice.name.localizedStandardCompare($1.slice.name) == .orderedAscending
-        }
-        let maximum = max(1, rankedValues.first?.value ?? 1)
-        return VStack(alignment: .leading, spacing: 14) {
-            Label(title, systemImage: icon).font(.headline)
-            ForEach(rankedValues.prefix(6)) { item in
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Label(item.slice.name, systemImage: item.slice.icon)
-                            .lineLimit(1)
-                        Spacer()
-                        Text(item.valueText).fontWeight(.semibold).foregroundStyle(.secondary)
-                    }
-                    .font(.caption)
-                    GeometryReader { geometry in
-                        Capsule().fill(item.slice.color.opacity(0.14))
-                        Capsule()
-                            .fill(item.slice.color)
-                            .frame(width: max(5, geometry.size.width * item.value / maximum))
-                    }
-                    .frame(height: 8)
-                }
-            }
-        }
-        .padding(16)
-        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        ReviewActivityHorizontalBars(title: title, icon: icon, values: values)
     }
 
     private var reviewActivityWeekdayHeatmap: some View {
@@ -1620,13 +3469,8 @@ struct HistoryStatisticsView: View {
     }
 
     private var reviewTransportActiveDaysChart: some View {
-        let calendar = Calendar.current
         let values = reviewTransportSlices.map { slice in
-            let activeDays = Set(
-                filteredTransportRecords.lazy
-                    .filter { reviewTransportType(for: $0).rawValue == slice.id }
-                    .map { calendar.startOfDay(for: $0.startTime) }
-            ).count
+            let activeDays = reviewDerived.transportActiveDays[slice.id] ?? 0
             return ReviewTransportBarValue(slice: slice, value: Double(activeDays), valueText: "\(activeDays)天")
         }
         return reviewTransportHorizontalBars(title: "使用天数", icon: "calendar", values: values)
@@ -2160,712 +4004,115 @@ struct HistoryStatisticsView: View {
         .padding(.horizontal, 20)
     }
 
-    private var reviewPlaceCount: Int {
-        getTopLocations(delta: 0.01).count
-    }
+    // MARK: Derived values (built off main in `ReviewDataBuilder.derive`)
 
     private var reviewDistanceText: String {
-        formatRankMileage(filteredTransportRecords.reduce(0) { $0 + $1.distance })
+        formatRankMileage(reviewDerived.totalDistance)
     }
 
     private var reviewMapRevision: Int {
-        let latestFootprint = filteredFootprints.map(\.endTime).max()?.timeIntervalSince1970 ?? 0
-        let latestTransport = filteredTransportRecords.map(\.endTime).max()?.timeIntervalSince1970 ?? 0
-        let rangeCode: Int
-        switch appliedRange {
-        case .last7Days: rangeCode = 7
-        case .last30Days: rangeCode = 30
-        case .last90Days: rangeCode = 90
-        case .lastYear: rangeCode = 365
-        case .customYear(let year): rangeCode = year
-        }
-        let dataRevision = rangeCode &* 1_000_003
-            &+ filteredFootprints.count &* 10_007
-            &+ filteredTransportRecords.count &* 101
-            &+ Int(max(latestFootprint, latestTransport))
-        return dataRevision &* 31 &+ 6
+        reviewDerived.mapRevision
     }
 
     private var reviewGeographyMetric: (icon: String, value: String, label: String) {
-        let countries = Set(filteredFootprints.compactMap { footprint -> String? in
-            let value = footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return value.isEmpty ? nil : value.uppercased()
-        })
-        if countries.count > 1 { return ("globe.asia.australia.fill", "\(countries.count)", "个国家") }
-
-        let cities = Set(filteredFootprints.compactMap { footprint -> String? in
-            let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !city.isEmpty else { return nil }
-            return "\(footprint.countryCode?.uppercased() ?? "")|\(city)"
-        })
-        if cities.count > 1 { return ("building.2.fill", "\(cities.count)", "座城市") }
-        return ("mappin.and.ellipse", "\(reviewPlaceCount)", "个地点")
-    }
-
-    private func buildReviewMemoryCandidatesCooperatively() async -> [ReviewMemoryCandidate] {
-        var candidates: [ReviewMemoryCandidate] = []
-        let calendar = Calendar.current
-        let footprintsInRange = filteredFootprints
-
-        let historyByPlace = Dictionary(grouping: allFootprints, by: reviewPlaceKey)
-        let visitsByPlace = Dictionary(grouping: footprintsInRange, by: reviewPlaceKey)
-        var photosByPlace: [String: [String]] = [:]
-        for (placeKey, visits) in visitsByPlace {
-            var seenPhotoIDs = Set<String>()
-            var photoAssetIDs: [String] = []
-            for visit in visits {
-                let visitPhotoAssetIDs = await PhotoService.shared.displayableAssetIDs(for: visit)
-                photoAssetIDs.append(contentsOf: visitPhotoAssetIDs.filter { seenPhotoIDs.insert($0).inserted })
-            }
-            photosByPlace[placeKey] = photoAssetIDs
-        }
-        let durationByPlace = visitsByPlace.mapValues { $0.reduce(0) { $0 + $1.duration } }
-        let visitCountByPlace = visitsByPlace.mapValues(\.count)
-        let representativeIDByPlace = visitsByPlace.compactMapValues { visits in
-            visits.max {
-                if $0.photoAssetIDs.count != $1.photoAssetIDs.count {
-                    return $0.photoAssetIDs.count < $1.photoAssetIDs.count
-                }
-                return $0.duration < $1.duration
-            }?.footprintID
-        }
-        let rankedDurationPlaces = durationByPlace
-            .filter { $0.value >= AppConfig.shared.reviewMemoryLongStayMinDuration }
-            .sorted { $0.value > $1.value }
-            .prefix(3)
-        let longStayPlaceKeys = Set(rankedDurationPlaces.map(\.key))
-        let longestPlaceKey = rankedDurationPlaces.first?.key
-        let mostVisitedPlaceKey = visitCountByPlace.max {
-            if $0.value != $1.value { return $0.value < $1.value }
-            return (durationByPlace[$0.key] ?? 0) < (durationByPlace[$1.key] ?? 0)
-        }?.key
-        let mostPhotoPlaceKey = photosByPlace.max { $0.value.count < $1.value.count }?.key
-        let frequentVisitMinCount = AppConfig.shared.reviewMemoryFrequentVisitMinCount
-        let longestFootprintID = footprintsInRange.max {
-            if $0.duration != $1.duration { return $0.duration < $1.duration }
-            return $0.startTime > $1.startTime
-        }?.footprintID
-        var previousVisitByID: [UUID: Date] = [:]
-        var firstVisitIDByPlace: [String: UUID] = [:]
-        var averageDurationByPlace: [String: TimeInterval] = [:]
-        for (index, entry) in historyByPlace.enumerated() {
-            if index.isMultiple(of: 40) {
-                await Task.yield()
-                if Task.isCancelled { return [] }
-            }
-            let (placeKey, history) = entry
-            let ordered = history.sorted {
-                if $0.startTime != $1.startTime { return $0.startTime < $1.startTime }
-                return $0.footprintID.uuidString < $1.footprintID.uuidString
-            }
-            firstVisitIDByPlace[placeKey] = ordered.first?.footprintID
-            var previousDate: Date?
-            for footprint in ordered {
-                if let previousDate { previousVisitByID[footprint.footprintID] = previousDate }
-                previousDate = footprint.startTime
-            }
-            averageDurationByPlace[placeKey] = history.reduce(0) { $0 + $1.duration } / Double(max(1, history.count))
-        }
-
-        var firstCountryDate: [String: Date] = [:]
-        var firstCityDate: [String: Date] = [:]
-        for (index, footprint) in allFootprints.enumerated() {
-            if index.isMultiple(of: 100) {
-                await Task.yield()
-                if Task.isCancelled { return [] }
-            }
-            let country = footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
-            if !country.isEmpty {
-                firstCountryDate[country] = min(firstCountryDate[country] ?? footprint.startTime, footprint.startTime)
-            }
-            let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !city.isEmpty {
-                let key = "\(country)|\(city)"
-                firstCityDate[key] = min(firstCityDate[key] ?? footprint.startTime, footprint.startTime)
-            }
-        }
-
-        for (index, footprint) in footprintsInRange.enumerated() {
-            if index.isMultiple(of: 40) {
-                await Task.yield()
-                if Task.isCancelled { return [] }
-            }
-            let placeKey = reviewPlaceKey(for: footprint)
-            let placePhotoAssetIDs = photosByPlace[placeKey] ?? []
-            let footprintPhotoAssetIDs = await PhotoService.shared.displayableAssetIDs(for: footprint)
-            let placeDuration = durationByPlace[placeKey] ?? 0
-            let placeVisitCount = visitsByPlace[placeKey]?.count ?? 0
-            let isPlaceRepresentative = representativeIDByPlace[placeKey] == footprint.footprintID
-            let previousVisit = previousVisitByID[footprint.footprintID]
-            let averageDuration = averageDurationByPlace[placeKey] ?? 0
-            // “第一次来到这里”只属于该地点全部历史记录中的最早一次，
-            // 不能因为当前统计周期或候选顺序改变而重新产生。
-            let firstVisit = firstVisitIDByPlace[placeKey] == footprint.footprintID
-            let daysSincePrevious = previousVisit.map {
-                calendar.dateComponents([.day], from: $0, to: footprint.startTime).day ?? 0
-            } ?? 0
-            let countryCode = footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
-            let cityName = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let firstCountry = !countryCode.isEmpty && firstCountryDate[countryCode] == footprint.startTime
-            let firstCity = !cityName.isEmpty && firstCityDate["\(countryCode)|\(cityName)"] == footprint.startTime
-
-            var score = 0.0
-            var reason = ""
-            var evidence = ""
-            var icon = "sparkles"
-
-            if firstVisit && footprintPhotoAssetIDs.count >= AppConfig.shared.reviewMemoryFirstVisitPhotoMinCount {
-                score += 6
-                reason = "第一次来到这里"
-                evidence = "\(footprintPhotoAssetIDs.count)张照片 · \(formatRankDuration(footprint.duration))"
-                icon = "flag.fill"
-            }
-            if firstCountry {
-                score += 7
-                reason = "第一次来到这个国家"
-                evidence = footprint.countryName ?? countryCode
-                icon = "globe.asia.australia.fill"
-            } else if firstCity {
-                score += 5
-                if reason.isEmpty {
-                    reason = "第一次来到这座城市"
-                    evidence = cityName
-                    icon = "building.2.fill"
-                }
-            }
-            if footprint.footprintID == longestFootprintID,
-               footprint.duration >= AppConfig.shared.reviewMemoryLongStayMinDuration {
-                score += 4
-                if !firstCountry && !firstCity {
-                    reason = "停留最久的一次"
-                    evidence = "停留\(formatRankDuration(footprint.duration))"
-                    icon = "hourglass.bottomhalf.filled"
-                }
-            }
-            if isPlaceRepresentative,
-               placeKey == mostVisitedPlaceKey,
-               placeVisitCount > 1 {
-                score += 3
-                if !firstCountry && !firstCity && footprint.footprintID != longestFootprintID {
-                    reason = "停留最多的地方"
-                    evidence = "\(placeVisitCount)次到访 · 累计\(formatRankDuration(placeDuration))"
-                    icon = "repeat.circle.fill"
-                }
-            }
-            if isPlaceRepresentative && longStayPlaceKeys.contains(placeKey) {
-                let durationScore = min(4, placeDuration / AppConfig.shared.reviewMemoryLongStayMinDuration)
-                score += durationScore
-                if reason.isEmpty || (reason == "第一次来到这里" && placeVisitCount >= frequentVisitMinCount) {
-                    reason = placeKey == longestPlaceKey
-                        ? "这段时间最常停留"
-                        : (placeVisitCount >= frequentVisitMinCount ? "常常回到这里" : "在这里度过了不少时间")
-                    evidence = "累计\(formatRankDuration(placeDuration)) · \(placeVisitCount)次到访"
-                    icon = "clock.fill"
-                }
-            }
-            if averageDuration > 0 && footprint.duration >= averageDuration * AppConfig.shared.reviewMemoryUnusualDurationRatio {
-                score += 2
-                if reason.isEmpty || reason == "第一次来到这里" {
-                    reason = "这次停留得格外久"
-                    evidence = "停留\(formatRankDuration(footprint.duration))"
-                    icon = "hourglass"
-                }
-            }
-            if isPlaceRepresentative && placePhotoAssetIDs.count >= AppConfig.shared.reviewMemoryPhotoMinCount {
-                score += min(4, Double(placePhotoAssetIDs.count) / Double(max(1, AppConfig.shared.reviewMemoryPhotoMinCount)))
-                if reason.isEmpty || (placeKey == mostPhotoPlaceKey && reason == "第一次来到这里") {
-                    reason = placeKey == mostPhotoPlaceKey ? "照片最多的地方" : "用照片记下这里"
-                    evidence = "累计拍了\(placePhotoAssetIDs.count)张照片"
-                    icon = "photo.on.rectangle.angled"
-                }
-            }
-            if daysSincePrevious >= AppConfig.shared.longTimeNoSeeDays {
-                score += 4
-                if !firstCountry && !firstCity {
-                    reason = "很久以后又回来"
-                    evidence = "相隔\(daysSincePrevious)天"
-                    icon = "arrow.uturn.backward.circle.fill"
-                }
-            }
-            if footprint.status == .manual || footprint.status == .confirmed { score += 0.8 }
-            if footprint.isAddressEditedByHand { score += 0.8 }
-            let personalNote = footprint.reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !personalNote.isEmpty {
-                score += 1.2
-                if reason == "第一次来到这里" || reason == "用照片记下这里" {
-                    reason = "你特别记下的一次停留"
-                    evidence = personalNote
-                    icon = "note.text"
-                }
-            }
-            if footprint.isHighlight == true { score += 0.4 }
-
-            guard score >= AppConfig.shared.reviewMemoryMinimumScore,
-                  !reason.isEmpty,
-                  !placePhotoAssetIDs.isEmpty else { continue }
-            candidates.append(ReviewMemoryCandidate(
-                id: "footprint-\(footprint.footprintID.uuidString)",
-                date: footprint.startTime,
-                footprint: footprint,
-                title: reviewPlaceName(for: footprint),
-                evidence: evidence,
-                reason: reason,
-                systemImage: icon,
-                photoAssetIDs: placePhotoAssetIDs,
-                score: score
-            ))
-        }
-
-        if let farthest = reviewFarthestDay, !farthest.photoIDs.isEmpty {
-            candidates.append(ReviewMemoryCandidate(
-                id: "distance-\(farthest.date.timeIntervalSince1970)",
-                date: farthest.date,
-                footprint: nil,
-                title: farthest.date.formatted(.dateTime.month().day()),
-                evidence: formatRankMileage(farthest.distance),
-                reason: "走得最远的一天",
-                systemImage: "point.topleft.down.to.point.bottomright.curvepath",
-                photoAssetIDs: farthest.photoIDs,
-                score: 5
-            ))
-        }
-        candidates.append(contentsOf: reviewTransportMemoryCandidates.filter { !$0.photoAssetIDs.isEmpty })
-
-        // A favorite is an explicit user choice, so keep one visible as a
-        // compact memory card even when its automatic score is not high enough.
-        let favoriteFootprints = footprintsInRange.filter {
-            $0.isHighlight == true && $0.status != .ignored
-        }
-        let orderedFavoriteFootprints = favoriteFootprints.sorted {
-            if $0.startTime != $1.startTime { return $0.startTime < $1.startTime }
-            return $0.footprintID.uuidString < $1.footprintID.uuidString
-        }
-        var favoriteCandidate: ReviewMemoryCandidate?
-        for footprint in orderedFavoriteFootprints {
-            let photoAssetIDs = await PhotoService.shared.displayableAssetIDs(for: footprint)
-            guard !photoAssetIDs.isEmpty else { continue }
-            favoriteCandidate = ReviewMemoryCandidate(
-                id: "favorite-\(footprint.footprintID.uuidString)",
-                date: footprint.startTime,
-                footprint: nil,
-                title: "\(favoriteFootprints.count)个重要片段",
-                evidence: "点开查看全部收藏",
-                reason: "收藏足迹",
-                systemImage: "star.fill",
-                photoAssetIDs: photoAssetIDs,
-                score: 0
-            )
-            break
-        }
-        if favoriteCandidate == nil, let footprint = orderedFavoriteFootprints.first {
-            favoriteCandidate = ReviewMemoryCandidate(
-                id: "favorite-\(footprint.footprintID.uuidString)",
-                date: footprint.startTime,
-                footprint: nil,
-                title: "\(favoriteFootprints.count)个重要片段",
-                evidence: "点开查看全部收藏",
-                reason: "收藏足迹",
-                systemImage: "star.fill",
-                photoAssetIDs: [],
-                score: 0
-            )
-        }
-
-        var usedDays: Set<Date> = []
-        var usedPlaces: Set<String> = []
-        var usedReasons: Set<String> = []
-        var selected: [ReviewMemoryCandidate] = []
-        let automaticLimit = max(0, AppConfig.shared.reviewMemoryMaximumCount - (favoriteCandidate == nil ? 0 : 1))
-        let rankedCandidates = candidates.sorted {
-            if $0.score != $1.score { return $0.score > $1.score }
-            if $0.date != $1.date { return $0.date < $1.date }
-            return $0.id < $1.id
-        }
-        func appendCandidateIfAvailable(_ candidate: ReviewMemoryCandidate, requiresNewReason: Bool) {
-            guard selected.count < automaticLimit else { return }
-            let day = calendar.startOfDay(for: candidate.date)
-            let placeKey = candidate.footprint.map(reviewPlaceKey)
-            guard !usedDays.contains(day),
-                  (placeKey.map({ !usedPlaces.contains($0) }) ?? true),
-                  !requiresNewReason || !usedReasons.contains(candidate.reason) else { return }
-            selected.append(candidate)
-            usedDays.insert(day)
-            usedReasons.insert(candidate.reason)
-            if let placeKey { usedPlaces.insert(placeKey) }
-        }
-        for candidate in rankedCandidates {
-            appendCandidateIfAvailable(candidate, requiresNewReason: true)
-        }
-        if selected.count < automaticLimit {
-            for candidate in rankedCandidates {
-                appendCandidateIfAvailable(candidate, requiresNewReason: false)
-            }
-        }
-        if let favoriteCandidate { selected.append(favoriteCandidate) }
-        return selected
-    }
-
-    private var reviewFarthestDay: (date: Date, distance: Double, photoIDs: [String])? {
-        let calendar = Calendar.current
-        let grouped = Dictionary(grouping: filteredTransportRecords) { calendar.startOfDay(for: $0.startTime) }
-        guard let item = grouped.map({ (date: $0.key, distance: $0.value.reduce(0) { $0 + $1.distance }) }).max(by: { $0.distance < $1.distance }),
-              item.distance >= AppConfig.shared.reviewMemoryTravelDistanceMin else { return nil }
-        let photoIDs = filteredFootprints.filter { calendar.isDate($0.startTime, inSameDayAs: item.date) }.flatMap(\.photoAssetIDs)
-        return (item.date, item.distance, photoIDs)
-    }
-
-    private var reviewTransportMemoryCandidates: [ReviewMemoryCandidate] {
-        let calendar = Calendar.current
-        let grouped = Dictionary(grouping: filteredTransportRecords) { calendar.startOfDay(for: $0.startTime) }
-        var candidates: [ReviewMemoryCandidate] = []
-
-        if let walking = grouped.map({ day, records -> (Date, Double) in
-            let distance = records.filter {
-                let type = $0.manualTypeRaw.flatMap(TransportType.init(rawValue:)) ?? TransportType(rawValue: $0.typeRaw) ?? .slow
-                return type == .slow || type == .running
-            }.reduce(0) { $0 + $1.distance }
-            return (day, distance)
-        }).max(by: { $0.1 < $1.1 }), walking.1 >= AppConfig.shared.reviewMemoryWalkDistanceMin {
-            candidates.append(ReviewMemoryCandidate(
-                id: "walking-\(walking.0.timeIntervalSince1970)", date: walking.0, footprint: nil,
-                title: walking.0.formatted(.dateTime.month().day()), evidence: formatRankMileage(walking.1),
-                reason: "步行最多的一天", systemImage: "figure.walk", photoAssetIDs: reviewPhotoIDs(on: walking.0), score: 4.8
-            ))
-        }
-
-        if let diverse = grouped.map({ day, records -> (Date, Int) in
-            let types = Set(records.compactMap { $0.manualTypeRaw ?? $0.typeRaw }.filter { !$0.isEmpty })
-            return (day, types.count)
-        }).max(by: { $0.1 < $1.1 }), diverse.1 >= AppConfig.shared.reviewMemoryDiverseTransportMinCount {
-            candidates.append(ReviewMemoryCandidate(
-                id: "modes-\(diverse.0.timeIntervalSince1970)", date: diverse.0, footprint: nil,
-                title: diverse.0.formatted(.dateTime.month().day()), evidence: "用了\(diverse.1)种交通方式",
-                reason: "出行方式最丰富的一天", systemImage: "arrow.triangle.branch", photoAssetIDs: reviewPhotoIDs(on: diverse.0), score: 4.4
-            ))
-        }
-        return candidates
-    }
-
-    private func reviewPhotoIDs(on date: Date) -> [String] {
-        filteredFootprints.filter { Calendar.current.isDate($0.startTime, inSameDayAs: date) }.flatMap(\.photoAssetIDs)
-    }
-
-    private func reviewPlaceKey(for footprint: Footprint) -> String {
-        reviewIntegratedPlaceKey(for: footprint, allPlaces: allPlaces)
+        let metric = reviewDerived.geographyMetric
+        return (metric.icon, metric.value, metric.label)
     }
 
     private var reviewActivitySlices: [ReviewActivitySlice] {
-        let calendar = Calendar.current
-        var totals: [String: TimeInterval] = [:]
-        for footprint in filteredFootprints {
-            // A trip day counts whole toward the trip's own type below, so
-            // its individual stops are not counted a second time.
-            guard reviewTripActivityDays[calendar.startOfDay(for: footprint.startTime)] == nil,
-                  let activity = footprint.getActivityType(from: activityTypes) else { continue }
-            totals[activity.name, default: 0] += footprint.duration
-        }
-        for value in reviewTripActivityDays.values {
-            guard let activity = activityTypes.first(where: { $0.id.uuidString == value || $0.name == value }) else { continue }
-            totals[activity.name, default: 0] += 86_400
-        }
-        return totals.compactMap { name, duration in
-            guard let activity = activityTypes.first(where: { $0.name == name }) else { return nil }
-            return ReviewActivitySlice(id: name, name: name, duration: duration, color: activity.color, icon: activity.icon)
-        }.sorted { $0.duration > $1.duration }
-    }
-
-    private var reviewActivityRecognizedFootprints: [Footprint] {
-        filteredFootprints.filter { $0.getActivityType(from: activityTypes) != nil }
+        reviewDerived.activitySlices
     }
 
     private func reviewActivityVisitCount(for name: String) -> Int {
-        reviewActivityRecognizedFootprints.filter {
-            $0.getActivityType(from: activityTypes)?.name == name
-        }.count
+        reviewDerived.activityVisitCounts[name] ?? 0
     }
 
     private func reviewActivityWeekdayCounts(for name: String) -> [Int] {
-        let calendar = Calendar.current
-        var values = Array(repeating: 0, count: 7)
-        for footprint in reviewActivityRecognizedFootprints where footprint.getActivityType(from: activityTypes)?.name == name {
-            let mondayFirstIndex = (calendar.component(.weekday, from: footprint.startTime) + 5) % 7
-            values[mondayFirstIndex] += 1
-        }
-        return values
+        reviewDerived.activityWeekdayCounts[name] ?? Array(repeating: 0, count: 7)
     }
 
     private func reviewActivityHourlyCounts(for name: String) -> [Int] {
-        let calendar = Calendar.current
-        var values = Array(repeating: 0, count: 24)
-        for footprint in reviewActivityRecognizedFootprints where footprint.getActivityType(from: activityTypes)?.name == name {
-            values[calendar.component(.hour, from: footprint.startTime)] += 1
-        }
-        return values
+        reviewDerived.activityHourlyCounts[name] ?? Array(repeating: 0, count: 24)
     }
 
     private var reviewTransportSlices: [ReviewTransportSlice] {
-        var counts: [TransportType: Int] = [:]
-        var distances: [TransportType: Double] = [:]
-        for record in filteredTransportRecords {
-            let type = reviewTransportType(for: record)
-            counts[type, default: 0] += 1
-            distances[type, default: 0] += record.distance
-        }
-        let colors: [Color] = [.dfkAccent, .blue, .green, .orange, .purple]
-        return counts.map { type, count in
-            let index = TransportType.allCases.firstIndex(of: type) ?? 0
-            return ReviewTransportSlice(
-                id: type.rawValue,
-                name: type.localizedName,
-                count: count,
-                distance: distances[type, default: 0],
-                color: colors[index % colors.count],
-                icon: type.sfSymbol
-            )
-        }.sorted {
-            if $0.count != $1.count { return $0.count > $1.count }
-            return $0.distance > $1.distance
-        }
-    }
-
-    private func reviewTransportType(for record: TransportRecord) -> TransportType {
-        record.manualTypeRaw.flatMap(TransportType.init(rawValue:))
-            ?? TransportType(rawValue: record.typeRaw)
-            ?? .slow
+        reviewDerived.transportSlices
     }
 
     private func reviewTransportWeekdayCounts(for typeID: String) -> [Int] {
-        let calendar = Calendar.current
-        var values = Array(repeating: 0, count: 7)
-        for record in filteredTransportRecords where reviewTransportType(for: record).rawValue == typeID {
-            let mondayFirstIndex = (calendar.component(.weekday, from: record.startTime) + 5) % 7
-            values[mondayFirstIndex] += 1
-        }
-        return values
+        reviewDerived.transportWeekdayCounts[typeID] ?? Array(repeating: 0, count: 7)
     }
 
     private func reviewTransportHourlyCounts(for typeID: String) -> [Int] {
-        let calendar = Calendar.current
-        var values = Array(repeating: 0, count: 24)
-        for record in filteredTransportRecords where reviewTransportType(for: record).rawValue == typeID {
-            values[calendar.component(.hour, from: record.startTime)] += 1
-        }
-        return values
+        reviewDerived.transportHourlyCounts[typeID] ?? Array(repeating: 0, count: 24)
     }
 
     private var reviewTopRegions: [(name: String, duration: TimeInterval)] {
-        var totals: [String: TimeInterval] = [:]
-        for footprint in filteredFootprints {
-            let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let name = city.isEmpty ? reviewPlaceName(for: footprint) : city
-            totals[name, default: 0] += footprint.duration
-        }
-        return totals.map { ($0.key, $0.value) }.sorted { $0.duration > $1.duration }
-    }
-
-    private var pastMemoryFootprint: Footprint? {
-        let calendar = Calendar.current
-        let now = Date()
-        let today = calendar.dateComponents([.month, .day, .year], from: now)
-        let importantPlaceIDs = Set(allPlaces.filter(\.isPriority).map(\.placeID))
-        return allFootprints.filter { footprint in
-            let components = calendar.dateComponents([.month, .day, .year], from: footprint.startTime)
-            guard components.month == today.month,
-                  components.day == today.day,
-                  (components.year ?? today.year ?? 0) < (today.year ?? 0),
-                  let placeID = footprint.placeID,
-                  !importantPlaceIDs.contains(placeID),
-                  !(footprint.activityTypeValue ?? "").isEmpty else {
-                return false
-            }
-            return true
-        }
-        .sorted { $0.startTime < $1.startTime }
-        .first
+        reviewDerived.topRegions
     }
 
     private var pastMemoryCandidate: ReviewMemoryCandidate? {
-        guard let footprint = pastMemoryFootprint else { return nil }
-        let years = max(1, Calendar.current.dateComponents([.year], from: footprint.startTime, to: Date()).year ?? 1)
-        return ReviewMemoryCandidate(
-            id: "past-memory-\(footprint.footprintID.uuidString)",
-            date: footprint.startTime,
-            footprint: footprint,
-            title: reviewPlaceName(for: footprint),
-            evidence: "\(years)年前",
-            reason: "往年今日",
-            systemImage: "clock.arrow.circlepath",
-            photoAssetIDs: footprint.photoAssetIDs,
-            score: 0
-        )
+        reviewDerived.pastMemoryCandidate
     }
 
-    private func reviewPlaceName(for footprint: Footprint) -> String {
-        if let placeID = footprint.placeID,
-           let place = allPlaces.first(where: { $0.placeID == placeID }),
-           !place.name.isEmpty {
-            return place.name
-        }
-        let address = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return address.isEmpty ? "这个地方" : address
+    private var reviewRangeWindow: ReviewRangeWindow {
+        ReviewRangeWindow(range: appliedRange)
     }
 
     private var reviewRangeStart: Date {
-        let calendar = Calendar.current
-        switch appliedRange {
-        case .last7Days: return calendar.date(byAdding: .day, value: -7, to: Date()) ?? Date()
-        case .last30Days: return calendar.date(byAdding: .day, value: -30, to: Date()) ?? Date()
-        case .last90Days: return calendar.date(byAdding: .day, value: -90, to: Date()) ?? Date()
-        case .lastYear: return calendar.date(byAdding: .day, value: -365, to: Date()) ?? Date()
-        case .customYear(let year): return calendar.date(from: DateComponents(year: year, month: 1, day: 1)) ?? Date()
-        }
+        reviewRangeWindow.rangeStart
     }
 
     private var reviewRangeEnd: Date {
-        if case .customYear(let year) = appliedRange {
-            return Calendar.current.date(from: DateComponents(year: year, month: 12, day: 31)) ?? Date()
-        }
-        return Date()
+        reviewRangeWindow.rangeEnd
     }
 
     private var reviewActivityBuckets: [Int] {
-        let bucketCount = 24
-        let duration = max(1, reviewRangeEnd.timeIntervalSince(reviewRangeStart))
-        var buckets = Array(repeating: 0, count: bucketCount)
-        for footprint in filteredFootprints {
-            let progress = footprint.startTime.timeIntervalSince(reviewRangeStart) / duration
-            let index = min(bucketCount - 1, max(0, Int(progress * Double(bucketCount))))
-            buckets[index] += 1
-        }
-        return buckets
-    }
-
-    private var reviewRhythmDailyCounts: [(date: Date, count: Int)] {
-        let calendar = Calendar.current
-        let endDate = calendar.startOfDay(for: min(reviewRangeEnd, Date()))
-        let dayCount: Int
-        if let fixedDays = appliedRange.days {
-            dayCount = fixedDays
-        } else {
-            let rangeStart = calendar.startOfDay(for: reviewRangeStart)
-            dayCount = max(1, (calendar.dateComponents([.day], from: rangeStart, to: endDate).day ?? 0) + 1)
-        }
-        let firstDate = calendar.date(byAdding: .day, value: -(dayCount - 1), to: endDate) ?? endDate
-        let countsByDate = Dictionary(grouping: filteredFootprints) {
-            calendar.startOfDay(for: $0.startTime)
-        }.mapValues(\.count)
-        return (0..<dayCount).map { offset in
-            let date = calendar.date(byAdding: .day, value: offset, to: firstDate) ?? firstDate
-            return (date, countsByDate[date, default: 0])
-        }
+        reviewDerived.activityBuckets
     }
 
     private var reviewMileageMetrics: ReviewMileageMetrics {
-        let calendar = Calendar.current
-        let distanceByDate = Dictionary(grouping: filteredTransportRecords) {
-            calendar.startOfDay(for: $0.startTime)
-        }.mapValues { records in
-            records.reduce(0) { $0 + $1.distance }
-        }
-        let dailyValues = reviewRhythmDailyCounts.map { item in
-            (date: item.date, distance: distanceByDate[item.date, default: 0])
-        }
-        let total = dailyValues.reduce(0) { $0 + $1.distance }
-        let dailyAverage = dailyValues.isEmpty ? 0 : total / Double(dailyValues.count)
-        let peakDay = dailyValues.max { $0.distance < $1.distance }
-        let activeDayCount = dailyValues.filter { $0.distance > 0 }.count
-        var totals = Array(repeating: 0.0, count: 7)
-        var occurrences = Array(repeating: 0, count: 7)
-        for item in dailyValues {
-            let mondayFirstIndex = (calendar.component(.weekday, from: item.date) + 5) % 7
-            totals[mondayFirstIndex] += item.distance
-            occurrences[mondayFirstIndex] += 1
-        }
-        let weekdayAverages = totals.indices.map { index in
-            totals[index] / Double(max(1, occurrences[index]))
-        }
-        return ReviewMileageMetrics(
-            dailyValues: dailyValues,
-            total: total,
-            dailyAverage: dailyAverage,
-            peakDay: peakDay,
-            activeDayCount: activeDayCount,
-            weekdayAverages: weekdayAverages
-        )
+        reviewDerived.mileage
     }
 
     private var reviewRhythmActiveDayCount: Int {
-        reviewRhythmDailyCounts.filter { $0.count > 0 }.count
+        reviewDerived.rhythm.activeDayCount
     }
 
     private var reviewRhythmActiveDayRate: Int {
-        let days = max(1, reviewRhythmDailyCounts.count)
-        return Int((Double(reviewRhythmActiveDayCount) / Double(days) * 100).rounded())
+        reviewDerived.rhythm.activeDayRate
     }
 
     private var reviewRhythmWeeklyAverageText: String {
-        let days = max(1, reviewRhythmDailyCounts.count)
-        let total = reviewRhythmDailyCounts.reduce(0) { $0 + $1.count }
-        return "\(reviewRhythmCompactNumber(Double(total) * 7 / Double(days)))次"
+        reviewDerived.rhythm.weeklyAverageText
     }
 
     private var reviewRhythmActiveDayAverageText: String {
-        let activeDays = max(1, reviewRhythmActiveDayCount)
-        let total = reviewRhythmDailyCounts.reduce(0) { $0 + $1.count }
-        return "\(reviewRhythmCompactNumber(Double(total) / Double(activeDays)))次"
+        reviewDerived.rhythm.activeDayAverageText
     }
 
     private var reviewRhythmPeakCount: Int {
-        reviewRhythmDailyCounts.map(\.count).max() ?? 0
+        reviewDerived.rhythm.peakCount
     }
 
     private var reviewRhythmLongestStreak: Int {
-        var longest = 0
-        var current = 0
-        for item in reviewRhythmDailyCounts {
-            if item.count > 0 {
-                current += 1
-                longest = max(longest, current)
-            } else {
-                current = 0
-            }
-        }
-        return longest
+        reviewDerived.rhythm.longestStreak
     }
 
     private var reviewRhythmWeekdaySymbols: [String] {
-        ["一", "二", "三", "四", "五", "六", "日"]
+        ReviewDataBuilder.weekdaySymbols
     }
 
     private var reviewRhythmWeekdayAverages: [CGFloat] {
-        let calendar = Calendar.current
-        var totals = Array(repeating: 0, count: 7)
-        var occurrences = Array(repeating: 0, count: 7)
-        for item in reviewRhythmDailyCounts {
-            let mondayFirstIndex = (calendar.component(.weekday, from: item.date) + 5) % 7
-            totals[mondayFirstIndex] += item.count
-            occurrences[mondayFirstIndex] += 1
-        }
-        return totals.indices.map { index in
-            CGFloat(totals[index]) / CGFloat(max(1, occurrences[index]))
-        }
+        reviewDerived.rhythm.weekdayAverages
     }
 
     private var reviewRhythmHourlyCounts: [Int] {
-        var values = Array(repeating: 0, count: 24)
-        let calendar = Calendar.current
-        for footprint in filteredFootprints {
-            values[calendar.component(.hour, from: footprint.startTime)] += 1
-        }
-        return values
+        reviewDerived.rhythm.hourlyCounts
     }
 
     private func reviewRhythmCompactNumber<T: BinaryFloatingPoint>(_ value: T) -> String {
-        let number = Double(value)
-        if abs(number.rounded() - number) < 0.05 {
-            return String(Int(number.rounded()))
-        }
-        return String(format: "%.1f", number)
+        ReviewDataBuilder.compactNumber(value)
     }
     
     private func updateAiSummary() {
@@ -2942,8 +4189,9 @@ struct HistoryStatisticsView: View {
         
         // 提前在主线程筛选出有自定义标签的重要地点足迹
         var userPlaceCounts: [String: Int] = [:]
+        let summaryPlaces = fetchMainPlaces()
         for fp in footprintsInScope {
-            if let pID = fp.placeID, let place = allPlaces.first(where: { $0.placeID == pID }), place.isUserDefined, !place.name.isEmpty {
+            if let pID = fp.placeID, let place = summaryPlaces.first(where: { $0.placeID == pID }), place.isUserDefined, !place.name.isEmpty {
                 userPlaceCounts[place.name, default: 0] += 1
             }
         }
@@ -3135,24 +4383,17 @@ struct HistoryStatisticsView: View {
         // app destroys this state. Release the database-wide source arrays and
         // the second, decoded copy of every transport route while the UI cannot
         // be used; the existing refresh path restores them when needed.
-        allFootprints.removeAll(keepingCapacity: false)
-        transportRecords.removeAll(keepingCapacity: false)
-        activityTypes.removeAll(keepingCapacity: false)
-        allPlaces.removeAll(keepingCapacity: false)
+        reviewSource = nil
+        reviewDerived = ReviewDerivedData()
+        rangeFootprints.removeAll(keepingCapacity: false)
+        rangeFootprintsByID.removeAll(keepingCapacity: false)
         reviewTimelineItemsCache.removeAll(keepingCapacity: false)
-        reviewTransportOverviewPoints.removeAll(keepingCapacity: false)
         reviewMemoryCandidatesCache.removeAll(keepingCapacity: false)
         reviewSourceFingerprint = nil
         reviewRoutesReady = false
         reviewMapRegion = nil
         mapPosition = .automatic
-        showingFullMap = false
-        selectedReviewPlace = nil
-        selectedBentoDetail = nil
-        selectedReviewPlaceList = nil
-        selectedBentoReviewPlace = nil
-        selectedBentoReviewPlaceList = nil
-        showingAllFavorites = false
+        presentedSheet = nil
         pendingFavoriteFootprint = nil
         sharePayload = nil
         DFKMapSnapshotCache.shared.removeAllMemoryImages()
@@ -3171,8 +4412,19 @@ struct HistoryStatisticsView: View {
             guard !Task.isCancelled else { return }
 
             var sourceChanged = false
-            if fetchesData {
-                sourceChanged = fetchData()
+            if fetchesData || reviewSource == nil {
+                // Fetch and fingerprint the whole source in a private context;
+                // the main actor only compares the resulting fingerprint.
+                let container = modelContext.container
+                let source = await reviewDetached(priority: .userInitiated) {
+                    ReviewDataBuilder.fetchSource(in: container)
+                }
+                guard !Task.isCancelled else { return }
+                if let source, source.fingerprint != reviewSourceFingerprint {
+                    reviewSourceFingerprint = source.fingerprint
+                    reviewSource = source
+                    sourceChanged = true
+                }
             }
             if let range {
                 appliedRange = range
@@ -3189,7 +4441,6 @@ struct HistoryStatisticsView: View {
 
             stopGeographyBackfill()
             hasManuallySelectedFrequentPlaceRankScope = false
-            updateDefaultFrequentPlaceRankScope()
             startReviewDerivedDataRefresh()
         }
     }
@@ -3199,226 +4450,142 @@ struct HistoryStatisticsView: View {
         let requestID = UUID()
         reviewDerivedDataRequestID = requestID
         let rangeAtStart = appliedRange
+        guard let source = reviewSource else { return }
 
-        let tripRangeStart = reviewRangeStart
-        let tripRangeEnd = min(reviewRangeEnd, Date())
-        Task { @MainActor in
-            let days = await TripScanManager.shared.tripActivityDays(from: tripRangeStart, through: tripRangeEnd)
-            guard rangeAtStart == appliedRange else { return }
-            reviewTripActivityDays = days
-        }
+        let window = ReviewRangeWindow(range: rangeAtStart)
+        let config = ReviewConfigSnapshot.current()
+        let container = modelContext.container
+        let tripRangeStart = window.rangeStart
+        let tripRangeEnd = min(window.rangeEnd, window.now)
 
-        let footprintsInRange = filteredFootprints
-        let records = filteredTransportRecords.map {
-            ReviewTransportBuildSnapshot(
-                id: $0.recordID,
-                startTime: $0.startTime,
-                endTime: $0.endTime,
-                startLocation: $0.startLocation,
-                endLocation: $0.endLocation,
-                typeRaw: $0.typeRaw,
-                distance: $0.distance,
-                averageSpeed: $0.averageSpeed,
-                pointsData: $0.pointsData,
-                manualTypeRaw: $0.manualTypeRaw,
-                stepCount: $0.stepCount
-            )
-        }
-        let trajectoryBaseCellDegrees = AppConfig.shared.reviewMapTrajectoryBaseCellDegrees
-        let trajectoryMaxDrawPoints = AppConfig.shared.reviewMapTrajectoryMaxDrawPoints
-        let footprintCoordinates = footprintsInRange.map { (latitude: $0.latitude, longitude: $0.longitude) }
-
-        // Footprints are immediately renderable. Route JSON decoding is the
-        // expensive part and must never run on the main actor.
         // Never leave a previous range visible while its replacement is being
-        // decoded. Footprints for the selected range are cheap and available
-        // immediately; routes are added atomically after the request is proven
-        // to still be current.
-        reviewTimelineItemsCache = footprintsInRange.map(TimelineItem.footprint)
-        reviewTransportOverviewPoints = []
-        reviewMemoryCandidatesCache = loadCachedReviewMemories()
+        // built. Rankings, rhythm, routes and memories are all derived off
+        // main and published together once the request is proven current.
+        reviewTimelineItemsCache = []
         reviewRoutesReady = false
 
         reviewDerivedDataTask = Task { @MainActor in
-            async let decodedResult = Task.detached(priority: .utility) {
-                let decoded = records.map { record in
-                    ReviewDecodedTransport(
-                        source: record,
-                        points: (try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData)) ?? []
-                    )
-                }
-                struct Bucket {
-                    var latitude = 0.0
-                    var longitude = 0.0
-                    var count = 0
-                }
-                var cellSize = trajectoryBaseCellDegrees
-                var buckets: [String: Bucket] = [:]
-                var minimumLatitude = Double.greatestFiniteMagnitude
-                var maximumLatitude = -Double.greatestFiniteMagnitude
-                var minimumLongitude = Double.greatestFiniteMagnitude
-                var maximumLongitude = -Double.greatestFiniteMagnitude
-
-                func include(latitude: Double, longitude: Double) {
-                    guard latitude.isFinite, longitude.isFinite,
-                          (-90...90).contains(latitude), (-180...180).contains(longitude),
-                          !(latitude == 0 && longitude == 0) else { return }
-                    minimumLatitude = min(minimumLatitude, latitude)
-                    maximumLatitude = max(maximumLatitude, latitude)
-                    minimumLongitude = min(minimumLongitude, longitude)
-                    maximumLongitude = max(maximumLongitude, longitude)
-                }
-
-                for coordinate in footprintCoordinates {
-                    include(latitude: coordinate.latitude, longitude: coordinate.longitude)
-                }
-                for transport in decoded {
-                    for point in transport.points where point.isSyntheticPadding != true {
-                        guard point.lat.isFinite, point.lon.isFinite,
-                              (-90...90).contains(point.lat), (-180...180).contains(point.lon),
-                              !(point.lat == 0 && point.lon == 0) else { continue }
-                        include(latitude: point.lat, longitude: point.lon)
-                        let x = Int((point.lon / cellSize).rounded())
-                        let y = Int((point.lat / cellSize).rounded())
-                        let key = "\(x):\(y)"
-                        var bucket = buckets[key, default: Bucket()]
-                        bucket.latitude += point.lat
-                        bucket.longitude += point.lon
-                        bucket.count += 1
-                        buckets[key] = bucket
-                    }
-                }
-
-                while buckets.count > trajectoryMaxDrawPoints {
-                    cellSize *= 1.6
-                    var merged: [String: Bucket] = [:]
-                    for bucket in buckets.values {
-                        let latitude = bucket.latitude / Double(bucket.count)
-                        let longitude = bucket.longitude / Double(bucket.count)
-                        let x = Int((longitude / cellSize).rounded())
-                        let y = Int((latitude / cellSize).rounded())
-                        let key = "\(x):\(y)"
-                        var target = merged[key, default: Bucket()]
-                        target.latitude += bucket.latitude
-                        target.longitude += bucket.longitude
-                        target.count += bucket.count
-                        merged[key] = target
-                    }
-                    buckets = merged
-                }
-                let overviewPoints = buckets.map { key, bucket in
-                    DFKTransportOverviewPoint(
-                        id: key,
-                        latitude: bucket.latitude / Double(bucket.count),
-                        longitude: bucket.longitude / Double(bucket.count),
-                        intensity: bucket.count
-                    )
-                }
-                let bounds: ReviewMapBounds? = minimumLatitude == Double.greatestFiniteMagnitude
-                    ? nil
-                    : ReviewMapBounds(
-                        minimumLatitude: minimumLatitude,
-                        maximumLatitude: maximumLatitude,
-                        minimumLongitude: minimumLongitude,
-                        maximumLongitude: maximumLongitude
-                    )
-                return (decoded, overviewPoints, bounds)
-            }.value
-
-            let (decoded, overviewPoints, bounds) = await decodedResult
+            let cachedMemories = await reviewDetached(priority: .userInitiated) {
+                ReviewDataBuilder.loadCachedMemories(for: rangeAtStart)
+            }
             guard !Task.isCancelled,
                   requestID == reviewDerivedDataRequestID,
                   rangeAtStart == appliedRange else { return }
-            reviewTransportOverviewPoints = overviewPoints
-            if let bounds {
+            reviewMemoryCandidatesCache = cachedMemories
+
+            let tripDays = await TripScanManager.shared.tripActivityDays(from: tripRangeStart, through: tripRangeEnd)
+            guard !Task.isCancelled,
+                  requestID == reviewDerivedDataRequestID,
+                  rangeAtStart == appliedRange else { return }
+            reviewTripActivityDays = tripDays
+
+            let result = await reviewDetached(priority: .userInitiated) {
+                ReviewDataBuilder.derive(
+                    source: source,
+                    window: window,
+                    tripActivityDays: tripDays,
+                    config: config,
+                    container: container
+                )
+            }
+            guard !Task.isCancelled,
+                  requestID == reviewDerivedDataRequestID,
+                  rangeAtStart == appliedRange else { return }
+
+            // Map items, selections and sharing need this context's models:
+            // one range query, matched to the derived data by ID.
+            let models = fetchRangeFootprintModels(in: window)
+            let modelsByID = Dictionary(models.map { ($0.footprintID, $0) }, uniquingKeysWith: { first, _ in first })
+            reviewDerived = result.derived
+            rangeFootprints = models
+            rangeFootprintsByID = modelsByID
+            updateDefaultFrequentPlaceRankScope()
+            if let bounds = result.bounds {
                 let region = mapRegion(for: bounds)
                 reviewMapRegion = region
                 mapPosition = .region(region)
             }
 
-            let candidates = await buildReviewMemoryCandidatesCooperatively()
-            guard !Task.isCancelled,
-                  requestID == reviewDerivedDataRequestID,
-                  rangeAtStart == appliedRange else { return }
-            reviewMemoryCandidatesCache = candidates
-            saveCachedReviewMemories(candidates)
-            let transportItems = decoded.map { decoded -> TimelineItem in
-                let pathPoints = decoded.points.map {
-                    TransportPathPoint(
-                        coordinate: CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon),
-                        timestamp: $0.timestamp,
-                        isSyntheticPadding: $0.isSyntheticPadding ?? false
-                    )
+            // Memories only appear on the page; sheets skip building them.
+            if sheet == nil {
+                let history = source.footprints
+                let derived = result.derived
+                let candidates = await reviewDetached(priority: .utility) {
+                    await ReviewDataBuilder.buildMemoryCandidates(history: history, derived: derived, config: config)
                 }
-                let source = decoded.source
-                return .transport(Transport(
-                    id: source.id,
-                    startTime: source.startTime,
-                    endTime: source.endTime,
-                    startLocation: source.startLocation,
-                    endLocation: source.endLocation,
-                    type: TransportType(rawValue: source.typeRaw) ?? .slow,
-                    distance: source.distance,
-                    averageSpeed: source.averageSpeed,
-                    points: pathPoints.map(\.coordinate),
-                    pathPoints: pathPoints,
-                    manualType: source.manualTypeRaw.flatMap(TransportType.init(rawValue:)),
-                    stepCount: source.stepCount
-                ))
+                guard !Task.isCancelled,
+                      requestID == reviewDerivedDataRequestID,
+                      rangeAtStart == appliedRange else { return }
+                reviewMemoryCandidatesCache = candidates
+                let revision = derived.mapRevision
+                Task.detached(priority: .utility) {
+                    ReviewDataBuilder.saveCachedMemories(candidates, revision: revision, range: rangeAtStart)
+                }
             }
-            guard requestID == reviewDerivedDataRequestID,
-                  rangeAtStart == appliedRange else { return }
-            reviewTimelineItemsCache = (footprintsInRange.map(TimelineItem.footprint) + transportItems)
-                .sorted { $0.startTime < $1.startTime }
+            reviewTimelineItemsCache = result.timelineSlots.compactMap { slot -> TimelineItem? in
+                switch slot {
+                case .footprint(let id):
+                    return modelsByID[id].map(TimelineItem.footprint)
+                case .transport(let index):
+                    return .transport(result.transports[index])
+                }
+            }
             reviewRoutesReady = true
         }
     }
 
-    private var reviewMemoryCacheKey: String {
-        "review.memory.v8.\(appliedRange.rawValue)"
-    }
-
-    private func loadCachedReviewMemories() -> [ReviewMemoryCandidate] {
-        guard let data = UserDefaults.standard.data(forKey: reviewMemoryCacheKey),
-              let payload = try? JSONDecoder().decode(ReviewMemoryCachePayload.self, from: data) else { return [] }
-        let footprintsByID = Dictionary(uniqueKeysWithValues: allFootprints.map { ($0.footprintID, $0) })
-        return payload.entries.filter {
-            !$0.photoAssetIDs.isEmpty || $0.id.hasPrefix("favorite-")
-        }.map { entry in
-            ReviewMemoryCandidate(
-                id: entry.id,
-                date: entry.date,
-                footprint: entry.footprintID.flatMap { footprintsByID[$0] },
-                title: entry.title,
-                evidence: entry.evidence,
-                reason: entry.reason,
-                systemImage: entry.systemImage,
-                photoAssetIDs: entry.photoAssetIDs,
-                score: entry.score
+    private func fetchRangeFootprintModels(in window: ReviewRangeWindow) -> [Footprint] {
+        let lowerBound = window.lowerBound
+        let descriptor: FetchDescriptor<Footprint>
+        if let upperBound = window.upperBound {
+            descriptor = FetchDescriptor<Footprint>(
+                predicate: #Predicate<Footprint> {
+                    $0.statusValue != "ignored" && $0.startTime >= lowerBound && $0.startTime < upperBound
+                },
+                sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
+            )
+        } else {
+            descriptor = FetchDescriptor<Footprint>(
+                predicate: #Predicate<Footprint> {
+                    $0.statusValue != "ignored" && $0.startTime >= lowerBound
+                },
+                sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
             )
         }
+        return (try? modelContext.fetch(descriptor)) ?? []
     }
 
-    private func saveCachedReviewMemories(_ candidates: [ReviewMemoryCandidate]) {
-        let entries = candidates.filter {
-            !$0.photoAssetIDs.isEmpty || $0.id.hasPrefix("favorite-")
-        }.map {
-            ReviewMemoryCacheEntry(
-                id: $0.id,
-                date: $0.date,
-                footprintID: $0.footprint?.footprintID,
-                title: $0.title,
-                evidence: $0.evidence,
-                reason: $0.reason,
-                systemImage: $0.systemImage,
-                photoAssetIDs: $0.photoAssetIDs,
-                score: $0.score
+    /// Range transport models, fetched only for sharing (the map snapshot
+    /// loader takes models).
+    private func fetchRangeTransportRecords() -> [TransportRecord] {
+        let window = reviewRangeWindow
+        let lowerBound = window.lowerBound
+        let descriptor: FetchDescriptor<TransportRecord>
+        if let upperBound = window.upperBound {
+            descriptor = FetchDescriptor<TransportRecord>(
+                predicate: #Predicate<TransportRecord> {
+                    $0.statusRaw == "active" && $0.startTime >= lowerBound && $0.startTime < upperBound
+                }
+            )
+        } else {
+            descriptor = FetchDescriptor<TransportRecord>(
+                predicate: #Predicate<TransportRecord> {
+                    $0.statusRaw == "active" && $0.startTime >= lowerBound
+                }
             )
         }
-        let payload = ReviewMemoryCachePayload(revision: reviewMapRevision, entries: entries)
-        if let data = try? JSONEncoder().encode(payload) {
-            UserDefaults.standard.set(data, forKey: reviewMemoryCacheKey)
-        }
+        return (try? modelContext.fetch(descriptor)) ?? []
+    }
+
+    private func fetchMainActivityTypes() -> [ActivityType] {
+        let descriptor = FetchDescriptor<ActivityType>(
+            sortBy: [SortDescriptor(\ActivityType.sortOrder)]
+        )
+        return (try? modelContext.fetch(descriptor)) ?? []
+    }
+
+    private func fetchMainPlaces() -> [Place] {
+        (try? modelContext.fetch(FetchDescriptor<Place>())) ?? []
     }
 
     private func mapRegion(for bounds: ReviewMapBounds) -> MKCoordinateRegion {
@@ -3433,47 +4600,11 @@ struct HistoryStatisticsView: View {
             span: MKCoordinateSpan(latitudeDelta: latitudeDelta, longitudeDelta: longitudeDelta)
         )
     }
-    
+
     private var rangePicker: some View {
-        Picker("时间范围", selection: $selectedRange) {
-            Text("7天").tag(StatisticsRange.last7Days)
-            Text("30天").tag(StatisticsRange.last30Days)
-            Text("90天").tag(StatisticsRange.last90Days)
-            Text("1年").tag(StatisticsRange.lastYear)
-            Text(isCustomYear ? "\(String(activeYearForSegment)) ▾" : "年份 ▾")
-                .tag(StatisticsRange.customYear(activeYearForSegment))
-        }
-        .pickerStyle(.segmented)
-        .overlay {
-            GeometryReader { geometry in
-                HStack(spacing: 0) {
-                    Spacer()
-                    if !availableYears.isEmpty {
-                        Menu {
-                            ForEach(availableYears, id: \.self) { year in
-                                Button(String(year)) {
-                                    activeYearForSegment = year
-                                    selectedRange = .customYear(year)
-                                }
-                            }
-                        } label: {
-                            Color.white.opacity(0.001)
-                        }
-                        .frame(width: geometry.size.width / 5)
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 20)
+        ReviewRangePicker(selection: $selectedRange, years: availableYears, activeYear: activeYearForSegment)
     }
 
-    private var isCustomYear: Bool {
-        if case .customYear = selectedRange { return true }
-        return false
-    }
-    
-
-    
     // MARK: - Frequent Places Section
     private var frequentPlacesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -3699,132 +4830,19 @@ struct HistoryStatisticsView: View {
     
     // MARK: - Data Helpers
     
-    struct FrequentPlaceItem: Identifiable {
-        let id: String
-        let name: String
-        let address: String
-        let count: Int
-        let duration: TimeInterval
-        let footprintIDs: [UUID]
-    }
+    fileprivate typealias FrequentPlaceItem = ReviewFrequentPlaceItem
     
     private func getFrequentPlacesData() -> [FrequentPlaceItem] {
         getFrequentPlacesData(for: frequentPlaceRankScope)
     }
 
     private func getFrequentPlacesData(for scope: FrequentPlaceRankScope) -> [FrequentPlaceItem] {
-        var groups: [String: (name: String, address: String, count: Int, duration: TimeInterval, footprintIDs: [UUID])] = [:]
-        let hasMultipleCountries = Set(filteredFootprints.compactMap { footprint in
-            footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines)
-        }.filter { !$0.isEmpty }).count > 1
-        
-        for fp in filteredFootprints {
-            var address = ""
-            var placeName = ""
-            if let pID = fp.placeID, let place = allPlaces.first(where: { $0.placeID == pID }) {
-                placeName = place.name
-                address = place.address ?? fp.address ?? ""
-            } else if let addr = fp.address, !addr.isEmpty {
-                let parts = addr.components(separatedBy: "市").last?.components(separatedBy: "区").last?.components(separatedBy: "县").last ?? addr
-                placeName = parts.components(separatedBy: " ").first ?? addr
-                address = addr
-            }
-
-            guard let name = rankName(
-                for: scope,
-                placeName: placeName,
-                countryName: fp.countryName,
-                countryCode: fp.countryCode,
-                cityName: fp.cityName
-            ) else {
-                continue
-            }
-            
-            // Only the place scope requires a place/address. Country and city
-            // come from their own persisted hierarchy, including old overseas
-            // footprints that were recorded before an address was available.
-            if name.isEmpty || name.contains("未知") || (scope == .place && address.isEmpty) { continue }
-            
-            let subtitle: String
-            let key: String
-            switch scope {
-            case .country:
-                subtitle = ""
-                key = fp.countryCode ?? name
-            case .city:
-                subtitle = hasMultipleCountries ? simplifiedChineseName(fp.countryName ?? "") : ""
-                key = "\(fp.countryCode ?? "")|\(name)"
-            case .place:
-                subtitle = address
-                key = reviewPlaceKey(for: fp)
-            }
-            if let existing = groups[key] {
-                groups[key] = (existing.name, existing.address, existing.count + 1, existing.duration + fp.duration, existing.footprintIDs + [fp.footprintID])
-            } else {
-                groups[key] = (name, subtitle, 1, fp.duration, [fp.footprintID])
-            }
-        }
-        
-        return groups
-            .filter { _, value in
-                scope != .place || value.duration >= 3600
-            }
-            .map { key, value in
-                FrequentPlaceItem(
-                    id: key,
-                    name: value.name,
-                    address: value.address,
-                    count: value.count,
-                    duration: value.duration,
-                    footprintIDs: value.footprintIDs
-                )
-            }
-            .sorted { $0.duration > $1.duration }
+        reviewDerived.frequentPlaces[scope] ?? []
     }
 
     private func updateDefaultFrequentPlaceRankScope() {
         guard !hasManuallySelectedFrequentPlaceRankScope else { return }
-
-        let countries = Set(filteredFootprints.compactMap { footprint in
-            footprint.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines)
-        }.filter { !$0.isEmpty })
-        if countries.count > 1 {
-            frequentPlaceRankScope = .country
-            return
-        }
-
-        let cities = Set(filteredFootprints.compactMap { footprint -> String? in
-            guard let city = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines), !city.isEmpty else {
-                return nil
-            }
-            return "\(footprint.countryCode ?? "")|\(city)"
-        })
-        frequentPlaceRankScope = cities.count == 1 ? .place : .city
-    }
-
-    private func rankName(
-        for scope: FrequentPlaceRankScope,
-        placeName: String,
-        countryName: String?,
-        countryCode: String?,
-        cityName: String?
-    ) -> String? {
-        switch scope {
-        case .place:
-            return placeName
-        case .country:
-            guard let countryName, let countryCode else { return nil }
-            return "\(flagEmoji(for: countryCode)) \(simplifiedChineseName(countryName))"
-        case .city:
-            return cityName.map(simplifiedChineseName)
-        }
-    }
-
-    private func flagEmoji(for countryCode: String) -> String {
-        let base: UInt32 = 127397
-        return countryCode.uppercased().unicodeScalars.compactMap {
-            UnicodeScalar(base + $0.value).map(String.init)
-        }.joined()
+        frequentPlaceRankScope = reviewDerived.defaultFrequentPlaceRankScope
     }
 
     struct LocationPoint {
@@ -3883,6 +4901,7 @@ struct HistoryStatisticsView: View {
     
     private func getActivityRankData(for scope: ActivityRankScope) -> [RankItem] {
         var totals: [String: (count: Int, duration: TimeInterval, distance: Double)] = [:]
+        let activityTypes = fetchMainActivityTypes()
         
         if scope == .footprints {
             for fp in filteredFootprints {
@@ -3894,7 +4913,7 @@ struct HistoryStatisticsView: View {
                 }
             }
         } else {
-            for transport in filteredTransportRecords {
+            for transport in reviewDerived.rangeTransports {
                 if let type = TransportType(rawValue: transport.manualTypeRaw ?? transport.typeRaw) {
                     var total = totals[type.localizedName, default: (0, 0, 0)]
                     total.count += 1
@@ -3928,50 +4947,11 @@ struct HistoryStatisticsView: View {
     }
 
     private func formatRankDuration(_ duration: TimeInterval) -> String {
-        let totalMinutes = Int(duration / 60)
-        guard totalMinutes >= 60 else {
-            return "\(totalMinutes)分钟"
-        }
-
-        let totalHours = totalMinutes / 60
-        if totalHours >= 24 {
-            let days = totalHours / 24
-            if duration > 3 * 24 * 60 * 60 {
-                return "\(days)天"
-            }
-            return "\(days)天\(totalHours % 24)小时"
-        }
-
-        let hours = Double(totalMinutes) / 60
-        if hours < 10 {
-            return String(format: "%.1f小时", hours)
-        }
-        return "\(Int(hours))小时"
+        ReviewDataBuilder.formatRankDuration(duration)
     }
 
     private func formatRankMileage(_ distance: Double) -> String {
-        if distance < 1_000 {
-            return "\(Int(distance.rounded()))米"
-        }
-        return String(format: "%.1f公里", distance / 1_000)
-    }
-
-    private var filteredTransportRecords: [TransportRecord] {
-        let calendar = Calendar.current
-        return transportRecords.filter { transport in
-            switch appliedRange {
-            case .last7Days:
-                return transport.startTime >= calendar.date(byAdding: .day, value: -7, to: Date())!
-            case .last30Days:
-                return transport.startTime >= calendar.date(byAdding: .day, value: -30, to: Date())!
-            case .last90Days:
-                return transport.startTime >= calendar.date(byAdding: .day, value: -90, to: Date())!
-            case .lastYear:
-                return transport.startTime >= calendar.date(byAdding: .day, value: -365, to: Date())!
-            case .customYear(let year):
-                return calendar.component(.year, from: transport.startTime) == year
-            }
-        }
+        ReviewDataBuilder.formatRankMileage(distance)
     }
     
     private func resolveRankingGeographies() {
@@ -4023,7 +5003,7 @@ struct HistoryStatisticsView: View {
         guard requestID == geographyBackfillRequestID else { return }
         let resultsByID = Dictionary(uniqueKeysWithValues: results.map { ($0.footprintID, $0) })
         var changed = false
-        for footprint in allFootprints {
+        for footprint in rangeFootprints {
             guard let result = resultsByID[footprint.footprintID] else { continue }
             footprint.countryCode = result.countryCode
             footprint.countryName = result.countryName
@@ -4032,9 +5012,9 @@ struct HistoryStatisticsView: View {
         }
         guard changed else { return }
         try? modelContext.save()
-        // A single refresh per completed batch keeps the ranking current
-        // without repeatedly rebuilding the map and every chart.
-        allFootprints = Array(allFootprints)
+        // Rankings are derived off main from the stored source; the next
+        // source refresh picks these saved values up.
+        rangeFootprints = Array(rangeFootprints)
         updateDefaultFrequentPlaceRankScope()
     }
 
@@ -4069,77 +5049,6 @@ struct HistoryStatisticsView: View {
         }
     }
     
-    private func fetchData() -> Bool {
-        let footprintDescriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate<Footprint> { $0.statusValue != "ignored" },
-            sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
-        )
-        let fetchedFootprints = (try? modelContext.fetch(footprintDescriptor)) ?? allFootprints
-
-        let transportRecordDescriptor = FetchDescriptor<TransportRecord>(
-            predicate: #Predicate<TransportRecord> { $0.statusRaw == "active" }
-        )
-        let fetchedTransports = (try? modelContext.fetch(transportRecordDescriptor)) ?? transportRecords
-        
-        let activityDescriptor = FetchDescriptor<ActivityType>(
-            sortBy: [SortDescriptor(\ActivityType.sortOrder)]
-        )
-        let fetchedActivities = (try? modelContext.fetch(activityDescriptor)) ?? activityTypes
-        
-        let placeDescriptor = FetchDescriptor<Place>()
-        let fetchedPlaces = (try? modelContext.fetch(placeDescriptor)) ?? allPlaces
-
-        var hasher = Hasher()
-        for footprint in fetchedFootprints {
-            hasher.combine(footprint.footprintID)
-            hasher.combine(footprint.startTime)
-            hasher.combine(footprint.endTime)
-            hasher.combine(footprint.latitudeData.count)
-            hasher.combine(footprint.longitudeData.count)
-            hasher.combine(footprint.photoAssetIDsData)
-            hasher.combine(footprint.placeID)
-            hasher.combine(footprint.activityTypeValue)
-            hasher.combine(footprint.countryCode)
-            hasher.combine(footprint.cityName)
-            hasher.combine(footprint.statusValue)
-        }
-        for transport in fetchedTransports {
-            hasher.combine(transport.recordID)
-            hasher.combine(transport.startTime)
-            hasher.combine(transport.endTime)
-            hasher.combine(transport.typeRaw)
-            hasher.combine(transport.manualTypeRaw)
-            hasher.combine(transport.distance)
-            // Route payloads can be very large. Their identity, time range and
-            // byte count are sufficient to detect normal edits without hashing
-            // the entire JSON blob on the main actor for every app-wide signal.
-            hasher.combine(transport.pointsData.count)
-        }
-        for activity in fetchedActivities {
-            hasher.combine(activity.id)
-            hasher.combine(activity.name)
-            hasher.combine(activity.icon)
-            hasher.combine(activity.colorHex)
-            hasher.combine(activity.sortOrder)
-        }
-        for place in fetchedPlaces {
-            hasher.combine(place.placeID)
-            hasher.combine(place.name)
-            hasher.combine(place.latitude)
-            hasher.combine(place.longitude)
-            hasher.combine(place.address)
-            hasher.combine(place.category)
-        }
-        let fingerprint = hasher.finalize()
-        guard fingerprint != reviewSourceFingerprint else { return false }
-
-        reviewSourceFingerprint = fingerprint
-        allFootprints = fetchedFootprints
-        transportRecords = fetchedTransports
-        activityTypes = fetchedActivities
-        allPlaces = fetchedPlaces
-        return true
-    }
 }
 
 private extension View {
@@ -4155,11 +5064,15 @@ private extension View {
 private struct ReviewPlaceView: View {
     @Environment(\.dismiss) private var dismiss
     let selection: ReviewPlaceSelection
+    let rangeControl: ReviewRangeControl?
     @State private var mapPosition: MapCameraPosition
     @State private var selectedPhotoID: IdentifiableString?
+    @State private var showsAllPhotos = false
+    private let photoPreviewCount = AppConfig.shared.reviewPlacePhotoPreviewCount
 
-    init(selection: ReviewPlaceSelection) {
+    init(selection: ReviewPlaceSelection, rangeControl: ReviewRangeControl? = nil) {
         self.selection = selection
+        self.rangeControl = rangeControl
         if let coordinate = Self.representativeCoordinate(in: selection.visits) {
             _mapPosition = State(initialValue: .region(MKCoordinateRegion(
                 center: coordinate,
@@ -4170,25 +5083,13 @@ private struct ReviewPlaceView: View {
         }
     }
 
+    // Computed off main with the selection (`ReviewDataBuilder.placeGroup`).
     private var totalDuration: TimeInterval {
-        selection.visits.reduce(0) { $0 + $1.duration }
-    }
-
-    private var representativeFootprint: Footprint? {
-        selection.visits.max {
-            if $0.photoAssetIDs.count != $1.photoAssetIDs.count {
-                return $0.photoAssetIDs.count < $1.photoAssetIDs.count
-            }
-            return $0.duration < $1.duration
-        }
+        selection.stats.totalDuration
     }
 
     private var geographyText: String? {
-        guard let footprint = representativeFootprint else { return nil }
-        let values = [footprint.countryName, footprint.cityName]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        return values.isEmpty ? nil : values.joined(separator: " · ")
+        selection.stats.geographyText
     }
 
     var body: some View {
@@ -4197,24 +5098,6 @@ private struct ReviewPlaceView: View {
                 // Keep the title geometry alive after it scrolls offscreen;
                 // LazyVStack recycles it and resets the compact-title state.
                 VStack(alignment: .leading, spacing: 22) {
-                if !selection.photoAssetIDs.isEmpty {
-                    ContinuousTimelinePhotoThumbnail(
-                        assetIDs: selection.photoAssetIDs,
-                        targetSide: 520,
-                        fillsAvailableSpace: true,
-                        usesHighQualityThumbnail: true
-                    )
-                    .frame(maxWidth: .infinity)
-                    .frame(height: UIDevice.current.userInterfaceIdiom == .pad ? 340 : 280)
-                    .clipped()
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if let firstPhotoID = selection.photoAssetIDs.first {
-                            selectedPhotoID = IdentifiableString(value: firstPhotoID)
-                        }
-                    }
-                }
-
                 VStack(alignment: .leading, spacing: 7) {
                     Text(selection.title)
                         .font(.largeTitle.bold())
@@ -4228,7 +5111,7 @@ private struct ReviewPlaceView: View {
                         .foregroundStyle(Color.dfkAccent)
                 }
                 .padding(.horizontal, 18)
-                .padding(.top, selection.photoAssetIDs.isEmpty ? 28 : 0)
+                .padding(.top, 12)
 
                 HStack(spacing: 10) {
                     placeMetric(value: "\(selection.visits.count)", label: "次到访")
@@ -4256,7 +5139,7 @@ private struct ReviewPlaceView: View {
                             columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
                             spacing: 8
                         ) {
-                            ForEach(selection.photoAssetIDs, id: \.self) { assetID in
+                            ForEach(showsAllPhotos ? selection.photoAssetIDs : Array(selection.photoAssetIDs.prefix(photoPreviewCount)), id: \.self) { assetID in
                                 AssetThumbnailView(
                                     assetID: assetID,
                                     showsTime: false,
@@ -4270,6 +5153,17 @@ private struct ReviewPlaceView: View {
                                     selectedPhotoID = IdentifiableString(value: assetID)
                                 }
                             }
+                        }
+                        if !showsAllPhotos, selection.photoAssetIDs.count > photoPreviewCount {
+                            Button {
+                                withAnimation { showsAllPhotos = true }
+                            } label: {
+                                Text("查看更多（共\(selection.photoAssetIDs.count)张）")
+                                    .font(.subheadline.weight(.semibold))
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(Color.dfkAccent)
                         }
                     }
                     .padding(.horizontal, 18)
@@ -4289,12 +5183,10 @@ private struct ReviewPlaceView: View {
                 .padding(.bottom, 28)
                 }
             }
-            // Keep the hero photo flush with the top while the native navigation
-            // bar consistently provides the title and glass close button.
-            .ignoresSafeArea(.container, edges: .top)
             .background(Color.dfkBackground)
             .navigationTitle("\(selection.rangeText) · \(selection.title)")
             .navigationBarTitleDisplayMode(.inline)
+            .reviewRangeBar(rangeControl)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -4330,6 +5222,9 @@ private struct ReviewPlaceView: View {
             Text("到访规律")
                 .font(.title2.bold())
 
+            if !selection.stats.activitySlices.isEmpty {
+                placeActivityChart
+            }
             placeWeekdayChart
             placeHourlyChart
             placeDurationTrendChart
@@ -4364,6 +5259,18 @@ private struct ReviewPlaceView: View {
         .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
+    private var placeActivityChart: some View {
+        let counts = selection.stats.activityVisitCounts
+        let values = selection.stats.activitySlices.map { slice in
+            ReviewActivityBarValue(
+                slice: slice,
+                value: slice.duration,
+                valueText: "\(counts[slice.name] ?? 0)次 · \(placeDurationText(slice.duration))"
+            )
+        }
+        return ReviewActivityHorizontalBars(title: "活动类型", icon: "square.grid.2x2", values: values)
+    }
+
     private var placeHourlyChart: some View {
         let values = placeHourlyVisitCounts
         return VStack(alignment: .leading, spacing: 14) {
@@ -4392,9 +5299,8 @@ private struct ReviewPlaceView: View {
     }
 
     private var placeDurationTrendChart: some View {
-        let visits = selection.visits.sorted { $0.startTime < $1.startTime }
-        let values = visits.map { max(0, $0.duration) }
-        let average = values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
+        let values = selection.stats.durationTrend
+        let average = selection.stats.averageDuration
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
                 Label("停留时长变化", systemImage: "chart.bar.fill")
@@ -4408,11 +5314,11 @@ private struct ReviewPlaceView: View {
             placeBarCanvas(values: values)
                 .frame(height: 104)
 
-            if let first = visits.first, let last = visits.last {
+            if let first = selection.stats.firstVisitDate, let last = selection.stats.lastVisitDate {
                 HStack {
-                    Text(first.startTime.formatted(.dateTime.year().month().day()))
+                    Text(first.formatted(.dateTime.year().month().day()))
                     Spacer()
-                    Text(last.startTime.formatted(.dateTime.year().month().day()))
+                    Text(last.formatted(.dateTime.year().month().day()))
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -4446,26 +5352,15 @@ private struct ReviewPlaceView: View {
     }
 
     private var placeWeekdaySymbols: [String] {
-        ["一", "二", "三", "四", "五", "六", "日"]
+        ReviewDataBuilder.weekdaySymbols
     }
 
     private var placeWeekdayVisitCounts: [Int] {
-        let calendar = Calendar.current
-        var values = Array(repeating: 0, count: 7)
-        for visit in selection.visits {
-            let mondayFirstIndex = (calendar.component(.weekday, from: visit.startTime) + 5) % 7
-            values[mondayFirstIndex] += 1
-        }
-        return values
+        selection.stats.weekdayCounts
     }
 
     private var placeHourlyVisitCounts: [Int] {
-        let calendar = Calendar.current
-        var values = Array(repeating: 0, count: 24)
-        for visit in selection.visits {
-            values[calendar.component(.hour, from: visit.startTime)] += 1
-        }
-        return values
+        selection.stats.hourlyCounts
     }
 
     private func visitRow(_ footprint: Footprint) -> some View {
@@ -4482,6 +5377,12 @@ private struct ReviewPlaceView: View {
             }
 
             HStack(spacing: 12) {
+                if let activity = selection.stats.visitActivities[footprint.footprintID] {
+                    Label(activity.name, systemImage: activity.icon)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(activity.color)
+                        .lineLimit(1)
+                }
                 Text("停留 \(placeDurationText(footprint.duration))")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -4528,25 +5429,38 @@ private struct ReviewPlaceView: View {
 
 struct FullReviewMapView: View {
     @Environment(\.dismiss) private var dismiss
-    @Query(sort: \Place.name) private var allPlaces: [Place]
     let title: String
     let rangeText: String
     let timelineItems: [TimelineItem]
-    let transportOverviewPoints: [DFKTransportOverviewPoint]
+    /// Background snapshots of the range footprints, keyed by ID, so place
+    /// grouping on taps runs off main.
+    private let footprintSnapshots: [UUID: ReviewFootprintSnapshot]
     let initialRegion: MKCoordinateRegion?
     let initialPosition: MapCameraPosition
+    private let rangeControl: ReviewRangeControl?
+    /// The host presents tapped places, each sheet with its own range.
+    private let onOpenPlaces: (ReviewPlaceQuery, [ReviewPlaceSelection]) -> Void
     
     @State private var position: MapCameraPosition
-    @State private var selectedPlace: ReviewPlaceSelection?
-    @State private var selectedPlaceCluster: ReviewMapPlaceCluster?
     
-    init(title: String, rangeText: String, timelineItems: [TimelineItem], transportOverviewPoints: [DFKTransportOverviewPoint], initialRegion: MKCoordinateRegion?, initialPosition: MapCameraPosition) {
+    fileprivate init(
+        title: String,
+        rangeText: String,
+        timelineItems: [TimelineItem],
+        footprintSnapshots: [UUID: ReviewFootprintSnapshot],
+        initialRegion: MKCoordinateRegion?,
+        initialPosition: MapCameraPosition,
+        rangeControl: ReviewRangeControl?,
+        onOpenPlaces: @escaping (ReviewPlaceQuery, [ReviewPlaceSelection]) -> Void
+    ) {
         self.title = title
         self.rangeText = rangeText
         self.timelineItems = timelineItems
-        self.transportOverviewPoints = transportOverviewPoints
+        self.footprintSnapshots = footprintSnapshots
         self.initialRegion = initialRegion
         self.initialPosition = initialPosition
+        self.rangeControl = rangeControl
+        self.onOpenPlaces = onOpenPlaces
         self._position = State(initialValue: initialPosition)
     }
     
@@ -4562,25 +5476,20 @@ struct FullReviewMapView: View {
                 clustersPlacesByMapScale: true,
                 placeClusterRegion: initialRegion,
                 showsUserDefinedPlaceRadii: false,
-                transportOverviewPoints: transportOverviewPoints,
                 onTimelineItemTap: { item in
                     guard case .footprint(let footprint) = item else { return }
-                    selectedPlace = placeSelection(
-                        id: "review-place-\(footprint.footprintID.uuidString)",
-                        footprints: [footprint]
-                    )
+                    presentPlace(footprint: footprint)
                 },
                 onAggregatedFootprintTap: { aggregated in
-                    let places = placeSelections(from: aggregated.footprints)
-                    if places.count > 1 {
-                        selectedPlaceCluster = ReviewMapPlaceCluster(id: aggregated.id, places: places)
-                    } else {
-                        selectedPlace = places.first
-                    }
+                    presentPlaces(from: aggregated.footprints, clusterID: aggregated.id)
+                },
+                onResetCamera: {
+                    withAnimation { position = initialPosition }
                 }
             )
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
+            .reviewRangeBar(rangeControl)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -4591,66 +5500,66 @@ struct FullReviewMapView: View {
                 }
             }
         }
-        .sheet(item: $selectedPlace) { selection in
-            ReviewPlaceView(selection: selection)
-        }
-        .sheet(item: $selectedPlaceCluster) { cluster in
-            ReviewMapPlaceClusterSheet(cluster: cluster)
+    }
+
+    /// Groups the tapped footprints by place off main, then presents them.
+    private func presentPlaces(from footprints: [Footprint], clusterID: String) {
+        let snapshots = footprints.compactMap { footprintSnapshots[$0.footprintID] }
+        let footprintsByID = Dictionary(footprints.map { ($0.footprintID, $0) }, uniquingKeysWith: { first, _ in first })
+        let rangeText = self.rangeText
+        Task { @MainActor in
+            let groups = await reviewDetached(priority: .userInitiated) {
+                ReviewDataBuilder.placeGroups(from: snapshots, titleKeyPath: \.mapTitle)
+            }
+            let places = groups.compactMap {
+                ReviewPlaceSelection(group: $0, rangeText: rangeText, footprintsByID: footprintsByID)
+            }
+            guard let first = places.first else { return }
+            onOpenPlaces(
+                ReviewPlaceQuery(
+                    id: clusterID,
+                    source: .placeKeys(places.map(\.id)),
+                    title: places.count > 1 ? "附近地点" : first.title,
+                    usesMapTitle: true,
+                    presentsList: places.count > 1
+                ),
+                places
+            )
         }
     }
 
-    private func placeSelections(from footprints: [Footprint]) -> [ReviewPlaceSelection] {
-        let grouped = Dictionary(grouping: footprints) {
-            reviewIntegratedPlaceKey(for: $0, allPlaces: allPlaces)
+    private func presentPlace(footprint: Footprint) {
+        guard let snapshot = footprintSnapshots[footprint.footprintID] else { return }
+        let footprintsByID = [footprint.footprintID: footprint]
+        let rangeText = self.rangeText
+        let placeKey = snapshot.placeKey
+        Task { @MainActor in
+            let group = await reviewDetached(priority: .userInitiated) {
+                ReviewDataBuilder.placeGroup(id: placeKey, visits: [snapshot], titleKeyPath: \.mapTitle, resolvedPhotoAssetIDs: nil)
+            }
+            guard let place = group.flatMap({
+                ReviewPlaceSelection(group: $0, rangeText: rangeText, footprintsByID: footprintsByID)
+            }) else { return }
+            onOpenPlaces(
+                ReviewPlaceQuery(id: placeKey, source: .placeKeys([placeKey]), title: place.title, usesMapTitle: true, presentsList: false),
+                [place]
+            )
         }
-        return grouped.compactMap { key, visits in
-            placeSelection(id: key, footprints: visits)
-        }.sorted {
-            let leftDuration = $0.visits.reduce(0) { $0 + $1.duration }
-            let rightDuration = $1.visits.reduce(0) { $0 + $1.duration }
-            return leftDuration > rightDuration
-        }
-    }
-
-    private func placeSelection(id: String, footprints: [Footprint]) -> ReviewPlaceSelection? {
-        let visits = footprints.sorted { $0.startTime > $1.startTime }
-        guard let representative = visits.first else { return nil }
-
-        let placeName = representative.placeID.flatMap { placeID in
-            allPlaces.first(where: { $0.placeID == placeID })?.name
-        }?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let address = representative.address?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cityName = representative.cityName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = [placeName, address, cityName]
-            .compactMap { $0 }
-            .first { !$0.isEmpty } ?? "地点"
-
-        var seenPhotoIDs = Set<String>()
-        let storedPhotoAssetIDs = visits
-            .flatMap(\.photoAssetIDs)
-            .filter { seenPhotoIDs.insert($0).inserted }
-        let photoAssetIDs = PhotoService.shared.displayableAssetIDs(storedPhotoAssetIDs)
-
-        return ReviewPlaceSelection(
-            id: id,
-            title: title,
-            rangeText: rangeText,
-            visits: visits,
-            photoAssetIDs: photoAssetIDs
-        )
     }
 }
 
 private struct ReviewPlaceListSheet: View {
     @Environment(\.dismiss) private var dismiss
     let selection: ReviewPlaceListSelection
-    @State private var selectedPlace: ReviewPlaceSelection?
+    let rangeControl: ReviewRangeControl?
+    /// The host presents the place, with its own range.
+    let onSelectPlace: (ReviewPlaceSelection) -> Void
 
     var body: some View {
         NavigationStack {
             List(selection.places) { place in
                 Button {
-                    selectedPlace = place
+                    onSelectPlace(place)
                 } label: {
                     ReviewPlaceListRow(place: place)
                 }
@@ -4659,6 +5568,7 @@ private struct ReviewPlaceListSheet: View {
             }
             .navigationTitle("\(selection.rangeText) · \(selection.title)")
             .navigationBarTitleDisplayMode(.inline)
+            .reviewRangeBar(rangeControl)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { dismiss() } label: {
@@ -4666,10 +5576,6 @@ private struct ReviewPlaceListSheet: View {
                     }
                 }
             }
-        }
-        .presentationDetents([.medium, .large])
-        .sheet(item: $selectedPlace) { place in
-            ReviewPlaceView(selection: place)
         }
     }
 
@@ -4718,39 +5624,6 @@ private struct ReviewPlaceListRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-    }
-}
-
-private struct ReviewMapPlaceClusterSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let cluster: ReviewMapPlaceCluster
-    @State private var selectedPlace: ReviewPlaceSelection?
-
-    var body: some View {
-        NavigationStack {
-            List(cluster.places) { place in
-                Button {
-                    selectedPlace = place
-                } label: {
-                    ReviewPlaceListRow(place: place)
-                }
-                .buttonStyle(.plain)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .navigationTitle(cluster.places.first.map { "\($0.rangeText) · 附近地点" } ?? "附近地点")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark").dfkToolbarDismissIcon()
-                    }
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-        .sheet(item: $selectedPlace) { selection in
-            ReviewPlaceView(selection: selection)
-        }
     }
 }
 

@@ -548,15 +548,21 @@ enum DFKGeographicHierarchy {
         let cityName: String
     }
 
-    static func fromPersistedForeignAddress(_ address: String?) -> Value? {
-        let text = address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !text.isEmpty else { return nil }
+    /// Non-CN regions with their Chinese names, longest name first. Built
+    /// once (thread-safe lazy static) instead of on every lookup.
+    private static let foreignCountriesByNameLength: [(String, String)] = {
         let locale = Locale(identifier: "zh_Hans_CN")
-        let countries = Locale.Region.isoRegions.compactMap { region -> (String, String)? in
+        return Locale.Region.isoRegions.compactMap { region -> (String, String)? in
             let code = region.identifier
             guard code != "CN", let name = locale.localizedString(forRegionCode: code), !name.isEmpty else { return nil }
             return (code, name)
         }.sorted { $0.1.count > $1.1.count }
+    }()
+
+    static func fromPersistedForeignAddress(_ address: String?) -> Value? {
+        let text = address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !text.isEmpty else { return nil }
+        let countries = foreignCountriesByNameLength
         guard let (countryCode, countryName) = countries.first(where: { text.hasPrefix($0.1) }) else {
             return nil
         }

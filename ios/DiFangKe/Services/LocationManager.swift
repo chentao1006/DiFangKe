@@ -1068,7 +1068,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     var isTracking: Bool = false
     var lastUpdateTime: Date?
-    var lastLocation: CLLocation?
+    var lastLocation: CLLocation? {
+        didSet { refreshMatchedPlace() }
+    }
     var accuracy: CLLocationAccuracy?
     var currentAddress: String = "正在解析位置..."
     private var pathMonitor: NWPathMonitor?
@@ -1146,9 +1148,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     try? await Task.sleep(nanoseconds: delay)
                 }
                 guard !Task.isCancelled else { return }
-                let coords = points.map { $0.coordinate }
                 let simplified = await Task.detached(priority: .utility) {
-                    LocationManager.simplifyCoordinates(coords, tolerance: 0.00005)
+                    LocationManager.simplifyCoordinates(points.map { $0.coordinate }, tolerance: 0.00005)
                 }.value
                 await MainActor.run {
                     guard !Task.isCancelled, self?.allTodayPoints.count == points.count else { return }
@@ -1195,7 +1196,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var timelineSiftTask: Task<Void, Never>?
     
     // 从 View 同步过来的参数
-    var allPlaces: [Place] = []
+    var allPlaces: [Place] = [] {
+        didSet {
+            stopAnchorPlaceMatch = nil
+            refreshMatchedPlace()
+        }
+    }
+    @ObservationIgnored private var stopAnchorPlaceMatch: (anchor: CLLocation, place: Place?)?
     var modelContext: ModelContext? {
         didSet {
             // The app root and timeline both bind the same container context.
@@ -1244,8 +1251,12 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     // 正在记录的临时停留状态
-    var potentialStopStartLocation: CLLocation?
-    private var ongoingPlaceOverrideID: UUID?
+    var potentialStopStartLocation: CLLocation? {
+        didSet { refreshMatchedPlace() }
+    }
+    private var ongoingPlaceOverrideID: UUID? {
+        didSet { refreshMatchedPlace() }
+    }
     private var ongoingPlaceOverrideAddress: String?
     
     /// 快速检测云端是否有数据 (通过 KVS)
@@ -1726,9 +1737,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     /// 遍历原始轨迹存储目录，找出所有有记录的日期并缓存
+    @ObservationIgnored private var availableRawDatesGeneration = 0
+
     func refreshAvailableRawDates() {
-        let dates = RawLocationStore.shared.availableDatesForPreferredRecordingDevice()
-        Task { @MainActor in
+        // Directory listing and file-name parsing run off main; only the
+        // latest request's result is assigned.
+        availableRawDatesGeneration += 1
+        let generation = availableRawDatesGeneration
+        Task { @MainActor [weak self] in
+            let dates = await Task.detached(priority: .utility) {
+                RawLocationStore.shared.availableDatesForPreferredRecordingDevice()
+            }.value
+            guard let self, generation == self.availableRawDatesGeneration else { return }
             self.availableRawDates = dates
         }
     }
@@ -1895,7 +1915,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 return
             }
 
-            if self.mergeRecentFootprints(in: context) {
+            // Commit UI edits first so the background pass sees them, then
+            // merge on a background context and notify on main as before.
+            if context.hasChanges { try? context.save() }
+            let container = context.container
+            let didMerge = await Task.detached(priority: .utility) {
+                LocationManager.mergeRecentStoredFootprints(in: ModelContext(container))
+            }.value
+            if didMerge {
                 NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
             }
         }
@@ -2053,7 +2080,19 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         return true
     }
 
-    var matchedPlace: Place? {
+    /// Cached match for the current location. Recomputed when the location,
+    /// stay anchor, place override or place list changes, so location
+    /// callbacks and view bodies read it without rescanning every place.
+    private(set) var matchedPlace: Place?
+
+    private func refreshMatchedPlace() {
+        let resolved = resolveMatchedPlace()
+        if resolved !== matchedPlace {
+            matchedPlace = resolved
+        }
+    }
+
+    private func resolveMatchedPlace() -> Place? {
         if let overrideID = ongoingPlaceOverrideID,
            let overridePlace = allPlaces.first(where: { $0.placeID == overrideID }) {
             return overridePlace
@@ -2276,7 +2315,14 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 合并数据库中已有的碎片足迹（必须在主线程执行）
     /// 第一步：删除时长 < 5分钟的噪点记录
     /// 第二步：合并间隔 < 30分钟 且 距离 < 200m 的相邻记录
-    public func consolidateFootprints(in context: ModelContext, targetDate: Date? = nil) async {
+    nonisolated public func consolidateFootprints(in context: ModelContext, targetDate: Date? = nil) async {
+        await Self.consolidateStoredFootprints(in: context, targetDate: targetDate)
+    }
+
+    /// Context-only implementation so the background syncDay pass can run it
+    /// on its own working context. Places come from the same context (the
+    /// timeline's place list is the full Place set sorted by name).
+    nonisolated static func consolidateStoredFootprints(in context: ModelContext, targetDate: Date? = nil) async {
         let mergeTime: TimeInterval = AppConfig.shared.liveStayMergeTimeThreshold
         let mergeDist: CLLocationDistance = AppConfig.shared.liveStayMergeDistanceThreshold
         let minKeepDuration: TimeInterval = AppConfig.shared.liveStayMinDurationThreshold
@@ -2298,6 +2344,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             )
         }
         guard let all = try? context.fetch(descriptor) else { return }
+        let places = (try? context.fetch(FetchDescriptor<Place>(sortBy: [SortDescriptor(\Place.name)]))) ?? []
 
         // ── 第一步：清理噪点（时长 < 5分钟 或 完全重复的记录）──
         var seen = Set<String>()
@@ -2416,7 +2463,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 // 地点自动重校准（自愈逻辑）：仅对未匹配或标记为 TBD 的进行校准，避免性能问题
                 // 地点自动重校准（自愈逻辑）：仅对未匹配或标记为 TBD 的进行校准，避免性能问题
                 if fp.placeID == nil || fp.locationHash == "TBD" {
-                    if let bestPlace = self.matchedPlaceFor(coordinate: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude)) {
+                    if let bestPlace = Self.matchedPlace(for: CLLocationCoordinate2D(latitude: fp.latitude, longitude: fp.longitude), in: places) {
                         if fp.placeID != bestPlace.placeID {
                             fp.placeID = bestPlace.placeID
                             if (fp.address ?? "").isEmpty { fp.address = bestPlace.name }
@@ -2424,14 +2471,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     }
                 }
                 
-                splitLargeFootprintByDistance(fp, in: context)
+                splitStoredFootprintByDistance(fp, in: context)
             }
         }
 
     }
 
     /// 针对已经合并成一整个 Footprint 的轨迹，尝试进行聚类拆分
-    public func splitLargeFootprintByDistance(_ fp: Footprint, in context: ModelContext) {
+    nonisolated public func splitLargeFootprintByDistance(_ fp: Footprint, in context: ModelContext) {
+        Self.splitStoredFootprintByDistance(fp, in: context)
+    }
+
+    nonisolated static func splitStoredFootprintByDistance(_ fp: Footprint, in context: ModelContext) {
         let coords = fp.footprintLocations
         // 核心：基于位置聚类寻找多个“停留点”
         // 安全保护：不自动处理用户手动编辑过、有照片、或者是已确认的足迹，避免干扰用户已有工作
@@ -2541,6 +2592,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     @MainActor
     @discardableResult
     public func mergeRecentFootprints(in context: ModelContext) -> Bool {
+        Self.mergeRecentStoredFootprints(in: context)
+    }
+
+    /// Context-only implementation; the live merge scheduler runs it on a
+    /// background context.
+    @discardableResult
+    nonisolated static func mergeRecentStoredFootprints(in context: ModelContext) -> Bool {
         let now = Date()
         let startOfDay = Calendar.current.startOfDay(for: now)
         let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
@@ -2979,7 +3037,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // 3. 更新当前停留状态用于 UI 显示
             if let startLoc = potentialStopStartLocation {
                 // 改进：增加地点粘性。如果当前位置依然匹配到与起始点相同的“重要地点”，则不应判定为离开并重置停留时间。
-                let startPlace = matchedPlaceFor(coordinate: startLoc.coordinate)
+                let startPlace = matchedPlaceForStopAnchor(startLoc)
                 let currentPlace = matchedPlaceFor(coordinate: location.coordinate)
                 
                 // 判定是否离开：
@@ -3266,46 +3324,57 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     private func sendPastMemoriesNotificationIfAvailable(for date: Date) async {
-        guard let context = modelContext else { return }
+        guard let container = modelContext?.container else { return }
+
+        // Full-history fetch and calendar math run on a background context;
+        // only the notification is sent from the main actor.
+        let highlight = await Task.detached(priority: .utility) { () -> (startTime: Date, address: String?)? in
+            let context = ModelContext(container)
+            let calendar = Calendar.current
+            
+            let month = calendar.component(.month, from: date)
+            let day = calendar.component(.day, from: date)
+            let currentYear = calendar.component(.year, from: date)
+            
+            // 查找往年今日的足迹 (排除今年)
+            let descriptor = FetchDescriptor<Footprint>()
+            let allFootprints = (try? context.fetch(descriptor)) ?? []
+
+            // 过滤往年今日
+            let pastFootprints = allFootprints.filter { fp in
+                let fpYear = calendar.component(.year, from: fp.startTime)
+                let fpMonth = calendar.component(.month, from: fp.startTime)
+                let fpDay = calendar.component(.day, from: fp.startTime)
+
+                if fp.placeID == nil || (fp.activityTypeValue ?? "").isEmpty {
+                    return false
+                }
+
+                return fpYear < currentYear && fpMonth == month && fpDay == day
+            }
+
+            guard !pastFootprints.isEmpty else { return nil }
+
+            // 排除重要地点 (isPriority = true)
+            // 获取所有重要地点的 ID
+            let placeDescriptor = FetchDescriptor<Place>(predicate: #Predicate<Place> { $0.isPriority })
+            let importantPlaceIDs = Set((try? context.fetch(placeDescriptor))?.map { $0.placeID } ?? [])
+
+            let filteredFootprints = pastFootprints.filter { fp in
+                if let pid = fp.placeID, importantPlaceIDs.contains(pid) {
+                    return false
+                }
+                return true
+            }.sorted { $0.startTime < $1.startTime }
+
+            guard let highlight = filteredFootprints.first else { return nil }
+            return (highlight.startTime, highlight.address)
+        }.value
+        
+        guard let highlight else { return }
+        
         let calendar = Calendar.current
-        
-        let month = calendar.component(.month, from: date)
-        let day = calendar.component(.day, from: date)
         let currentYear = calendar.component(.year, from: date)
-        
-        // 查找往年今日的足迹 (排除今年)
-        let descriptor = FetchDescriptor<Footprint>()
-        let allFootprints = (try? context.fetch(descriptor)) ?? []
-        
-        // 过滤往年今日
-        let pastFootprints = allFootprints.filter { fp in
-            let fpYear = calendar.component(.year, from: fp.startTime)
-            let fpMonth = calendar.component(.month, from: fp.startTime)
-            let fpDay = calendar.component(.day, from: fp.startTime)
-            
-            if fp.placeID == nil || (fp.activityTypeValue ?? "").isEmpty {
-                return false
-            }
-            
-            return fpYear < currentYear && fpMonth == month && fpDay == day
-        }
-        
-        guard !pastFootprints.isEmpty else { return }
-        
-        // 排除重要地点 (isPriority = true)
-        // 获取所有重要地点的 ID
-        let placeDescriptor = FetchDescriptor<Place>(predicate: #Predicate<Place> { $0.isPriority })
-        let importantPlaceIDs = Set((try? context.fetch(placeDescriptor))?.map { $0.placeID } ?? [])
-        
-        let filteredFootprints = pastFootprints.filter { fp in
-            if let pid = fp.placeID, importantPlaceIDs.contains(pid) {
-                return false
-            }
-            return true
-        }.sorted { $0.startTime < $1.startTime }
-        
-        guard let highlight = filteredFootprints.first else { return }
-        
         let fpYear = calendar.component(.year, from: highlight.startTime)
         let yearsAgo = currentYear - fpYear
         let placeName = highlight.address ?? "某个地方"
@@ -3544,38 +3613,49 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         place: Place?,
         context: ModelContext
     ) {
-        let location = CLLocation(latitude: footprint.latitude, longitude: footprint.longitude)
+        let latitude = footprint.latitude
+        let longitude = footprint.longitude
         let startTime = footprint.startTime
+        let placeID = place?.placeID
+        let placeName = place?.name ?? footprint.address ?? currentAddress
+        let footprintID = footprint.footprintID
+        let container = context.container
 
         // 新地点：历史上从未在该地点（或周边 200m）生成过足迹。
         // 由于 SwiftData Predicate 不支持计算属性 (latitude/longitude)，我们在此使用内存过滤
-        // 对于几千条记录，性能是可以接受的
-        let descriptor = FetchDescriptor<Footprint>()
-        let allFootprints = (try? context.fetch(descriptor)) ?? []
-        
-        let history = allFootprints.filter { fp in
-            // 排除当前及之后的（以防万一）
-            if fp.startTime >= startTime { return false }
-            
-            // 如果有匹配地点，优先按地点 ID 匹配
-            if let pid = place?.placeID, fp.placeID == pid {
-                return true
+        // The full-history scan runs on a background context; the footprint
+        // was saved by the caller, and only the notification is sent on main.
+        Task.detached(priority: .utility) {
+            let context = ModelContext(container)
+            let location = CLLocation(latitude: latitude, longitude: longitude)
+            let descriptor = FetchDescriptor<Footprint>()
+            let allFootprints = (try? context.fetch(descriptor)) ?? []
+
+            let hasHistory = allFootprints.contains { fp in
+                // 排除当前及之后的（以防万一）
+                if fp.startTime >= startTime { return false }
+
+                // 如果有匹配地点，优先按地点 ID 匹配
+                if let pid = placeID, fp.placeID == pid {
+                    return true
+                }
+
+                // 否则按距离匹配 (200m 范围内视为同一地点)
+                let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
+                return location.distance(from: fpLoc) < 200
             }
-            
-            // 否则按距离匹配 (200m 范围内视为同一地点)
-            let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
-            return location.distance(from: fpLoc) < 200
+
+            guard !hasHistory else { return }
+
+            await MainActor.run {
+                NotificationManager.shared.sendNewFootprintActivityNotification(
+                    title: "新地点足迹",
+                    body: "你第一次在「\(placeName)」留下足迹。",
+                    footprintID: footprintID,
+                    date: startTime
+                )
+            }
         }
-
-        guard history.isEmpty else { return }
-
-        let placeName = place?.name ?? footprint.address ?? currentAddress
-        NotificationManager.shared.sendNewFootprintActivityNotification(
-            title: "新地点足迹",
-            body: "你第一次在「\(placeName)」留下足迹。",
-            footprintID: footprint.footprintID,
-            date: footprint.startTime
-        )
     }
 
     private func saveOngoingTitle() {
@@ -3588,6 +3668,21 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     /// 辅助方法：判断特定坐标匹配到的地点
      private func matchedPlaceFor(coordinate: CLLocationCoordinate2D) -> Place? {
+         Self.matchedPlace(for: coordinate, in: allPlaces)
+     }
+
+     /// The stay anchor rarely changes while fixes arrive every few seconds;
+     /// reuse its match until the anchor or the place list changes.
+     private func matchedPlaceForStopAnchor(_ anchor: CLLocation) -> Place? {
+         if let cached = stopAnchorPlaceMatch, cached.anchor === anchor { return cached.place }
+         let place = matchedPlaceFor(coordinate: anchor.coordinate)
+         stopAnchorPlaceMatch = (anchor, place)
+         return place
+     }
+
+     /// Context-independent matcher shared by main-actor callers (allPlaces)
+     /// and background passes (places fetched from their own context).
+     nonisolated static func matchedPlace(for coordinate: CLLocationCoordinate2D, in allPlaces: [Place]) -> Place? {
          let loc = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
          
          // 第一波：优先寻找重要地点，匹配门槛放宽至 radius + 150m 以应对 GPS 漂移
@@ -3633,6 +3728,31 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             window: habitTimeWindow,
             threshold: habitFrequencyThreshold
         )
+    }
+
+    /// Resolves the habitual activity on a background context and assigns it
+    /// (including nil, as the synchronous lookup did) on the main actor.
+    private func applyFrequentActivityType(to footprint: Footprint, placeID: UUID, at time: Date, context: ModelContext) {
+        let container = context.container
+        let window = habitTimeWindow
+        let threshold = habitFrequencyThreshold
+        Task { @MainActor in
+            let value = await Task.detached(priority: .utility) {
+                LocationManager.resolveFrequentActivityType(
+                    for: placeID,
+                    at: time,
+                    context: ModelContext(container),
+                    window: window,
+                    threshold: threshold
+                )
+            }.value
+            guard !footprint.isDeleted, footprint.activityTypeValue != value else { return }
+            footprint.activityTypeValue = value
+            if let ownerContext = footprint.modelContext {
+                try? ownerContext.save()
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            }
+        }
     }
 
     func suggestFrequentActivityType(for placeID: UUID, at time: Date) -> String? {
@@ -3871,7 +3991,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 // --- 自动关联习惯活动类型 ---
                 // 只有同一地点、同一时间段出现过3次以上才关联
-                newFootprint.activityTypeValue = self.findFrequentActivityType(for: pid, at: boundedCandidate.startTime, context: context)
+                // The history scan runs off main and is applied once known.
+                self.applyFrequentActivityType(to: newFootprint, placeID: pid, at: boundedCandidate.startTime, context: context)
                 
                 // Address 优先使用地点名称，解决“标题对地点(地址)不对”的问题
                 newFootprint.address = ongoingPlaceOverrideAddress ?? mPlace.name
@@ -4006,13 +4127,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         guard status == .authorized || status == .limited else { return }
         
         // 核心修复：即使照片在本地有效，如果缺失云端元数据（导致无法同步），也必须继续执行以补全元数据。
-        if !footprint.photoAssetIDs.isEmpty && PhotoService.shared.validateAssetIDs(footprint.photoAssetIDs) {
-            let hasMetadataForAll = footprint.photoAssetIDs.allSatisfy { id in
-                footprint.photoMetadata.contains(where: { $0.localIdentifier == id && $0.cloudIdentifier != nil })
-            }
-            if hasMetadataForAll {
-                return 
-            }
+        let storedAssetIDs = footprint.photoAssetIDs
+        let hasMetadataForAll = storedAssetIDs.allSatisfy { id in
+            footprint.photoMetadata.contains(where: { $0.localIdentifier == id && $0.cloudIdentifier != nil })
         }
         
         // 时间线行是根据存储记录生成的 UI 副本（未入库）。这里只读取它的值，
@@ -4023,6 +4140,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let endTime = footprint.endTime
         let coordinate = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
         
+        Task { @MainActor in
+        // PHAsset validation runs off main before deciding whether to rescan.
+        if !storedAssetIDs.isEmpty && hasMetadataForAll,
+           await PhotoService.shared.validateAssetIDsAsync(storedAssetIDs) {
+            return
+        }
+
         PhotoService.shared.fetchAssets(
             startTime: startTime,
             endTime: endTime,
@@ -4066,8 +4190,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 // 2. 云端 -> 本机只写入设备内解析缓存。PHAsset 的
                 // localIdentifier 在不同设备上不同，绝不能回写共享数据。
-                let invalidLocalWithCloud = workingMetadata.filter { meta in
-                    meta.cloudIdentifier != nil && !PhotoService.shared.validateAssetIDs([meta.localIdentifier])
+                var invalidLocalWithCloud: [PhotoMetadata] = []
+                for meta in workingMetadata where meta.cloudIdentifier != nil {
+                    if !(await PhotoService.shared.validateAssetIDsAsync([meta.localIdentifier])) {
+                        invalidLocalWithCloud.append(meta)
+                    }
                 }
                 
                 if !invalidLocalWithCloud.isEmpty {
@@ -4178,6 +4305,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     }
                 }
             }
+        }
         }
     }
 
@@ -4301,54 +4429,60 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     
     func triggerNotificationSummaryRefresh() {
-        guard let context = modelContext else { return }
+        guard let container = modelContext?.container else { return }
         
         let targetDate = Calendar.current.startOfDay(for: Date())
         let tomorrowStart = targetDate.addingTimeInterval(86400)
         
-        let fetchDescriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate { $0.startTime < tomorrowStart && $0.endTime >= targetDate },
-            sortBy: [SortDescriptor(\.startTime, order: .forward)]
-        )
-        
-        guard let todayFootprints = try? context.fetch(fetchDescriptor) else { return }
-        
-        // Filter out ignored footprints and include ongoing stay
-        let validFootprints = todayFootprints.filter { $0.status != .ignored }
-        // A daily notification counts places, so repeated visits to one place
-        // contribute only once. Prefer the displayed place name because the
-        // same place can have separate Place records after timeline edits.
-        let placeCount = Set(validFootprints.map { footprint -> String in
-            let name = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !name.isEmpty && !["正在解析位置...", "未知位置", "地点记录", "此处"].contains(name) {
-                return "name:\(name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))"
-            }
-            if let placeID = footprint.placeID { return "place:\(placeID.uuidString)" }
-            return "coordinate:\(Int((footprint.latitude * 1000).rounded())),\(Int((footprint.longitude * 1000).rounded()))"
-        }).count
-        let transportDescriptor = FetchDescriptor<TransportRecord>(
-            predicate: #Predicate { $0.startTime < tomorrowStart && $0.endTime > targetDate && $0.statusRaw == "active" },
-            sortBy: [SortDescriptor(\.startTime, order: .forward)]
-        )
-        let fetchedTodayTransports = (try? context.fetch(transportDescriptor)) ?? []
-        // A legacy automatic record can be active while carrying a zero-length
-        // or otherwise non-moving route.  It must not become an AI "ride" fact
-        // merely because it has a transport type.
-        let todayTransports = fetchedTodayTransports.filter {
-            $0.manualTypeRaw != nil || PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan($0)
-        }
-        
         // Build the notification exclusively from persisted timeline facts.
         // Raw samples and inferred straight lines between stays are not trips.
+        // Fetches and counting run on a background context.
         Task.detached(priority: .background) {
+            let context = ModelContext(container)
+            let fetchDescriptor = FetchDescriptor<Footprint>(
+                predicate: #Predicate { $0.startTime < tomorrowStart && $0.endTime >= targetDate },
+                sortBy: [SortDescriptor(\.startTime, order: .forward)]
+            )
+
+            guard let todayFootprints = try? context.fetch(fetchDescriptor) else { return }
+
+            // Filter out ignored footprints and include ongoing stay
+            let validFootprints = todayFootprints.filter { $0.status != .ignored }
+            // A daily notification counts places, so repeated visits to one place
+            // contribute only once. Prefer the displayed place name because the
+            // same place can have separate Place records after timeline edits.
+            let placeCount = Set(validFootprints.map { footprint -> String in
+                let name = footprint.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !name.isEmpty && !["正在解析位置...", "未知位置", "地点记录", "此处"].contains(name) {
+                    return "name:\(name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))"
+                }
+                if let placeID = footprint.placeID { return "place:\(placeID.uuidString)" }
+                return "coordinate:\(Int((footprint.latitude * 1000).rounded())),\(Int((footprint.longitude * 1000).rounded()))"
+            }).count
+            let transportDescriptor = FetchDescriptor<TransportRecord>(
+                predicate: #Predicate { $0.startTime < tomorrowStart && $0.endTime > targetDate && $0.statusRaw == "active" },
+                sortBy: [SortDescriptor(\.startTime, order: .forward)]
+            )
+            let fetchedTodayTransports = (try? context.fetch(transportDescriptor)) ?? []
+            // A legacy automatic record can be active while carrying a zero-length
+            // or otherwise non-moving route.  It must not become an AI "ride" fact
+            // merely because it has a transport type.
+            let todayTransports = fetchedTodayTransports.filter {
+                $0.manualTypeRaw != nil || PersistentTimelineBuilder.hasMinimumAutomaticTransportSpan($0)
+            }
+            // OpenAIService refetches by ID in its own context; pass only the
+            // identifiers so these background-context models stay on this task.
+            let footprintIDs = validFootprints.map(\.footprintID)
+            let transportIDs = todayTransports.map(\.recordID)
+            let transportCount = todayTransports.count
             let mileage = todayTransports.reduce(0.0) { $0 + max(0, $1.distance) }
 
             let overviewStatus = await withCheckedContinuation { continuation in
                 Task { @MainActor in
                     OpenAIService.shared.dailyOverviewStatus(
                         for: targetDate,
-                        footprints: validFootprints,
-                        transports: todayTransports
+                        footprintIDs: footprintIDs,
+                        transportIDs: transportIDs
                     ) { needsNetworkRequest, savedSummary in
                         continuation.resume(returning: (needsNetworkRequest, savedSummary))
                     }
@@ -4362,8 +4496,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     Task { @MainActor in
                         OpenAIService.shared.currentDailyOverviewSummary(
                             for: targetDate,
-                            footprints: validFootprints,
-                            transports: todayTransports
+                            footprintIDs: footprintIDs,
+                            transportIDs: transportIDs
                         ) { summary in
                             continuation.resume(returning: summary)
                         }
@@ -4379,7 +4513,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 NotificationManager.shared.refreshDailySummary(
                     placeCount: placeCount,
                     mileage: mileage,
-                    transportCount: todayTransports.count,
+                    transportCount: transportCount,
                     overviewSummary: resolvedOverview
                 )
 
@@ -4390,29 +4524,48 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
     
     /// 同步今日所有点位的包围盒给小组件，避免小组件去读 CSV 导致超时
+    @ObservationIgnored private var widgetRegionGeneration = 0
+
     private func updateSharedWidgetRegion() {
-        let sharedDefaults = widgetSharedDefaults()
-        
-        let allCoords = self.allTodayPoints.map { $0.coordinate }
-        guard !allCoords.isEmpty else { return }
-        
-        var minLat = allCoords[0].latitude
-        var maxLat = allCoords[0].latitude
-        var minLon = allCoords[0].longitude
-        var maxLon = allCoords[0].longitude
-        
-        for p in allCoords {
-            minLat = min(minLat, p.latitude)
-            maxLat = max(maxLat, p.latitude)
-            minLon = min(minLon, p.longitude)
-            maxLon = max(maxLon, p.longitude)
+        let points = self.allTodayPoints
+        guard !points.isEmpty else { return }
+        // The bounding box scans every point of the day; compute it off main
+        // and write only the latest request's result.
+        widgetRegionGeneration += 1
+        let generation = widgetRegionGeneration
+        Task.detached(priority: .utility) { [weak self] in
+            var minLat = points[0].coordinate.latitude
+            var maxLat = minLat
+            var minLon = points[0].coordinate.longitude
+            var maxLon = minLon
+
+            for point in points {
+                let p = point.coordinate
+                minLat = min(minLat, p.latitude)
+                maxLat = max(maxLat, p.latitude)
+                minLon = min(minLon, p.longitude)
+                maxLon = max(maxLon, p.longitude)
+            }
+
+            let latDelta = max(0.005, (maxLat - minLat) * 1.4)
+            let lonDelta = max(0.005, (maxLon - minLon) * 1.4)
+            let centerLat = (minLat + maxLat) / 2
+            let centerLon = (minLon + maxLon) / 2
+
+            await self?.applySharedWidgetRegion(
+                generation: generation,
+                centerLat: centerLat, centerLon: centerLon,
+                latDelta: latDelta, lonDelta: lonDelta
+            )
         }
-        
-        let latDelta = max(0.005, (maxLat - minLat) * 1.4)
-        let lonDelta = max(0.005, (maxLon - minLon) * 1.4)
-        
-        sharedDefaults.set((minLat + maxLat) / 2, forKey: "widgetRegionCenterLat")
-        sharedDefaults.set((minLon + maxLon) / 2, forKey: "widgetRegionCenterLon")
+    }
+
+    private func applySharedWidgetRegion(generation: Int, centerLat: Double, centerLon: Double,
+                                         latDelta: Double, lonDelta: Double) {
+        guard generation == widgetRegionGeneration else { return }
+        let sharedDefaults = widgetSharedDefaults()
+        sharedDefaults.set(centerLat, forKey: "widgetRegionCenterLat")
+        sharedDefaults.set(centerLon, forKey: "widgetRegionCenterLon")
         sharedDefaults.set(latDelta, forKey: "widgetRegionLatDelta")
         sharedDefaults.set(lonDelta, forKey: "widgetRegionLonDelta")
     }
@@ -4672,29 +4825,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 // 物理清空当天所有相关记录（保留照片足迹）。必须按时间交集清理，
                 // 否则昨天开始、今天结束的跨天足迹会漏删，重建后继续出现在今天。
-                let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-                    $0.startTime < endOfDay && $0.endTime > startOfDay
-                })
-                let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                    $0.startTime < endOfDay && $0.endTime > startOfDay
-                })
-                let insightDesc = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDay })
-                
-                if let fps = try? context.fetch(fpDesc) {
-                    for fp in fps {
-                        if fp.photoAssetIDs.isEmpty, fp.status != .manual {
-                            context.delete(fp)
-                        }
-                    }
-                }
-                if let tps = try? context.fetch(tpDesc) {
-                    for tp in tps where tp.manualTypeRaw == nil {
-                        context.delete(tp)
-                    }
-                }
-                if let insights = try? context.fetch(insightDesc) { for i in insights { context.delete(i) } }
-                
-                try? context.save()
+                if context.hasChanges { try? context.save() }
+                let container = context.container
+                await Task.detached(priority: .userInitiated) {
+                    LocationManager.clearRebuildableRecords(from: startOfDay, to: endOfDay, in: ModelContext(container))
+                }.value
                 
                 // 调用新引擎重新构建
                 await PersistentTimelineBuilder.syncDay(date: date, in: context)
@@ -4715,6 +4850,35 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
     
+    /// Deletes the automatically generated records of one day before a rebuild
+    /// (photo, manual and manually typed records are kept). Runs on a
+    /// background context.
+    nonisolated static func clearRebuildableRecords(from startOfDay: Date, to endOfDay: Date, in context: ModelContext) {
+        let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
+            $0.startTime < endOfDay && $0.endTime > startOfDay
+        })
+        let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+            $0.startTime < endOfDay && $0.endTime > startOfDay
+        })
+        let insightDesc = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDay })
+
+        if let fps = try? context.fetch(fpDesc) {
+            for fp in fps {
+                if fp.photoAssetIDs.isEmpty, fp.status != .manual {
+                    context.delete(fp)
+                }
+            }
+        }
+        if let tps = try? context.fetch(tpDesc) {
+            for tp in tps where tp.manualTypeRaw == nil {
+                context.delete(tp)
+            }
+        }
+        if let insights = try? context.fetch(insightDesc) { for i in insights { context.delete(i) } }
+
+        try? context.save()
+    }
+
     @MainActor
     func cancelRebuild() {
         rebuildTask?.cancel()
@@ -4739,18 +4903,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let startOfDay = Calendar.current.startOfDay(for: date)
         let endOfDay = startOfDay.addingTimeInterval(86400)
         
+        guard let container = modelContext?.container else { return }
         Task {
-            // 1. 获取当天的原始点
-            let rawPoints = await Task.detached {
-                RawLocationStore.shared.loadAllDevicesLocations(for: date)
-            }.value
-            
-            guard !rawPoints.isEmpty else { return }
-            
-            // 2. 获取当天现有的足迹与交通覆盖区间，避免在交通上再回填一个足迹
-            let occupiedRanges = await MainActor.run { () -> [(start: Date, end: Date)] in
-                guard let currentContext = self.modelContext else { return [] }
+            // Raw-point loading, occupied-range fetches and gap scanning run on a
+            // background context; only persistence below returns to main.
+            let gapsToInsert = await Task.detached(priority: .utility) { () -> [(start: Date, end: Date, center: CLLocationCoordinate2D, points: [CLLocationCoordinate2D], duration: TimeInterval)] in
+                // 1. 获取当天的原始点
+                let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
+
+                guard !rawPoints.isEmpty else { return [] }
                 
+                // 2. 获取当天现有的足迹与交通覆盖区间，避免在交通上再回填一个足迹
+                let currentContext = ModelContext(container)
                 let footprintDescriptor = FetchDescriptor<Footprint>(
                     predicate: #Predicate { $0.startTime < endOfDay && $0.endTime >= startOfDay },
                     sortBy: [SortDescriptor(\.startTime)]
@@ -4762,41 +4926,42 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 
                 let footprintRanges = ((try? currentContext.fetch(footprintDescriptor)) ?? []).map { ($0.startTime, $0.endTime) }
                 let transportRanges = ((try? currentContext.fetch(transportDescriptor)) ?? []).map { ($0.startTime, $0.endTime) }
-                return (footprintRanges + transportRanges).sorted { $0.start < $1.start }
-            }
-            
-            // 3. 寻找间隙并在后台处理
-            var currentTime = startOfDay
-            var gapsToInsert: [(start: Date, end: Date, center: CLLocationCoordinate2D, points: [CLLocationCoordinate2D], duration: TimeInterval)] = []
-            
-            for range in occupiedRanges {
-                if range.start > currentTime.addingTimeInterval(120) {
-                    if let gap = identifyGapStay(from: currentTime, to: range.start, rawPoints: rawPoints) {
+                let occupiedRanges: [(start: Date, end: Date)] = (footprintRanges + transportRanges).sorted { $0.start < $1.start }
+
+                // 3. 寻找间隙并在后台处理
+                var currentTime = startOfDay
+                var gapsToInsert: [(start: Date, end: Date, center: CLLocationCoordinate2D, points: [CLLocationCoordinate2D], duration: TimeInterval)] = []
+
+                for range in occupiedRanges {
+                    if range.start > currentTime.addingTimeInterval(120) {
+                        if let gap = LocationManager.identifyGapStay(from: currentTime, to: range.start, rawPoints: rawPoints) {
+                            gapsToInsert.append(gap)
+                        }
+                    }
+                    currentTime = max(currentTime, range.end)
+                }
+
+                let now = Date()
+                let isToday = Calendar.current.isDateInToday(date)
+                let lastDataTime = rawPoints.last?.timestamp
+                let dayLimit: Date
+                if isToday {
+                    dayLimit = now
+                } else {
+                    // 对于历史日期，止于最后一条数据的时间点，不再强行补齐到翌日0点
+                    dayLimit = lastDataTime.map { min(endOfDay, $0) } ?? currentTime
+                }
+
+                // 4. 处理最后一个间隙（直至当前时间点）
+                if dayLimit > currentTime.addingTimeInterval(AppConfig.shared.ongoingStayGracePeriod) {
+                    if let gap = LocationManager.identifyGapStay(from: currentTime, to: dayLimit, rawPoints: rawPoints) {
+                        // Use the same insertion/extension checks as interior gaps.
+                        // The old GAP_STAY shortcut bypassed manual time boundaries.
                         gapsToInsert.append(gap)
                     }
                 }
-                currentTime = max(currentTime, range.end)
-            }
-            
-            let now = Date()
-            let isToday = Calendar.current.isDateInToday(date)
-            let lastDataTime = rawPoints.last?.timestamp
-            let dayLimit: Date
-            if isToday {
-                dayLimit = now
-            } else {
-                // 对于历史日期，止于最后一条数据的时间点，不再强行补齐到翌日0点
-                dayLimit = lastDataTime.map { min(endOfDay, $0) } ?? currentTime
-            }
-            
-            // 4. 处理最后一个间隙（直至当前时间点）
-            if dayLimit > currentTime.addingTimeInterval(AppConfig.shared.ongoingStayGracePeriod) {
-                if let gap = identifyGapStay(from: currentTime, to: dayLimit, rawPoints: rawPoints) {
-                    // Use the same insertion/extension checks as interior gaps.
-                    // The old GAP_STAY shortcut bypassed manual time boundaries.
-                    gapsToInsert.append(gap)
-                }
-            }
+                return gapsToInsert
+            }.value
             
             // 4. 回到主线程执行持久化
             if !gapsToInsert.isEmpty {
@@ -4879,8 +5044,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                             newFp.placeID = pid
                             newFp.address = mPlace.name
                             
-                            // --- 自动关联历史习惯 ---
-                            newFp.activityTypeValue = self.findFrequentActivityType(for: pid, at: gap.start, context: context)
+                            // --- 自动关联历史习惯 ---（history scan runs off main）
+                            self.applyFrequentActivityType(to: newFp, placeID: pid, at: gap.start, context: context)
                         }
                         insertedFootprints.append(newFp)
                     }
@@ -4899,7 +5064,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
     
-    private func identifyGapStay(from start: Date, to end: Date, rawPoints: [CLLocation]) -> (start: Date, end: Date, center: CLLocationCoordinate2D, points: [CLLocationCoordinate2D], duration: TimeInterval)? {
+    nonisolated private static func identifyGapStay(from start: Date, to end: Date, rawPoints: [CLLocation]) -> (start: Date, end: Date, center: CLLocationCoordinate2D, points: [CLLocationCoordinate2D], duration: TimeInterval)? {
         let gapPoints = TimelineBuilder.extractPoints(from: rawPoints, start: start, end: end)
         guard !gapPoints.isEmpty else { return nil }
         
@@ -4916,7 +5081,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         return nil
     }
     
-    private func calculateMaxDiameter(_ points: [CLLocation]) -> Double {
+    nonisolated private static func calculateMaxDiameter(_ points: [CLLocation]) -> Double {
         guard points.count > 1 else { return 0 }
         
         var minLat = 90.0, maxLat = -90.0
@@ -4969,22 +5134,47 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         let center = CLLocation(latitude: place.latitude, longitude: place.longitude)
         let threshold = Double(place.radius) + 100.0
         
-        let descriptor = FetchDescriptor<Footprint>()
-        if let all = try? context.fetch(descriptor) {
-            for fp in all {
-                if fp.placeID == placeID {
+        func applyIgnore(to fp: Footprint) {
+            if fp.placeID == placeID {
+                fp.status = .ignored
+            } else {
+                let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
+                if fpLoc.distance(from: center) <= threshold {
                     fp.status = .ignored
-                } else {
-                    let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
-                    if fpLoc.distance(from: center) <= threshold {
-                        fp.status = .ignored
-                        fp.placeID = placeID
-                    }
+                    fp.placeID = placeID
                 }
             }
         }
-        
+        // The chosen footprint updates immediately; the full-history scan runs
+        // on a background context after the place is committed.
+        applyIgnore(to: footprint)
         try? context.save()
+
+        let container = context.container
+        Task { @MainActor in
+            let changed = await Task.detached(priority: .userInitiated) { () -> Bool in
+                let context = ModelContext(container)
+                let descriptor = FetchDescriptor<Footprint>()
+                guard let all = try? context.fetch(descriptor) else { return false }
+                for fp in all {
+                    if fp.placeID == placeID {
+                        fp.status = .ignored
+                    } else {
+                        let fpLoc = CLLocation(latitude: fp.latitude, longitude: fp.longitude)
+                        if fpLoc.distance(from: center) <= threshold {
+                            fp.status = .ignored
+                            fp.placeID = placeID
+                        }
+                    }
+                }
+                guard context.hasChanges else { return false }
+                try? context.save()
+                return true
+            }.value
+            if changed {
+                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+            }
+        }
     }
     
     /// 智能重构：仅删除受影响（包含被删时间戳）的交通记录，并重新填补空缺，不影响当天的其他足迹和交通。
@@ -5052,34 +5242,40 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         isResettingData = true
         UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
         
+        if context.hasChanges { try? context.save() }
+        let container = context.container
         Task {
             // 1. 物理清空当天所有相关记录。按时间交集删除，防止跨天旧记录漏删。
-            let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
-                $0.startTime < endOfDay && $0.endTime > startOfDay
-            })
-            let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
-                $0.startTime < endOfDay && $0.endTime > startOfDay
-            })
-            let insightDesc = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDay })
-            
-            if let fps = try? context.fetch(fpDesc) {
-                for fp in fps {
-                    context.delete(fp)
+            // Fetch/delete on a background context; the main context merges the save.
+            await Task.detached(priority: .userInitiated) {
+                let context = ModelContext(container)
+                let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
+                    $0.startTime < endOfDay && $0.endTime > startOfDay
+                })
+                let tpDesc = FetchDescriptor<TransportRecord>(predicate: #Predicate {
+                    $0.startTime < endOfDay && $0.endTime > startOfDay
+                })
+                let insightDesc = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDay })
+
+                if let fps = try? context.fetch(fpDesc) {
+                    for fp in fps {
+                        context.delete(fp)
+                    }
                 }
-            }
-            if let tps = try? context.fetch(tpDesc) { for tp in tps { context.delete(tp) } }
-            if let insights = try? context.fetch(insightDesc) { for i in insights { context.delete(i) } }
+                if let tps = try? context.fetch(tpDesc) { for tp in tps { context.delete(tp) } }
+                if let insights = try? context.fetch(insightDesc) { for i in insights { context.delete(i) } }
 
-            // 同步清理当天的手动删除标记（与 resetToday() 保持一致）：否则用户此前手动
-            // 删除过的交通段会一直残留在 TransportManualSelection 里，syncDay 重建时
-            // 会把重叠的缺口当作"已排除"整段跳过，导致哪怕原始 GPS 点还在，重建出来
-            // 也是空的——只清空了旧数据，看起来像是"重新生成"没有真正执行。
-            let manualDesc = FetchDescriptor<TransportManualSelection>(predicate: #Predicate {
-                $0.startTime >= startOfDay && $0.startTime < endOfDay
-            })
-            if let manuals = try? context.fetch(manualDesc) { for m in manuals { context.delete(m) } }
+                // 同步清理当天的手动删除标记（与 resetToday() 保持一致）：否则用户此前手动
+                // 删除过的交通段会一直残留在 TransportManualSelection 里，syncDay 重建时
+                // 会把重叠的缺口当作"已排除"整段跳过，导致哪怕原始 GPS 点还在，重建出来
+                // 也是空的——只清空了旧数据，看起来像是"重新生成"没有真正执行。
+                let manualDesc = FetchDescriptor<TransportManualSelection>(predicate: #Predicate {
+                    $0.startTime >= startOfDay && $0.startTime < endOfDay
+                })
+                if let manuals = try? context.fetch(manualDesc) { for m in manuals { context.delete(m) } }
 
-            try? context.save()
+                try? context.save()
+            }.value
 
             // 2. 调用新引擎重新构建
             // syncDay 内部有防重入锁：如果这一天恰好被别的触发源（例如实时定位
@@ -5139,21 +5335,27 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         var allFound: [LocationSuggestion] = []
         
         // 1. 获取已保存的附近地点 (1.5km内)
-        let saved = allPlaces.compactMap { place -> (LocationSuggestion, Double)? in
-            let loc = CLLocation(latitude: place.latitude, longitude: place.longitude)
-            let dist = center.distance(from: loc)
-            guard dist < 1500 else { return nil }
-            return (LocationSuggestion(
-                id: UUID(),
-                name: place.name,
-                address: place.name,
-                coordinate: place.coordinate,
-                isExistingPlace: true,
-                placeID: place.placeID,
-                category: place.category
-            ), dist)
+        // Distance filtering runs off main on a value snapshot of the places.
+        let placeSnapshot = allPlaces.map {
+            (name: $0.name, coordinate: $0.coordinate, placeID: $0.placeID, category: $0.category)
         }
-        allFound.append(contentsOf: saved.map { $0.0 })
+        let saved = await Task.detached(priority: .userInitiated) { () -> [LocationSuggestion] in
+            placeSnapshot.compactMap { place -> (LocationSuggestion, Double)? in
+                let loc = CLLocation(latitude: place.coordinate.latitude, longitude: place.coordinate.longitude)
+                let dist = center.distance(from: loc)
+                guard dist < 1500 else { return nil }
+                return (LocationSuggestion(
+                    id: UUID(),
+                    name: place.name,
+                    address: place.name,
+                    coordinate: place.coordinate,
+                    isExistingPlace: true,
+                    placeID: place.placeID,
+                    category: place.category
+                ), dist)
+            }.map { $0.0 }
+        }.value
+        allFound.append(contentsOf: saved)
         
         // 2. 先进行反地理编码，获取当前所在的街道、区域和地标潜力名
         let geocoder = CLGeocoder()
@@ -5372,8 +5574,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             fp.isAddressEditedByHand = true
 
             if shouldRematchActivity, let context = modelContext {
-                fp.activityTypeValue = findFrequentActivityType(
-                    for: targetPlace.placeID,
+                applyFrequentActivityType(
+                    to: fp,
+                    placeID: targetPlace.placeID,
                     at: fp.startTime,
                     context: context
                 )
@@ -5679,7 +5882,7 @@ final class CurrentLiveActivityManager {
     private static let layoutSessionPrefix = "current-layout-v3-"
     private static let lastKnownKindKey = "currentLiveActivityLastKnownKind"
 
-    private struct TodaySummary {
+    private struct TodaySummary: Sendable {
         var placeKeys: Set<String>
         let distance: Double
     }
@@ -5855,7 +6058,7 @@ final class CurrentLiveActivityManager {
             print("[CurrentLiveActivity] waiting for model context; preserving active activity")
             return
         }
-        guard let resolved = resolveState(location: location, context: context) else {
+        guard let resolved = await resolveState(location: location, context: context) else {
             // Recognition briefly has no persisted model while a departure is
             // being rebuilt. Keep the current activity alive; an explicit stop,
             // disabled setting, or the next resolved state owns termination.
@@ -6082,90 +6285,154 @@ final class CurrentLiveActivityManager {
         assetBackgroundTask = .invalid
     }
 
-    private func resolveState(
-        location: CLLocation,
-        context: ModelContext
-    ) -> (
+    private typealias ResolvedState = (
         state: CurrentTrackingActivityAttributes.ContentState,
         route: [CodableCoordinate],
         photoAssetIDs: [String]
-    )? {
+    )
+
+    /// Main-actor values read once per update; the state itself is computed
+    /// on a background context from this snapshot.
+    private struct ResolveInput: @unchecked Sendable {
+        let location: CLLocation
+        let now: Date
+        let isTracking: Bool
+        let isCurrentlyMoving: Bool
+        let uiMovingStartedAt: Date?
+        let allTodayPoints: [CLLocation]
+        let currentAddress: String
+        let ongoingTitle: String?
+        let potentialStopStartLocation: CLLocation?
+        let matchedPlaceID: UUID?
+        let matchedPlaceName: String?
+        let provisionalTransportStartedAt: Date?
+        let provisionalTransportStartLocation: String?
+        let lastStateKind: CurrentTrackingActivityKind?
+        let lastStatePlaceName: String?
+        let mapRevision: Int
+        let prefersDarkMap: Bool
+    }
+
+    private struct ResolveOutput: @unchecked Sendable {
+        let resolved: ResolvedState
+        let provisionalTransportStartedAt: Date?
+        let provisionalTransportStartLocation: String?
+    }
+
+    private func resolveState(
+        location: CLLocation,
+        context: ModelContext
+    ) async -> ResolvedState? {
         let manager = LocationManager.shared
-        let now = Date()
-        var todaySummary = todaySummary(context: context, now: now)
+        let input = ResolveInput(
+            location: location,
+            now: Date(),
+            isTracking: manager.isTracking,
+            isCurrentlyMoving: manager.isCurrentlyMoving,
+            uiMovingStartedAt: manager.uiMovingStartedAt,
+            allTodayPoints: manager.allTodayPoints,
+            currentAddress: manager.currentAddress,
+            ongoingTitle: manager.ongoingTitle,
+            potentialStopStartLocation: manager.potentialStopStartLocation,
+            matchedPlaceID: manager.matchedPlace?.placeID,
+            matchedPlaceName: manager.matchedPlace.flatMap { $0.isIgnored ? nil : $0.name },
+            provisionalTransportStartedAt: provisionalTransportStartedAt,
+            provisionalTransportStartLocation: provisionalTransportStartLocation,
+            lastStateKind: lastState?.kind,
+            lastStatePlaceName: lastState?.placeName,
+            mapRevision: mapRevision,
+            prefersDarkMap: currentInterfacePrefersDarkMap
+        )
+        // The background context reads the store; commit pending UI edits first.
+        if context.hasChanges { try? context.save() }
+        let container = context.container
+        guard let output = await Task.detached(priority: .userInitiated, operation: { () -> ResolveOutput? in
+            Self.computeState(input, context: ModelContext(container))
+        }).value else { return nil }
+        provisionalTransportStartedAt = output.provisionalTransportStartedAt
+        provisionalTransportStartLocation = output.provisionalTransportStartLocation
+        return output.resolved
+    }
+
+    nonisolated private static func computeState(_ input: ResolveInput, context: ModelContext) -> ResolveOutput? {
+        let location = input.location
+        let now = input.now
+        var todaySummary = Self.todaySummary(context: context, now: now)
 
         // Use exactly the same state that makes the current timeline row show
         // “正在移动”. Do not independently infer transport for Live Activity.
-        if manager.isCurrentlyMoving {
+        if input.isCurrentlyMoving {
             let transport = WatchSyncManager.currentTransportRecord(
                 in: context,
                 now: now,
-                isCurrentlyMoving: manager.isCurrentlyMoving,
-                movingStartedAt: manager.uiMovingStartedAt
+                isCurrentlyMoving: input.isCurrentlyMoving,
+                movingStartedAt: input.uiMovingStartedAt
             )
             if transport == nil {
-                return provisionalTransportState(
-                    location: location,
-                    manager: manager,
-                    todaySummary: todaySummary
-                )
+                return provisionalTransportState(input: input, todaySummary: todaySummary)
             }
             guard let transport else { return nil }
-            provisionalTransportStartedAt = transport.startTime
-            if provisionalTransportStartLocation == nil {
-                provisionalTransportStartLocation = transport.startLocation
-            }
+            let startedAt = transport.startTime
+            let startLocation = input.provisionalTransportStartLocation ?? transport.startLocation
             let type = TransportType(rawValue: transport.manualTypeRaw ?? transport.typeRaw) ?? .slow
             let route = (try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData)) ?? []
             let averageSpeed = WatchSyncManager.currentMovementAverageSpeed(
                 persistedAverageSpeed: transport.averageSpeed,
-                locations: manager.allTodayPoints,
-                movingStartedAt: manager.uiMovingStartedAt,
+                locations: input.allTodayPoints,
+                movingStartedAt: input.uiMovingStartedAt,
                 now: now,
-                isCurrentlyMoving: manager.isCurrentlyMoving
+                isCurrentlyMoving: input.isCurrentlyMoving
             )
-            let placeName = normalizedPlaceName(manager.currentAddress, fallback: "当前位置")
-            return (
-                CurrentTrackingActivityAttributes.ContentState(
-                    kind: .transport,
-                    recordID: transport.recordID.uuidString,
-                    startedAt: transport.startTime,
-                    title: type.localizedName,
-                    icon: type.sfSymbol,
-                    colorHex: nil,
-                    placeName: placeName,
-                    address: nil,
-                    startLocation: transport.startLocation,
-                    distance: transport.distance > 0 ? transport.distance : nil,
-                    averageSpeed: averageSpeed,
-                    latitude: location.coordinate.latitude,
-                    longitude: location.coordinate.longitude,
-                    mapRevision: mapRevision,
-                    prefersDarkMap: currentInterfacePrefersDarkMap,
-                    todayPlaceCount: todaySummary.placeKeys.count,
-                    todayDistance: todaySummary.distance
+            let placeName = normalizedPlaceName(input.currentAddress, fallback: "当前位置")
+            return ResolveOutput(
+                resolved: (
+                    CurrentTrackingActivityAttributes.ContentState(
+                        kind: .transport,
+                        recordID: transport.recordID.uuidString,
+                        startedAt: transport.startTime,
+                        title: type.localizedName,
+                        icon: type.sfSymbol,
+                        colorHex: nil,
+                        placeName: placeName,
+                        address: nil,
+                        startLocation: transport.startLocation,
+                        distance: transport.distance > 0 ? transport.distance : nil,
+                        averageSpeed: averageSpeed,
+                        latitude: location.coordinate.latitude,
+                        longitude: location.coordinate.longitude,
+                        mapRevision: input.mapRevision,
+                        prefersDarkMap: input.prefersDarkMap,
+                        todayPlaceCount: todaySummary.placeKeys.count,
+                        todayDistance: todaySummary.distance
+                    ),
+                    route,
+                    []
                 ),
-                route,
-                []
+                provisionalTransportStartedAt: startedAt,
+                provisionalTransportStartLocation: startLocation
             )
         }
 
-        guard let stayAnchor = manager.potentialStopStartLocation else { return nil }
-        provisionalTransportStartedAt = nil
-        provisionalTransportStartLocation = nil
-        let activePlaceID = manager.matchedPlace?.placeID
-        let footprint = manager.currentStayFootprint(in: context, now: now)
+        guard let stayAnchor = input.potentialStopStartLocation else { return nil }
+        let activePlaceID = input.matchedPlaceID
+        // Same conditions as LocationManager.currentStayFootprint(in:now:).
+        let footprint: Footprint? = input.isTracking && !input.isCurrentlyMoving
+            ? WatchSyncManager.currentStayFootprint(
+                in: context, anchor: stayAnchor, placeID: activePlaceID,
+                now: now, distanceThreshold: AppConfig.shared.stayDistanceThreshold
+            )
+            : nil
         let stayStart = stayAnchor.timestamp
         let activities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
         let activity = footprint?.getActivityType(from: activities)
-        let matchedPlaceName = manager.matchedPlace.flatMap { $0.isIgnored ? nil : $0.name }
-        let ongoingName = normalizedPlaceName(manager.ongoingTitle, fallback: "")
+        let matchedPlaceName = input.matchedPlaceName
+        let ongoingName = normalizedPlaceName(input.ongoingTitle, fallback: "")
         let footprintName = normalizedPlaceName(footprint?.address, fallback: "")
         let placeName = matchedPlaceName
             ?? (ongoingName.isEmpty ? nil : ongoingName)
             ?? (footprintName.isEmpty ? nil : footprintName)
-            ?? normalizedPlaceName(manager.currentAddress, fallback: "正在停留")
-        let currentAddress = normalizedPlaceName(manager.currentAddress, fallback: "")
+            ?? normalizedPlaceName(input.currentAddress, fallback: "正在停留")
+        let currentAddress = normalizedPlaceName(input.currentAddress, fallback: "")
         let address = currentAddress.isEmpty || currentAddress == placeName ? nil : currentAddress
         if footprint == nil {
             todaySummary.placeKeys.insert(
@@ -6176,48 +6443,48 @@ final class CurrentLiveActivityManager {
                 )
             )
         }
-        return (
-            CurrentTrackingActivityAttributes.ContentState(
-                kind: .footprint,
-                recordID: footprint?.footprintID.uuidString
-                    ?? "ongoing-\(Int(stayStart.timeIntervalSince1970))",
-                startedAt: stayStart,
-                title: activity?.name ?? "停留",
-                icon: activity?.icon ?? FootprintIconDefaults.card,
-                colorHex: activity?.colorHex,
-                placeName: placeName,
-                address: address,
-                startLocation: nil,
-                distance: nil,
-                averageSpeed: nil,
-                latitude: location.coordinate.latitude,
-                longitude: location.coordinate.longitude,
-                mapRevision: mapRevision,
-                prefersDarkMap: currentInterfacePrefersDarkMap,
-                todayPlaceCount: todaySummary.placeKeys.count,
-                todayDistance: todaySummary.distance
+        return ResolveOutput(
+            resolved: (
+                CurrentTrackingActivityAttributes.ContentState(
+                    kind: .footprint,
+                    recordID: footprint?.footprintID.uuidString
+                        ?? "ongoing-\(Int(stayStart.timeIntervalSince1970))",
+                    startedAt: stayStart,
+                    title: activity?.name ?? "停留",
+                    icon: activity?.icon ?? FootprintIconDefaults.card,
+                    colorHex: activity?.colorHex,
+                    placeName: placeName,
+                    address: address,
+                    startLocation: nil,
+                    distance: nil,
+                    averageSpeed: nil,
+                    latitude: location.coordinate.latitude,
+                    longitude: location.coordinate.longitude,
+                    mapRevision: input.mapRevision,
+                    prefersDarkMap: input.prefersDarkMap,
+                    todayPlaceCount: todaySummary.placeKeys.count,
+                    todayDistance: todaySummary.distance
+                ),
+                [],
+                footprint?.photoAssetIDs ?? []
             ),
-            [],
-            footprint?.photoAssetIDs ?? []
+            provisionalTransportStartedAt: nil,
+            provisionalTransportStartLocation: nil
         )
     }
 
-    private func provisionalTransportState(
-        location: CLLocation,
-        manager: LocationManager,
+    nonisolated private static func provisionalTransportState(
+        input: ResolveInput,
         todaySummary: TodaySummary
-    ) -> (
-        state: CurrentTrackingActivityAttributes.ContentState,
-        route: [CodableCoordinate],
-        photoAssetIDs: [String]
-    ) {
+    ) -> ResolveOutput {
+        let location = input.location
         let now = Date()
         let freshLocationStart = abs(location.timestamp.timeIntervalSince(now))
             < AppConfig.shared.currentLocationFreshnessThreshold
             ? location.timestamp
             : now
-        let detectedMovementAt = manager.uiMovingStartedAt ?? freshLocationStart
-        var startEvidence = manager.allTodayPoints.filter {
+        let detectedMovementAt = input.uiMovingStartedAt ?? freshLocationStart
+        var startEvidence = input.allTodayPoints.filter {
             $0.timestamp <= now && CLLocationCoordinate2DIsValid($0.coordinate)
         }
         if startEvidence.last.map({ location.timestamp > $0.timestamp }) ?? true {
@@ -6227,15 +6494,15 @@ final class CurrentLiveActivityManager {
             locations: startEvidence,
             detectedMovementAt: detectedMovementAt
         )
-        let startedAt = provisionalTransportStartedAt ?? inferredStart
-        if provisionalTransportStartedAt == nil {
-            provisionalTransportStartedAt = startedAt
-            provisionalTransportStartLocation = lastState?.kind == .footprint
-                ? lastState?.placeName
-                : normalizedPlaceName(manager.currentAddress, fallback: "出发地")
+        let startedAt = input.provisionalTransportStartedAt ?? inferredStart
+        var startLocation = input.provisionalTransportStartLocation
+        if input.provisionalTransportStartedAt == nil {
+            startLocation = input.lastStateKind == .footprint
+                ? input.lastStatePlaceName
+                : normalizedPlaceName(input.currentAddress, fallback: "出发地")
         }
 
-        var routePoints = manager.allTodayPoints.filter {
+        var routePoints = input.allTodayPoints.filter {
             $0.timestamp >= startedAt && $0.timestamp <= now &&
             CLLocationCoordinate2DIsValid($0.coordinate)
         }
@@ -6252,40 +6519,44 @@ final class CurrentLiveActivityManager {
             locations: routePoints,
             movingStartedAt: startedAt,
             now: now,
-            isCurrentlyMoving: manager.isCurrentlyMoving
+            isCurrentlyMoving: input.isCurrentlyMoving
         )
-        return (
-            CurrentTrackingActivityAttributes.ContentState(
-                kind: .transport,
-                recordID: "provisional-\(Int(startedAt.timeIntervalSince1970))",
-                startedAt: startedAt,
-                title: "移动",
-                icon: "location.north.line.fill",
-                colorHex: nil,
-                placeName: normalizedPlaceName(manager.currentAddress, fallback: "移动中"),
-                address: nil,
-                startLocation: provisionalTransportStartLocation,
-                distance: distance > 0 ? distance : nil,
-                averageSpeed: averageSpeed,
-                latitude: location.coordinate.latitude,
-                longitude: location.coordinate.longitude,
-                mapRevision: mapRevision,
-                prefersDarkMap: currentInterfacePrefersDarkMap,
-                todayPlaceCount: todaySummary.placeKeys.count,
-                todayDistance: todaySummary.distance + distance
+        return ResolveOutput(
+            resolved: (
+                CurrentTrackingActivityAttributes.ContentState(
+                    kind: .transport,
+                    recordID: "provisional-\(Int(startedAt.timeIntervalSince1970))",
+                    startedAt: startedAt,
+                    title: "移动",
+                    icon: "location.north.line.fill",
+                    colorHex: nil,
+                    placeName: normalizedPlaceName(input.currentAddress, fallback: "移动中"),
+                    address: nil,
+                    startLocation: startLocation,
+                    distance: distance > 0 ? distance : nil,
+                    averageSpeed: averageSpeed,
+                    latitude: location.coordinate.latitude,
+                    longitude: location.coordinate.longitude,
+                    mapRevision: input.mapRevision,
+                    prefersDarkMap: input.prefersDarkMap,
+                    todayPlaceCount: todaySummary.placeKeys.count,
+                    todayDistance: todaySummary.distance + distance
+                ),
+                routePoints.map {
+                    CodableCoordinate(
+                        lat: $0.coordinate.latitude,
+                        lon: $0.coordinate.longitude,
+                        timestamp: $0.timestamp
+                    )
+                },
+                []
             ),
-            routePoints.map {
-                CodableCoordinate(
-                    lat: $0.coordinate.latitude,
-                    lon: $0.coordinate.longitude,
-                    timestamp: $0.timestamp
-                )
-            },
-            []
+            provisionalTransportStartedAt: startedAt,
+            provisionalTransportStartLocation: startLocation
         )
     }
 
-    private func todaySummary(context: ModelContext, now: Date) -> TodaySummary {
+    nonisolated private static func todaySummary(context: ModelContext, now: Date) -> TodaySummary {
         let calendar = Calendar.current
         let startOfToday = calendar.startOfDay(for: now)
         let endOfToday = calendar.date(byAdding: .day, value: 1, to: startOfToday)
@@ -6313,7 +6584,7 @@ final class CurrentLiveActivityManager {
         )
     }
 
-    private func placeSummaryKey(
+    nonisolated private static func placeSummaryKey(
         name: String?,
         placeID: UUID?,
         coordinate: CLLocationCoordinate2D
@@ -6327,7 +6598,7 @@ final class CurrentLiveActivityManager {
         return "coordinate:\(Int((coordinate.latitude * 1000).rounded())),\(Int((coordinate.longitude * 1000).rounded()))"
     }
 
-    private func normalizedPlaceName(_ value: String?, fallback: String) -> String {
+    nonisolated private static func normalizedPlaceName(_ value: String?, fallback: String) -> String {
         let text = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if text.isEmpty || text == "正在解析位置..." || text == "未知位置" {
             return fallback

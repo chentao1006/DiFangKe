@@ -1045,9 +1045,14 @@ class StatisticsViewModel(application: Application) : AndroidViewModel(applicati
                 transports = source.transports.filter { inRange(it.startTime) },
                 activityTypes = source.activityTypes,
                 places = source.places
-            )
+            ).also { built ->
+                // Fill the lazy rank cache here so the detail page never computes it in composition.
+                FrequentPlaceRankScope.values().forEach { built.frequentPlaces(it) }
+            }
         }
-        val years = source.footprints.map { yearOf(it.startTime) }.distinct().sortedDescending()
+        val years = withContext(Dispatchers.Default) {
+            source.footprints.map { yearOf(it.startTime) }.distinct().sortedDescending()
+        }
         _state.update {
             it.copy(snapshot = snapshot, memories = emptyList(), mapData = null, isReady = false, availableYears = years)
         }

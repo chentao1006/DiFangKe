@@ -118,6 +118,91 @@ private struct TimelineSnapshotBatch: Sendable {
     let places: [PlaceLite]
 }
 
+/// One row of a day plan. Footprints stay value snapshots; only the
+/// lightweight unmanaged model is materialized on the main actor.
+private enum TimelineDayPlanEntry: @unchecked Sendable {
+    case footprint(TimelineFootprintSnapshot, [CLLocationCoordinate2D])
+    case transport(Transport)
+}
+
+/// A day's timeline converted, aligned and ordered off the main actor.
+private struct TimelineDayPlan: @unchecked Sendable {
+    let date: Date
+    /// Newest first, the order stored for a loaded day.
+    let entries: [TimelineDayPlanEntry]
+    /// Indices into `entries` in chronological order, as rows render them.
+    let chronologicalOrder: [Int]
+    /// Unique footprint city names in chronological order.
+    let cityNames: [String]
+}
+
+/// A loaded day as consumed by the timeline UI. Everything here was ordered
+/// in the background; the main actor only reads it.
+private struct TimelineDayContent {
+    /// Newest first.
+    let items: [TimelineItem]
+    /// Oldest first.
+    let chronologicalItems: [TimelineItem]
+    let cityNames: [String]
+}
+
+/// Loadable dates sorted once whenever availability or hidden days change, so
+/// rows and toolbar state use binary searches instead of scanning a set.
+private struct TimelineLoadableDateIndex {
+    /// Ascending, unique, start-of-day dates.
+    let sortedDates: [Date]
+
+    static let empty = TimelineLoadableDateIndex(sortedDates: [])
+
+    /// First index whose date is not earlier than `date`.
+    func lowerBound(_ date: Date) -> Int {
+        var low = 0
+        var high = sortedDates.count
+        while low < high {
+            let mid = (low + high) / 2
+            if sortedDates[mid] < date { low = mid + 1 } else { high = mid }
+        }
+        return low
+    }
+
+    /// First index whose date is later than `date`.
+    func upperBound(_ date: Date) -> Int {
+        var low = 0
+        var high = sortedDates.count
+        while low < high {
+            let mid = (low + high) / 2
+            if sortedDates[mid] <= date { low = mid + 1 } else { high = mid }
+        }
+        return low
+    }
+
+    /// Dates strictly between the two bounds, ascending.
+    func dates(after earlierDate: Date, before laterDate: Date) -> ArraySlice<Date> {
+        let lower = upperBound(earlierDate)
+        let upper = max(lower, lowerBound(laterDate))
+        return sortedDates[lower..<upper]
+    }
+}
+
+/// Value inputs for timeline camera framing, so coordinate gathering and
+/// bounding run off the main actor.
+private enum TimelineMapCameraSource: @unchecked Sendable {
+    case footprint(latitude: Double, longitude: Double, placeID: UUID?, locationHash: String, duration: TimeInterval)
+    case transport(Transport)
+}
+
+private enum TimelineMapCameraMode: Sendable {
+    case medium
+    case collapsed
+    case expanded
+}
+
+private struct FootprintCameraRectCache {
+    let key: FootprintCameraSourceKey
+    let viewport: CGSize
+    let rect: MKMapRect
+}
+
 private struct LocationSettingsAlertModifier: ViewModifier {
     @Binding var isPresented: Bool
 
@@ -136,14 +221,14 @@ private struct LocationSettingsAlertModifier: ViewModifier {
 
 @MainActor
 private final class ContinuousTimelineCache {
-    private var timelinesByDate: [Date: [TimelineItem]] = [:]
+    private var timelinesByDate: [Date: TimelineDayContent] = [:]
     private var hiddenDates = Set<Date>()
 
     func contains(_ date: Date) -> Bool {
         timelinesByDate[date] != nil || hiddenDates.contains(date)
     }
 
-    func cachedTimeline(for date: Date) -> [TimelineItem]? {
+    func cachedTimeline(for date: Date) -> TimelineDayContent? {
         timelinesByDate[date]
     }
 
@@ -158,7 +243,7 @@ private final class ContinuousTimelineCache {
         }
     }
 
-    func store(_ fetchedTimelines: [Date: [TimelineItem]], visibleDates: Set<Date>, hiddenDates: Set<Date>) {
+    func store(_ fetchedTimelines: [Date: TimelineDayContent], visibleDates: Set<Date>, hiddenDates: Set<Date>) {
         for (date, items) in fetchedTimelines {
             timelinesByDate[date] = items
         }
@@ -190,7 +275,6 @@ struct TimelineScene<Content: View>: View {
     // while materializing UI models so one "load earlier" batch never owns
     // the main actor for the whole batch.
     nonisolated private static var timelineCommitChunkSize: Int { 1 }
-    nonisolated private static var timelineCoordinateConversionChunkSize: Int { 2_048 }
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
@@ -201,7 +285,7 @@ struct TimelineScene<Content: View>: View {
     @State private var showLocationSettingsAlert = false
     @State private var showingArrivalConfirmation = false
     @State private var loadedDates: [Date] = []
-    @State private var timelinesByDate: [Date: [TimelineItem]] = [:]
+    @State private var timelinesByDate: [Date: TimelineDayContent] = [:]
     @State private var isLoadingEarlierDates = false
     @State private var todayScrollRequest = 0
     @State private var targetScrollDate: Date? = nil
@@ -228,7 +312,10 @@ struct TimelineScene<Content: View>: View {
     @State private var allowsMapInteractionCollapse = false
     @State private var timelineCache = ContinuousTimelineCache()
     @State private var availableTimelineDateSet = Set<Date>()
+    /// `availableTimelineDateSet` ascending, as produced off main.
+    @State private var availableTimelineDates: [Date] = []
     @State private var hiddenTimelineDateSet = Set<Date>()
+    @State private var loadableTimelineDateIndex = TimelineLoadableDateIndex.empty
     @State private var timelineReloadTask: Task<Void, Never>?
     @State private var midnightTimelineRefreshTask: Task<Void, Never>?
     @State private var isReloadingTimelineExternally = false
@@ -239,14 +326,27 @@ struct TimelineScene<Content: View>: View {
     @State private var mapTapDetentBeforeCollapse: PresentationDetent?
     @State private var loadedFootprintCameraKey: FootprintCameraSourceKey?
     @State private var loadedFootprintCameraCoordinates: [CLLocationCoordinate2D] = []
+    @State private var loadedFootprintCameraCenter: CLLocationCoordinate2D?
+    @State private var footprintCameraRectCache: FootprintCameraRectCache?
+    @State private var footprintFocusTask: Task<Void, Never>?
+    @State private var lockedMapCameraTask: Task<Void, Never>?
     @State private var selectedFootprintGroup: DFKMapView.AggregatedFootprint?
     @State private var selectedMapPhotoAssetID: String? = nil
 
 
     private var timelineDates: [Date] {
-        var dates = Set(loadedDates)
-        dates.insert(activeTimelineDate)
-        return Array(dates).sorted()
+        // `loadedDates` is always sorted and unique; insert the active date
+        // by binary search instead of rebuilding and sorting a set.
+        var low = 0
+        var high = loadedDates.count
+        while low < high {
+            let mid = (low + high) / 2
+            if loadedDates[mid] < activeTimelineDate { low = mid + 1 } else { high = mid }
+        }
+        guard low == loadedDates.count || loadedDates[low] != activeTimelineDate else { return loadedDates }
+        var dates = loadedDates
+        dates.insert(activeTimelineDate, at: low)
+        return dates
     }
 
     private var mapTimelineItems: [TimelineItem] {
@@ -263,10 +363,8 @@ struct TimelineScene<Content: View>: View {
     }
 
     private var selectedFootprintMapCoordinate: CLLocationCoordinate2D? {
-        let points = mapPoints
-        guard !points.isEmpty else { return nil }
-        return CLLocationCoordinate2D(latitude: points.map(\.latitude).reduce(0, +) / Double(points.count),
-                                      longitude: points.map(\.longitude).reduce(0, +) / Double(points.count))
+        guard let key = footprintCameraSourceKey, loadedFootprintCameraKey == key else { return nil }
+        return loadedFootprintCameraCenter
     }
     
     private var mapPrefersActivityIcons: Bool {
@@ -383,7 +481,7 @@ struct TimelineScene<Content: View>: View {
             loadGapDates: loadTimelineGapDates,
             loadDate: { date, allowEmpty in await loadTimelineDate(date, allowEmpty: allowEmpty) },
             gapLoadBatchSize: Self.gapLoadDateBatchSize,
-            availableDates: loadableTimelineDateSet,
+            availableDates: loadableTimelineDateIndex,
             visibleDatesChanged: updateVisibleTimelineDates,
             visibleItemIDsChanged: updateVisibleTimelineItemIDs,
             isActive: isActive,
@@ -566,6 +664,8 @@ struct TimelineScene<Content: View>: View {
         visibleMapUpdateTask?.cancel()
         mapCameraTransitionTask?.cancel()
         mapInteractionEnableTask?.cancel()
+        footprintFocusTask?.cancel()
+        lockedMapCameraTask?.cancel()
     }
 
     private func handleFootprintDataChanged(_: Notification) {
@@ -701,12 +801,15 @@ struct TimelineScene<Content: View>: View {
         guard let footprint = selectedFootprint, let key = footprintCameraSourceKey else {
             loadedFootprintCameraKey = nil
             loadedFootprintCameraCoordinates = []
+            loadedFootprintCameraCenter = nil
+            footprintCameraRectCache = nil
             return
         }
         let fallback = footprint.coordinates.isEmpty
             ? [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
             : footprint.coordinates
-        let coordinates = await Task.detached(priority: .userInitiated) {
+        let viewport = mapViewportSize
+        let result = await Task.detached(priority: .userInitiated) {
             let calendar = Calendar.current
             var day = calendar.startOfDay(for: key.start)
             let lastDay = calendar.startOfDay(for: max(key.start, key.end))
@@ -716,33 +819,65 @@ struct TimelineScene<Content: View>: View {
                 guard let next = calendar.date(byAdding: .day, value: 1, to: day), next > day else { break }
                 day = next
             }
-            return FootprintCameraFraming.coordinates(rawPoints: rawPoints, start: key.start, end: key.end,
-                                                     fallback: fallback)
+            let coordinates = FootprintCameraFraming.coordinates(rawPoints: rawPoints, start: key.start, end: key.end,
+                                                                 fallback: fallback)
+            let center: CLLocationCoordinate2D? = coordinates.isEmpty ? nil : CLLocationCoordinate2D(
+                latitude: coordinates.map(\.latitude).reduce(0, +) / Double(coordinates.count),
+                longitude: coordinates.map(\.longitude).reduce(0, +) / Double(coordinates.count)
+            )
+            let rect = Self.footprintCameraRect(coordinates: coordinates, viewport: viewport)
+            return (coordinates: coordinates, center: center, rect: rect)
         }.value
         guard !Task.isCancelled, footprintCameraSourceKey == key else { return }
-        loadedFootprintCameraCoordinates = coordinates
+        loadedFootprintCameraCoordinates = result.coordinates
+        loadedFootprintCameraCenter = result.center
+        footprintCameraRectCache = result.rect.map { FootprintCameraRectCache(key: key, viewport: viewport, rect: $0) }
         loadedFootprintCameraKey = key
         focusMap(on: footprint)
+    }
+
+    /// Fits a selected footprint into the unobscured part of the map. Pure
+    /// geometry over the footprint's raw samples; runs off the main actor.
+    nonisolated private static func footprintCameraRect(coordinates: [CLLocationCoordinate2D], viewport: CGSize) -> MKMapRect? {
+        // Wait for real geometry instead of fitting with a guessed aspect ratio.
+        guard viewport.width > 1, viewport.height > 1 else { return nil }
+        let visibleRect = CGRect(
+            x: viewport.width * 0.08,
+            y: viewport.height * 0.10,
+            width: viewport.width * 0.84,
+            height: viewport.height * 0.80
+        )
+        return FootprintCameraFraming.mapRect(coordinates: coordinates, viewport: viewport, visibleRect: visibleRect)
     }
 
     private func focusMap(on footprint: Footprint, animated: Bool = true) {
         let key = FootprintCameraSourceKey(id: footprint.footprintID, start: footprint.startTime, end: footprint.endTime)
         guard loadedFootprintCameraKey == key else { return }
-        let coordinates = loadedFootprintCameraCoordinates
         // Wait for real geometry instead of fitting with a guessed aspect ratio.
         guard mapViewportSize.width > 1, mapViewportSize.height > 1 else { return }
-        let visibleRect = CGRect(
-            x: mapViewportSize.width * 0.08,
-            y: mapViewportSize.height * 0.10,
-            width: mapViewportSize.width * 0.84,
-            height: mapViewportSize.height * 0.80
-        )
-        guard let rect = FootprintCameraFraming.mapRect(
-            coordinates: coordinates, viewport: mapViewportSize, visibleRect: visibleRect
-        ) else { return }
+        let viewport = mapViewportSize
+        footprintFocusTask?.cancel()
+        if let cache = footprintCameraRectCache, cache.key == key, cache.viewport == viewport {
+            applyFootprintCamera(rect: cache.rect, footprintID: footprint.footprintID, animated: animated)
+            return
+        }
+        // The viewport changed since the rect was fitted: refit off main.
+        let coordinates = loadedFootprintCameraCoordinates
+        let footprintID = footprint.footprintID
+        footprintFocusTask = Task { @MainActor in
+            let rect = await Task.detached(priority: .userInitiated) {
+                Self.footprintCameraRect(coordinates: coordinates, viewport: viewport)
+            }.value
+            guard !Task.isCancelled, loadedFootprintCameraKey == key, mapViewportSize == viewport, let rect else { return }
+            footprintCameraRectCache = FootprintCameraRectCache(key: key, viewport: viewport, rect: rect)
+            applyFootprintCamera(rect: rect, footprintID: footprintID, animated: animated)
+        }
+    }
+
+    private func applyFootprintCamera(rect: MKMapRect, footprintID: UUID, animated: Bool) {
         let baseRegion = MKCoordinateRegion(rect)
         let targetRegion = adjustedMapRegion(baseRegion)
-        renderedSelectedFootprintID = footprint.footprintID
+        renderedSelectedFootprintID = footprintID
         renderedMapRegion = targetRegion
         displayedMapRegion = targetRegion
         // Commit the destination once and let MapKit animate the camera.
@@ -797,8 +932,13 @@ struct TimelineScene<Content: View>: View {
         if newValue == collapsedDetent { lockVisibleTimelineMapForInteraction() }
     }
 
-    private var loadableTimelineDateSet: Set<Date> {
-        availableTimelineDateSet.subtracting(hiddenTimelineDateSet)
+    /// Rebuilds the sorted loadable-date index after availability or hidden
+    /// days change. Linear filter over an already sorted array; no sorting.
+    private func refreshLoadableTimelineDateIndex() {
+        let hidden = hiddenTimelineDateSet
+        loadableTimelineDateIndex = TimelineLoadableDateIndex(
+            sortedDates: hidden.isEmpty ? availableTimelineDates : availableTimelineDates.filter { !hidden.contains($0) }
+        )
     }
 
     private func setupLocationManager() {
@@ -934,7 +1074,8 @@ struct TimelineScene<Content: View>: View {
     private func publishTimelineDatePlaceholders(around date: Date, in availableDates: [Date]? = nil, radius: Int = 14) {
         let calendar = Calendar.current
         let normalizedDate = calendar.startOfDay(for: date)
-        let dates = (availableDates ?? Array(availableTimelineDateSet)).map { calendar.startOfDay(for: $0) }.sorted()
+        // Cached availability is already sorted start-of-day dates.
+        let dates = availableDates.map { $0.map { calendar.startOfDay(for: $0) }.sorted() } ?? availableTimelineDates
         guard !dates.isEmpty else {
             publishTimelineDatePlaceholders(for: [normalizedDate])
             return
@@ -963,19 +1104,21 @@ struct TimelineScene<Content: View>: View {
     private func loadTimelineDate(_ date: Date, allowEmpty: Bool = false) async -> Bool {
         let calendar = Calendar.current
         let normalizedDate = calendar.startOfDay(for: date)
-        if let items = timelinesByDate[normalizedDate] {
-            guard shouldDisplayTimelineDate(normalizedDate, items: items, allowEmpty: allowEmpty) else { return false }
+        if let day = timelinesByDate[normalizedDate] {
+            guard shouldDisplayTimelineDate(normalizedDate, items: day.items, allowEmpty: allowEmpty) else { return false }
             if !loadedDates.contains(normalizedDate) {
                 loadedDates = Set(loadedDates).union([normalizedDate]).sorted()
             }
             hiddenTimelineDateSet.remove(normalizedDate)
+            refreshLoadableTimelineDateIndex()
             return true
         }
-        if let cachedItems = timelineCache.cachedTimeline(for: normalizedDate) {
-            guard shouldDisplayTimelineDate(normalizedDate, items: cachedItems, allowEmpty: allowEmpty) else { return false }
-            timelinesByDate[normalizedDate] = cachedItems
+        if let cachedDay = timelineCache.cachedTimeline(for: normalizedDate) {
+            guard shouldDisplayTimelineDate(normalizedDate, items: cachedDay.items, allowEmpty: allowEmpty) else { return false }
+            timelinesByDate[normalizedDate] = cachedDay
             loadedDates = Set(loadedDates).union([normalizedDate]).sorted()
             hiddenTimelineDateSet.remove(normalizedDate)
+            refreshLoadableTimelineDateIndex()
             return true
         }
         if !allowEmpty, timelineCache.isHidden(normalizedDate) {
@@ -997,27 +1140,27 @@ struct TimelineScene<Content: View>: View {
         guard !normalizedDates.isEmpty else { return false }
 
         let container = modelContext.container
-        let snapshot = await Task.detached(priority: .utility) {
-            Self.fetchTimelineSnapshots(for: normalizedDates, in: container)
+        let plans = await Task.detached(priority: .utility) {
+            Self.fetchTimelinePlans(for: normalizedDates, in: container)
         }.value
-        guard !snapshot.days.isEmpty else { return false }
+        guard !plans.isEmpty else { return false }
 
-        var fetchedTimelines: [Date: [TimelineItem]] = [:]
+        var fetchedTimelines: [Date: TimelineDayContent] = [:]
         var loadedVisibleDates = Set<Date>()
         var hiddenDates = Set<Date>()
         var didLoadVisibleDate = false
-        for (index, daySnapshot) in snapshot.days.sorted(by: { $0.date < $1.date }).enumerated() {
+        for (index, plan) in plans.enumerated() {
             guard !Task.isCancelled else { break }
-            guard !loadedDates.contains(daySnapshot.date) else { continue }
+            guard !loadedDates.contains(plan.date) else { continue }
 
-            let items = await Self.timelineItems(from: daySnapshot, allPlaces: snapshot.places)
-            fetchedTimelines[daySnapshot.date] = items
+            let day = Self.timelineDayContent(from: plan)
+            fetchedTimelines[plan.date] = day
 
-            if shouldDisplayTimelineDate(daySnapshot.date, items: items) {
-                loadedVisibleDates.insert(daySnapshot.date)
+            if shouldDisplayTimelineDate(plan.date, items: day.items) {
+                loadedVisibleDates.insert(plan.date)
                 didLoadVisibleDate = true
             } else {
-                hiddenDates.insert(daySnapshot.date)
+                hiddenDates.insert(plan.date)
             }
 
             if index > 0, index % Self.timelineCommitChunkSize == 0 {
@@ -1113,61 +1256,42 @@ struct TimelineScene<Content: View>: View {
         return TimelineSnapshotBatch(days: days, places: places)
     }
 
-    @MainActor
-    private static func timelineItems(from snapshot: TimelineDaySnapshot, allPlaces: [PlaceLite]) async -> [TimelineItem] {
-        var items: [TimelineItem] = []
+    /// Fetches the requested days and converts, aligns and orders them. Runs
+    /// entirely off the main actor; plans are returned in ascending date order.
+    nonisolated private static func fetchTimelinePlans(for dates: [Date], in container: ModelContainer) -> [TimelineDayPlan] {
+        let snapshot = fetchTimelineSnapshots(for: dates, in: container)
+        return snapshot.days
+            .sorted { $0.date < $1.date }
+            .map { timelineDayPlan(from: $0, allPlaces: snapshot.places) }
+    }
 
+    nonisolated private static func timelineDayPlan(from snapshot: TimelineDaySnapshot, allPlaces: [PlaceLite]) -> TimelineDayPlan {
+        var items: [TimelineItem] = []
+        var footprintCoordinates: [[CLLocationCoordinate2D]] = []
+        items.reserveCapacity(snapshot.footprints.count + snapshot.transports.count)
+        footprintCoordinates.reserveCapacity(snapshot.footprints.count)
+
+        // Unmanaged scratch models used only for alignment inside this task;
+        // the UI's models are created on main from the same snapshots.
         for footprint in snapshot.footprints {
             let coordinates = footprint.coordinates.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-            let model = Footprint(
-                footprintID: footprint.footprintID,
-                date: footprint.date,
-                startTime: footprint.startTime,
-                endTime: footprint.endTime,
-                footprintLocations: coordinates,
-                locationHash: footprint.locationHash,
-                duration: max(0, footprint.endTime.timeIntervalSince(footprint.startTime)),
-                reason: footprint.reason,
-                status: footprint.status,
-                aiScore: footprint.aiScore,
-                isHighlight: footprint.isHighlight,
-                placeID: footprint.placeID,
-                photoAssetIDs: footprint.photoAssetIDs,
-                address: footprint.address,
-                isPlaceSuggestionIgnored: footprint.isPlaceSuggestionIgnored,
-                aiAnalyzed: footprint.aiAnalyzed,
-                isAddressEditedByHand: footprint.isAddressEditedByHand,
-                activityTypeValue: footprint.activityTypeValue,
-                stepCount: footprint.stepCount,
-                walkingDistance: footprint.walkingDistance,
-                floorsAscended: footprint.floorsAscended
-            )
-            model.countryCode = footprint.countryCode
-            model.countryName = footprint.countryName
-            model.cityName = footprint.cityName
-            items.append(.footprint(model))
+            footprintCoordinates.append(coordinates)
+            items.append(.footprint(makeTimelineFootprint(footprint, coordinates: coordinates)))
         }
 
         for transport in snapshot.transports {
             var pathPoints: [TransportPathPoint] = []
             pathPoints.reserveCapacity(transport.points.count)
-            for (index, point) in transport.points.enumerated() {
+            var coordinates: [CLLocationCoordinate2D] = []
+            coordinates.reserveCapacity(transport.points.count)
+            for point in transport.points {
+                let coordinate = CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon)
                 pathPoints.append(TransportPathPoint(
-                    coordinate: CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon),
+                    coordinate: coordinate,
                     timestamp: point.timestamp,
                     isSyntheticPadding: point.isSyntheticPadding ?? false
                 ))
-                if index > 0, index % Self.timelineCoordinateConversionChunkSize == 0 {
-                    await Task.yield()
-                }
-            }
-            var coordinates: [CLLocationCoordinate2D] = []
-            coordinates.reserveCapacity(pathPoints.count)
-            for (index, point) in pathPoints.enumerated() {
-                coordinates.append(point.coordinate)
-                if index > 0, index % Self.timelineCoordinateConversionChunkSize == 0 {
-                    await Task.yield()
-                }
+                coordinates.append(coordinate)
             }
             let type = TransportType(rawValue: transport.typeRaw) ?? .slow
             let manualType = transport.manualTypeRaw.flatMap { TransportType(rawValue: $0) }
@@ -1187,8 +1311,95 @@ struct TimelineScene<Content: View>: View {
             )))
         }
 
-        items.sort { $0.startTime < $1.startTime }
-        return TimelineBuilder.alignTransportLocations(items, allPlaces: allPlaces).sorted { $0.startTime > $1.startTime }
+        // Same order of operations as before: ascending sort, align, then
+        // newest-first sort. Sorting indices with the same comparator yields
+        // the same permutation as sorting the items themselves.
+        let ascendingSources = Array(items.indices).sorted { items[$0].startTime < items[$1].startTime }
+        let aligned = TimelineBuilder.alignTransportLocations(ascendingSources.map { items[$0] }, allPlaces: allPlaces)
+        let newestFirst = Array(aligned.indices).sorted { aligned[$0].startTime > aligned[$1].startTime }
+
+        let footprintCount = snapshot.footprints.count
+        var entries: [TimelineDayPlanEntry] = []
+        var entryStartTimes: [Date] = []
+        entries.reserveCapacity(newestFirst.count)
+        entryStartTimes.reserveCapacity(newestFirst.count)
+        for position in newestFirst {
+            let source = ascendingSources[position]
+            let item = aligned[position]
+            entryStartTimes.append(item.startTime)
+            if source < footprintCount {
+                entries.append(.footprint(snapshot.footprints[source], footprintCoordinates[source]))
+            } else if case .transport(let transport) = item {
+                // Warm the memoized display geometry here so the map and rows
+                // read it without computing on main.
+                _ = transport.lineSegments
+                entries.append(.transport(transport))
+            }
+        }
+
+        let chronologicalOrder = Array(entryStartTimes.indices).sorted { entryStartTimes[$0] < entryStartTimes[$1] }
+        var seenCityNames = Set<String>()
+        var cityNames: [String] = []
+        for index in chronologicalOrder {
+            guard case .footprint(let footprint, _) = entries[index],
+                  let cityName = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !cityName.isEmpty,
+                  seenCityNames.insert(cityName).inserted else { continue }
+            cityNames.append(cityName)
+        }
+
+        return TimelineDayPlan(date: snapshot.date, entries: entries, chronologicalOrder: chronologicalOrder, cityNames: cityNames)
+    }
+
+    nonisolated private static func makeTimelineFootprint(_ footprint: TimelineFootprintSnapshot, coordinates: [CLLocationCoordinate2D]) -> Footprint {
+        let model = Footprint(
+            footprintID: footprint.footprintID,
+            date: footprint.date,
+            startTime: footprint.startTime,
+            endTime: footprint.endTime,
+            footprintLocations: coordinates,
+            locationHash: footprint.locationHash,
+            duration: max(0, footprint.endTime.timeIntervalSince(footprint.startTime)),
+            reason: footprint.reason,
+            status: footprint.status,
+            aiScore: footprint.aiScore,
+            isHighlight: footprint.isHighlight,
+            placeID: footprint.placeID,
+            photoAssetIDs: footprint.photoAssetIDs,
+            address: footprint.address,
+            isPlaceSuggestionIgnored: footprint.isPlaceSuggestionIgnored,
+            aiAnalyzed: footprint.aiAnalyzed,
+            isAddressEditedByHand: footprint.isAddressEditedByHand,
+            activityTypeValue: footprint.activityTypeValue,
+            stepCount: footprint.stepCount,
+            walkingDistance: footprint.walkingDistance,
+            floorsAscended: footprint.floorsAscended
+        )
+        model.countryCode = footprint.countryCode
+        model.countryName = footprint.countryName
+        model.cityName = footprint.cityName
+        return model
+    }
+
+    /// Materializes a background plan for the UI: creates the unmanaged
+    /// footprint models in precomputed order. No sorting or geometry here.
+    @MainActor
+    private static func timelineDayContent(from plan: TimelineDayPlan) -> TimelineDayContent {
+        var items: [TimelineItem] = []
+        items.reserveCapacity(plan.entries.count)
+        for entry in plan.entries {
+            switch entry {
+            case .footprint(let footprint, let coordinates):
+                items.append(.footprint(makeTimelineFootprint(footprint, coordinates: coordinates)))
+            case .transport(let transport):
+                items.append(.transport(transport))
+            }
+        }
+        return TimelineDayContent(
+            items: items,
+            chronologicalItems: plan.chronologicalOrder.map { items[$0] },
+            cityNames: plan.cityNames
+        )
     }
 
     @discardableResult
@@ -1246,7 +1457,7 @@ struct TimelineScene<Content: View>: View {
 
         guard !datesToLoad.isEmpty else { return false }
 
-        var cachedTimelines: [Date: [TimelineItem]] = [:]
+        var cachedTimelines: [Date: TimelineDayContent] = [:]
         var cachedVisibleDates = Set<Date>()
         var cachedHiddenDates = Set<Date>()
         datesToLoad.removeAll { date in
@@ -1272,37 +1483,40 @@ struct TimelineScene<Content: View>: View {
         defer { endDeferredTimelineWork(defersMapUpdates: defersMapUpdates) }
 
         if let today = datesToLoad.first(where: { calendar.isDateInToday($0) }) {
-            _ = PersistentTimelineBuilder.fetchTimeline(for: today, in: modelContext)
+            // Only the persisted repairs matter here (cross-day split and
+            // continuation absorption for today); the snapshot below must
+            // observe them, so the background repair is awaited first.
+            await PersistentTimelineBuilder.repairTimelineDay(for: today, container: modelContext.container)
         }
         let container = modelContext.container
-        let snapshot = await Task.detached(priority: .utility) {
-            Self.fetchTimelineSnapshots(for: datesToLoad, in: container)
+        let plans = await Task.detached(priority: .utility) {
+            Self.fetchTimelinePlans(for: datesToLoad, in: container)
         }.value
-        guard !snapshot.days.isEmpty else {
+        guard !plans.isEmpty else {
             publishLoadedTimelines([:], visibleDates: [], hiddenDates: Set(datesToLoad))
             return false
         }
 
-        var fetchedTimelines: [Date: [TimelineItem]] = [:]
+        var fetchedTimelines: [Date: TimelineDayContent] = [:]
         var loadedVisibleDates = Set<Date>()
         var hiddenDates = Set<Date>()
         var didLoadVisibleDate = false
         var fetchedDates = Set<Date>()
 
-        for (index, daySnapshot) in snapshot.days.sorted(by: { $0.date < $1.date }).enumerated() {
+        for (index, plan) in plans.enumerated() {
             guard !Task.isCancelled else { break }
-            fetchedDates.insert(daySnapshot.date)
-            let hasRenderedTimeline = timelinesByDate[daySnapshot.date] != nil || timelineCache.isHidden(daySnapshot.date)
+            fetchedDates.insert(plan.date)
+            let hasRenderedTimeline = timelinesByDate[plan.date] != nil || timelineCache.isHidden(plan.date)
             guard reloadLoadedDates || !hasRenderedTimeline else { continue }
 
-            let items = await Self.timelineItems(from: daySnapshot, allPlaces: snapshot.places)
-            fetchedTimelines[daySnapshot.date] = items
+            let day = Self.timelineDayContent(from: plan)
+            fetchedTimelines[plan.date] = day
 
-            if shouldDisplayTimelineDate(daySnapshot.date, items: items, allowEmpty: allowEmpty) {
-                loadedVisibleDates.insert(daySnapshot.date)
+            if shouldDisplayTimelineDate(plan.date, items: day.items, allowEmpty: allowEmpty) {
+                loadedVisibleDates.insert(plan.date)
                 didLoadVisibleDate = true
             } else {
-                hiddenDates.insert(daySnapshot.date)
+                hiddenDates.insert(plan.date)
             }
 
             if index > 0, index % Self.timelineCommitChunkSize == 0 {
@@ -1316,12 +1530,13 @@ struct TimelineScene<Content: View>: View {
         return didLoadVisibleDate
     }
 
-    private func publishLoadedTimelines(_ fetchedTimelines: [Date: [TimelineItem]], visibleDates: Set<Date>, hiddenDates: Set<Date>) {
+    private func publishLoadedTimelines(_ fetchedTimelines: [Date: TimelineDayContent], visibleDates: Set<Date>, hiddenDates: Set<Date>) {
         guard !fetchedTimelines.isEmpty || !visibleDates.isEmpty || !hiddenDates.isEmpty else { return }
 
         timelineCache.store(fetchedTimelines, visibleDates: visibleDates, hiddenDates: hiddenDates)
         hiddenTimelineDateSet.subtract(visibleDates)
         hiddenTimelineDateSet.formUnion(hiddenDates)
+        refreshLoadableTimelineDateIndex()
 
         var transaction = Transaction()
         transaction.disablesAnimations = true
@@ -1374,22 +1589,21 @@ struct TimelineScene<Content: View>: View {
 
     @discardableResult
     private func refreshAvailableTimelineDateCache() async -> [Date] {
-        let dates = await availableTimelineDatesForLoading()
-        availableTimelineDateSet = Set(dates)
-        return dates
+        let rawDates = Array(locationManager.availableRawDates)
+        let container = modelContext.container
+        let result = await Task.detached(priority: .utility) {
+            let dates = Self.fetchAvailableTimelineDates(rawDates: rawDates, in: container)
+            return (dates: dates, set: Set(dates))
+        }.value
+        availableTimelineDateSet = result.set
+        availableTimelineDates = result.dates
+        refreshLoadableTimelineDateIndex()
+        return result.dates
     }
 
     private func availableTimelineDatesForLookup() async -> Set<Date> {
         if !availableTimelineDateSet.isEmpty { return availableTimelineDateSet }
         return Set(await refreshAvailableTimelineDateCache())
-    }
-
-    private func availableTimelineDatesForLoading() async -> [Date] {
-        let rawDates = Array(locationManager.availableRawDates)
-        let container = modelContext.container
-        return await Task.detached(priority: .utility) {
-            Self.fetchAvailableTimelineDates(rawDates: rawDates, in: container)
-        }.value
     }
 
     nonisolated private static func fetchAvailableTimelineDates(rawDates _: [Date], in container: ModelContainer) -> [Date] {
@@ -1513,19 +1727,30 @@ struct TimelineScene<Content: View>: View {
         renderedMapDetentKey = currentMapDetentKey
         renderedSelectedFootprintID = selectedFootprint?.footprintID
 
-        let region: MKCoordinateRegion?
-        if items.isEmpty {
-            region = currentLocationMapRegion()
-        } else {
-            region = adjustedMapRegion(for: mapCameraCoordinates(for: cameraItems))
-        }
-
-        guard let region else {
-            renderedMapRegion = nil
+        lockedMapCameraTask?.cancel()
+        guard !items.isEmpty else {
+            guard let region = currentLocationMapRegion() else {
+                renderedMapRegion = nil
+                return
+            }
+            moveMapCamera(to: region, animated: animated)
             return
         }
 
-        moveMapCamera(to: region, animated: animated)
+        // Gather and bound the camera coordinates off the main actor.
+        let sources = Self.mapCameraSources(for: cameraItems)
+        let mode = currentMapCameraMode
+        lockedMapCameraTask = Task { @MainActor in
+            let boundingRegion = await Task.detached(priority: .userInitiated) {
+                Self.cameraBoundingRegion(for: sources, mode: mode)
+            }.value
+            guard !Task.isCancelled else { return }
+            guard let region = adjustedMapRegion(fromBoundingRegion: boundingRegion) else {
+                renderedMapRegion = nil
+                return
+            }
+            moveMapCamera(to: region, animated: animated)
+        }
     }
 
     private func unlockVisibleTimelineMapAfterInteraction() {
@@ -1603,6 +1828,21 @@ struct TimelineScene<Content: View>: View {
             let selectedFootprintID = selectedFootprint?.footprintID
             let mapStateChanged = mapItemIDs != renderedMapItemIDs || detentKey != renderedMapDetentKey || selectedFootprintID != renderedSelectedFootprintID
             let cameraStateChanged = cameraItemIDs != renderedCameraItemIDs || detentKey != renderedMapDetentKey || selectedFootprintID != renderedSelectedFootprintID
+
+            // Gather and bound the camera coordinates off the main actor
+            // before committing any rendered state, so a cancelled refresh
+            // leaves the next one seeing the same change.
+            var targetRegion: MKCoordinateRegion?
+            if mapStateChanged || cameraStateChanged {
+                let sources = Self.mapCameraSources(for: cameraItems)
+                let mode = currentMapCameraMode
+                let boundingRegion = await Task.detached(priority: .userInitiated) {
+                    Self.cameraBoundingRegion(for: sources, mode: mode)
+                }.value
+                guard !Task.isCancelled else { return }
+                targetRegion = adjustedMapRegion(fromBoundingRegion: boundingRegion)
+            }
+
             renderedMapItemIDs = mapItemIDs
             renderedCameraItemIDs = cameraItemIDs
             renderedMapDetentKey = detentKey
@@ -1611,9 +1851,7 @@ struct TimelineScene<Content: View>: View {
             visibleTimelineItems = items
             guard mapStateChanged || cameraStateChanged else { return }
 
-            let coordinates = mapCameraCoordinates(for: cameraItems)
-
-            if let region = adjustedMapRegion(for: coordinates), shouldUpdateMapRegion(to: region) {
+            if let region = targetRegion, shouldUpdateMapRegion(to: region) {
                 moveMapCamera(to: region, animated: true)
             }
         }
@@ -1625,7 +1863,7 @@ struct TimelineScene<Content: View>: View {
         return visibleDates
             .sorted()
             .flatMap { date in
-                (timelinesByDate[calendar.startOfDay(for: date)] ?? []).filter { item in
+                (timelinesByDate[calendar.startOfDay(for: date)]?.items ?? []).filter { item in
                     visibleDates.contains(calendar.startOfDay(for: item.startTime))
                 }
             }
@@ -1761,32 +1999,56 @@ struct TimelineScene<Content: View>: View {
         return region.span.latitudeDelta <= 180 && region.span.longitudeDelta <= 360
     }
 
-    private func mapCameraCoordinates(for items: [TimelineItem]) -> [CLLocationCoordinate2D] {
-        let itemCoordinates: [CLLocationCoordinate2D]
-        if !isSideBySide && timelineDetent == .medium {
-            itemCoordinates = mediumDetentAnnotationCoordinates(for: items)
-        } else {
-            itemCoordinates = items.flatMap { item -> [CLLocationCoordinate2D] in
-                switch item {
-                case .footprint(let footprint):
-                    return [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
-                case .transport(let transport):
-                    if !isSideBySide && timelineDetent == .height(collapsedTimelineDetentHeight) {
-                        return transport.points
-                    }
-                    return sampledCoordinates(from: transport.points, maximumCount: 24)
-                }
-            }
-        }
-
-        return itemCoordinates
+    private var currentMapCameraMode: TimelineMapCameraMode {
+        if !isSideBySide && timelineDetent == .medium { return .medium }
+        if !isSideBySide && timelineDetent == .height(collapsedTimelineDetentHeight) { return .collapsed }
+        return .expanded
     }
 
-    private func mediumDetentAnnotationCoordinates(for items: [TimelineItem]) -> [CLLocationCoordinate2D] {
-        var coordinates = aggregatedFootprintCameraCoordinates(for: items)
+    /// Value inputs for camera framing. Reads only cached model fields.
+    private static func mapCameraSources(for items: [TimelineItem]) -> [TimelineMapCameraSource] {
+        items.map { item in
+            switch item {
+            case .footprint(let footprint):
+                return .footprint(
+                    latitude: footprint.latitude,
+                    longitude: footprint.longitude,
+                    placeID: footprint.placeID,
+                    locationHash: footprint.locationHash,
+                    duration: footprint.duration
+                )
+            case .transport(let transport):
+                return .transport(transport)
+            }
+        }
+    }
 
-        for item in items {
-            guard case .transport(let transport) = item else { continue }
+    nonisolated private static func cameraBoundingRegion(for sources: [TimelineMapCameraSource], mode: TimelineMapCameraMode) -> MKCoordinateRegion? {
+        mapCameraCoordinates(for: sources, mode: mode).boundingRegion(paddingFactor: 1.4)
+    }
+
+    nonisolated private static func mapCameraCoordinates(for sources: [TimelineMapCameraSource], mode: TimelineMapCameraMode) -> [CLLocationCoordinate2D] {
+        if mode == .medium {
+            return mediumDetentAnnotationCoordinates(for: sources)
+        }
+        return sources.flatMap { source -> [CLLocationCoordinate2D] in
+            switch source {
+            case .footprint(let latitude, let longitude, _, _, _):
+                return [CLLocationCoordinate2D(latitude: latitude, longitude: longitude)]
+            case .transport(let transport):
+                if mode == .collapsed {
+                    return transport.points
+                }
+                return sampledCoordinates(from: transport.points, maximumCount: 24)
+            }
+        }
+    }
+
+    nonisolated private static func mediumDetentAnnotationCoordinates(for sources: [TimelineMapCameraSource]) -> [CLLocationCoordinate2D] {
+        var coordinates = aggregatedFootprintCameraCoordinates(for: sources)
+
+        for source in sources {
+            guard case .transport(let transport) = source else { continue }
             let transportCoordinates = transport.lineSegments
                 .flatMap { $0.coordinates }
                 .filter(\.isRenderableMapCoordinate)
@@ -1796,10 +2058,10 @@ struct TimelineScene<Content: View>: View {
         }
 
         if coordinates.isEmpty {
-            return items.flatMap { item -> [CLLocationCoordinate2D] in
-                switch item {
-                case .footprint(let footprint):
-                    return [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
+            return sources.flatMap { source -> [CLLocationCoordinate2D] in
+                switch source {
+                case .footprint(let latitude, let longitude, _, _, _):
+                    return [CLLocationCoordinate2D(latitude: latitude, longitude: longitude)]
                 case .transport(let transport):
                     return sampledCoordinates(from: transport.points, maximumCount: 24)
                 }
@@ -1816,38 +2078,38 @@ struct TimelineScene<Content: View>: View {
         var totalDuration: TimeInterval
     }
 
-    private func aggregatedFootprintCameraCoordinates(for items: [TimelineItem]) -> [CLLocationCoordinate2D] {
+    nonisolated private static func aggregatedFootprintCameraCoordinates(for sources: [TimelineMapCameraSource]) -> [CLLocationCoordinate2D] {
         var buckets: [String: FootprintCameraBucket] = [:]
         var orderedKeys: [String] = []
 
-        for item in items {
-            guard case .footprint(let footprint) = item else { continue }
-            let coordinate = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+        for source in sources {
+            guard case .footprint(let latitude, let longitude, let placeID, let locationHash, let duration) = source else { continue }
+            let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
             guard coordinate.isRenderableMapCoordinate else { continue }
 
             let key: String
-            if let placeID = footprint.placeID {
+            if let placeID {
                 key = "place:\(placeID.uuidString)"
-            } else if !footprint.locationHash.isEmpty {
-                key = "hash:\(footprint.locationHash)"
+            } else if !locationHash.isEmpty {
+                key = "hash:\(locationHash)"
             } else {
-                key = String(format: "coord:%.5f,%.5f", footprint.latitude, footprint.longitude)
+                key = String(format: "coord:%.5f,%.5f", latitude, longitude)
             }
 
-            let durationWeight = max(footprint.duration, 1)
+            let durationWeight = max(duration, 1)
             if var bucket = buckets[key] {
-                bucket.weightedLatitude += footprint.latitude * durationWeight
-                bucket.weightedLongitude += footprint.longitude * durationWeight
+                bucket.weightedLatitude += latitude * durationWeight
+                bucket.weightedLongitude += longitude * durationWeight
                 bucket.totalWeight += durationWeight
-                bucket.totalDuration += footprint.duration
+                bucket.totalDuration += duration
                 buckets[key] = bucket
             } else {
                 orderedKeys.append(key)
                 buckets[key] = FootprintCameraBucket(
-                    weightedLatitude: footprint.latitude * durationWeight,
-                    weightedLongitude: footprint.longitude * durationWeight,
+                    weightedLatitude: latitude * durationWeight,
+                    weightedLongitude: longitude * durationWeight,
                     totalWeight: durationWeight,
-                    totalDuration: footprint.duration
+                    totalDuration: duration
                 )
             }
         }
@@ -1862,7 +2124,7 @@ struct TimelineScene<Content: View>: View {
         }
     }
 
-    private func sampledCoordinates(from coordinates: [CLLocationCoordinate2D], maximumCount: Int) -> [CLLocationCoordinate2D] {
+    nonisolated private static func sampledCoordinates(from coordinates: [CLLocationCoordinate2D], maximumCount: Int) -> [CLLocationCoordinate2D] {
         guard coordinates.count > maximumCount, maximumCount > 2 else { return coordinates }
         let step = Double(coordinates.count - 1) / Double(maximumCount - 1)
         return (0..<maximumCount).map { index in
@@ -1882,8 +2144,13 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func adjustedMapRegion(for coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion? {
-        guard let region = coordinates.boundingRegion(paddingFactor: 1.4),
-              isRenderableMapRegion(region) else { return nil }
+        adjustedMapRegion(fromBoundingRegion: coordinates.boundingRegion(paddingFactor: 1.4))
+    }
+
+    /// Main-actor half of camera fitting: validates a bounding region computed
+    /// off main and applies the current detent's framing.
+    private func adjustedMapRegion(fromBoundingRegion region: MKCoordinateRegion?) -> MKCoordinateRegion? {
+        guard let region, isRenderableMapRegion(region) else { return nil }
         return adjustedMapRegion(region)
     }
 
@@ -2009,7 +2276,7 @@ private struct TimelineView: View {
     @AppStorage("isImportantPlaceGuideDismissed") private var isImportantPlaceGuideDismissed = false
 
     let dates: [Date]
-    let timelinesByDate: [Date: [TimelineItem]]
+    let timelinesByDate: [Date: TimelineDayContent]
     let initialTimelineLoadCompleted: Bool
     let layoutViewportState: ContinuousTimelineLayoutViewportState
     let isReloadingTimelineExternally: Bool
@@ -2035,7 +2302,7 @@ private struct TimelineView: View {
     let loadGapDates: ([Date]) async -> Bool
     let loadDate: (Date, Bool) async -> Bool
     let gapLoadBatchSize: Int
-    let availableDates: Set<Date>
+    let availableDates: TimelineLoadableDateIndex
     let visibleDatesChanged: (Set<Date>) -> Void
     let visibleItemIDsChanged: (Set<String>) -> Void
     let isActive: Bool
@@ -2101,25 +2368,25 @@ private struct TimelineView: View {
     }
 
     private var canLoadEarlierDates: Bool {
-        guard let firstDate = currentDates.first else { return false }
-        return availableDates.contains { $0 < firstDate }
+        guard let firstDate = currentDates.first,
+              let earliestDate = availableDates.sortedDates.first else { return false }
+        return earliestDate < firstDate
     }
 
     private var canLoadLaterDates: Bool {
         guard let lastDate = currentDates.last else { return false }
         let today = Calendar.current.startOfDay(for: Date())
-        return availableDates.contains { $0 > lastDate && $0 <= today }
+        let index = availableDates.upperBound(lastDate)
+        return index < availableDates.sortedDates.count && availableDates.sortedDates[index] <= today
     }
 
     private func loadableTimelineDates(between earlierDate: Date, and laterDate: Date) -> [Date] {
         let calendar = Calendar.current
         let earlierDate = calendar.startOfDay(for: earlierDate)
         let laterDate = calendar.startOfDay(for: laterDate)
-        return availableDates.compactMap { availableDate -> Date? in
-            let normalizedDate = calendar.startOfDay(for: availableDate)
-            guard normalizedDate > earlierDate && normalizedDate < laterDate && !currentDates.contains(normalizedDate) else { return nil }
-            return normalizedDate
-        }.sorted()
+        // Indexed dates are already sorted start-of-day values.
+        let renderedDates = rawDateFrames.dateSet
+        return availableDates.dates(after: earlierDate, before: laterDate).filter { !renderedDates.contains($0) }
     }
 
     /// The rendered date list, safe to read after an `await`. Tasks capture a
@@ -2822,10 +3089,14 @@ private struct TimelineView: View {
         let calendar = Calendar.current
         let base = calendar.startOfDay(for: calendarScrollLockTarget ?? activeTimelineDate)
         let today = calendar.startOfDay(for: Date())
-        let candidates = availableDates.filter { date in
-            date <= today && (forward ? date > base : date < base)
+        let dates = availableDates.sortedDates
+        if forward {
+            let index = availableDates.upperBound(base)
+            guard index < dates.count, dates[index] <= today else { return nil }
+            return dates[index]
         }
-        return forward ? candidates.min() : candidates.max()
+        let index = min(availableDates.lowerBound(base), availableDates.upperBound(today)) - 1
+        return index >= 0 ? dates[index] : nil
     }
 
     private func navigateRecordedDay(forward: Bool, using proxy: ScrollViewProxy) {
@@ -2835,7 +3106,7 @@ private struct TimelineView: View {
 
     private func prepareTimelineShare(for day: Date? = nil) {
         let date = Calendar.current.startOfDay(for: day ?? activeTimelineDate)
-        let items = timelinesByDate[date] ?? []
+        let items = timelinesByDate[date]?.items ?? []
         let photoAssetIDs = items.flatMap { item -> [String] in
             if case .footprint(let footprint) = item {
                 return footprint.photoAssetIDs
@@ -2848,8 +3119,39 @@ private struct TimelineView: View {
             }
             return nil
         }
-        let transports = shareTransportRecords(from: items)
-        let coordinates = shareMapCoordinates(from: items)
+        // Route geometry and point encoding run off main; only the
+        // unmanaged share records are created here.
+        let sources = Self.shareCoordinateSources(from: items)
+        let shareTransports = items.compactMap { item -> Transport? in
+            if case .transport(let transport) = item { return transport }
+            return nil
+        }
+        Task { @MainActor in
+            let prepared = await Task.detached(priority: .userInitiated) {
+                (
+                    coordinates: Self.shareMapCoordinates(from: sources),
+                    encodedTransports: Self.encodedShareTransports(shareTransports)
+                )
+            }.value
+            presentTimelineShare(
+                date: date,
+                items: items,
+                photoAssetIDs: photoAssetIDs,
+                footprints: footprints,
+                transports: prepared.encodedTransports.map { Self.shareTransportRecord(from: $0) },
+                coordinates: prepared.coordinates
+            )
+        }
+    }
+
+    private func presentTimelineShare(
+        date: Date,
+        items: [TimelineItem],
+        photoAssetIDs: [String],
+        footprints: [Footprint],
+        transports: [TransportRecord],
+        coordinates: [CLLocationCoordinate2D]
+    ) {
         let loadingPayload = DFKShareCardFactory.loadingPayload(
             kind: .timeline,
             rangeText: DFKShareCardFactory.dateText(date),
@@ -2913,7 +3215,35 @@ private struct TimelineView: View {
         let transports = (try? modelContext.fetch(transportDescriptor)) ?? []
         let photoAssetIDs = footprints.flatMap(\.photoAssetIDs)
         let rangeText = DFKShareCardFactory.rangeText(from: start, to: selectedEnd)
-        let coordinates = footprints.flatMap(\.coordinates) + shareMapCoordinates(from: transports)
+        // The share card API takes the fetched models, so they are fetched
+        // here; decoding every route for the map coordinates runs off main.
+        let footprintCoordinates = footprints.flatMap(\.coordinates)
+        let routeData = transports.map(\.pointsData)
+        Task { @MainActor in
+            let routeCoordinates = await Task.detached(priority: .userInitiated) {
+                Self.shareMapCoordinates(fromRouteData: routeData)
+            }.value
+            presentTimelineShare(
+                start: start,
+                selectedEnd: selectedEnd,
+                rangeText: rangeText,
+                photoAssetIDs: photoAssetIDs,
+                footprints: footprints,
+                transports: transports,
+                coordinates: footprintCoordinates + routeCoordinates
+            )
+        }
+    }
+
+    private func presentTimelineShare(
+        start: Date,
+        selectedEnd: Date,
+        rangeText: String,
+        photoAssetIDs: [String],
+        footprints: [Footprint],
+        transports: [TransportRecord],
+        coordinates: [CLLocationCoordinate2D]
+    ) {
         let loadingPayload = DFKShareCardFactory.loadingPayload(
             kind: .timeline,
             rangeText: rangeText,
@@ -2956,9 +3286,18 @@ private struct TimelineView: View {
         }
     }
 
-    private func shareTransportRecords(from items: [TimelineItem]) -> [TransportRecord] {
-        items.compactMap { item -> TransportRecord? in
-            guard case .transport(let transport) = item else { return nil }
+    private struct EncodedShareTransport: @unchecked Sendable {
+        let transport: Transport
+        let pointsData: Data
+    }
+
+    private enum ShareCoordinateSource: @unchecked Sendable {
+        case footprint(coordinates: [CLLocationCoordinate2D], latitude: Double, longitude: Double)
+        case transport(Transport)
+    }
+
+    nonisolated private static func encodedShareTransports(_ transports: [Transport]) -> [EncodedShareTransport] {
+        transports.compactMap { transport in
             let encodedPoints = transport.pathPoints.map {
                 CodableCoordinate(
                     lat: $0.coordinate.latitude,
@@ -2970,32 +3309,47 @@ private struct TimelineView: View {
             guard let pointsData = try? JSONEncoder().encode(encodedPoints), !encodedPoints.isEmpty else {
                 return nil
             }
-            let record = TransportRecord(
-                recordID: transport.id,
-                day: Calendar.current.startOfDay(for: transport.startTime),
-                startTime: transport.startTime,
-                endTime: transport.endTime,
-                startLocation: transport.startLocation,
-                endLocation: transport.endLocation,
-                typeRaw: transport.type.rawValue,
-                distance: transport.distance,
-                averageSpeed: transport.averageSpeed,
-                pointsData: pointsData,
-                statusRaw: "active",
-                stepCount: transport.stepCount
-            )
-            record.manualTypeRaw = transport.manualType?.rawValue
-            return record
+            return EncodedShareTransport(transport: transport, pointsData: pointsData)
         }
     }
 
-    private func shareMapCoordinates(from items: [TimelineItem]) -> [CLLocationCoordinate2D] {
-        items.flatMap { item -> [CLLocationCoordinate2D] in
+    private static func shareTransportRecord(from encoded: EncodedShareTransport) -> TransportRecord {
+        let transport = encoded.transport
+        let record = TransportRecord(
+            recordID: transport.id,
+            day: Calendar.current.startOfDay(for: transport.startTime),
+            startTime: transport.startTime,
+            endTime: transport.endTime,
+            startLocation: transport.startLocation,
+            endLocation: transport.endLocation,
+            typeRaw: transport.type.rawValue,
+            distance: transport.distance,
+            averageSpeed: transport.averageSpeed,
+            pointsData: encoded.pointsData,
+            statusRaw: "active",
+            stepCount: transport.stepCount
+        )
+        record.manualTypeRaw = transport.manualType?.rawValue
+        return record
+    }
+
+    private static func shareCoordinateSources(from items: [TimelineItem]) -> [ShareCoordinateSource] {
+        items.map { item in
             switch item {
             case .footprint(let footprint):
-                let coordinates = footprint.coordinates
+                return .footprint(coordinates: footprint.coordinates, latitude: footprint.latitude, longitude: footprint.longitude)
+            case .transport(let transport):
+                return .transport(transport)
+            }
+        }
+    }
+
+    nonisolated private static func shareMapCoordinates(from sources: [ShareCoordinateSource]) -> [CLLocationCoordinate2D] {
+        sources.flatMap { source -> [CLLocationCoordinate2D] in
+            switch source {
+            case .footprint(let coordinates, let latitude, let longitude):
                 if !coordinates.isEmpty { return coordinates }
-                return [CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)]
+                return [CLLocationCoordinate2D(latitude: latitude, longitude: longitude)]
             case .transport(let transport):
                 let coordinates = transport.lineSegments.flatMap(\.coordinates)
                 if !coordinates.isEmpty { return coordinates }
@@ -3004,9 +3358,9 @@ private struct TimelineView: View {
         }
     }
 
-    private func shareMapCoordinates(from transports: [TransportRecord]) -> [CLLocationCoordinate2D] {
-        transports.flatMap { record in
-            ((try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData)) ?? [])
+    nonisolated private static func shareMapCoordinates(fromRouteData routeData: [Data]) -> [CLLocationCoordinate2D] {
+        routeData.flatMap { pointsData in
+            ((try? JSONDecoder().decode([CodableCoordinate].self, from: pointsData)) ?? [])
                 .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
                 .filter {
                     $0.latitude.isFinite &&
@@ -3046,8 +3400,9 @@ private struct TimelineView: View {
 
     private var limitedSecondaryHeader: String {
         let characterLimit = 16
-        guard secondaryHeader.count > characterLimit else { return secondaryHeader }
-        return String(secondaryHeader.prefix(characterLimit)) + "…"
+        let header = secondaryHeader
+        guard header.count > characterLimit else { return header }
+        return String(header.prefix(characterLimit)) + "…"
     }
 
     private func timelineDateSecondaryTitleWithCity(for display: Date) -> String {
@@ -3058,23 +3413,18 @@ private struct TimelineView: View {
 
     private func uniqueTimelineCityNames(for dates: [Date]) -> [String] {
         let calendar = Calendar.current
-        let normalizedDates = Set(dates.map { calendar.startOfDay(for: $0) })
-        let footprints = timelinesByDate
-            .filter { normalizedDates.contains(calendar.startOfDay(for: $0.key)) }
-            .flatMap(\.value)
-            .compactMap { item -> Footprint? in
-                guard case .footprint(let footprint) = item else { return nil }
-                return footprint
-            }
-            .sorted { $0.startTime < $1.startTime }
-
+        // Each day's names were deduplicated chronologically off main. Days
+        // cover disjoint time ranges, so concatenating them in date order and
+        // deduplicating again equals deduplicating all footprints by time.
+        let normalizedDates = Set(dates.map { calendar.startOfDay(for: $0) }).sorted()
         var seen = Set<String>()
-        return footprints.compactMap { footprint in
-            guard let cityName = footprint.cityName?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !cityName.isEmpty,
-                  seen.insert(cityName).inserted else { return nil }
-            return cityName
+        var names: [String] = []
+        for date in normalizedDates {
+            for cityName in timelinesByDate[date]?.cityNames ?? [] where seen.insert(cityName).inserted {
+                names.append(cityName)
+            }
         }
+        return names
     }
 
     private func timelineDateTitle(for display: Date) -> String {
@@ -3382,18 +3732,26 @@ private struct TimelineView: View {
 
     @ViewBuilder
     private func timelineDay(for date: Date) -> some View {
-        let items = (timelinesByDate[date] ?? []).sorted { $0.startTime < $1.startTime }
+        // Ordered off main when the day loaded.
+        let items = timelinesByDate[date]?.chronologicalItems ?? []
 
         let mixedItems: [MixedTimelineItem] = {
             var mixed = [MixedTimelineItem]()
+            mixed.reserveCapacity(items.count + 1)
             for (index, item) in items.enumerated() {
                 mixed.append(.timelineItem(item, index))
             }
             if Calendar.current.isDateInToday(date) {
-                mixed.append(.currentStay)
-            }
-            mixed.sort { lhs, rhs in
-                lhs.sortTime < rhs.sortTime
+                // Items are chronological; place the live card after every
+                // item that started before now (binary search, no re-sort).
+                let now = Date()
+                var low = 0
+                var high = items.count
+                while low < high {
+                    let mid = (low + high) / 2
+                    if items[mid].startTime < now { low = mid + 1 } else { high = mid }
+                }
+                mixed.insert(.currentStay, at: low)
             }
             return mixed
         }()
@@ -3441,8 +3799,11 @@ private struct TimelineView: View {
                         },
                         onPhotoTap: { assetID in
                             guard case .footprint(let footprint) = item else { return }
-                            selectedMapPhotoAssetIDs = PhotoService.shared.displayableAssetIDs(footprint.photoAssetIDs)
-                            selectedMapPhotoAssetID = assetID
+                            let storedAssetIDs = footprint.photoAssetIDs
+                            Task { @MainActor in
+                                selectedMapPhotoAssetIDs = await PhotoService.shared.displayableAssetIDsAsync(storedAssetIDs)
+                                selectedMapPhotoAssetID = assetID
+                            }
                         },
                         onShowAllPhotos: {
                             guard case .footprint(let footprint) = item else { return }
@@ -3452,9 +3813,9 @@ private struct TimelineView: View {
                         onMerge: {
                             switch item {
                             case .footprint(let footprint):
-                                pendingMergeCandidate = adjacentMergeCandidate(for: storedFootprint(matching: footprint))
-                            case .transport:
-                                pendingTransportMergeCandidate = adjacentTransportMergeCandidate(for: item)
+                                requestFootprintMergeCandidate(for: footprint)
+                            case .transport(let transport):
+                                requestTransportMergeCandidate(for: transport)
                             }
                         },
                         onSplit: {
@@ -4344,35 +4705,77 @@ private struct TimelineView: View {
         return try? modelContext.fetch(descriptor).first
     }
 
-    private func adjacentMergeCandidate(for item: TimelineItem) -> ContinuousAdjacentFootprintMergeCandidate? {
-        guard case .footprint(let footprint) = item else { return nil }
-        return adjacentMergeCandidate(for: storedFootprint(matching: footprint))
+    private struct AdjacentMergePair: Sendable {
+        let baseID: UUID
+        let otherID: UUID
     }
 
-    private func adjacentMergeCandidate(for footprint: Footprint) -> ContinuousAdjacentFootprintMergeCandidate? {
-        let allFootprints = adjacentSearchFootprints(around: footprint)
+    /// Resolves the merge candidate in a background context, then loads the
+    /// two models from the view's context by stable ID.
+    private func requestFootprintMergeCandidate(for footprint: Footprint) {
+        let footprintID = footprint.footprintID
+        let container = modelContext.container
+        Task { @MainActor in
+            let pair = await Task.detached(priority: .userInitiated) {
+                Self.adjacentFootprintMergePair(footprintID: footprintID, in: ModelContext(container))
+            }.value
+            guard let pair,
+                  let base = storedFootprint(id: pair.baseID),
+                  let other = storedFootprint(id: pair.otherID) else { return }
+            pendingMergeCandidate = ContinuousAdjacentFootprintMergeCandidate(base: base, other: other)
+        }
+    }
+
+    private func requestTransportMergeCandidate(for transport: Transport) {
+        let recordID = transport.id
+        let container = modelContext.container
+        Task { @MainActor in
+            let pair = await Task.detached(priority: .userInitiated) {
+                Self.adjacentTransportMergePair(recordID: recordID, in: ModelContext(container))
+            }.value
+            guard let pair,
+                  let base = storedTransportRecord(id: pair.baseID),
+                  let other = storedTransportRecord(id: pair.otherID) else { return }
+            pendingTransportMergeCandidate = ContinuousAdjacentTransportMergeCandidate(base: base, other: other)
+        }
+    }
+
+    private func storedFootprint(id footprintID: UUID) -> Footprint? {
+        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+        return try? modelContext.fetch(descriptor).first
+    }
+
+    private func storedTransportRecord(id recordID: UUID) -> TransportRecord? {
+        let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == recordID })
+        return try? modelContext.fetch(descriptor).first
+    }
+
+    nonisolated private static func adjacentFootprintMergePair(footprintID: UUID, in context: ModelContext) -> AdjacentMergePair? {
+        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+        guard let footprint = try? context.fetch(descriptor).first else { return nil }
+        let allFootprints = adjacentSearchFootprints(around: footprint, in: context)
         guard let index = allFootprints.firstIndex(where: { $0.footprintID == footprint.footprintID }) else {
             return nil
         }
 
         if index > 0 {
             let previous = allFootprints[index - 1]
-            if canMergeAdjacentFootprints(previous, footprint) {
-                return ContinuousAdjacentFootprintMergeCandidate(base: previous, other: footprint)
+            if canMergeAdjacentFootprints(previous, footprint, in: context) {
+                return AdjacentMergePair(baseID: previous.footprintID, otherID: footprint.footprintID)
             }
         }
 
         if index < allFootprints.count - 1 {
             let next = allFootprints[index + 1]
-            if canMergeAdjacentFootprints(footprint, next) {
-                return ContinuousAdjacentFootprintMergeCandidate(base: footprint, other: next)
+            if canMergeAdjacentFootprints(footprint, next, in: context) {
+                return AdjacentMergePair(baseID: footprint.footprintID, otherID: next.footprintID)
             }
         }
 
         return nil
     }
 
-    private func adjacentSearchFootprints(around footprint: Footprint) -> [Footprint] {
+    nonisolated private static func adjacentSearchFootprints(around footprint: Footprint, in context: ModelContext) -> [Footprint] {
         let lowerBound = footprint.startTime.addingTimeInterval(-172800)
         let upperBound = footprint.endTime.addingTimeInterval(172800)
         let descriptor = FetchDescriptor<Footprint>(
@@ -4383,22 +4786,22 @@ private struct TimelineView: View {
             },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]
         )
-        return (try? modelContext.fetch(descriptor)) ?? []
+        return (try? context.fetch(descriptor)) ?? []
     }
 
-    private func canMergeAdjacentFootprints(_ first: Footprint, _ second: Footprint) -> Bool {
+    nonisolated private static func canMergeAdjacentFootprints(_ first: Footprint, _ second: Footprint, in context: ModelContext) -> Bool {
         guard first.status != .ignored, second.status != .ignored else { return false }
         guard first.footprintID != second.footprintID else { return false }
         guard isSameDayFootprint(first), isSameDayFootprint(second) else { return false }
         guard Calendar.current.isDate(first.startTime, inSameDayAs: second.startTime) else { return false }
-        return !hasTransportBetween(first, second)
+        return !hasTransportBetween(first, second, in: context)
     }
 
-    private func isSameDayFootprint(_ footprint: Footprint) -> Bool {
+    nonisolated private static func isSameDayFootprint(_ footprint: Footprint) -> Bool {
         Calendar.current.isDate(footprint.startTime, inSameDayAs: footprint.endTime.addingTimeInterval(-0.001))
     }
 
-    private func hasTransportBetween(_ first: Footprint, _ second: Footprint) -> Bool {
+    nonisolated private static func hasTransportBetween(_ first: Footprint, _ second: Footprint, in context: ModelContext) -> Bool {
         let lowerBound = min(first.endTime, second.endTime)
         let upperBound = max(first.startTime, second.startTime)
         guard upperBound > lowerBound else { return false }
@@ -4410,39 +4813,35 @@ private struct TimelineView: View {
                 $0.startTime < upperBound
             }
         )
-        return ((try? modelContext.fetch(descriptor)) ?? []).isEmpty == false
+        return ((try? context.fetch(descriptor)) ?? []).isEmpty == false
     }
 
-    private func adjacentTransportMergeCandidate(for item: TimelineItem) -> ContinuousAdjacentTransportMergeCandidate? {
-        guard case .transport(let transport) = item,
-              let record = storedTransportRecord(matching: transport) else { return nil }
-        return adjacentTransportMergeCandidate(for: record)
-    }
-
-    private func adjacentTransportMergeCandidate(for record: TransportRecord) -> ContinuousAdjacentTransportMergeCandidate? {
-        let allTransports = adjacentSearchTransports(around: record)
+    nonisolated private static func adjacentTransportMergePair(recordID: UUID, in context: ModelContext) -> AdjacentMergePair? {
+        let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == recordID })
+        guard let record = try? context.fetch(descriptor).first else { return nil }
+        let allTransports = adjacentSearchTransports(around: record, in: context)
         guard let index = allTransports.firstIndex(where: { $0.recordID == record.recordID }) else {
             return nil
         }
 
         if index > 0 {
             let previous = allTransports[index - 1]
-            if canMergeAdjacentTransports(previous, record) {
-                return ContinuousAdjacentTransportMergeCandidate(base: previous, other: record)
+            if canMergeAdjacentTransports(previous, record, in: context) {
+                return AdjacentMergePair(baseID: previous.recordID, otherID: record.recordID)
             }
         }
 
         if index < allTransports.count - 1 {
             let next = allTransports[index + 1]
-            if canMergeAdjacentTransports(record, next) {
-                return ContinuousAdjacentTransportMergeCandidate(base: record, other: next)
+            if canMergeAdjacentTransports(record, next, in: context) {
+                return AdjacentMergePair(baseID: record.recordID, otherID: next.recordID)
             }
         }
 
         return nil
     }
 
-    private func adjacentSearchTransports(around record: TransportRecord) -> [TransportRecord] {
+    nonisolated private static func adjacentSearchTransports(around record: TransportRecord, in context: ModelContext) -> [TransportRecord] {
         let lowerBound = record.startTime.addingTimeInterval(-172800)
         let upperBound = record.endTime.addingTimeInterval(172800)
         let descriptor = FetchDescriptor<TransportRecord>(
@@ -4453,17 +4852,17 @@ private struct TimelineView: View {
             },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]
         )
-        return (try? modelContext.fetch(descriptor)) ?? []
+        return (try? context.fetch(descriptor)) ?? []
     }
 
-    private func canMergeAdjacentTransports(_ first: TransportRecord, _ second: TransportRecord) -> Bool {
+    nonisolated private static func canMergeAdjacentTransports(_ first: TransportRecord, _ second: TransportRecord, in context: ModelContext) -> Bool {
         guard first.statusRaw != "ignored", second.statusRaw != "ignored" else { return false }
         guard first.recordID != second.recordID else { return false }
         guard Calendar.current.isDate(first.startTime, inSameDayAs: second.startTime) else { return false }
-        return !hasFootprintBetween(first, second)
+        return !hasFootprintBetween(first, second, in: context)
     }
 
-    private func hasFootprintBetween(_ first: TransportRecord, _ second: TransportRecord) -> Bool {
+    nonisolated private static func hasFootprintBetween(_ first: TransportRecord, _ second: TransportRecord, in context: ModelContext) -> Bool {
         let lowerBound = min(first.endTime, second.endTime)
         let upperBound = max(first.startTime, second.startTime)
         guard upperBound > lowerBound else { return false }
@@ -4475,7 +4874,7 @@ private struct TimelineView: View {
                 $0.startTime < upperBound
             }
         )
-        return ((try? modelContext.fetch(descriptor)) ?? []).isEmpty == false
+        return ((try? context.fetch(descriptor)) ?? []).isEmpty == false
     }
 
     private var mergeConfirmationMessage: String {
@@ -4583,6 +4982,37 @@ private struct TimelineView: View {
     private func mergeAdjacentTransports(_ candidate: ContinuousAdjacentTransportMergeCandidate) {
         let base = candidate.first
         let other = candidate.second
+        // Decode, concatenate and re-encode both routes off main; apply the
+        // result to the models on the view's context afterwards.
+        let basePointsData = base.pointsData
+        let otherPointsData = other.pointsData
+        Task { @MainActor in
+            let mergedRoute = await Task.detached(priority: .userInitiated) {
+                let mergedPoints = Self.decodedTransportPoints(basePointsData) + Self.decodedTransportPoints(otherPointsData)
+                return (
+                    pointsData: try? JSONEncoder().encode(mergedPoints),
+                    pointCount: mergedPoints.count,
+                    observedCount: mergedPoints.filter { $0.isSyntheticPadding != true && $0.timestamp != nil }.count
+                )
+            }.value
+            guard !base.isDeleted, !other.isDeleted else { return }
+            applyAdjacentTransportMerge(
+                base: base,
+                other: other,
+                mergedPointsData: mergedRoute.pointsData,
+                pointCount: mergedRoute.pointCount,
+                observedCount: mergedRoute.observedCount
+            )
+        }
+    }
+
+    private func applyAdjacentTransportMerge(
+        base: TransportRecord,
+        other: TransportRecord,
+        mergedPointsData: Data?,
+        pointCount: Int,
+        observedCount: Int
+    ) {
         let mergedStart = min(base.startTime, other.startTime)
         let mergedEnd = max(base.endTime, other.endTime)
 
@@ -4606,17 +5036,15 @@ private struct TimelineView: View {
             base.endLocation = other.endLocation
         }
 
-        let mergedPoints = decodedTransportPoints(base) + decodedTransportPoints(other)
-        if let pointsData = try? JSONEncoder().encode(mergedPoints) {
-            base.pointsData = pointsData
+        if let mergedPointsData {
+            base.pointsData = mergedPointsData
         }
-        let observedCount = mergedPoints.filter { $0.isSyntheticPadding != true && $0.timestamp != nil }.count
         let inferredType = TransportType.from(
             speed: base.averageSpeed,
             stepCount: base.stepCount ?? 0,
             duration: mergedDuration,
             distanceMeters: base.distance,
-            pointCount: mergedPoints.count,
+            pointCount: pointCount,
             observedPointCount: observedCount
         )
         base.typeRaw = explicitlySelectedType ?? inferredType.rawValue
@@ -4630,8 +5058,8 @@ private struct TimelineView: View {
         Aptabase.shared.trackEvent("transport_adjacent_merged")
     }
 
-    private func decodedTransportPoints(_ record: TransportRecord) -> [CodableCoordinate] {
-        (try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData)) ?? []
+    nonisolated private static func decodedTransportPoints(_ pointsData: Data) -> [CodableCoordinate] {
+        (try? JSONDecoder().decode([CodableCoordinate].self, from: pointsData)) ?? []
     }
 
     private func cleanupManualSelection(for recordID: UUID) {
@@ -4805,7 +5233,14 @@ private final class ContinuousTimelineRawDateFrames {
     var viewportHeight: CGFloat = 0
     private var lastViewportResizeTime = Date.distantPast
     /// Latest rendered date list; see `TimelineView.currentDates`.
-    var dates: [Date] = []
+    var dates: [Date] = [] {
+        didSet {
+            guard dates != oldValue else { return }
+            dateSet = Set(dates)
+        }
+    }
+    /// `dates` as a set for O(1) membership checks from row bodies.
+    private(set) var dateSet = Set<Date>()
 
     var isViewportResizing: Bool {
         Date().timeIntervalSince(lastViewportResizeTime) < 0.12
@@ -5397,7 +5832,9 @@ private struct ContinuousTimelineRow: View {
         }
         .task(id: photoAssetIDs) {
             didResolvePhotoAssetIDs = false
-            displayablePhotoAssetIDs = PhotoService.shared.displayableAssetIDs(photoAssetIDs)
+            let resolved = await PhotoService.shared.displayableAssetIDsAsync(photoAssetIDs)
+            guard !Task.isCancelled else { return }
+            displayablePhotoAssetIDs = resolved
             didResolvePhotoAssetIDs = true
         }
         .onAppear {
@@ -5506,9 +5943,18 @@ private struct ContinuousTimelineRow: View {
         } else if case .transport(let transport) = item {
             TimelineTransportMarker(
                 icon: icon,
-                travelsWest: transport.points.filter(\.isRenderableMapCoordinate).travelsWest
+                travelsWest: Self.travelsWest(transport.points)
             )
         }
+    }
+
+    /// Same result as `points.filter(\.isRenderableMapCoordinate).travelsWest`,
+    /// reading only the first and last renderable points.
+    private static func travelsWest(_ points: [CLLocationCoordinate2D]) -> Bool {
+        guard let firstIndex = points.firstIndex(where: \.isRenderableMapCoordinate),
+              let lastIndex = points.lastIndex(where: \.isRenderableMapCoordinate),
+              firstIndex < lastIndex else { return false }
+        return [points[firstIndex], points[lastIndex]].travelsWest
     }
 
     private func prepareActivityPicker() {
@@ -5717,7 +6163,7 @@ struct ContinuousTimelinePhotoThumbnail: View {
             }
         }
         .task(id: assetIDs) {
-            requestThumbnail()
+            await requestThumbnail()
         }
         .onDisappear {
             cancelRequest()
@@ -5746,7 +6192,7 @@ struct ContinuousTimelinePhotoThumbnail: View {
         return image.size.width / image.size.height
     }
 
-    private func requestThumbnail() {
+    private func requestThumbnail() async {
         cancelRequest()
         image = nil
         let generation = UUID()
@@ -5755,10 +6201,11 @@ struct ContinuousTimelinePhotoThumbnail: View {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return }
 
+        // The sorted Photos lookup runs off main.
         let asset = prefersEarliestPhoto
-            ? PhotoService.shared.earliestAsset(among: assetIDs)
-            : PhotoService.shared.latestAsset(among: assetIDs)
-        guard let asset else { return }
+            ? await PhotoService.shared.earliestAssetAsync(among: assetIDs)
+            : await PhotoService.shared.latestAssetAsync(among: assetIDs)
+        guard !Task.isCancelled, requestGeneration == generation, let asset else { return }
 
         // PHImageManager may return an aspect-fit thumbnail backed by a square
         // request canvas. Its UIImage size is therefore not reliable layout
@@ -5955,12 +6402,41 @@ private struct CurrentStayTimelineCard: View {
     let locationManager: LocationManager
     @State private var showingOngoingLocationSearch = false
     @State private var showingArrivalConfirmation = false
+    /// Current movement speed, refreshed when the route or moving state
+    /// changes rather than on every 1-second clock tick.
+    @State private var currentMovementAverageSpeed: Double?
+    @State private var movementDataRevision = 0
+
+    private struct MovementSpeedKey: Equatable {
+        let isCurrentlyMoving: Bool
+        let movingStartedAt: Date?
+        let pointCount: Int
+        let latestPointTimestamp: Date?
+        let dataRevision: Int
+    }
+
+    private var movementSpeedKey: MovementSpeedKey {
+        MovementSpeedKey(
+            isCurrentlyMoving: locationManager.isCurrentlyMoving,
+            movingStartedAt: locationManager.uiMovingStartedAt,
+            pointCount: locationManager.allTodayPoints.count,
+            latestPointTimestamp: locationManager.allTodayPoints.last?.timestamp,
+            dataRevision: movementDataRevision
+        )
+    }
 
     var body: some View {
         SwiftUI.TimelineView(.periodic(from: Date(), by: 1)) { context in
             if let timestamp = statusTimestamp {
                 statusRow(startTimestamp: timestamp, now: context.date)
             }
+        }
+        .task(id: movementSpeedKey) {
+            await refreshCurrentMovementAverageSpeed()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
+            // A persisted trip record can appear without new raw points.
+            movementDataRevision &+= 1
         }
         .sheet(isPresented: $showingOngoingLocationSearch) {
             LocationSearchSheet(
@@ -6102,24 +6578,47 @@ private struct CurrentStayTimelineCard: View {
         locationManager.allPlaces.contains { $0.isUserDefined && !$0.isIgnored }
     }
 
+    private struct MovementLocations: @unchecked Sendable {
+        let points: [CLLocation]
+    }
+
+    /// Runs only when `movementSpeedKey` changes, not on every clock tick.
+    /// The trip lookup and route-speed calculation run off main.
+    private func refreshCurrentMovementAverageSpeed() async {
+        guard locationManager.isCurrentlyMoving else {
+            currentMovementAverageSpeed = nil
+            return
+        }
+        let container = modelContext.container
+        let isCurrentlyMoving = locationManager.isCurrentlyMoving
+        let movingStartedAt = locationManager.uiMovingStartedAt
+        let locations = MovementLocations(points: locationManager.allTodayPoints)
+        let speed = await Task.detached(priority: .utility) {
+            let now = Date()
+            let currentTransport = WatchSyncManager.currentTransportRecord(
+                in: ModelContext(container),
+                now: now,
+                isCurrentlyMoving: isCurrentlyMoving,
+                movingStartedAt: movingStartedAt
+            )
+            return WatchSyncManager.currentMovementAverageSpeed(
+                persistedAverageSpeed: currentTransport?.averageSpeed,
+                locations: locations.points,
+                movingStartedAt: movingStartedAt,
+                now: now,
+                isCurrentlyMoving: isCurrentlyMoving
+            )
+        }.value
+        guard !Task.isCancelled else { return }
+        currentMovementAverageSpeed = speed
+    }
+
     private func detailText(for timestamp: Date, now: Date) -> String {
         if !isCurrentlyMoving {
             return "已 \(now.timeIntervalSince(timestamp).formattedTimelineDuration)"
         }
 
-        let currentTransport = WatchSyncManager.currentTransportRecord(
-            in: modelContext,
-            now: now,
-            isCurrentlyMoving: locationManager.isCurrentlyMoving,
-            movingStartedAt: locationManager.uiMovingStartedAt
-        )
-        if let averageSpeed = WatchSyncManager.currentMovementAverageSpeed(
-            persistedAverageSpeed: currentTransport?.averageSpeed,
-            locations: locationManager.allTodayPoints,
-            movingStartedAt: locationManager.uiMovingStartedAt,
-            now: now,
-            isCurrentlyMoving: locationManager.isCurrentlyMoving
-        ) {
+        if let averageSpeed = currentMovementAverageSpeed {
             let speedKmh = Measurement(value: averageSpeed, unit: UnitSpeed.metersPerSecond)
                 .converted(to: .kilometersPerHour)
                 .value

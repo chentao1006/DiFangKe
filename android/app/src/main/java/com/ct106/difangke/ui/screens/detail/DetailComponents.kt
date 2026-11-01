@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -33,6 +34,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.ct106.difangke.data.db.entity.ActivityTypeEntity
+import com.ct106.difangke.ui.components.decodeSampledPhotoBitmap
 import com.ct106.difangke.ui.components.getIconForName
 import com.tencent.tencentmap.mapsdk.maps.CameraUpdateFactory
 import com.tencent.tencentmap.mapsdk.maps.TencentMap
@@ -45,6 +47,8 @@ import com.tencent.tencentmap.mapsdk.maps.model.PolylineOptions
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 internal val DfkAccent = Color(0xFF00A0AC)
 internal val SplitBlue = Color(0xFF007AFF)
@@ -77,6 +81,15 @@ private fun dotBitmap(color: Int, diameterPx: Int): Bitmap {
     return bmp
 }
 
+/** Inputs last drawn by [TrackPreviewMap]; plain fields so drawing never triggers recomposition. */
+private class TrackPreviewDrawState {
+    var segments: List<MapSegment>? = null
+    var dots: List<MapDot>? = null
+    var marker: LatLng? = null
+    var markerColor: Color? = null
+    var isDark: Boolean? = null
+}
+
 /** A polyline segment drawn on [TrackPreviewMap]. */
 data class MapSegment(val points: List<LatLng>, val color: Color, val dashed: Boolean = false, val width: Float = 10f)
 
@@ -100,6 +113,7 @@ fun TrackPreviewMap(
     val isDark = isSystemInDarkTheme()
     val density = androidx.compose.ui.platform.LocalDensity.current.density
     var lastFit by remember { mutableStateOf<Any?>(Unit) }
+    val drawn = remember { TrackPreviewDrawState() }
     AndroidView(
         factory = { ctx -> TextureMapView(ctx).apply { onResume() } },
         modifier = modifier,
@@ -115,6 +129,15 @@ fun TrackPreviewMap(
             isScrollGesturesEnabled = interactive
             isZoomGesturesEnabled = interactive
         }
+        // Callers pass precomputed lists; redraw only when their identity (or the look) changes.
+        if (drawn.segments === segments && drawn.dots === dots && drawn.marker == marker &&
+            drawn.markerColor == markerColor && drawn.isDark == isDark
+        ) return@AndroidView
+        drawn.segments = segments
+        drawn.dots = dots
+        drawn.marker = marker
+        drawn.markerColor = markerColor
+        drawn.isDark = isDark
         map.clear()
         segments.filter { it.points.size >= 2 }.forEach { s ->
             val opts = PolylineOptions().addAll(s.points).width(s.width).color(s.color.toArgb())
@@ -342,11 +365,23 @@ fun PhotoPagerViewer(uris: List<String>, initialIndex: Int, onDismiss: () -> Uni
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
                 val uri = uris[page]
+                val context = LocalContext.current
+                // Decode a screen-sized bitmap on IO instead of a full-resolution setImageURI on main.
+                val bitmap by produceState<Bitmap?>(null, uri) {
+                    val metrics = context.resources.displayMetrics
+                    val targetPixels = maxOf(metrics.widthPixels, metrics.heightPixels)
+                    value = withContext(Dispatchers.IO) { decodeSampledPhotoBitmap(context, uri, targetPixels) }
+                }
                 AndroidView(
                     factory = { ctx ->
                         android.widget.ImageView(ctx).apply { scaleType = android.widget.ImageView.ScaleType.FIT_CENTER }
                     },
-                    update = { iv -> runCatching { iv.setImageURI(android.net.Uri.parse(uri)) } },
+                    update = { iv ->
+                        if (iv.tag !== bitmap) {
+                            iv.tag = bitmap
+                            iv.setImageBitmap(bitmap)
+                        }
+                    },
                     modifier = Modifier.fillMaxSize()
                 )
             }

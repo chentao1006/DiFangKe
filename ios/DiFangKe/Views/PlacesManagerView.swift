@@ -7,11 +7,12 @@ import CoreLocation
 
 struct PlacesManagerView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \Place.name) private var allPlacesList: [Place]
-    private var places: [Place] {
-        allPlacesList.filter { $0.isUserDefined }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-    }
+    // Filtered and localized-standard sorted by the store so body never scans every Place on main.
+    @Query(
+        filter: #Predicate<Place> { $0.isUserDefined == true },
+        sort: [SortDescriptor(\Place.name, comparator: .localizedStandard)]
+    )
+    private var places: [Place]
     var startInAddMode: Bool = false
     
     @State private var showingAddPlace = false

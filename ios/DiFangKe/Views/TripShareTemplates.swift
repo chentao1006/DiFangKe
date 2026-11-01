@@ -113,10 +113,17 @@ struct DFKTripShareSummary {
         return away.isEmpty ? cities : away
     }
 
+    /// ICU transforms are costly and the templates call this from `body`;
+    /// results are memoized per name (NSCache is thread-safe).
+    private static let latinNameCache = NSCache<NSString, NSString>()
+
     static func latinName(for name: String) -> String {
+        if let cached = latinNameCache.object(forKey: name as NSString) { return cached as String }
         let latin = name.applyingTransform(.toLatin, reverse: false)?
             .applyingTransform(.stripDiacritics, reverse: false) ?? name
-        return latin.replacingOccurrences(of: " ", with: "").uppercased()
+        let result = latin.replacingOccurrences(of: " ", with: "").uppercased()
+        latinNameCache.setObject(result as NSString, forKey: name as NSString)
+        return result
     }
 
     static func distanceText(_ meters: Double) -> String {
@@ -509,10 +516,16 @@ struct DFKTripShareTemplateView<QRCode: View>: View {
         let nodes: [CGPoint] = stations.indices.map { index in
             CGPoint(x: index.isMultiple(of: 2) ? u(58) : u(254), y: u(24) + spacing * CGFloat(index))
         }
-        // Fewer days leave more room, so each node carries more photos.
-        let dayCount = stations.filter { $0.day != nil }.count
-        let photosPerNode = dayCount <= 2 ? 3 : (dayCount <= 3 ? 2 : 1)
-        let photoSide = min(u(92), max(u(56), (spacing - u(22) * CGFloat(photosPerNode)) / CGFloat(photosPerNode)))
+        // A node's photos sit in one row level with it, in the half of the
+        // card away from its label. Near a node the curve runs vertically and
+        // the leg badges sit midway between nodes, so that band is free; the
+        // photo height is kept within it.
+        let photoBandWidth = u(194)
+        let photoGap = u(10)
+        let photoCaption = u(18)
+        // Block centred near the node, clear of the badges half a spacing away.
+        let photoSide = min(u(84), max(u(44), spacing - u(32) - photoCaption))
+        let photosPerNode = max(1, min(3, Int((photoBandWidth + photoGap) / (photoSide + photoGap))))
 
         return VStack(alignment: .leading, spacing: u(14)) {
             VStack(alignment: .leading, spacing: u(6)) {
@@ -575,13 +588,18 @@ struct DFKTripShareTemplateView<QRCode: View>: View {
                                 .overlay(RoundedRectangle(cornerRadius: u(4)).stroke(paper, lineWidth: u(3)))
                             if photoIndex < captions.count {
                                 Text(captions[photoIndex]).font(sans(10)).foregroundStyle(Color(red: 0.78, green: 0.82, blue: 0.84))
-                                    .lineLimit(1).frame(maxWidth: photoSide + u(24))
+                                    .lineLimit(1).frame(maxWidth: photoSide + photoGap)
                             }
                         }
                         .rotationEffect(.degrees((index + photoIndex).isMultiple(of: 2) ? 4 : -4))
                         .position(
-                            x: onLeft ? u(190) - CGFloat(photoIndex % 2) * u(18) : u(122) + CGFloat(photoIndex % 2) * u(18),
-                            y: node.y + photoSide / 2 + CGFloat(photoIndex) * (photoSide + u(22))
+                            x: {
+                                let count = CGFloat(min(photos.count, photosPerNode))
+                                let rowWidth = count * photoSide + (count - 1) * photoGap
+                                let bandStart = onLeft ? area.width - photoBandWidth : 0
+                                return bandStart + (photoBandWidth - rowWidth) / 2 + photoSide / 2 + CGFloat(photoIndex) * (photoSide + photoGap)
+                            }(),
+                            y: node.y + u(6)
                         )
                     }
                     VStack(spacing: u(3)) {

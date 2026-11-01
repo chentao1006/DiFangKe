@@ -113,15 +113,19 @@ struct FootprintModalView: View {
         isInline && presentationDetent == .height(88)
     }
 
-    private var photoOrderTaskKey: String {
-        "\(photoService.authorizationStatus.rawValue)|\(photoService.identifierResolutionRevision)|\(footprint.photoAssetIDs.joined(separator: "|"))"
+    private var photoOrderTaskKey: Int {
+        var hasher = Hasher()
+        hasher.combine(photoService.authorizationStatus.rawValue)
+        hasher.combine(photoService.identifierResolutionRevision)
+        hasher.combine(footprint.photoAssetIDs)
+        return hasher.finalize()
     }
 
     private var displayedPhotoAssetIDs: [String] {
         orderedPhotoAssetIDs ?? footprint.photoAssetIDs
     }
 
-    private func refreshPhotoAssetOrder() {
+    private func refreshPhotoAssetOrder() async {
         let assetIDs = footprint.photoAssetIDs
         guard !assetIDs.isEmpty else {
             orderedPhotoAssetIDs = []
@@ -133,7 +137,9 @@ struct FootprintModalView: View {
         // rendering them creates a second set of permanently empty tiles.
         // Keep the stored references for Cloud Identifier recovery, but only
         // present assets that Photos can actually resolve on this device.
-        orderedPhotoAssetIDs = photoService.displayableAssetIDs(assetIDs)
+        let displayable = await photoService.displayableAssetIDsAsync(assetIDs)
+        guard !Task.isCancelled else { return }
+        orderedPhotoAssetIDs = displayable
     }
 
     private func ensureFootprintManaged() {
@@ -275,7 +281,7 @@ struct FootprintModalView: View {
                 }
             }
             .task(id: photoOrderTaskKey) {
-                refreshPhotoAssetOrder()
+                await refreshPhotoAssetOrder()
             }
             .sheet(isPresented: $showCamera) {
                 CameraPickerView { image in
@@ -615,7 +621,9 @@ extension FootprintModalView {
                 selectedIDs.contains(storedIdentifier)
                     || selectedIDs.contains(photoService.resolvedAssetIdentifier(for: storedIdentifier))
             }
-            orderedPhotoAssetIDs = photoService.displayableAssetIDs(footprint.photoAssetIDs)
+            // Drop the removed tiles now; the photo-order task re-resolves the
+            // remaining IDs off main since `photoAssetIDs` changed.
+            orderedPhotoAssetIDs = orderedPhotoAssetIDs?.filter { !selectedIDs.contains($0) }
             footprint.markManualMetadataEdit()
             hasChanged = true
             if !isDraft { try? modelContext.save() }
@@ -766,10 +774,12 @@ extension FootprintModalView {
     }
 
     private var matchedPlaceByAddress: Place? {
-        savedPlaces.first(where: { place in
-            if place.placeID == footprint.placeID && place.isUserDefined { return true }
+        // Trim the footprint address once, not once per saved place.
+        let fpAddr = (footprint.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let placeID = footprint.placeID
+        return savedPlaces.first(where: { place in
+            if place.placeID == placeID && place.isUserDefined { return true }
             guard place.isUserDefined else { return false }
-            let fpAddr = (footprint.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !fpAddr.isEmpty else { return false }
             return place.name.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr ||
             place.address?.trimmingCharacters(in: .whitespacesAndNewlines) == fpAddr
@@ -807,7 +817,12 @@ extension FootprintModalView {
     }
 
     private var selectedActivityName: String {
-        footprint.getActivityType(from: allActivities)?.name ?? "选择活动类型"
+        selectedActivity?.name ?? "选择活动类型"
+    }
+
+    /// One activity lookup shared by name, icon and color.
+    private var selectedActivity: ActivityType? {
+        footprint.getActivityType(from: allActivities)
     }
 
     private var minimizedSubtitle: String {
@@ -815,11 +830,11 @@ extension FootprintModalView {
     }
 
     private var selectedActivityIcon: String {
-        footprint.getActivityType(from: allActivities)?.icon ?? "questionmark.circle.dashed"
+        selectedActivity?.icon ?? "questionmark.circle.dashed"
     }
 
     private var selectedActivityColor: Color {
-        footprint.getActivityType(from: allActivities)?.color ?? .secondary
+        selectedActivity?.color ?? .secondary
     }
 
     private func getSuggestedActivities(includeFallback: Bool = true) -> [ActivityType] {
@@ -1171,6 +1186,115 @@ struct FullFrameMapView: View {
 
 }
 
+/// Raw points sorted by time, indexed so a time window is two binary
+/// searches and a slice instead of a scan. Built off main once per load.
+private struct TimeSortedRawPoints {
+    let points: [CLLocation]
+    private let timestamps: [Date]
+    /// Renderable coordinates in time order.
+    private let renderableCoordinates: [CLLocationCoordinate2D]
+    /// `renderablePrefix[i]` = renderable points before index `i`.
+    private let renderablePrefix: [Int]
+
+    init(points: [CLLocation] = []) {
+        self.points = points
+        timestamps = points.map(\.timestamp)
+        var coordinates: [CLLocationCoordinate2D] = []
+        var prefix: [Int] = [0]
+        coordinates.reserveCapacity(points.count)
+        prefix.reserveCapacity(points.count + 1)
+        for point in points {
+            if point.coordinate.isRawPointsRenderable {
+                coordinates.append(point.coordinate)
+            }
+            prefix.append(coordinates.count)
+        }
+        renderableCoordinates = coordinates
+        renderablePrefix = prefix
+    }
+
+    /// First index whose timestamp is >= `date` (or > when `strict`).
+    private func boundary(_ date: Date, strict: Bool) -> Int {
+        var low = 0
+        var high = timestamps.count
+        while low < high {
+            let mid = (low + high) / 2
+            if strict ? timestamps[mid] <= date : timestamps[mid] < date {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+
+    /// Indices of points with start <= timestamp <= end.
+    func range(from start: Date, to end: Date) -> Range<Int> {
+        let lower = boundary(start, strict: false)
+        let upper = boundary(end, strict: true)
+        return lower..<max(lower, upper)
+    }
+
+    /// Renderable coordinates of the points in `range`, in time order.
+    func renderableCoordinates(in range: Range<Int>) -> [CLLocationCoordinate2D] {
+        Array(renderableCoordinates[renderablePrefix[range.lowerBound]..<renderablePrefix[range.upperBound]])
+    }
+
+    /// The point in `range` closest in time to `date`; the earliest wins ties,
+    /// matching `min(by:)` over the time-ordered points.
+    func nearestPoint(to date: Date, in range: Range<Int>) -> CLLocation? {
+        guard !range.isEmpty else { return nil }
+        let index = min(max(boundary(date, strict: false), range.lowerBound), range.upperBound - 1)
+        var best = index
+        if index > range.lowerBound {
+            // First point of the preceding timestamp group.
+            let previous = max(boundary(timestamps[index - 1], strict: false), range.lowerBound)
+            if abs(timestamps[previous].timeIntervalSince(date)) <= abs(timestamps[index].timeIntervalSince(date)) {
+                best = previous
+            }
+        }
+        return points[best]
+    }
+}
+
+/// New transport fields after its time range changed, computed off main.
+private struct TransportMetricsUpdate {
+    let isIgnored: Bool
+    let pointsData: Data?
+    let distance: Double?
+
+    static func compute(pointsData: Data, startTime: Date, endTime: Date) -> TransportMetricsUpdate {
+        guard endTime > startTime else {
+            return TransportMetricsUpdate(isIgnored: true, pointsData: nil, distance: nil)
+        }
+        if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: pointsData) {
+            let filtered = decoded.filter { point in
+                guard let timestamp = point.timestamp else { return point.isSyntheticPadding == true }
+                return timestamp >= startTime && timestamp <= endTime
+            }
+            if !filtered.isEmpty, let data = try? JSONEncoder().encode(filtered) {
+                return TransportMetricsUpdate(isIgnored: false, pointsData: data, distance: TimelineBuilder.calculatePathDistance(filtered))
+            }
+        }
+        return TransportMetricsUpdate(isIgnored: false, pointsData: nil, distance: nil)
+    }
+
+    func apply(to record: TransportRecord) {
+        guard !isIgnored else {
+            record.statusRaw = "ignored"
+            return
+        }
+        if let pointsData, let distance {
+            record.pointsData = pointsData
+            record.distance = distance
+        }
+        let duration = record.endTime.timeIntervalSince(record.startTime)
+        if duration > 0 {
+            record.averageSpeed = record.distance / duration
+        }
+    }
+}
+
 private struct FootprintTimeAdjustmentView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
@@ -1182,22 +1306,22 @@ private struct FootprintTimeAdjustmentView: View {
     @State private var rangeEnd: Date = Date()
     @State private var draftStart: Date = Date()
     @State private var draftEnd: Date = Date()
-    @State private var rawPoints: [CLLocation] = []
+    @State private var rawPoints = TimeSortedRawPoints()
     @State private var isLoadingRawPoints = true
     @State private var hasInitializedRange = false
+    @State private var isSaving = false
+    // The slider window, sliced from the time-sorted points on each change.
+    @State private var selectedPointCount = 0
+    @State private var selectedCoordinates: [CLLocationCoordinate2D] = []
 
     private var minimumFootprintDuration: TimeInterval {
         max(60, ceil(AppConfig.shared.stayDurationThreshold / 60) * 60)
     }
 
-    private var selectedPoints: [CLLocation] {
-        rawPoints.filter { $0.timestamp >= draftStart && $0.timestamp <= draftEnd }
-    }
-
-    private var selectedCoordinates: [CLLocationCoordinate2D] {
-        selectedPoints
-            .map(\.coordinate)
-            .filter(\.isRawPointsRenderable)
+    private func updateSelection() {
+        let range = rawPoints.range(from: draftStart, to: draftEnd)
+        selectedPointCount = range.count
+        selectedCoordinates = rawPoints.renderableCoordinates(in: range)
     }
 
     private var canSave: Bool {
@@ -1219,7 +1343,7 @@ private struct FootprintTimeAdjustmentView: View {
                     .frame(height: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
                     .overlay(alignment: .bottomLeading) {
-                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
+                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPointCount) 个原始点")
                             .font(.caption.bold())
                             .foregroundColor(.white)
                             .padding(.horizontal, 10)
@@ -1282,7 +1406,7 @@ private struct FootprintTimeAdjustmentView: View {
                         Image(systemName: "checkmark").dfkToolbarConfirmIcon()
                             .fontWeight(.bold)
                     }
-                    .disabled(!canSave)
+                    .disabled(!canSave || isSaving)
                 }
             }
         }
@@ -1290,6 +1414,8 @@ private struct FootprintTimeAdjustmentView: View {
             setupInitialRange()
             loadRawPoints()
         }
+        .onChange(of: draftStart) { _, _ in updateSelection() }
+        .onChange(of: draftEnd) { _, _ in updateSelection() }
     }
 
     private func setupInitialRange() {
@@ -1319,12 +1445,13 @@ private struct FootprintTimeAdjustmentView: View {
         let dates = touchedDates(start: rangeStart, end: rangeEnd)
         Task {
             let points = await Task.detached {
-                dates.flatMap { RawLocationStore.shared.loadAllDevicesLocations(for: $0) }
-                    .sorted { $0.timestamp < $1.timestamp }
+                TimeSortedRawPoints(points: dates.flatMap { RawLocationStore.shared.loadAllDevicesLocations(for: $0) }
+                    .sorted { $0.timestamp < $1.timestamp })
             }.value
             await MainActor.run {
                 rawPoints = points
                 isLoadingRawPoints = false
+                updateSelection()
             }
         }
     }
@@ -1350,6 +1477,7 @@ private struct FootprintTimeAdjustmentView: View {
     }
 
     private func saveAdjustment() {
+        guard !isSaving else { return }
         let oldStart = footprint.startTime
         let oldEnd = footprint.endTime
         let roundedStart = roundedToMinute(draftStart)
@@ -1364,64 +1492,59 @@ private struct FootprintTimeAdjustmentView: View {
 
         let start = didChangeStart ? roundedStart : oldStart
         let end = didChangeEnd ? max(roundedEnd, start.addingTimeInterval(minimumFootprintDuration)) : max(oldEnd, start.addingTimeInterval(minimumFootprintDuration))
+        let coordinates = rawPoints.renderableCoordinates(in: rawPoints.range(from: start, to: end))
 
-        footprint.allowsAutomaticDurationExtension = false
-        footprint.startTime = start
-        footprint.endTime = end
-        footprint.date = Calendar.current.startOfDay(for: start)
-        footprint.status = .manual
-        if footprint.locationHash == "ONGOING_STAY" || footprint.locationHash.hasPrefix("GAP_STAY") {
-            footprint.locationHash = "MANUAL_STAY"
-        }
+        // Adjacent transports are looked up with the old bounds; their trimmed
+        // routes and distances are recomputed off main before saving.
+        let previous = didChangeStart ? adjacentTransport(endingAtFootprintStart: oldStart) : nil
+        let next = didChangeEnd ? adjacentTransport(startingAtFootprintEnd: oldEnd) : nil
+        let previousInput = previous.map { (pointsData: $0.pointsData, startTime: $0.startTime, endTime: start) }
+        let nextInput = next.map { (pointsData: $0.pointsData, startTime: end, endTime: $0.endTime) }
+        isSaving = true
 
-        let coordinates = rawPoints
-            .filter { $0.timestamp >= start && $0.timestamp <= end }
-            .map(\.coordinate)
-            .filter(\.isRawPointsRenderable)
-        if !coordinates.isEmpty {
-            footprint.footprintLocations = coordinates
-        }
+        Task { @MainActor in
+            let updates = await Task.detached(priority: .userInitiated) { () -> (previous: TransportMetricsUpdate?, next: TransportMetricsUpdate?) in
+                (
+                    previousInput.map { TransportMetricsUpdate.compute(pointsData: $0.pointsData, startTime: $0.startTime, endTime: $0.endTime) },
+                    nextInput.map { TransportMetricsUpdate.compute(pointsData: $0.pointsData, startTime: $0.startTime, endTime: $0.endTime) }
+                )
+            }.value
 
-        adjustAdjacentTransports(
-            oldStart: oldStart,
-            oldEnd: oldEnd,
-            newStart: start,
-            newEnd: end,
-            didChangeStart: didChangeStart,
-            didChangeEnd: didChangeEnd
-        )
-        if let anchor = LocationManager.shared.potentialStopStartLocation,
-           let current = LocationManager.shared.lastLocation ?? rawPoints.last {
-            Footprint.continueCurrentEditedStay(
-                footprint, anchor: anchor, current: current,
-                rawPoints: rawPoints, context: modelContext
-            )
-        }
-        try? modelContext.save()
-        invalidateCaches(oldStart: oldStart, oldEnd: oldEnd, newStart: start, newEnd: end)
-        onSave()
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        dismiss()
-    }
+            footprint.allowsAutomaticDurationExtension = false
+            footprint.startTime = start
+            footprint.endTime = end
+            footprint.date = Calendar.current.startOfDay(for: start)
+            footprint.status = .manual
+            if footprint.locationHash == "ONGOING_STAY" || footprint.locationHash.hasPrefix("GAP_STAY") {
+                footprint.locationHash = "MANUAL_STAY"
+            }
 
-    private func adjustAdjacentTransports(
-        oldStart: Date,
-        oldEnd: Date,
-        newStart: Date,
-        newEnd: Date,
-        didChangeStart: Bool,
-        didChangeEnd: Bool
-    ) {
-        if didChangeStart, let previous = adjacentTransport(endingAtFootprintStart: oldStart) {
-            previous.endTime = newStart
-            previous.day = Calendar.current.startOfDay(for: previous.startTime)
-            refreshTransportMetrics(previous)
-        }
+            if !coordinates.isEmpty {
+                footprint.footprintLocations = coordinates
+            }
 
-        if didChangeEnd, let next = adjacentTransport(startingAtFootprintEnd: oldEnd) {
-            next.startTime = newEnd
-            next.day = Calendar.current.startOfDay(for: next.startTime)
-            refreshTransportMetrics(next)
+            if let previous, let update = updates.previous {
+                previous.endTime = start
+                previous.day = Calendar.current.startOfDay(for: previous.startTime)
+                update.apply(to: previous)
+            }
+            if let next, let update = updates.next {
+                next.startTime = end
+                next.day = Calendar.current.startOfDay(for: next.startTime)
+                update.apply(to: next)
+            }
+            if let anchor = LocationManager.shared.potentialStopStartLocation,
+               let current = LocationManager.shared.lastLocation ?? rawPoints.points.last {
+                Footprint.continueCurrentEditedStay(
+                    footprint, anchor: anchor, current: current,
+                    rawPoints: rawPoints.points, context: modelContext
+                )
+            }
+            try? modelContext.save()
+            invalidateCaches(oldStart: oldStart, oldEnd: oldEnd, newStart: start, newEnd: end)
+            onSave()
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            dismiss()
         }
     }
 
@@ -1447,29 +1570,6 @@ private struct FootprintTimeAdjustmentView: View {
             sortBy: [SortDescriptor(\.startTime)]
         )
         return try? modelContext.fetch(descriptor).first
-    }
-
-    private func refreshTransportMetrics(_ record: TransportRecord) {
-        guard record.endTime > record.startTime else {
-            record.statusRaw = "ignored"
-            return
-        }
-
-        if let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData) {
-            let filtered = decoded.filter { point in
-                guard let timestamp = point.timestamp else { return point.isSyntheticPadding == true }
-                return timestamp >= record.startTime && timestamp <= record.endTime
-            }
-            if !filtered.isEmpty, let data = try? JSONEncoder().encode(filtered) {
-                record.pointsData = data
-                record.distance = TimelineBuilder.calculatePathDistance(filtered)
-            }
-        }
-
-        let duration = record.endTime.timeIntervalSince(record.startTime)
-        if duration > 0 {
-            record.averageSpeed = record.distance / duration
-        }
     }
 
     private func invalidateCaches(oldStart: Date, oldEnd: Date, newStart: Date, newEnd: Date) {
@@ -1529,8 +1629,16 @@ struct FootprintSplitView: View {
     @Bindable var footprint: Footprint
 
     @State private var splitTime: Date = Date()
-    @State private var rawPoints: [CLLocation] = []
+    @State private var rawPoints = TimeSortedRawPoints()
     @State private var isLoadingRawPoints = true
+    // Map/preview data for the current split, sliced from the time-sorted
+    // points on each slider change instead of filtering in body.
+    @State private var footprintRange: Range<Int> = 0..<0
+    @State private var fallbackCoordinates: [CLLocationCoordinate2D] = []
+    @State private var selectedCoordinates: [CLLocationCoordinate2D] = []
+    @State private var firstSegmentCoordinates: [CLLocationCoordinate2D] = []
+    @State private var secondSegmentCoordinates: [CLLocationCoordinate2D] = []
+    @State private var splitCoordinate: CLLocationCoordinate2D?
     @State private var firstActivityTypeValue: String?
     @State private var secondActivityTypeValue: String?
     @State private var hasInitializedActivityDrafts = false
@@ -1549,27 +1657,17 @@ struct FootprintSplitView: View {
         return min(max(splitTime, minSplit), maxSplit)
     }
 
-    private var selectedPoints: [CLLocation] {
-        rawPoints.filter { $0.timestamp >= footprint.startTime && $0.timestamp <= footprint.endTime }
-    }
-
-    private var selectedCoordinates: [CLLocationCoordinate2D] {
-        if !selectedPoints.isEmpty {
-            return selectedPoints.map(\.coordinate).filter(\.isRawPointsRenderable)
+    /// Recomputes the footprint window (after loading) and the split slices.
+    private func updateSelection(reloadRange: Bool) {
+        if reloadRange {
+            footprintRange = rawPoints.range(from: footprint.startTime, to: footprint.endTime)
+            selectedCoordinates = footprintRange.isEmpty
+                ? fallbackCoordinates
+                : rawPoints.renderableCoordinates(in: footprintRange)
         }
-        return footprint.footprintLocations.filter(\.isRawPointsRenderable)
-    }
-
-    private var splitCoordinate: CLLocationCoordinate2D? {
-        coordinate(at: boundedSplitTime)
-    }
-
-    private var firstSegmentCoordinates: [CLLocationCoordinate2D] {
-        coordinates(from: footprint.startTime, to: boundedSplitTime, fallbackStartRatio: 0, fallbackEndRatio: splitRatio)
-    }
-
-    private var secondSegmentCoordinates: [CLLocationCoordinate2D] {
-        coordinates(from: boundedSplitTime, to: footprint.endTime, fallbackStartRatio: splitRatio, fallbackEndRatio: 1)
+        splitCoordinate = coordinate(at: boundedSplitTime)
+        firstSegmentCoordinates = coordinates(from: footprint.startTime, to: boundedSplitTime, fallbackStartRatio: 0, fallbackEndRatio: splitRatio)
+        secondSegmentCoordinates = coordinates(from: boundedSplitTime, to: footprint.endTime, fallbackStartRatio: splitRatio, fallbackEndRatio: 1)
     }
 
     var body: some View {
@@ -1590,7 +1688,7 @@ struct FootprintSplitView: View {
                     .frame(height: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
                     .overlay(alignment: .bottomLeading) {
-                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(selectedPoints.count) 个原始点")
+                        Text(isLoadingRawPoints ? "加载轨迹点..." : "\(footprintRange.count) 个原始点")
                             .font(.caption.bold())
                             .foregroundColor(.white)
                             .padding(.horizontal, 10)
@@ -1679,6 +1777,9 @@ struct FootprintSplitView: View {
             initializeActivityDraftsIfNeeded()
             loadRawPoints()
         }
+        .onChange(of: splitTime) { _, _ in
+            updateSelection(reloadRange: false)
+        }
     }
 
     private var midpointDate: Date {
@@ -1699,25 +1800,28 @@ struct FootprintSplitView: View {
     private func loadRawPoints() {
         isLoadingRawPoints = true
         let dates = touchedDates(start: footprint.startTime, end: footprint.endTime)
+        let storedLocations = footprint.footprintLocations
         Task {
-            let points = await Task.detached {
-                dates.flatMap { RawLocationStore.shared.loadAllDevicesLocations(for: $0) }
-                    .sorted { $0.timestamp < $1.timestamp }
+            let (points, fallback) = await Task.detached { () -> (TimeSortedRawPoints, [CLLocationCoordinate2D]) in
+                let points = TimeSortedRawPoints(points: dates.flatMap { RawLocationStore.shared.loadAllDevicesLocations(for: $0) }
+                    .sorted { $0.timestamp < $1.timestamp })
+                return (points, storedLocations.filter(\.isRawPointsRenderable))
             }.value
             await MainActor.run {
                 rawPoints = points
+                fallbackCoordinates = fallback
                 isLoadingRawPoints = false
+                updateSelection(reloadRange: true)
             }
         }
     }
 
     private func coordinate(at date: Date) -> CLLocationCoordinate2D? {
-        let points = selectedPoints
-        if let nearest = points.min(by: { abs($0.timestamp.timeIntervalSince(date)) < abs($1.timestamp.timeIntervalSince(date)) }) {
+        if let nearest = rawPoints.nearestPoint(to: date, in: footprintRange) {
             return nearest.coordinate.isRawPointsRenderable ? nearest.coordinate : nil
         }
 
-        let coordinates = footprint.footprintLocations.filter(\.isRawPointsRenderable)
+        let coordinates = fallbackCoordinates
         guard !coordinates.isEmpty else { return nil }
         let ratio = date.timeIntervalSince(footprint.startTime) / max(1, footprint.endTime.timeIntervalSince(footprint.startTime))
         let index = min(max(0, Int((Double(coordinates.count - 1) * ratio).rounded())), coordinates.count - 1)
@@ -1734,6 +1838,7 @@ struct FootprintSplitView: View {
         let secondStart = min(split, oldEnd.addingTimeInterval(-minimumFootprintDuration))
         let ratio = split.timeIntervalSince(oldStart) / max(1, oldEnd.timeIntervalSince(oldStart))
 
+        // Binary-searched slices of the preloaded points (no full scan).
         let firstCoordinates = coordinates(from: oldStart, to: firstEnd, fallbackStartRatio: 0, fallbackEndRatio: splitRatio)
         let secondCoordinates = coordinates(from: secondStart, to: oldEnd, fallbackStartRatio: splitRatio, fallbackEndRatio: 1)
 
@@ -1790,15 +1895,13 @@ struct FootprintSplitView: View {
     }
 
     private func coordinates(from start: Date, to end: Date, fallbackStartRatio: Double, fallbackEndRatio: Double) -> [CLLocationCoordinate2D] {
-        let rawCoordinates = selectedPoints
-            .filter { $0.timestamp >= start && $0.timestamp <= end }
-            .map(\.coordinate)
-            .filter(\.isRawPointsRenderable)
+        let window = rawPoints.range(from: start, to: end).clamped(to: footprintRange)
+        let rawCoordinates = rawPoints.renderableCoordinates(in: window)
         if !rawCoordinates.isEmpty {
             return rawCoordinates
         }
 
-        let coordinates = footprint.footprintLocations.filter(\.isRawPointsRenderable)
+        let coordinates = fallbackCoordinates
         guard !coordinates.isEmpty else { return [] }
         let lastIndex = coordinates.count - 1
         let startIndex = min(max(0, Int((Double(lastIndex) * fallbackStartRatio).rounded())), lastIndex)
@@ -2349,6 +2452,7 @@ struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
         coordinator.pendingMapUpdate?.cancel()
         coordinator.mapView = nil
         coordinator.dataKey = ""
+        coordinator.resetInputKey()
         mapView.delegate = nil
         let overlays = mapView.overlays
         let annotations = mapView.annotations
@@ -2388,12 +2492,44 @@ struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
         weak var leadingPolyline: MKPolyline?
         weak var trailingPolyline: MKPolyline?
         var pendingMapUpdate: DispatchWorkItem?
+        /// O(1) fingerprint of the last applied inputs; layout passes with
+        /// unchanged inputs skip the filter/sample work entirely.
+        private var lastInputKey: InputKey?
+        /// Sampled base coordinates from the last update, reused for fitting.
+        private var fitCoordinates: [CLLocationCoordinate2D] = []
+
+        private struct InputKey: Equatable {
+            let counts: [Int]
+            let endpoints: [Double]
+            let diameter: CGFloat
+        }
+
+        private var inputKey: InputKey {
+            let lists = [parent.coordinates, parent.leadingCoordinates ?? [], parent.trailingCoordinates ?? []]
+            var endpoints: [Double] = []
+            for list in lists {
+                for coordinate in [list.first, list.last] {
+                    endpoints.append(coordinate?.latitude ?? .nan)
+                    endpoints.append(coordinate?.longitude ?? .nan)
+                }
+            }
+            endpoints.append(parent.markerCoordinate?.latitude ?? .nan)
+            endpoints.append(parent.markerCoordinate?.longitude ?? .nan)
+            return InputKey(
+                counts: [parent.coordinates.count, parent.leadingCoordinates?.count ?? -1, parent.trailingCoordinates?.count ?? -1],
+                endpoints: endpoints.map { $0.isNaN ? -999 : $0 },
+                diameter: parent.dotDiameter
+            )
+        }
 
         init(_ parent: FootprintTimeAdjustmentMapView) {
             self.parent = parent
         }
 
         func updateMap(on mapView: MKMapView) {
+            if pendingMapUpdate == nil, inputKey == lastInputKey {
+                return
+            }
             let shouldThrottle = parent.leadingCoordinates != nil || parent.trailingCoordinates != nil || parent.markerCoordinate != nil
             guard shouldThrottle else {
                 applyMapUpdate(on: mapView)
@@ -2411,6 +2547,7 @@ struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
         }
 
         private func applyMapUpdate(on mapView: MKMapView) {
+            lastInputKey = inputKey
             let coordinates = Self.sample(parent.coordinates.filter(\.isRawPointsRenderable), maxCount: FootprintTimeAdjustmentMapView.maxRenderedPoints)
             let leadingCoordinates = Self.sample(parent.leadingCoordinates?.filter(\.isRawPointsRenderable) ?? [], maxCount: FootprintTimeAdjustmentMapView.maxRenderedPoints)
             let trailingCoordinates = Self.sample(parent.trailingCoordinates?.filter(\.isRawPointsRenderable) ?? [], maxCount: FootprintTimeAdjustmentMapView.maxRenderedPoints)
@@ -2421,6 +2558,7 @@ struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
             let key = "\(baseKey)|\(leadingKey)|\(trailingKey)|\(markerKey)|\(parent.dotDiameter)"
             guard key != dataKey else { return }
             dataKey = key
+            fitCoordinates = coordinates
 
             mapView.removeOverlays(mapView.overlays)
             mapView.removeAnnotations(mapView.annotations)
@@ -2452,13 +2590,17 @@ struct FootprintTimeAdjustmentMapView: UIViewRepresentable {
         private func scheduleFit(on mapView: MKMapView, key: String, attempt: Int = 0) {
             DispatchQueue.main.async { [weak self, weak mapView] in
                 guard let self, let mapView, self.dataKey == key else { return }
-                if !self.fit(coordinates: Self.sample(self.parent.coordinates.filter(\.isRawPointsRenderable), maxCount: FootprintTimeAdjustmentMapView.maxRenderedPoints), on: mapView), attempt < 6 {
+                if !self.fit(coordinates: self.fitCoordinates, on: mapView), attempt < 6 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak mapView] in
                         guard let self, let mapView else { return }
                         self.scheduleFit(on: mapView, key: key, attempt: attempt + 1)
                     }
                 }
             }
+        }
+
+        func resetInputKey() {
+            lastInputKey = nil
         }
 
         @discardableResult
@@ -2845,6 +2987,14 @@ private struct MiniMapView: View {
     }
 }
 
+/// Creation date of a stored photo identifier, looked up off main.
+private func photoAssetCreationDate(for assetID: String) async -> Date? {
+    await Task.detached(priority: .userInitiated) {
+        let localIdentifier = PhotoService.shared.resolvedAssetIdentifier(for: assetID)
+        return PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject?.creationDate
+    }.value
+}
+
 struct AssetThumbnailView: View {
     let assetID: String
     var showsTime: Bool = true
@@ -2856,7 +3006,7 @@ struct AssetThumbnailView: View {
     @State private var isLoading = true
     @State private var isMissing = false
     @State private var creationDate: Date?
-    @State private var requestID: PHImageRequestID?
+    @State private var imageRequest: PhotoImageRequest?
     
     var body: some View {
         ZStack {
@@ -2928,10 +3078,8 @@ struct AssetThumbnailView: View {
     }
     
     private func cancelRequest() {
-        if let id = requestID {
-            PHImageManager.default().cancelImageRequest(id)
-            requestID = nil
-        }
+        imageRequest?.cancel()
+        imageRequest = nil
     }
     
     private func handleStateTap() {
@@ -2952,13 +3100,18 @@ struct AssetThumbnailView: View {
         self.isLoading = true
         self.isMissing = false
         
-        self.requestID = PhotoService.shared.loadImage(for: assetID, targetSize: targetSize) { img, exists, status, isDegraded in
+        let requestedAssetID = assetID
+        var didRequestCreationDate = false
+        self.imageRequest = PhotoService.shared.requestImage(for: assetID, targetSize: targetSize) { img, exists, status, isDegraded in
             self.authStatus = status
             
-            if exists {
-                let localIdentifier = PhotoService.shared.resolvedAssetIdentifier(for: assetID)
-                let result = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
-                self.creationDate = result.firstObject?.creationDate
+            if exists, !didRequestCreationDate {
+                didRequestCreationDate = true
+                Task { @MainActor in
+                    let date = await photoAssetCreationDate(for: requestedAssetID)
+                    guard requestedAssetID == assetID else { return }
+                    self.creationDate = date
+                }
             }
             
             if !exists {
@@ -3120,10 +3273,13 @@ struct PhotoFullscreenView: View {
     
     private func fetchCurrentDate() {
         guard currentIndex < assetIDs.count else { return }
-        let assetID = assetIDs[currentIndex]
-        let localIdentifier = PhotoService.shared.resolvedAssetIdentifier(for: assetID)
-        let result = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
-        currentCreationDate = result.firstObject?.creationDate
+        let index = currentIndex
+        let assetID = assetIDs[index]
+        Task { @MainActor in
+            let date = await photoAssetCreationDate(for: assetID)
+            guard index == currentIndex else { return }
+            currentCreationDate = date
+        }
     }
 }
 
@@ -3138,6 +3294,7 @@ struct FullscreenImageItem: View {
     @State private var isDegraded: Bool = true
     @State private var loadFailed: Bool = false
     @State private var creationDate: Date?
+    @State private var imageRequest: PhotoImageRequest?
     
     var body: some View {
         ZStack(alignment: .top) {
@@ -3190,7 +3347,10 @@ struct FullscreenImageItem: View {
     }
     
     private func loadImage() {
-        PhotoService.shared.loadImage(for: assetID, targetSize: CGSize(width: 2400, height: 2400), contentMode: .aspectFit, progressHandler: { progress in
+        imageRequest?.cancel()
+        let requestedAssetID = assetID
+        var didRequestCreationDate = false
+        imageRequest = PhotoService.shared.requestImage(for: assetID, targetSize: CGSize(width: 2400, height: 2400), contentMode: .aspectFit, progressHandler: { progress in
             // Only show download UI if we are actually downloading (progress < 1.0)
             if progress < 1.0 {
                 withAnimation(.linear) {
@@ -3199,10 +3359,13 @@ struct FullscreenImageItem: View {
                 }
             }
         }) { img, exists, _, degraded in
-            if exists {
-                let localIdentifier = PhotoService.shared.resolvedAssetIdentifier(for: assetID)
-                let result = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
-                self.creationDate = result.firstObject?.creationDate
+            if exists, !didRequestCreationDate {
+                didRequestCreationDate = true
+                Task { @MainActor in
+                    let date = await photoAssetCreationDate(for: requestedAssetID)
+                    guard requestedAssetID == assetID else { return }
+                    self.creationDate = date
+                }
             }
 
             if let img = img {
@@ -3356,14 +3519,18 @@ struct FootprintDetailMapView: View {
             }
         )
         .onAppear {
-            if let region = displayRegion(with: photoAssets) {
-                cameraPosition = .region(region)
+            Task { @MainActor in
+                if let region = await displayRegion(with: photoAssets) {
+                    cameraPosition = .region(region)
+                }
             }
         }
         .onChange(of: photoAssets) { _, newAssets in
-             if let region = displayRegion(with: newAssets) {
-                withAnimation {
-                    cameraPosition = .region(region)
+            Task { @MainActor in
+                if let region = await displayRegion(with: newAssets), newAssets == photoAssets {
+                    withAnimation {
+                        cameraPosition = .region(region)
+                    }
                 }
             }
         }
@@ -3374,8 +3541,13 @@ struct FootprintDetailMapView: View {
         }
     }
 
-    private func displayRegion(with photos: [PHAsset]) -> MKCoordinateRegion? {
-        guard var region = footprint.calculateRegion(with: photos) else { return nil }
+    /// Photo locations and bounds are computed off main.
+    private func displayRegion(with photos: [PHAsset]) async -> MKCoordinateRegion? {
+        let coordinates = footprint.coordinates
+        let computed = await Task.detached(priority: .userInitiated) {
+            Footprint.calculateRegion(coordinates: coordinates, photoAssets: photos)
+        }.value
+        guard var region = computed else { return nil }
         guard centersFootprintInVisibleTopArea else { return region }
 
         let marker = CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
@@ -3392,6 +3564,11 @@ struct FootprintDetailMapView: View {
 
 extension Footprint {
     func calculateRegion(with photoAssets: [PHAsset] = []) -> MKCoordinateRegion? {
+        Self.calculateRegion(coordinates: coordinates, photoAssets: photoAssets)
+    }
+
+    /// Value form of `calculateRegion(with:)`, safe to run off main.
+    static func calculateRegion(coordinates: [CLLocationCoordinate2D], photoAssets: [PHAsset]) -> MKCoordinateRegion? {
         var allCoords = coordinates
         
         // Include photo locations (using gcj02 for mainland China)

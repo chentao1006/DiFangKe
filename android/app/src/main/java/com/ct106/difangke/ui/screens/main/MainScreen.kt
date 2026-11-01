@@ -74,6 +74,8 @@ import com.ct106.difangke.ui.shared.TimelineEditActions
 import com.ct106.difangke.ui.theme.DfkAccent
 import com.ct106.difangke.viewmodel.MainViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
@@ -290,11 +292,14 @@ private fun ContinuousTimelineScreen(
     }
 
     // iOS timelineDates: every loadable day plus today, oldest first.
-    val allTimelineDates = remember(availableDates, today.time) {
-        (availableDates + today).map(::normalizeTimelineDate)
-            .filter { !it.after(today) }
-            .distinctBy { it.time }
-            .sortedBy { it.time }
+    // Normalizing and sorting every recorded date runs off main; starts with today alone.
+    val allTimelineDates by produceState(listOf(normalizeTimelineDate(today)), availableDates, today.time) {
+        value = withContext(Dispatchers.Default) {
+            (availableDates + today).map(::normalizeTimelineDate)
+                .filter { !it.after(today) }
+                .distinctBy { it.time }
+                .sortedBy { it.time }
+        }
     }
     val timelineDates = remember(allTimelineDates, loadedDateCount) { allTimelineDates.takeLast(loadedDateCount) }
     val canLoadEarlier = allTimelineDates.size > timelineDates.size
@@ -1011,6 +1016,12 @@ private fun TimelineDaySection(
         LocationTrackingService.TrackingState.Idle -> false
     }
     val now = Date()
+    // Place matching and footprint coordinate JSON parsing run off main on each live update.
+    val lastItemIsCurrentStay by produceState(false, showsCurrentStay, sortedItems, trackingState, allPlaces) {
+        value = showsCurrentStay && withContext(Dispatchers.Default) {
+            lastFootprintIsCurrentStay(sortedItems, trackingState, allPlaces)
+        }
+    }
     val currentStayIndex = if (showsCurrentStay) {
         sortedItems.indexOfFirst { it.startTime.after(now) }.let { if (it < 0) sortedItems.size else it }
     } else -1
@@ -1021,7 +1032,7 @@ private fun TimelineDaySection(
         viewModel = viewModel,
         activityTypes = activityTypes,
         allPlaces = allPlaces,
-        lastItemUsesMinimumSpacing = showsCurrentStay && lastFootprintIsCurrentStay(sortedItems, trackingState, allPlaces),
+        lastItemUsesMinimumSpacing = showsCurrentStay && lastItemIsCurrentStay,
         rowActions = rowActions,
         insertAt = currentStayIndex
     ) {

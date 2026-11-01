@@ -6,7 +6,9 @@ struct SettingsView: View {
     @Environment(\.requestReview) private var requestReview
     @Environment(LocationManager.self) private var locationManager
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
-    @Query(sort: \Place.name) private var allPlaces: [Place]
+    @Environment(\.modelContext) private var modelContext
+    @State private var placeCounts = PlaceCategoryCounts()
+    @State private var placeCountsRevision = 0
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder)]) private var allActivities: [ActivityType]
     @AppStorage("isICloudSyncEnabled") private var isICloudSyncEnabled = false
     @AppStorage("raw_recording_source_device_id") private var rawRecordingSourceDeviceID = ""
@@ -141,8 +143,7 @@ struct SettingsView: View {
                             Image(systemName: "mappin.circle").foregroundColor(.orange)
                         }
                         Spacer()
-                        let importantCount = allPlaces.filter { $0.isUserDefined }.count
-                        Text("\(importantCount)")
+                        Text("\(placeCounts.important)")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
@@ -155,8 +156,7 @@ struct SettingsView: View {
                             Image(systemName: "clock.arrow.circlepath").foregroundColor(.blue)
                         }
                         Spacer()
-                        let savedCount = allPlaces.filter { !$0.isUserDefined && !$0.isIgnored }.count
-                        Text("\(savedCount)")
+                        Text("\(placeCounts.saved)")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
@@ -170,8 +170,7 @@ struct SettingsView: View {
                             Image(systemName: "mappin.slash").foregroundColor(.secondary)
                         }
                         Spacer()
-                        let ignoredCount = allPlaces.filter { $0.isIgnored && !$0.isUserDefined }.count
-                        Text("\(ignoredCount)")
+                        Text("\(placeCounts.ignored)")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
@@ -266,6 +265,42 @@ struct SettingsView: View {
         .navigationTitle("设置")
         .navigationBarTitleDisplayMode(.large)
         .tint(.dfkAccent)
+        .task(id: placeCountsRevision) {
+            let container = modelContext.container
+            let counts = await Task.detached(priority: .utility) {
+                Self.fetchPlaceCounts(in: container)
+            }.value
+            guard !Task.isCancelled else { return }
+            placeCounts = counts
+        }
+        .onAppear { placeCountsRevision += 1 }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
+            placeCountsRevision += 1
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RemoteDataChanged"))) { _ in
+            placeCountsRevision += 1
+        }
+    }
+
+    struct PlaceCategoryCounts: Sendable {
+        var important = 0
+        var saved = 0
+        var ignored = 0
+    }
+
+    // Counts are evaluated by the store in a background context instead of filtering every Place on main.
+    nonisolated private static func fetchPlaceCounts(in container: ModelContainer) -> PlaceCategoryCounts {
+        let context = ModelContext(container)
+        let important = (try? context.fetchCount(FetchDescriptor<Place>(predicate: #Predicate {
+            $0.isUserDefined == true
+        }))) ?? 0
+        let saved = (try? context.fetchCount(FetchDescriptor<Place>(predicate: #Predicate {
+            $0.isUserDefined == false && $0.isIgnored == false
+        }))) ?? 0
+        let ignored = (try? context.fetchCount(FetchDescriptor<Place>(predicate: #Predicate {
+            $0.isIgnored == true && $0.isUserDefined == false
+        }))) ?? 0
+        return PlaceCategoryCounts(important: important, saved: saved, ignored: ignored)
     }
 }
 

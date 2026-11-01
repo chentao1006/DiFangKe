@@ -4,6 +4,11 @@ import SwiftData
 import Aptabase
 
 // MARK: - Footprint Card View
+private struct AdjacentFootprintMergePair: Sendable, Equatable {
+    let baseID: UUID
+    let otherID: UUID
+}
+
 private struct AdjacentFootprintMergeCandidate {
     let base: Footprint
     let other: Footprint
@@ -47,6 +52,39 @@ struct FootprintCardView: View {
     @State private var isResolvingUnknownPlace = false
     @State private var isPlaceTitleBreathing = false
     @State private var activityPickerPresentation: ActivityPickerPresentation?
+    /// Merge neighbour resolved off main; the context menu only reads it.
+    @State private var adjacentMergePair: AdjacentFootprintMergePair?
+    @State private var footprintDataRevision = 0
+
+    private struct AdjacentMergeLookupKey: Equatable {
+        let footprintID: UUID
+        let startTime: Date
+        let endTime: Date
+        let revision: Int
+        let isEnabled: Bool
+    }
+
+    private var adjacentMergeLookupKey: AdjacentMergeLookupKey {
+        AdjacentMergeLookupKey(
+            footprintID: footprint.footprintID,
+            startTime: footprint.startTime,
+            endTime: footprint.endTime,
+            revision: footprintDataRevision,
+            isEnabled: !disableContextMenu && footprint.status != .ignored
+        )
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private static let monthDayTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M月d日 HH:mm"
+        return formatter
+    }()
     
     var body: some View {
         if footprint.status == .ignored {
@@ -158,6 +196,13 @@ struct FootprintCardView: View {
             .if(!disableContextMenu) { view in
                 view.contextMenu { longPressMenu }
             }
+            .task(id: adjacentMergeLookupKey) {
+                await refreshAdjacentMergePair()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { _ in
+                // Neighbouring records can change without this card changing.
+                footprintDataRevision &+= 1
+            }
             .alert("确认删除足迹？", isPresented: $showingDeleteConfirm) {
                 Button("删除", role: .destructive) { ignoreFootprint() }
                 Button("取消", role: .cancel) { }
@@ -261,8 +306,7 @@ struct FootprintCardView: View {
     }
     
     private var timeRangeString: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
+        let formatter = Self.timeFormatter
         let startStr = formatter.string(from: footprint.startTime)
         let endStr = formatter.string(from: footprint.endTime)
         
@@ -279,8 +323,7 @@ struct FootprintCardView: View {
             return "\(startStr)-次日\(endStr)"
         } else {
             let isSameDay = calendar.isDate(footprint.startTime, inSameDayAs: footprint.endTime)
-            let monthDayFormatter = DateFormatter()
-            monthDayFormatter.dateFormat = "M月d日 HH:mm"
+            let monthDayFormatter = Self.monthDayTimeFormatter
             
             if isSameDay {
                 return "\(monthDayFormatter.string(from: footprint.startTime))-\(endStr)"
@@ -378,9 +421,11 @@ struct FootprintCardView: View {
 
     @ViewBuilder
     private var longPressMenu: some View {
-        if let mergeCandidate = adjacentMergeCandidate {
+        if let mergePair = adjacentMergePair {
             Button {
-                pendingMergeCandidate = mergeCandidate
+                guard let base = storedFootprint(id: mergePair.baseID),
+                      let other = storedFootprint(id: mergePair.otherID) else { return }
+                pendingMergeCandidate = AdjacentFootprintMergeCandidate(base: base, other: other)
                 showingMergeConfirm = true
             } label: {
                 Label("合并相邻足迹", systemImage: "arrow.triangle.merge")
@@ -419,23 +464,44 @@ struct FootprintCardView: View {
         Button(role: .destructive) { showingDeleteConfirm = true } label: { Label("删除", systemImage: "trash") }
     }
 
-    private var adjacentMergeCandidate: AdjacentFootprintMergeCandidate? {
-        let allFootprints = adjacentSearchFootprints()
+    private func refreshAdjacentMergePair() async {
+        let key = adjacentMergeLookupKey
+        guard key.isEnabled else {
+            adjacentMergePair = nil
+            return
+        }
+        let container = modelContext.container
+        let pair = await Task.detached(priority: .utility) {
+            Self.adjacentMergePair(footprintID: key.footprintID, in: ModelContext(container))
+        }.value
+        guard !Task.isCancelled, adjacentMergeLookupKey == key else { return }
+        adjacentMergePair = pair
+    }
+
+    private func storedFootprint(id footprintID: UUID) -> Footprint? {
+        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+        return try? modelContext.fetch(descriptor).first
+    }
+
+    nonisolated private static func adjacentMergePair(footprintID: UUID, in context: ModelContext) -> AdjacentFootprintMergePair? {
+        let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == footprintID })
+        guard let footprint = try? context.fetch(descriptor).first else { return nil }
+        let allFootprints = adjacentSearchFootprints(around: footprint, in: context)
         guard let index = allFootprints.firstIndex(where: { $0.footprintID == footprint.footprintID }) else {
             return nil
         }
 
         if index > 0 {
             let previous = allFootprints[index - 1]
-            if canMergeAdjacentFootprints(previous, footprint) {
-                return AdjacentFootprintMergeCandidate(base: previous, other: footprint)
+            if canMergeAdjacentFootprints(previous, footprint, in: context) {
+                return AdjacentFootprintMergePair(baseID: previous.footprintID, otherID: footprint.footprintID)
             }
         }
 
         if index < allFootprints.count - 1 {
             let next = allFootprints[index + 1]
-            if canMergeAdjacentFootprints(footprint, next) {
-                return AdjacentFootprintMergeCandidate(base: footprint, other: next)
+            if canMergeAdjacentFootprints(footprint, next, in: context) {
+                return AdjacentFootprintMergePair(baseID: footprint.footprintID, otherID: next.footprintID)
             }
         }
 
@@ -454,7 +520,7 @@ struct FootprintCardView: View {
         return "将合并 \(formatter.string(from: first.startTime))-\(formatter.string(from: first.endTime)) 和 \(formatter.string(from: second.startTime))-\(formatter.string(from: second.endTime)) 两条足迹。"
     }
 
-    private func adjacentSearchFootprints() -> [Footprint] {
+    nonisolated private static func adjacentSearchFootprints(around footprint: Footprint, in context: ModelContext) -> [Footprint] {
         let lowerBound = footprint.startTime.addingTimeInterval(-172800)
         let upperBound = footprint.endTime.addingTimeInterval(172800)
         let descriptor = FetchDescriptor<Footprint>(
@@ -465,22 +531,22 @@ struct FootprintCardView: View {
             },
             sortBy: [SortDescriptor(\.startTime, order: .forward)]
         )
-        return (try? modelContext.fetch(descriptor)) ?? []
+        return (try? context.fetch(descriptor)) ?? []
     }
 
-    private func canMergeAdjacentFootprints(_ first: Footprint, _ second: Footprint) -> Bool {
+    nonisolated private static func canMergeAdjacentFootprints(_ first: Footprint, _ second: Footprint, in context: ModelContext) -> Bool {
         guard first.status != .ignored, second.status != .ignored else { return false }
         guard first.footprintID != second.footprintID else { return false }
         guard isSameDayFootprint(first), isSameDayFootprint(second) else { return false }
         guard Calendar.current.isDate(first.startTime, inSameDayAs: second.startTime) else { return false }
-        return !hasTransportBetween(first, second)
+        return !hasTransportBetween(first, second, in: context)
     }
 
-    private func isSameDayFootprint(_ footprint: Footprint) -> Bool {
+    nonisolated private static func isSameDayFootprint(_ footprint: Footprint) -> Bool {
         Calendar.current.isDate(footprint.startTime, inSameDayAs: footprint.endTime.addingTimeInterval(-0.001))
     }
 
-    private func hasTransportBetween(_ first: Footprint, _ second: Footprint) -> Bool {
+    nonisolated private static func hasTransportBetween(_ first: Footprint, _ second: Footprint, in context: ModelContext) -> Bool {
         let lowerBound = min(first.endTime, second.endTime)
         let upperBound = max(first.startTime, second.startTime)
         guard upperBound > lowerBound else { return false }
@@ -492,7 +558,7 @@ struct FootprintCardView: View {
                 $0.startTime < upperBound
             }
         )
-        return ((try? modelContext.fetch(descriptor)) ?? []).isEmpty == false
+        return ((try? context.fetch(descriptor)) ?? []).isEmpty == false
     }
 
     private func mergeAdjacentFootprints(_ candidate: AdjacentFootprintMergeCandidate) {

@@ -56,7 +56,11 @@ object TimelineEditActions {
     // ───────────────────────────── Footprints ─────────────────────────────
 
     /** Adjacent footprint that can merge with [footprint] (previous preferred), or null. */
-    suspend fun findFootprintMergePartner(db: AppDatabase, footprint: FootprintEntity): FootprintEntity? {
+    suspend fun findFootprintMergePartner(db: AppDatabase, footprint: FootprintEntity): FootprintEntity? = withContext(Dispatchers.Default) {
+        findFootprintMergePartnerOffMain(db, footprint)
+    }
+
+    private suspend fun findFootprintMergePartnerOffMain(db: AppDatabase, footprint: FootprintEntity): FootprintEntity? {
         val stored = db.footprintDao().getById(footprint.footprintID) ?: footprint
         val all = db.footprintDao().getBetween(
             Date(stored.startTime.time - TWO_DAYS_MS),
@@ -85,7 +89,11 @@ object TimelineEditActions {
     }
 
     /** Merge [a] and [b]; the earlier one survives (iOS parity). Returns the merged footprint. */
-    suspend fun mergeFootprints(db: AppDatabase, a: FootprintEntity, b: FootprintEntity): FootprintEntity {
+    suspend fun mergeFootprints(db: AppDatabase, a: FootprintEntity, b: FootprintEntity): FootprintEntity = withContext(Dispatchers.Default) {
+        mergeFootprintsOffMain(db, a, b)
+    }
+
+    private suspend fun mergeFootprintsOffMain(db: AppDatabase, a: FootprintEntity, b: FootprintEntity): FootprintEntity {
         val sa = db.footprintDao().getById(a.footprintID) ?: a
         val sb = db.footprintDao().getById(b.footprintID) ?: b
         val base = if (sa.startTime <= sb.startTime) sa else sb
@@ -122,7 +130,11 @@ object TimelineEditActions {
     }
 
     /** Convenience: merge with the detected adjacent partner. Returns merged footprint or null. */
-    suspend fun mergeAdjacentFootprint(db: AppDatabase, footprint: FootprintEntity): FootprintEntity? {
+    suspend fun mergeAdjacentFootprint(db: AppDatabase, footprint: FootprintEntity): FootprintEntity? = withContext(Dispatchers.Default) {
+        mergeAdjacentFootprintOffMain(db, footprint)
+    }
+
+    private suspend fun mergeAdjacentFootprintOffMain(db: AppDatabase, footprint: FootprintEntity): FootprintEntity? {
         val partner = findFootprintMergePartner(db, footprint) ?: return null
         return mergeFootprints(db, footprint, partner)
     }
@@ -162,6 +174,17 @@ object TimelineEditActions {
         splitTime: Date,
         firstActivityTypeValue: String? = footprint.activityTypeValue,
         secondActivityTypeValue: String? = footprint.activityTypeValue
+    ): Pair<FootprintEntity, FootprintEntity>? = withContext(Dispatchers.Default) {
+        splitFootprintOffMain(db, context, footprint, splitTime, firstActivityTypeValue, secondActivityTypeValue)
+    }
+
+    private suspend fun splitFootprintOffMain(
+        db: AppDatabase,
+        context: Context,
+        footprint: FootprintEntity,
+        splitTime: Date,
+        firstActivityTypeValue: String?,
+        secondActivityTypeValue: String?
     ): Pair<FootprintEntity, FootprintEntity>? {
         val fp = db.footprintDao().getById(footprint.footprintID) ?: footprint
         val total = fp.endTime.time - fp.startTime.time
@@ -224,7 +247,11 @@ object TimelineEditActions {
     }
 
     /** Editable range for the time-adjust sheet (iOS setupInitialRange). */
-    suspend fun footprintAdjustRange(db: AppDatabase, footprint: FootprintEntity): Pair<Date, Date> {
+    suspend fun footprintAdjustRange(db: AppDatabase, footprint: FootprintEntity): Pair<Date, Date> = withContext(Dispatchers.Default) {
+        footprintAdjustRangeOffMain(db, footprint)
+    }
+
+    private suspend fun footprintAdjustRangeOffMain(db: AppDatabase, footprint: FootprintEntity): Pair<Date, Date> {
         val dayStart = startOfDay(footprint.date)
         val dayEnd = Date(addDays(dayStart, 1).time)
         val latestAllowed = Date(min(dayEnd.time, currentMinute().time))
@@ -244,6 +271,16 @@ object TimelineEditActions {
      * status manual, recomputes coordinates from raw points and trims/extends adjacent transports.
      */
     suspend fun adjustFootprintTime(
+        db: AppDatabase,
+        context: Context,
+        footprint: FootprintEntity,
+        newStart: Date,
+        newEnd: Date
+    ): FootprintEntity? = withContext(Dispatchers.Default) {
+        adjustFootprintTimeOffMain(db, context, footprint, newStart, newEnd)
+    }
+
+    private suspend fun adjustFootprintTimeOffMain(
         db: AppDatabase,
         context: Context,
         footprint: FootprintEntity,
@@ -292,7 +329,11 @@ object TimelineEditActions {
     }
 
     /** iOS LocationManager.ignoreLocation: mark place ignored and hide its footprints (radius + 100 m). */
-    suspend fun ignorePlace(db: AppDatabase, footprint: FootprintEntity): PlaceEntity? {
+    suspend fun ignorePlace(db: AppDatabase, footprint: FootprintEntity): PlaceEntity? = withContext(Dispatchers.Default) {
+        ignorePlaceOffMain(db, footprint)
+    }
+
+    private suspend fun ignorePlaceOffMain(db: AppDatabase, footprint: FootprintEntity): PlaceEntity? {
         val fp = db.footprintDao().getById(footprint.footprintID) ?: footprint
         val coord = representativeCoordinate(fp)
         val existing = fp.placeID?.let { db.placeDao().getById(it) }
@@ -369,7 +410,11 @@ object TimelineEditActions {
      * priority (create an automatic Place if needed), write address/placeID/isAddressEditedByHand,
      * re-match a non-manual activity from the new place's history, then markManualMetadataEdit().
      */
-    suspend fun applyPlaceSelection(db: AppDatabase, footprint: FootprintEntity, suggestion: GeocodeService.SearchResult): FootprintEntity {
+    suspend fun applyPlaceSelection(db: AppDatabase, footprint: FootprintEntity, suggestion: GeocodeService.SearchResult): FootprintEntity = withContext(Dispatchers.Default) {
+        applyPlaceSelectionOffMain(db, footprint, suggestion)
+    }
+
+    private suspend fun applyPlaceSelectionOffMain(db: AppDatabase, footprint: FootprintEntity, suggestion: GeocodeService.SearchResult): FootprintEntity {
         val fp = db.footprintDao().getById(footprint.footprintID) ?: footprint
         val place = updateOrCreatePlaceAsPriority(db, suggestion)
         val shouldRematch = fp.activityTypeValue == null || fp.status != FootprintStatus.MANUAL
@@ -414,7 +459,11 @@ object TimelineEditActions {
 
     // ───────────────────────────── Transports ─────────────────────────────
 
-    suspend fun findTransportMergePartner(db: AppDatabase, record: TransportRecordEntity): TransportRecordEntity? {
+    suspend fun findTransportMergePartner(db: AppDatabase, record: TransportRecordEntity): TransportRecordEntity? = withContext(Dispatchers.Default) {
+        findTransportMergePartnerOffMain(db, record)
+    }
+
+    private suspend fun findTransportMergePartnerOffMain(db: AppDatabase, record: TransportRecordEntity): TransportRecordEntity? {
         val stored = db.transportRecordDao().getById(record.recordID) ?: record
         val all = db.transportRecordDao().getActiveBetween(
             Date(stored.startTime.time - TWO_DAYS_MS),
@@ -441,7 +490,11 @@ object TimelineEditActions {
     }
 
     /** iOS mergeAdjacentTransports: earlier record survives; manualTypeRaw pinned. */
-    suspend fun mergeTransports(db: AppDatabase, a: TransportRecordEntity, b: TransportRecordEntity): TransportRecordEntity {
+    suspend fun mergeTransports(db: AppDatabase, a: TransportRecordEntity, b: TransportRecordEntity): TransportRecordEntity = withContext(Dispatchers.Default) {
+        mergeTransportsOffMain(db, a, b)
+    }
+
+    private suspend fun mergeTransportsOffMain(db: AppDatabase, a: TransportRecordEntity, b: TransportRecordEntity): TransportRecordEntity {
         val sa = db.transportRecordDao().getById(a.recordID) ?: a
         val sb = db.transportRecordDao().getById(b.recordID) ?: b
         val base = if (sa.startTime <= sb.startTime) sa else sb
@@ -484,7 +537,11 @@ object TimelineEditActions {
         return merged
     }
 
-    suspend fun mergeAdjacentTransport(db: AppDatabase, record: TransportRecordEntity): TransportRecordEntity? {
+    suspend fun mergeAdjacentTransport(db: AppDatabase, record: TransportRecordEntity): TransportRecordEntity? = withContext(Dispatchers.Default) {
+        mergeAdjacentTransportOffMain(db, record)
+    }
+
+    private suspend fun mergeAdjacentTransportOffMain(db: AppDatabase, record: TransportRecordEntity): TransportRecordEntity? {
         val partner = findTransportMergePartner(db, record) ?: return null
         return mergeTransports(db, record, partner)
     }
@@ -575,7 +632,11 @@ object TimelineEditActions {
      * endpoints "中途", per-half type inferred unless the user had picked one; pins manualTypeRaw on both.
      * Returns (first, second) or null when the transport is shorter than 2 minutes.
      */
-    suspend fun splitTransport(db: AppDatabase, record: TransportRecordEntity, splitTime: Date): Pair<TransportRecordEntity, TransportRecordEntity>? {
+    suspend fun splitTransport(db: AppDatabase, record: TransportRecordEntity, splitTime: Date): Pair<TransportRecordEntity, TransportRecordEntity>? = withContext(Dispatchers.Default) {
+        splitTransportOffMain(db, record, splitTime)
+    }
+
+    private suspend fun splitTransportOffMain(db: AppDatabase, record: TransportRecordEntity, splitTime: Date): Pair<TransportRecordEntity, TransportRecordEntity>? {
         val r = db.transportRecordDao().getById(record.recordID) ?: record
         if (!canSplitTransport(r)) return null
         val split = Date(splitTime.time.coerceIn(r.startTime.time + MIN_TRANSPORT_SEGMENT_MS, r.endTime.time - MIN_TRANSPORT_SEGMENT_MS))
@@ -619,7 +680,11 @@ object TimelineEditActions {
     }
 
     /** Editable range for the transport time-adjust sheet (iOS setupInitialRange + editableRange*). */
-    suspend fun transportAdjustRange(db: AppDatabase, record: TransportRecordEntity): Pair<Date, Date> {
+    suspend fun transportAdjustRange(db: AppDatabase, record: TransportRecordEntity): Pair<Date, Date> = withContext(Dispatchers.Default) {
+        transportAdjustRangeOffMain(db, record)
+    }
+
+    private suspend fun transportAdjustRangeOffMain(db: AppDatabase, record: TransportRecordEntity): Pair<Date, Date> {
         val dayStart = startOfDay(record.startTime)
         val dayEnd = addDays(dayStart, 1)
         val latestAllowed = minOf(dayEnd, currentMinute())
@@ -649,6 +714,16 @@ object TimelineEditActions {
      * adjacent connected items (within alignment threshold) follow the new boundary.
      */
     suspend fun adjustTransportTime(
+        db: AppDatabase,
+        context: Context,
+        record: TransportRecordEntity,
+        newStart: Date,
+        newEnd: Date
+    ): TransportRecordEntity = withContext(Dispatchers.Default) {
+        adjustTransportTimeOffMain(db, context, record, newStart, newEnd)
+    }
+
+    private suspend fun adjustTransportTimeOffMain(
         db: AppDatabase,
         context: Context,
         record: TransportRecordEntity,
@@ -722,7 +797,11 @@ object TimelineEditActions {
     }
 
     /** iOS updateTransport(type:): writes manualTypeRaw and typeRaw. */
-    suspend fun setTransportManualType(db: AppDatabase, record: TransportRecordEntity, type: TransportType): TransportRecordEntity {
+    suspend fun setTransportManualType(db: AppDatabase, record: TransportRecordEntity, type: TransportType): TransportRecordEntity = withContext(Dispatchers.Default) {
+        setTransportManualTypeOffMain(db, record, type)
+    }
+
+    private suspend fun setTransportManualTypeOffMain(db: AppDatabase, record: TransportRecordEntity, type: TransportType): TransportRecordEntity {
         val r = db.transportRecordDao().getById(record.recordID) ?: record
         val updated = r.copy(manualTypeRaw = type.raw, typeRaw = type.raw)
         db.transportRecordDao().update(updated)

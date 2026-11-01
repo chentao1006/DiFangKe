@@ -2,7 +2,9 @@ import Foundation
 import SwiftData
 import CoreLocation
 
-@MainActor
+/// The heavy passes below fetch whole entity sets and compare records
+/// pairwise, so they must run on a background `ModelContext`. The enum itself
+/// is nonisolated; use the container-taking async variants from UI code.
 enum DataDeduplicationService {
     struct Report {
         var importedDuplicatesDeleted = 0
@@ -21,10 +23,27 @@ enum DataDeduplicationService {
     /// Reconcile stable backup IDs first: a CloudKit object ID is not the
     /// application's UUID. Only use exact payload matching across different IDs.
     /// A separate context keeps a failed cleanup from rolling back UI edits.
+    @MainActor
     @discardableResult
     static func reconcileImportedDuplicates(in container: ModelContainer) -> Int {
         // Do not race an unsaved user edit in the UI context.
         guard !container.mainContext.hasChanges else { return 0 }
+        return removeExactImportedClones(in: container)
+    }
+
+    /// Off-main variant of `reconcileImportedDuplicates(in:)`: the unsaved-edit
+    /// guard is evaluated on the main actor, the fetch/compare/save pass runs
+    /// on a detached background context.
+    @MainActor
+    @discardableResult
+    static func reconcileImportedDuplicatesInBackground(in container: ModelContainer) async -> Int {
+        guard !container.mainContext.hasChanges else { return 0 }
+        return await Task.detached(priority: .utility) {
+            removeExactImportedClones(in: container)
+        }.value
+    }
+
+    private static func removeExactImportedClones(in container: ModelContainer) -> Int {
         let context = ModelContext(container)
         context.autosaveEnabled = false
         do {
@@ -185,6 +204,15 @@ enum DataDeduplicationService {
         return true
     }
 
+    /// Runs the full maintenance pass on a detached background context.
+    static func run(in container: ModelContainer) async -> Report {
+        await Task.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            return run(context: context)
+        }.value
+    }
+
     static func run(context: ModelContext) -> Report {
         var report = Report()
 
@@ -226,6 +254,17 @@ enum DataDeduplicationService {
         print("[DataDeduplication] after places=\(remainingPlaces), footprints=\(remainingFootprints), transports=\(remainingTransports), activityTypes=\(remainingActivityTypes)")
 
         return report
+    }
+
+    /// Off-main variant of `deduplicateTransports(context:)` using a detached
+    /// background context of the same container.
+    @discardableResult
+    static func deduplicateTransports(in container: ModelContainer) async -> Int {
+        await Task.detached(priority: .utility) {
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            return deduplicateTransports(context: context)
+        }.value
     }
 
     /// Safe to run during normal timeline rebuilding.  This intentionally only

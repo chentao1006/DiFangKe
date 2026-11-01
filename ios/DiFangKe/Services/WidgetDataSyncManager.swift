@@ -7,24 +7,141 @@ import WidgetKit
 
 @MainActor
 final class WidgetDataSyncManager {
-    private static var inferredRouteDistanceThreshold: CLLocationDistance { AppConfig.shared.widgetInferredRouteDistanceThreshold }
+    nonisolated private static var inferredRouteDistanceThreshold: CLLocationDistance { AppConfig.shared.widgetInferredRouteDistanceThreshold }
     static let shared = WidgetDataSyncManager()
     // Keep this in sync with the widget reader. Bump it whenever the widget
     // renderer changes so WidgetKit cannot reuse an image drawn with old rules.
-    static let snapshotFileVersion = "v14"
+    nonisolated static let snapshotFileVersion = "v14"
 
     /// Marker outlines are composited after MapKit renders the map, so they
     /// must use the snapshot's requested appearance instead of the app's
     /// current dynamic system color.
-    private static func mapMarkerOutlineColor(for style: UIUserInterfaceStyle) -> UIColor {
+    nonisolated private static func mapMarkerOutlineColor(for style: UIUserInterfaceStyle) -> UIColor {
         style == .dark ? .black : .white
     }
 
-    private struct AggregatedFootprintSnapshot {
+    private struct AggregatedFootprintSnapshot: @unchecked Sendable {
         let coordinate: CLLocationCoordinate2D
         let totalDuration: TimeInterval
-        let representative: Footprint
+        /// Activity of the bucket's representative (longest) footprint.
+        let activityTypeValue: String?
         let latestPhotoAssetID: String?
+    }
+
+    /// Plain values read from a `Footprint`, so aggregation, geometry and
+    /// drawing can run off the main actor without touching a model object.
+    private struct WidgetFootprintValue: Sendable {
+        let footprintID: UUID
+        let latitudeData: Data
+        let longitudeData: Data
+        let photoAssetIDsData: Data
+        let placeID: UUID?
+        let locationHash: String
+        let startTime: Date
+        let endTime: Date
+        let address: String?
+        let activityTypeValue: String?
+        let statusValue: String
+        /// Precomputed aggregation key (share cards group by review place).
+        let aggregationKey: String?
+
+        init(_ footprint: Footprint, aggregationKey: String? = nil) {
+            footprintID = footprint.footprintID
+            latitudeData = footprint.latitudeData
+            longitudeData = footprint.longitudeData
+            photoAssetIDsData = footprint.photoAssetIDsData
+            placeID = footprint.placeID
+            locationHash = footprint.locationHash
+            startTime = footprint.startTime
+            endTime = footprint.endTime
+            address = footprint.address
+            activityTypeValue = footprint.activityTypeValue
+            statusValue = footprint.statusValue
+            self.aggregationKey = aggregationKey
+        }
+
+        /// Same derivation as `Footprint.duration`.
+        var duration: TimeInterval { max(0, endTime.timeIntervalSince(startTime)) }
+
+        /// Same thread-safe decoded geometry `Footprint` itself reads.
+        var geometry: FootprintGeometry {
+            FootprintGeometryCache.shared.geometry(
+                for: footprintID, latitudeData: latitudeData, longitudeData: longitudeData
+            )
+        }
+
+        /// Same decoding as `Footprint.photoAssetIDs`.
+        var photoAssetIDs: [String] {
+            (try? JSONDecoder().decode([String].self, from: photoAssetIDsData)) ?? []
+        }
+    }
+
+    private struct WidgetTransportValue: Sendable {
+        let recordID: UUID
+        let startTime: Date
+        let endTime: Date
+        let statusRaw: String
+        let typeRaw: String
+        let manualTypeRaw: String?
+        let pointsData: Data
+
+        init(_ transport: TransportRecord) {
+            recordID = transport.recordID
+            startTime = transport.startTime
+            endTime = transport.endTime
+            statusRaw = transport.statusRaw
+            typeRaw = transport.typeRaw
+            manualTypeRaw = transport.manualTypeRaw
+            pointsData = transport.pointsData
+        }
+    }
+
+    private struct WidgetActivityValue: Sendable {
+        let idString: String
+        let name: String
+        let colorHex: String
+        let icon: String
+
+        init(_ activity: ActivityType) {
+            idString = activity.id.uuidString
+            name = activity.name
+            colorHex = activity.colorHex
+            icon = activity.icon
+        }
+    }
+
+    /// One day's widget inputs read on a background context.
+    private struct WidgetDayValues: Sendable {
+        let footprints: [WidgetFootprintValue]
+        let transports: [WidgetTransportValue]
+        let activities: [WidgetActivityValue]
+        let signature: String
+        let allFilesExist: Bool
+    }
+
+    /// Precomputed drawing inputs for a set of map snapshots.
+    private struct WidgetMapDrawingInputs: @unchecked Sendable {
+        let aggregatedFootprints: [AggregatedFootprintSnapshot]
+        let decodedTransports: [WidgetDecodedTransport]
+        let mapCoordinates: [CLLocationCoordinate2D]
+        let activitiesByID: [String: WidgetActivityValue]
+        let activitiesByName: [String: WidgetActivityValue]
+    }
+
+    private struct UncheckedSendableBox<Value>: @unchecked Sendable {
+        let value: Value
+    }
+
+    /// Runs CPU/IO work (decode, geometry, drawing, encoding, file access)
+    /// on a detached background task and returns its result to the caller.
+    nonisolated private static func offMain<T>(
+        priority: TaskPriority = .utility,
+        _ work: @escaping () -> T
+    ) async -> T {
+        let box = UncheckedSendableBox(value: work)
+        return await Task.detached(priority: priority) {
+            UncheckedSendableBox(value: box.value())
+        }.value.value
     }
 
     private struct ReviewPlaceClusterSnapshot {
@@ -38,7 +155,7 @@ final class WidgetDataSyncManager {
         let travelsWest: Bool
     }
 
-    private struct CurrentActivityMapOverlays {
+    private struct CurrentActivityMapOverlays: @unchecked Sendable {
         let footprints: [CurrentActivityFootprintOverlay]
         let transports: [CurrentActivityTransportOverlay]
         let activitiesByID: [String: CurrentActivityMarkerStyle]
@@ -115,30 +232,39 @@ final class WidgetDataSyncManager {
               ) else { return false }
 
         ensureContainer()
-        let todayOverlays = loadCurrentActivityTodayOverlays()
+        let container = self.container
+        let todayOverlays = await Self.offMain {
+            Self.loadCurrentActivityTodayOverlays(container: container)
+        }
 
         return await withExclusiveMapSnapshotWork {
             var writtenStyleCount = 0
             for style in [UIUserInterfaceStyle.light, .dark] {
                 guard !Task.isCancelled else { return false }
-                guard let image = await self.makeCurrentActivityMapSnapshot(
+                guard let data = await self.makeCurrentActivityMapSnapshotPNG(
                     kind: kind,
                     coordinate: coordinate,
                     routeCoordinates: routeCoordinates,
                     style: style,
                     todayOverlays: todayOverlays
-                ), let data = image.pngData() else { continue }
+                ) else { continue }
                 guard !Task.isCancelled else { return false }
 
                 let suffix = style == .dark ? "dark" : "light"
                 let fileURL = containerURL.appendingPathComponent(
                     "current_activity_\(sessionID)_\(revision)_\(suffix).png"
                 )
-                do {
-                    try data.write(to: fileURL, options: .atomic)
+                let didWrite = await Self.offMain { () -> Bool in
+                    do {
+                        try data.write(to: fileURL, options: .atomic)
+                        return true
+                    } catch {
+                        print("[CurrentLiveActivity] map write failed (\(suffix)): \(error)")
+                        return false
+                    }
+                }
+                if didWrite {
                     writtenStyleCount += 1
-                } catch {
-                    print("[CurrentLiveActivity] map write failed (\(suffix)): \(error)")
                 }
             }
 
@@ -150,23 +276,28 @@ final class WidgetDataSyncManager {
             let prefix = "current_activity_\(sessionID)_"
             let retainedRevisions = [revision, max(0, revision - 1), retainingRevision]
                 .compactMap { $0 }.map(String.init)
-            if let files = try? FileManager.default.contentsOfDirectory(
-                at: containerURL,
-                includingPropertiesForKeys: nil
-            ) {
-                for file in files where file.lastPathComponent.hasPrefix(prefix) {
-                    let remainder = file.lastPathComponent.dropFirst(prefix.count)
-                    guard !remainder.hasPrefix("photo_") else { continue }
-                    guard !retainedRevisions.contains(where: { remainder.hasPrefix("\($0)_") }) else { continue }
-                    try? FileManager.default.removeItem(at: file)
+            await Self.offMain {
+                if let files = try? FileManager.default.contentsOfDirectory(
+                    at: containerURL,
+                    includingPropertiesForKeys: nil
+                ) {
+                    for file in files where file.lastPathComponent.hasPrefix(prefix) {
+                        let remainder = file.lastPathComponent.dropFirst(prefix.count)
+                        guard !remainder.hasPrefix("photo_") else { continue }
+                        guard !retainedRevisions.contains(where: { remainder.hasPrefix("\($0)_") }) else { continue }
+                        try? FileManager.default.removeItem(at: file)
+                    }
                 }
             }
             return true
         }
     }
 
-    private func loadCurrentActivityTodayOverlays() -> CurrentActivityMapOverlays {
-        guard let context = container?.mainContext else {
+    /// Reads today's overlays on a background context; call via `offMain`.
+    nonisolated private static func loadCurrentActivityTodayOverlays(
+        container: ModelContainer?
+    ) -> CurrentActivityMapOverlays {
+        guard let container else {
             return CurrentActivityMapOverlays(
                 footprints: [],
                 transports: [],
@@ -174,6 +305,7 @@ final class WidgetDataSyncManager {
                 activitiesByName: [:]
             )
         }
+        let context = ModelContext(container)
 
         let calendar = Calendar.current
         let startOfToday = calendar.startOfDay(for: Date())
@@ -186,13 +318,13 @@ final class WidgetDataSyncManager {
             $0.startTime < endOfToday && $0.endTime >= startOfToday && $0.statusRaw != "ignored"
         })
 
-        let footprints = (try? context.fetch(footprintDescriptor)) ?? []
+        let footprints = ((try? context.fetch(footprintDescriptor)) ?? []).map { WidgetFootprintValue($0) }
         let transports = (try? context.fetch(transportDescriptor)) ?? []
         let activities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
         let footprintOverlays = aggregatedFootprints(from: footprints).map {
             CurrentActivityFootprintOverlay(
                 coordinate: $0.coordinate,
-                activityKey: $0.representative.activityTypeValue
+                activityKey: $0.activityTypeValue
             )
         }
         let transportOverlays = transports.compactMap { transport -> CurrentActivityTransportOverlay? in
@@ -252,35 +384,97 @@ final class WidgetDataSyncManager {
             }
         }
 
-        for (index, image) in images.enumerated() {
-            guard let data = image.jpegData(compressionQuality: 0.82) else { continue }
-            let fileURL = containerURL.appendingPathComponent(
-                "current_activity_\(sessionID)_photo_\(revision)_\(index).jpg"
-            )
-            try? data.write(to: fileURL, options: .atomic)
-        }
+        // JPEG encoding, writes and directory cleanup run off the main actor.
+        let writtenImages = images
+        await Self.offMain {
+            for (index, image) in writtenImages.enumerated() {
+                guard let data = image.jpegData(compressionQuality: 0.82) else { continue }
+                let fileURL = containerURL.appendingPathComponent(
+                    "current_activity_\(sessionID)_photo_\(revision)_\(index).jpg"
+                )
+                try? data.write(to: fileURL, options: .atomic)
+            }
 
-        let prefix = "current_activity_\(sessionID)_photo_"
-        if let files = try? FileManager.default.contentsOfDirectory(
-            at: containerURL,
-            includingPropertiesForKeys: nil
-        ) {
-            for file in files where file.lastPathComponent.hasPrefix(prefix) {
-                let remainder = file.lastPathComponent.dropFirst(prefix.count)
-                guard !remainder.hasPrefix("\(revision)_") else { continue }
-                try? FileManager.default.removeItem(at: file)
+            let prefix = "current_activity_\(sessionID)_photo_"
+            if let files = try? FileManager.default.contentsOfDirectory(
+                at: containerURL,
+                includingPropertiesForKeys: nil
+            ) {
+                for file in files where file.lastPathComponent.hasPrefix(prefix) {
+                    let remainder = file.lastPathComponent.dropFirst(prefix.count)
+                    guard !remainder.hasPrefix("\(revision)_") else { continue }
+                    try? FileManager.default.removeItem(at: file)
+                }
             }
         }
         return images.count
     }
 
-    private func makeCurrentActivityMapSnapshot(
+    private func makeCurrentActivityMapSnapshotPNG(
         kind: CurrentTrackingActivityKind,
         coordinate: CLLocationCoordinate2D,
         routeCoordinates: [CodableCoordinate],
         style: UIUserInterfaceStyle,
         todayOverlays: CurrentActivityMapOverlays
-    ) async -> UIImage? {
+    ) async -> Data? {
+        // Route filtering, smoothing and region math run off the main actor.
+        let prepared = await Self.offMain {
+            Self.currentActivitySnapshotGeometry(
+                kind: kind,
+                coordinate: coordinate,
+                routeCoordinates: routeCoordinates
+            )
+        }
+        let options = MKMapSnapshotter.Options()
+        options.region = prepared.region
+        options.size = CGSize(width: 400, height: 200)
+        options.scale = 2.0
+        options.showsBuildings = true
+        options.traitCollection = UITraitCollection(userInterfaceStyle: style)
+        var snapshot: MKMapSnapshotter.Snapshot?
+        for attempt in 0..<3 {
+            guard !Task.isCancelled else { return nil }
+            do {
+                let snapshotter = MKMapSnapshotter(options: options)
+                let candidate = try await withTaskCancellationHandler {
+                    try await snapshotter.start()
+                } onCancel: {
+                    snapshotter.cancel()
+                }
+                guard !Task.isCancelled else { return nil }
+                let hasDetail = await Self.offMain { Self.hasVisibleMapDetail(candidate.image) }
+                if hasDetail {
+                    snapshot = candidate
+                    break
+                }
+                print("[CurrentLiveActivity] map snapshot contained no visible map detail (attempt \(attempt + 1))")
+            } catch {
+                guard !Task.isCancelled else { return nil }
+                print("[CurrentLiveActivity] map snapshot failed (attempt \(attempt + 1)): \(error)")
+            }
+            if attempt < 2 {
+                try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 500_000_000)
+            }
+        }
+        guard let snapshot else { return nil }
+
+        // Overlay compositing and PNG encoding stay off the main actor.
+        return await Self.offMain {
+            Self.renderCurrentActivitySnapshot(
+                snapshot,
+                kind: kind,
+                style: style,
+                routeSegments: prepared.routeSegments,
+                todayOverlays: todayOverlays
+            ).pngData()
+        }
+    }
+
+    nonisolated private static func currentActivitySnapshotGeometry(
+        kind: CurrentTrackingActivityKind,
+        coordinate: CLLocationCoordinate2D,
+        routeCoordinates: [CodableCoordinate]
+    ) -> (region: MKCoordinateRegion, routeSegments: [WidgetTransportLineSegment]) {
         let validRoute = routeCoordinates.filter {
             $0.lat.isFinite && $0.lon.isFinite &&
             CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon))
@@ -304,38 +498,16 @@ final class WidgetDataSyncManager {
                 longitudeDelta: max(minimumSpan, (maxLon - minLon) * 1.8)
             )
         )
-        let options = MKMapSnapshotter.Options()
-        options.region = region
-        options.size = CGSize(width: 400, height: 200)
-        options.scale = 2.0
-        options.showsBuildings = true
-        options.traitCollection = UITraitCollection(userInterfaceStyle: style)
-        var snapshot: MKMapSnapshotter.Snapshot?
-        for attempt in 0..<3 {
-            guard !Task.isCancelled else { return nil }
-            do {
-                let snapshotter = MKMapSnapshotter(options: options)
-                let candidate = try await withTaskCancellationHandler {
-                    try await snapshotter.start()
-                } onCancel: {
-                    snapshotter.cancel()
-                }
-                guard !Task.isCancelled else { return nil }
-                if Self.hasVisibleMapDetail(candidate.image) {
-                    snapshot = candidate
-                    break
-                }
-                print("[CurrentLiveActivity] map snapshot contained no visible map detail (attempt \(attempt + 1))")
-            } catch {
-                guard !Task.isCancelled else { return nil }
-                print("[CurrentLiveActivity] map snapshot failed (attempt \(attempt + 1)): \(error)")
-            }
-            if attempt < 2 {
-                try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 500_000_000)
-            }
-        }
-        guard let snapshot else { return nil }
+        return (region, routeSegments)
+    }
 
+    nonisolated private static func renderCurrentActivitySnapshot(
+        _ snapshot: MKMapSnapshotter.Snapshot,
+        kind: CurrentTrackingActivityKind,
+        style: UIUserInterfaceStyle,
+        routeSegments: [WidgetTransportLineSegment],
+        todayOverlays: CurrentActivityMapOverlays
+    ) -> UIImage {
         let renderer = UIGraphicsImageRenderer(size: snapshot.image.size)
         return renderer.image { context in
             snapshot.image.draw(at: .zero)
@@ -388,7 +560,7 @@ final class WidgetDataSyncManager {
     /// Build the Live Activity route through the same model implementation
     /// used by DFKMapView, so sampling gaps, synthetic points, and smoothing
     /// cannot drift between the app map and its snapshot.
-    private func currentActivityRouteSegments(
+    nonisolated private static func currentActivityRouteSegments(
         from decoded: [CodableCoordinate]
     ) -> [WidgetTransportLineSegment] {
         let pathPoints = decoded.map {
@@ -416,7 +588,7 @@ final class WidgetDataSyncManager {
         }
     }
 
-    private func drawCurrentActivityTodayOverlays(
+    nonisolated private static func drawCurrentActivityTodayOverlays(
         _ overlays: CurrentActivityMapOverlays,
         on snapshot: MKMapSnapshotter.Snapshot,
         in cg: CGContext,
@@ -550,7 +722,7 @@ final class WidgetDataSyncManager {
 
     /// A background snapshot request can occasionally succeed before map tiles
     /// arrive and return a uniform gray placeholder. Never publish that image.
-    private static func hasVisibleMapDetail(_ image: UIImage) -> Bool {
+    nonisolated private static func hasVisibleMapDetail(_ image: UIImage) -> Bool {
         guard let cgImage = image.cgImage else { return false }
         let width = 16
         let height = 8
@@ -690,13 +862,13 @@ final class WidgetDataSyncManager {
     }
 
     func snapshotImagesForOffset(_ offset: Int) async -> (light: UIImage?, dark: UIImage?) {
-        let existing = readSnapshotImagesForOffset(offset)
+        let existing = await readSnapshotImagesForOffset(offset)
         if existing.light != nil || existing.dark != nil {
             return existing
         }
 
         await syncOffsetOnDemand(offset)
-        return readSnapshotImagesForOffset(offset)
+        return await readSnapshotImagesForOffset(offset)
     }
 
     func makeShareMapSnapshots(
@@ -707,109 +879,102 @@ final class WidgetDataSyncManager {
         reviewPlaces: [Place]? = nil,
         size: CGSize = CGSize(width: 329, height: 119)
     ) async -> (light: UIImage?, dark: UIImage?) {
-        await withExclusiveMapSnapshotWork {
+        // The caller's models belong to the main context, so only copy their
+        // stored values here; decoding, aggregation and drawing run detached.
+        // The review key is resolved against the footprint's own place
+        // (first match by placeID, as `reviewIntegratedPlaceKey` does).
+        let reviewPlacesByID = reviewPlaces.map { places in
+            Dictionary(places.map { ($0.placeID, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+        let footprintValues = footprints.map { footprint -> WidgetFootprintValue in
+            guard let reviewPlacesByID else { return WidgetFootprintValue(footprint) }
+            let ownPlace = footprint.placeID.flatMap { reviewPlacesByID[$0] }
+            return WidgetFootprintValue(
+                footprint,
+                aggregationKey: reviewIntegratedPlaceKey(
+                    for: footprint,
+                    allPlaces: ownPlace.map { [$0] } ?? []
+                )
+            )
+        }
+        let transportValues = transports.map(WidgetTransportValue.init)
+        let activityValues = activities.map(WidgetActivityValue.init)
+        let usesReviewPlaceCounts = reviewPlaces != nil
+        return await withExclusiveMapSnapshotWork {
             await self.makeShareMapSnapshotsUnlocked(
-                footprints: footprints,
-                transports: transports,
-                activities: activities,
+                footprints: footprintValues,
+                transports: transportValues,
+                activities: activityValues,
                 markerScale: markerScale,
-                reviewPlaces: reviewPlaces,
+                usesReviewPlaceCounts: usesReviewPlaceCounts,
                 size: size
             )
         }
     }
 
     private func makeShareMapSnapshotsUnlocked(
-        footprints: [Footprint],
-        transports: [TransportRecord],
-        activities: [ActivityType],
+        footprints: [WidgetFootprintValue],
+        transports: [WidgetTransportValue],
+        activities: [WidgetActivityValue],
         markerScale: CGFloat,
-        reviewPlaces: [Place]?,
+        usesReviewPlaceCounts: Bool,
         size: CGSize
     ) async -> (light: UIImage?, dark: UIImage?) {
-        let aggregatedFootprints = aggregatedFootprints(from: footprints) { footprint in
-            guard let reviewPlaces else { return nil }
-            return reviewIntegratedPlaceKey(for: footprint, allPlaces: reviewPlaces)
-        }
-        let decodedTransports = transports.compactMap { transport -> WidgetDecodedTransport? in
-            guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
-                  !decoded.isEmpty else {
-                return nil
-            }
-            let coordinates = decoded
-                .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-                .filter {
-                    $0.latitude.isFinite &&
-                    $0.longitude.isFinite &&
-                    CLLocationCoordinate2DIsValid($0)
-                }
-            guard !coordinates.isEmpty else { return nil }
-            return WidgetDecodedTransport(
-                record: transport,
-                coordinates: coordinates,
-                segments: widgetTransportLineSegments(from: decoded)
-            )
-        }
+        let prepared = await Self.offMain { () -> (inputs: WidgetMapDrawingInputs, region: MKCoordinateRegion)? in
+            let aggregatedFootprints = Self.aggregatedFootprints(from: footprints)
+            let decodedTransports = Self.decodedTransports(transports, requiresCoordinates: true)
 
-        // 分享卡片的相机只由足迹决定。交通仍完整绘制为覆盖层，但不能因为
-        // 一段很长的行程把足迹标记缩得看不清；纯交通卡片才退回以交通定范围。
-        let footprintCameraCoordinates = footprints.flatMap(\.coordinates).filter {
-            $0.latitude.isFinite &&
-            $0.longitude.isFinite &&
-            CLLocationCoordinate2DIsValid($0)
-        }
-        let cameraCoordinates = footprintCameraCoordinates.isEmpty
-            ? decodedTransports.flatMap(\.coordinates).filter {
+            // 分享卡片的相机只由足迹决定。交通仍完整绘制为覆盖层，但不能因为
+            // 一段很长的行程把足迹标记缩得看不清；纯交通卡片才退回以交通定范围。
+            let footprintCameraCoordinates = footprints.flatMap { $0.geometry.coordinates }.filter {
                 $0.latitude.isFinite &&
                 $0.longitude.isFinite &&
                 CLLocationCoordinate2DIsValid($0)
             }
-            : footprintCameraCoordinates
-        guard !cameraCoordinates.isEmpty else { return (nil, nil) }
+            let cameraCoordinates = footprintCameraCoordinates.isEmpty
+                ? decodedTransports.flatMap(\.coordinates).filter {
+                    $0.latitude.isFinite &&
+                    $0.longitude.isFinite &&
+                    CLLocationCoordinate2DIsValid($0)
+                }
+                : footprintCameraCoordinates
+            guard !cameraCoordinates.isEmpty else { return nil }
 
-        let allActivities = activities
-        let activitiesByID = Dictionary(allActivities.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { first, _ in first })
-        let activitiesByName = Dictionary(allActivities.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+            let activitiesByID = Dictionary(activities.map { ($0.idString, $0) }, uniquingKeysWith: { first, _ in first })
+            let activitiesByName = Dictionary(activities.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+            let inputs = WidgetMapDrawingInputs(
+                aggregatedFootprints: aggregatedFootprints,
+                decodedTransports: decodedTransports,
+                mapCoordinates: cameraCoordinates,
+                activitiesByID: activitiesByID,
+                activitiesByName: activitiesByName
+            )
+            return (inputs, Self.shareSnapshotRegion(for: cameraCoordinates))
+        }
+        guard let prepared else { return (nil, nil) }
 
         async let light = makeWidgetMapSnapshot(
-            coordinates: cameraCoordinates,
-            aggregatedFootprints: aggregatedFootprints,
+            region: prepared.region,
+            inputs: prepared.inputs,
             footprintPhotoImages: [:],
-            decodedTransports: decodedTransports,
-            activitiesByID: activitiesByID,
-            activitiesByName: activitiesByName,
             markerScale: markerScale,
-            usesReviewPlaceCounts: reviewPlaces != nil,
+            usesReviewPlaceCounts: usesReviewPlaceCounts,
             style: .light,
             size: size
         )
         async let dark = makeWidgetMapSnapshot(
-            coordinates: cameraCoordinates,
-            aggregatedFootprints: aggregatedFootprints,
+            region: prepared.region,
+            inputs: prepared.inputs,
             footprintPhotoImages: [:],
-            decodedTransports: decodedTransports,
-            activitiesByID: activitiesByID,
-            activitiesByName: activitiesByName,
             markerScale: markerScale,
-            usesReviewPlaceCounts: reviewPlaces != nil,
+            usesReviewPlaceCounts: usesReviewPlaceCounts,
             style: .dark,
             size: size
         )
         return await (light, dark)
     }
 
-    private func makeWidgetMapSnapshot(
-        coordinates: [CLLocationCoordinate2D],
-        aggregatedFootprints: [AggregatedFootprintSnapshot],
-        footprintPhotoImages: [String: UIImage],
-        decodedTransports: [WidgetDecodedTransport],
-        activitiesByID: [String: ActivityType],
-        activitiesByName: [String: ActivityType],
-        markerScale: CGFloat,
-        usesReviewPlaceCounts: Bool = false,
-        style: UIUserInterfaceStyle,
-        size: CGSize
-    ) async -> UIImage? {
+    nonisolated private static func shareSnapshotRegion(for coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion {
         var minLat = coordinates[0].latitude
         var maxLat = coordinates[0].latitude
         var minLon = coordinates[0].longitude
@@ -823,11 +988,21 @@ final class WidgetDataSyncManager {
 
         let spanLat = max(0.005, (maxLat - minLat) * 2.0)
         let spanLon = max(0.005, (maxLon - minLon) * 2.8)
-        let region = MKCoordinateRegion(
+        return MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2 + spanLat * 0.17, longitude: (minLon + maxLon) / 2),
             span: MKCoordinateSpan(latitudeDelta: spanLat, longitudeDelta: spanLon)
         )
+    }
 
+    private func makeWidgetMapSnapshot(
+        region: MKCoordinateRegion,
+        inputs: WidgetMapDrawingInputs,
+        footprintPhotoImages: [String: UIImage],
+        markerScale: CGFloat,
+        usesReviewPlaceCounts: Bool = false,
+        style: UIUserInterfaceStyle,
+        size: CGSize
+    ) async -> UIImage? {
         let options = MKMapSnapshotter.Options()
         options.region = region
         options.size = size
@@ -838,6 +1013,33 @@ final class WidgetDataSyncManager {
             return nil
         }
 
+        // Overlay compositing runs off the main actor.
+        return await Self.offMain(priority: .userInitiated) {
+            Self.renderShareSnapshot(
+                snapshot,
+                region: region,
+                aggregatedFootprints: inputs.aggregatedFootprints,
+                decodedTransports: inputs.decodedTransports,
+                activitiesByID: inputs.activitiesByID,
+                activitiesByName: inputs.activitiesByName,
+                markerScale: markerScale,
+                usesReviewPlaceCounts: usesReviewPlaceCounts,
+                style: style
+            )
+        }
+    }
+
+    nonisolated private static func renderShareSnapshot(
+        _ snapshot: MKMapSnapshotter.Snapshot,
+        region: MKCoordinateRegion,
+        aggregatedFootprints: [AggregatedFootprintSnapshot],
+        decodedTransports: [WidgetDecodedTransport],
+        activitiesByID: [String: WidgetActivityValue],
+        activitiesByName: [String: WidgetActivityValue],
+        markerScale: CGFloat,
+        usesReviewPlaceCounts: Bool,
+        style: UIUserInterfaceStyle
+    ) -> UIImage {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 3.0
         let renderer = UIGraphicsImageRenderer(size: snapshot.image.size, format: format)
@@ -881,7 +1083,7 @@ final class WidgetDataSyncManager {
                     path.lineWidth = 1.2
                     path.stroke()
 
-                    let transportType = TransportType(rawValue: transportSnapshot.record.manualTypeRaw ?? transportSnapshot.record.typeRaw) ?? .slow
+                    let transportType = TransportType(rawValue: transportSnapshot.typeRaw) ?? .slow
                     if let sourceImage = UIImage(systemName: transportType.sfSymbol) {
                         let iconImage = clCoords.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
                         let symbolSize: CGFloat = 8
@@ -927,12 +1129,11 @@ final class WidgetDataSyncManager {
 
             let sortedFootprints = aggregatedFootprints.sorted { $0.coordinate.latitude > $1.coordinate.latitude }
             for aggregated in sortedFootprints {
-                let footprint = aggregated.representative
                 let point = snapshot.point(for: aggregated.coordinate)
                 let radius: CGFloat = 9 * markerScale
                 let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
 
-                let activity = footprint.activityTypeValue.flatMap { activitiesByID[$0] ?? activitiesByName[$0] }
+                let activity = aggregated.activityTypeValue.flatMap { activitiesByID[$0] ?? activitiesByName[$0] }
                 let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
                 let iconColor: UIColor = .white
 
@@ -992,7 +1193,7 @@ final class WidgetDataSyncManager {
         }
     }
 
-    private func reviewPlaceClusters(
+    nonisolated private static func reviewPlaceClusters(
         from places: [AggregatedFootprintSnapshot],
         latitudeSpan: CLLocationDegrees,
         longitudeSpan: CLLocationDegrees
@@ -1036,7 +1237,7 @@ final class WidgetDataSyncManager {
         }
     }
 
-    private func drawReviewPlaceClusters(
+    nonisolated private static func drawReviewPlaceClusters(
         _ clusters: [ReviewPlaceClusterSnapshot],
         snapshot: MKMapSnapshotter.Snapshot,
         markerScale: CGFloat,
@@ -1122,7 +1323,7 @@ final class WidgetDataSyncManager {
         }
     }
 
-    private func reviewTransportIconClusters(
+    nonisolated private static func reviewTransportIconClusters(
         from transports: [WidgetDecodedTransport],
         region: MKCoordinateRegion
     ) -> [ReviewTransportIconCluster] {
@@ -1139,9 +1340,7 @@ final class WidgetDataSyncManager {
         var buckets: [String: Bucket] = [:]
         for transport in transports {
             guard let midpoint = transport.coordinates.widgetMidpoint else { continue }
-            let type = TransportType(
-                rawValue: transport.record.manualTypeRaw ?? transport.record.typeRaw
-            ) ?? .slow
+            let type = TransportType(rawValue: transport.typeRaw) ?? .slow
             let x = Int((midpoint.longitude / longitudeCell).rounded())
             let y = Int((midpoint.latitude / latitudeCell).rounded())
             let key = "\(type.rawValue):\(x):\(y)"
@@ -1174,7 +1373,7 @@ final class WidgetDataSyncManager {
         }
     }
 
-    private func drawReviewTransportIconClusters(
+    nonisolated private static func drawReviewTransportIconClusters(
         _ clusters: [ReviewTransportIconCluster],
         snapshot: MKMapSnapshotter.Snapshot,
         style: UIUserInterfaceStyle,
@@ -1201,15 +1400,19 @@ final class WidgetDataSyncManager {
         }
     }
 
-    private func readSnapshotImagesForOffset(_ offset: Int) -> (light: UIImage?, dark: UIImage?) {
-        (
-            readSnapshotImage(forOffset: offset, themeName: "light"),
-            readSnapshotImage(forOffset: offset, themeName: "dark")
-        )
+    /// File reads and image decoding run off the main actor.
+    private func readSnapshotImagesForOffset(_ offset: Int) async -> (light: UIImage?, dark: UIImage?) {
+        let groupID = self.groupID
+        return await Self.offMain {
+            (
+                Self.readSnapshotImage(groupID: groupID, offset: offset, themeName: "light"),
+                Self.readSnapshotImage(groupID: groupID, offset: offset, themeName: "dark")
+            )
+        }
     }
 
-    private func readSnapshotImage(forOffset offset: Int, themeName: String) -> UIImage? {
-        guard let url = getFileURL(forOffset: offset, sizeName: "medium", themeName: themeName),
+    nonisolated private static func readSnapshotImage(groupID: String, offset: Int, themeName: String) -> UIImage? {
+        guard let url = snapshotFileURL(groupID: groupID, offset: offset, sizeName: "medium", themeName: themeName),
               let data = try? Data(contentsOf: url) else { return nil }
         return UIImage(data: data)
     }
@@ -1234,15 +1437,15 @@ final class WidgetDataSyncManager {
         }
     }
 
-    private func aggregatedFootprints(
-        from footprints: [Footprint],
-        keyProvider: ((Footprint) -> String?)? = nil
+    nonisolated private static func aggregatedFootprints(
+        from footprints: [WidgetFootprintValue]
     ) -> [AggregatedFootprintSnapshot] {
         struct Bucket {
             var weightedLatitude: Double
             var weightedLongitude: Double
             var totalDuration: TimeInterval
-            var representative: Footprint
+            var representativeDuration: TimeInterval
+            var representativeActivityTypeValue: String?
             var latestPhotoAssetID: String?
             var latestPhotoEndTime: Date?
         }
@@ -1251,26 +1454,32 @@ final class WidgetDataSyncManager {
         var orderedKeys: [String] = []
 
         for footprint in footprints {
-            let durationWeight = max(footprint.duration, 1)
+            let duration = footprint.duration
+            let durationWeight = max(duration, 1)
+            let geometry = footprint.geometry
+            let latitude = geometry.meanLatitude
+            let longitude = geometry.meanLongitude
+            let photoAssetIDs = footprint.photoAssetIDs
             let key: String
-            if let providedKey = keyProvider?(footprint) {
+            if let providedKey = footprint.aggregationKey {
                 key = providedKey
             } else if let placeID = footprint.placeID {
                 key = "place:\(placeID.uuidString)"
             } else if !footprint.locationHash.isEmpty {
                 key = "hash:\(footprint.locationHash)"
             } else {
-                key = String(format: "coord:%.5f,%.5f", footprint.latitude, footprint.longitude)
+                key = String(format: "coord:%.5f,%.5f", latitude, longitude)
             }
 
             if var bucket = buckets[key] {
-                bucket.weightedLatitude += footprint.latitude * durationWeight
-                bucket.weightedLongitude += footprint.longitude * durationWeight
-                bucket.totalDuration += footprint.duration
-                if footprint.duration > bucket.representative.duration {
-                    bucket.representative = footprint
+                bucket.weightedLatitude += latitude * durationWeight
+                bucket.weightedLongitude += longitude * durationWeight
+                bucket.totalDuration += duration
+                if duration > bucket.representativeDuration {
+                    bucket.representativeDuration = duration
+                    bucket.representativeActivityTypeValue = footprint.activityTypeValue
                 }
-                if let latestPhotoAssetID = footprint.photoAssetIDs.last,
+                if let latestPhotoAssetID = photoAssetIDs.last,
                    bucket.latestPhotoEndTime == nil || footprint.endTime >= bucket.latestPhotoEndTime! {
                     bucket.latestPhotoAssetID = latestPhotoAssetID
                     bucket.latestPhotoEndTime = footprint.endTime
@@ -1279,12 +1488,13 @@ final class WidgetDataSyncManager {
             } else {
                 orderedKeys.append(key)
                 buckets[key] = Bucket(
-                    weightedLatitude: footprint.latitude * durationWeight,
-                    weightedLongitude: footprint.longitude * durationWeight,
-                    totalDuration: footprint.duration,
-                    representative: footprint,
-                    latestPhotoAssetID: footprint.photoAssetIDs.last,
-                    latestPhotoEndTime: footprint.photoAssetIDs.isEmpty ? nil : footprint.endTime
+                    weightedLatitude: latitude * durationWeight,
+                    weightedLongitude: longitude * durationWeight,
+                    totalDuration: duration,
+                    representativeDuration: duration,
+                    representativeActivityTypeValue: footprint.activityTypeValue,
+                    latestPhotoAssetID: photoAssetIDs.last,
+                    latestPhotoEndTime: photoAssetIDs.isEmpty ? nil : footprint.endTime
                 )
             }
         }
@@ -1292,14 +1502,13 @@ final class WidgetDataSyncManager {
         return orderedKeys.compactMap { key in
             guard let bucket = buckets[key] else { return nil }
             let divisor = max(bucket.totalDuration, 1)
-            let representative = bucket.representative
             return AggregatedFootprintSnapshot(
                 coordinate: CLLocationCoordinate2D(
                     latitude: bucket.weightedLatitude / divisor,
                     longitude: bucket.weightedLongitude / divisor
                 ),
                 totalDuration: bucket.totalDuration,
-                representative: representative,
+                activityTypeValue: bucket.representativeActivityTypeValue,
                 latestPhotoAssetID: bucket.latestPhotoAssetID
             )
         }
@@ -1360,12 +1569,40 @@ final class WidgetDataSyncManager {
     }
 
     private struct WidgetDecodedTransport {
-        let record: TransportRecord
+        /// `manualTypeRaw ?? typeRaw` of the source record.
+        let typeRaw: String
         let coordinates: [CLLocationCoordinate2D]
         let segments: [WidgetTransportLineSegment]
     }
 
-    private func widgetTransportLineSegments(from decoded: [CodableCoordinate]) -> [WidgetTransportLineSegment] {
+    /// Decodes route JSON into drawable coordinates and line segments.
+    /// `requiresCoordinates` mirrors callers that drop routes with no valid point.
+    nonisolated private static func decodedTransports(
+        _ transports: [WidgetTransportValue],
+        requiresCoordinates: Bool
+    ) -> [WidgetDecodedTransport] {
+        transports.compactMap { transport -> WidgetDecodedTransport? in
+            guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
+                  !decoded.isEmpty else {
+                return nil
+            }
+            let coordinates = decoded
+                .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                .filter {
+                    $0.latitude.isFinite &&
+                    $0.longitude.isFinite &&
+                    CLLocationCoordinate2DIsValid($0)
+                }
+            if requiresCoordinates && coordinates.isEmpty { return nil }
+            return WidgetDecodedTransport(
+                typeRaw: transport.manualTypeRaw ?? transport.typeRaw,
+                coordinates: coordinates,
+                segments: widgetTransportLineSegments(from: decoded)
+            )
+        }
+    }
+
+    nonisolated private static func widgetTransportLineSegments(from decoded: [CodableCoordinate]) -> [WidgetTransportLineSegment] {
         let validPoints = decoded.filter {
             $0.lat.isFinite &&
             $0.lon.isFinite &&
@@ -1507,271 +1744,320 @@ final class WidgetDataSyncManager {
         let endOfTargetDay = calendar.date(byAdding: .day, value: 1, to: startOfTargetDay) ?? startOfTargetDay.addingTimeInterval(86400)
         
         guard let container = self.container else { return }
-        let context = container.mainContext
-        
-        do {
-            // 1. 获取数据
-            let descriptor = FetchDescriptor<Footprint>(
-                predicate: #Predicate<Footprint> { 
-                    $0.startTime < endOfTargetDay && $0.endTime >= startOfTargetDay && $0.statusValue != "ignored"
-                }
-            )
-            let footprints = try context.fetch(descriptor)
-            
-            let transportDescriptor = FetchDescriptor<TransportRecord>(
-                predicate: #Predicate<TransportRecord> {
-                    $0.startTime < endOfTargetDay && $0.endTime >= startOfTargetDay && $0.statusRaw != "ignored"
-                }
-            )
-            let transports = (try? context.fetch(transportDescriptor)) ?? []
-            let allActivities = (try? context.fetch(FetchDescriptor<ActivityType>())) ?? []
+        let groupID = self.groupID
 
-            // Skip the expensive photo-loading + 6x MKMapSnapshotter render pass entirely
-            // when this day's underlying data hasn't changed since the last sync — history
-            // days rarely change, but syncRecentHistoryIfNeeded used to re-render them all
-            // unconditionally on every call.
-            let signature = daySignature(footprints: footprints, transports: transports, activities: allActivities)
-            let signatureKey = "widgetSnapshotSignature_\(Self.snapshotFileVersion)_\(offset)"
-            let signatureDefaults = sharedDefaults()
-            let outputCombinations: [(sizeName: String, themeName: String)] = [
-                ("small", "light"), ("small", "dark"),
-                ("medium", "light"), ("medium", "dark"),
-                ("large", "light"), ("large", "dark")
-            ]
-            let allFilesExist = outputCombinations.allSatisfy {
-                guard let url = getFileURL(forOffset: offset, sizeName: $0.sizeName, themeName: $0.themeName) else { return false }
-                return FileManager.default.fileExists(atPath: url.path)
-            }
-            if allFilesExist, signatureDefaults?.string(forKey: signatureKey) == signature {
-                signatureDefaults?.set(Date().timeIntervalSince1970, forKey: "widgetUpdate_\(offset)")
-                return
-            }
+        // 1. 获取数据 (background context; fetch, signature and file checks off main)
+        let loaded = await Self.offMain { () -> WidgetDayValues? in
+            Self.loadDayValues(
+                container: container,
+                groupID: groupID,
+                offset: offset,
+                startOfTargetDay: startOfTargetDay,
+                endOfTargetDay: endOfTargetDay
+            )
+        }
+        guard let dayValues = loaded else { return }
+        let footprints = dayValues.footprints
 
-            let aggregatedFootprints = aggregatedFootprints(from: footprints)
-            let footprintPhotoImages = await loadAggregatedFootprintPhotoImages(aggregatedFootprints, targetSide: 88)
-            let decodedTransports = transports.compactMap { transport -> WidgetDecodedTransport? in
-                guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
-                      !decoded.isEmpty else {
-                    return nil
-                }
-                let coordinates = decoded
-                    .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-                    .filter {
-                        $0.latitude.isFinite &&
-                        $0.longitude.isFinite &&
-                        CLLocationCoordinate2DIsValid($0)
-                    }
-                return WidgetDecodedTransport(
-                    record: transport,
-                    coordinates: coordinates,
-                    segments: widgetTransportLineSegments(from: decoded)
-                )
-            }
-            let footprintCoordinates = footprints.flatMap(\.coordinates)
+        // Skip the expensive photo-loading + 6x MKMapSnapshotter render pass entirely
+        // when this day's underlying data hasn't changed since the last sync — history
+        // days rarely change, but syncRecentHistoryIfNeeded used to re-render them all
+        // unconditionally on every call.
+        let signature = dayValues.signature
+        let signatureKey = "widgetSnapshotSignature_\(Self.snapshotFileVersion)_\(offset)"
+        let signatureDefaults = sharedDefaults()
+        if dayValues.allFilesExist, signatureDefaults?.string(forKey: signatureKey) == signature {
+            signatureDefaults?.set(Date().timeIntervalSince1970, forKey: "widgetUpdate_\(offset)")
+            return
+        }
+
+        let inputs = await Self.offMain { () -> WidgetMapDrawingInputs in
+            let aggregatedFootprints = Self.aggregatedFootprints(from: footprints)
+            let decodedTransports = Self.decodedTransports(dayValues.transports, requiresCoordinates: false)
+            let footprintCoordinates = footprints.flatMap { $0.geometry.coordinates }
             let transportCoordinates = decodedTransports.flatMap(\.coordinates)
             let allMapCoordinates = (footprintCoordinates + transportCoordinates).filter {
                 $0.latitude.isFinite &&
                 $0.longitude.isFinite &&
                 CLLocationCoordinate2DIsValid($0)
             }
-            let activitiesByID = Dictionary(allActivities.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { first, _ in first })
-            let activitiesByName = Dictionary(allActivities.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-            
-            let defaults = sharedDefaults()
-            let lastLat = defaults?.double(forKey: "lastLat") ?? 39.9042
-            let lastLon = defaults?.double(forKey: "lastLon") ?? 116.4074
-            
-            // 2. 为不同尺寸和主题生成图片
-            let sizes: [(name: String, size: CGSize)] = [
-                ("small", CGSize(width: 155, height: 155)),
-                ("medium", CGSize(width: 329, height: 155)),
-                ("large", CGSize(width: 329, height: 345))
-            ]
-            let themes: [UIUserInterfaceStyle] = [.light, .dark]
-            
-            for s in sizes {
-                for theme in themes {
-                    let themeName = theme == .dark ? "dark" : "light"
-                    
-                    let region: MKCoordinateRegion
-                    if !allMapCoordinates.isEmpty {
-                        var minLat = allMapCoordinates[0].latitude; var maxLat = allMapCoordinates[0].latitude
-                        var minLon = allMapCoordinates[0].longitude; var maxLon = allMapCoordinates[0].longitude
-                        for p in allMapCoordinates {
-                            minLat = min(minLat, p.latitude); maxLat = max(maxLat, p.latitude)
-                            minLon = min(minLon, p.longitude); maxLon = max(maxLon, p.longitude)
-                        }
-                        
-                        let spanLat = max(0.005, (maxLat - minLat) * 1.6)
-                        let spanLon = max(0.005, (maxLon - minLon) * 1.6)
-                        let finalSpanLon = s.name == "medium" ? spanLon * 1.5 : spanLon
-                        
-                        region = MKCoordinateRegion(
-                            center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2),
-                            span: MKCoordinateSpan(latitudeDelta: spanLat, longitudeDelta: finalSpanLon)
+            let activitiesByID = Dictionary(dayValues.activities.map { ($0.idString, $0) }, uniquingKeysWith: { first, _ in first })
+            let activitiesByName = Dictionary(dayValues.activities.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+            return WidgetMapDrawingInputs(
+                aggregatedFootprints: aggregatedFootprints,
+                decodedTransports: decodedTransports,
+                mapCoordinates: allMapCoordinates,
+                activitiesByID: activitiesByID,
+                activitiesByName: activitiesByName
+            )
+        }
+        let footprintPhotoImages = await loadAggregatedFootprintPhotoImages(inputs.aggregatedFootprints, targetSide: 88)
+        let allMapCoordinates = inputs.mapCoordinates
+        let bounds = await Self.offMain { () -> (minLat: Double, maxLat: Double, minLon: Double, maxLon: Double)? in
+            guard !allMapCoordinates.isEmpty else { return nil }
+            var minLat = allMapCoordinates[0].latitude; var maxLat = allMapCoordinates[0].latitude
+            var minLon = allMapCoordinates[0].longitude; var maxLon = allMapCoordinates[0].longitude
+            for p in allMapCoordinates {
+                minLat = min(minLat, p.latitude); maxLat = max(maxLat, p.latitude)
+                minLon = min(minLon, p.longitude); maxLon = max(maxLon, p.longitude)
+            }
+            return (minLat, maxLat, minLon, maxLon)
+        }
+
+        let defaults = sharedDefaults()
+        let lastLat = defaults?.double(forKey: "lastLat") ?? 39.9042
+        let lastLon = defaults?.double(forKey: "lastLon") ?? 116.4074
+
+        // 2. 为不同尺寸和主题生成图片
+        let sizes: [(name: String, size: CGSize)] = [
+            ("small", CGSize(width: 155, height: 155)),
+            ("medium", CGSize(width: 329, height: 155)),
+            ("large", CGSize(width: 329, height: 345))
+        ]
+        let themes: [UIUserInterfaceStyle] = [.light, .dark]
+
+        for s in sizes {
+            for theme in themes {
+                let themeName = theme == .dark ? "dark" : "light"
+
+                let region: MKCoordinateRegion
+                if let bounds {
+                    let spanLat = max(0.005, (bounds.maxLat - bounds.minLat) * 1.6)
+                    let spanLon = max(0.005, (bounds.maxLon - bounds.minLon) * 1.6)
+                    let finalSpanLon = s.name == "medium" ? spanLon * 1.5 : spanLon
+
+                    region = MKCoordinateRegion(
+                        center: CLLocationCoordinate2D(latitude: (bounds.minLat + bounds.maxLat) / 2, longitude: (bounds.minLon + bounds.maxLon) / 2),
+                        span: MKCoordinateSpan(latitudeDelta: spanLat, longitudeDelta: finalSpanLon)
+                    )
+                } else {
+                    region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: lastLat, longitude: lastLon), span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
+                }
+
+                let options = MKMapSnapshotter.Options()
+                options.region = region
+                options.size = s.size
+                options.scale = 2.0
+                options.traitCollection = UITraitCollection(userInterfaceStyle: theme)
+
+                let snapshotter = MKMapSnapshotter(options: options)
+                if let snapshot = try? await snapshotter.start() {
+                    let fileURL = getFileURL(forOffset: offset, sizeName: s.name, themeName: themeName)
+                    // Compositing, JPEG encoding and the file write run off main.
+                    await Self.offMain {
+                        let image = Self.renderDaySnapshot(
+                            snapshot,
+                            theme: theme,
+                            decodedTransports: inputs.decodedTransports,
+                            aggregatedFootprints: inputs.aggregatedFootprints,
+                            activitiesByID: inputs.activitiesByID,
+                            activitiesByName: inputs.activitiesByName,
+                            footprintPhotoImages: footprintPhotoImages
                         )
-                    } else {
-                        region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: lastLat, longitude: lastLon), span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
-                    }
-                    
-                    let options = MKMapSnapshotter.Options()
-                    options.region = region
-                    options.size = s.size
-                    options.scale = 2.0
-                    options.traitCollection = UITraitCollection(userInterfaceStyle: theme)
-                    
-                    let snapshotter = MKMapSnapshotter(options: options)
-                    if let snapshot = try? await snapshotter.start() {
-                        let format = UIGraphicsImageRendererFormat()
-                        format.scale = 2.0
-                        let renderer = UIGraphicsImageRenderer(size: snapshot.image.size, format: format)
-                        let image = renderer.image { ctx in
-                            snapshot.image.draw(at: .zero)
-                            
-                            // 绘制路线
-                            ctx.cgContext.setLineCap(.round)
-                            ctx.cgContext.setLineJoin(.round)
-                            let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
-                            let markerOutlineColor = Self.mapMarkerOutlineColor(for: theme)
-                            
-                            for transportSnapshot in decodedTransports {
-                                let clCoords = transportSnapshot.coordinates
-
-                                for segment in transportSnapshot.segments {
-                                    let points = segment.coordinates.map { snapshot.point(for: $0) }
-                                    guard points.count >= 2 else { continue }
-
-                                    ctx.cgContext.beginPath()
-                                    ctx.cgContext.move(to: points[0])
-                                    for i in 1..<points.count { ctx.cgContext.addLine(to: points[i]) }
-                                    ctx.cgContext.setStrokeColor(
-                                        themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
-                                    )
-                                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.0 : 2.5)
-                                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
-                                    ctx.cgContext.strokePath()
-                                }
-                                ctx.cgContext.setLineDash(phase: 0, lengths: [])
-
-                                if clCoords.count >= 2, let midCoord = clCoords.widgetMidpoint {
-                                    let midPoint = snapshot.point(for: midCoord)
-                                    let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
-                                    let path = UIBezierPath(ovalIn: rect)
-
-                                    markerOutlineColor.setFill()
-                                    path.fill()
-                                    themeColor.setStroke()
-                                    path.lineWidth = 1.2
-                                    path.stroke()
-
-                                    let transportType = TransportType(rawValue: transportSnapshot.record.manualTypeRaw ?? transportSnapshot.record.typeRaw) ?? .slow
-                                    if let sourceImage = UIImage(systemName: transportType.sfSymbol) {
-                                        let iconImage = clCoords.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
-                                        let symbolSize: CGFloat = 8
-                                        let symbolRect = CGRect(x: midPoint.x - symbolSize/2, y: midPoint.y - symbolSize/2, width: symbolSize, height: symbolSize)
-                                        iconImage.withTintColor(themeColor).drawAspectFit(in: symbolRect)
-                                    }
-                                }
-                            }
-                            
-                            // 绘制聚合足迹，按纬度从北到南排序，使得靠南的图标盖住靠北的图标
-                            let sortedFootprints = aggregatedFootprints.sorted { $0.coordinate.latitude > $1.coordinate.latitude }
-                            for aggregated in sortedFootprints {
-                                let fp = aggregated.representative
-                                let point = snapshot.point(for: aggregated.coordinate)
-                                let radius: CGFloat = 9.0
-                                let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
-                                
-                                let activity = fp.activityTypeValue.flatMap { activitiesByID[$0] ?? activitiesByName[$0] }
-                                let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
-                                let iconColor: UIColor = .white
-                                
-                                let pinPath = CGMutablePath()
-                                pinPath.addArc(center: center, radius: radius, startAngle: 140 * .pi / 180, endAngle: 40 * .pi / 180, clockwise: false)
-                                let bottomY = point.y - 1.5
-                                pinPath.addLine(to: CGPoint(x: center.x + 1.5, y: bottomY))
-                                pinPath.addArc(center: CGPoint(x: center.x, y: bottomY), radius: 1.5, startAngle: 0, endAngle: .pi, clockwise: false)
-                                pinPath.closeSubpath()
-
-                                ctx.cgContext.saveGState()
-                                ctx.cgContext.setShadow(offset: CGSize(width: 0, height: 1.5), blur: 1.5, color: UIColor.black.withAlphaComponent(0.15).cgColor)
-                                ctx.cgContext.setFillColor(markerOutlineColor.cgColor)
-                                ctx.cgContext.addPath(pinPath)
-                                ctx.cgContext.fillPath()
-                                ctx.cgContext.restoreGState()
-
-                                let innerRadius = radius - 1.5
-                                let innerCenter = center
-                                let innerCirclePath = UIBezierPath(arcCenter: innerCenter, radius: innerRadius, startAngle: 0, endAngle: 2 * .pi, clockwise: true)
-                                
-                                ctx.cgContext.saveGState()
-                                innerCirclePath.addClip()
-                                let colors = theme == .dark
-                                    ? [activityColor.cgColor, activityColor.withAlphaComponent(0.7).cgColor] as CFArray
-                                    : [activityColor.withAlphaComponent(0.7).cgColor, activityColor.cgColor] as CFArray
-                                if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0.0, 1.0]) {
-                                    ctx.cgContext.drawLinearGradient(gradient, start: CGPoint(x: innerCenter.x, y: innerCenter.y - innerRadius), end: CGPoint(x: innerCenter.x, y: innerCenter.y + innerRadius), options: [])
-                                } else {
-                                    activityColor.setFill()
-                                    innerCirclePath.fill()
-                                }
-                                ctx.cgContext.restoreGState()
-
-                                if let latestPhotoAssetID = aggregated.latestPhotoAssetID,
-                                   let photoImage = footprintPhotoImages[latestPhotoAssetID] {
-                                    let photoRadius = innerRadius + 0.5
-                                    let photoRect = CGRect(x: innerCenter.x - photoRadius, y: innerCenter.y - photoRadius, width: photoRadius * 2, height: photoRadius * 2)
-                                    let clipPath = UIBezierPath(ovalIn: photoRect)
-                                    ctx.cgContext.saveGState()
-                                    clipPath.addClip()
-                                    photoImage.drawAspectFill(in: photoRect)
-                                    ctx.cgContext.restoreGState()
-                                    activityColor.setStroke()
-                                    clipPath.lineWidth = 1.0
-                                    clipPath.stroke()
-                                } else {
-                                    let iconName = activity?.icon ?? FootprintIconDefaults.map
-                                    if let iconImage = UIImage(systemName: iconName) {
-                                        let iconSize: CGFloat = 11.0
-                                        let iconRect = CGRect(x: innerCenter.x - iconSize/2, y: innerCenter.y - iconSize/2, width: iconSize, height: iconSize)
-                                        iconImage.withTintColor(iconColor, renderingMode: .alwaysTemplate).drawAspectFit(in: iconRect)
-                                    }
-                                }
-                            }
-                        }
-                        
                         // 保存图片
-                        if let data = image.jpegData(compressionQuality: 0.8),
-                           let fileURL = getFileURL(forOffset: offset, sizeName: s.name, themeName: themeName) {
+                        if let data = image.jpegData(compressionQuality: 0.8), let fileURL {
                             try? data.write(to: fileURL)
                         }
                     }
                 }
             }
-            
-            // 更新元数据
-            let uniqueFootprintCount = Set(footprints.map { fp -> String in
+        }
+        
+        // 更新元数据
+        let uniqueFootprintCount = await Self.offMain {
+            Set(footprints.map { fp -> String in
                 if let addr = fp.address, !addr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     return addr
                 }
                 return fp.locationHash
             }).count
-            defaults?.set(uniqueFootprintCount, forKey: "widgetCount_\(offset)")
-            defaults?.set(Date().timeIntervalSince1970, forKey: "widgetUpdate_\(offset)")
-            defaults?.set(signature, forKey: signatureKey)
+        }
+        defaults?.set(uniqueFootprintCount, forKey: "widgetCount_\(offset)")
+        defaults?.set(Date().timeIntervalSince1970, forKey: "widgetUpdate_\(offset)")
+        defaults?.set(signature, forKey: signatureKey)
+    }
 
+    /// Fetches one day on a background context and returns plain values plus
+    /// the change signature and whether all snapshot files already exist.
+    nonisolated private static func loadDayValues(
+        container: ModelContainer,
+        groupID: String,
+        offset: Int,
+        startOfTargetDay: Date,
+        endOfTargetDay: Date
+    ) -> WidgetDayValues? {
+        let context = ModelContext(container)
+        do {
+            let descriptor = FetchDescriptor<Footprint>(
+                predicate: #Predicate<Footprint> { 
+                    $0.startTime < endOfTargetDay && $0.endTime >= startOfTargetDay && $0.statusValue != "ignored"
+                }
+            )
+            let footprints = try context.fetch(descriptor).map { WidgetFootprintValue($0) }
+            let transportDescriptor = FetchDescriptor<TransportRecord>(
+                predicate: #Predicate<TransportRecord> {
+                    $0.startTime < endOfTargetDay && $0.endTime >= startOfTargetDay && $0.statusRaw != "ignored"
+                }
+            )
+            let transports = ((try? context.fetch(transportDescriptor)) ?? []).map(WidgetTransportValue.init)
+            let allActivities = ((try? context.fetch(FetchDescriptor<ActivityType>())) ?? []).map(WidgetActivityValue.init)
+
+            let outputCombinations: [(sizeName: String, themeName: String)] = [
+                ("small", "light"), ("small", "dark"),
+                ("medium", "light"), ("medium", "dark"),
+                ("large", "light"), ("large", "dark")
+            ]
+            let allFilesExist = outputCombinations.allSatisfy {
+                guard let url = snapshotFileURL(groupID: groupID, offset: offset, sizeName: $0.sizeName, themeName: $0.themeName) else { return false }
+                return FileManager.default.fileExists(atPath: url.path)
+            }
+            return WidgetDayValues(
+                footprints: footprints,
+                transports: transports,
+                activities: allActivities,
+                signature: daySignature(footprints: footprints, transports: transports, activities: allActivities),
+                allFilesExist: allFilesExist
+            )
         } catch {
             print("[WidgetSync] Sync error for offset \(offset): \(error)")
+            return nil
+        }
+    }
+
+    nonisolated private static func renderDaySnapshot(
+        _ snapshot: MKMapSnapshotter.Snapshot,
+        theme: UIUserInterfaceStyle,
+        decodedTransports: [WidgetDecodedTransport],
+        aggregatedFootprints: [AggregatedFootprintSnapshot],
+        activitiesByID: [String: WidgetActivityValue],
+        activitiesByName: [String: WidgetActivityValue],
+        footprintPhotoImages: [String: UIImage]
+    ) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2.0
+        let renderer = UIGraphicsImageRenderer(size: snapshot.image.size, format: format)
+        return renderer.image { ctx in
+            snapshot.image.draw(at: .zero)
+            
+            // 绘制路线
+            ctx.cgContext.setLineCap(.round)
+            ctx.cgContext.setLineJoin(.round)
+            let themeColor = UIColor(named: "AccentColor") ?? .systemTeal
+            let markerOutlineColor = Self.mapMarkerOutlineColor(for: theme)
+            
+            for transportSnapshot in decodedTransports {
+                let clCoords = transportSnapshot.coordinates
+
+                for segment in transportSnapshot.segments {
+                    let points = segment.coordinates.map { snapshot.point(for: $0) }
+                    guard points.count >= 2 else { continue }
+
+                    ctx.cgContext.beginPath()
+                    ctx.cgContext.move(to: points[0])
+                    for i in 1..<points.count { ctx.cgContext.addLine(to: points[i]) }
+                    ctx.cgContext.setStrokeColor(
+                        themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
+                    )
+                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.0 : 2.5)
+                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
+                    ctx.cgContext.strokePath()
+                }
+                ctx.cgContext.setLineDash(phase: 0, lengths: [])
+
+                if clCoords.count >= 2, let midCoord = clCoords.widgetMidpoint {
+                    let midPoint = snapshot.point(for: midCoord)
+                    let rect = CGRect(x: midPoint.x - 7, y: midPoint.y - 7, width: 14, height: 14)
+                    let path = UIBezierPath(ovalIn: rect)
+
+                    markerOutlineColor.setFill()
+                    path.fill()
+                    themeColor.setStroke()
+                    path.lineWidth = 1.2
+                    path.stroke()
+
+                    let transportType = TransportType(rawValue: transportSnapshot.typeRaw) ?? .slow
+                    if let sourceImage = UIImage(systemName: transportType.sfSymbol) {
+                        let iconImage = clCoords.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
+                        let symbolSize: CGFloat = 8
+                        let symbolRect = CGRect(x: midPoint.x - symbolSize/2, y: midPoint.y - symbolSize/2, width: symbolSize, height: symbolSize)
+                        iconImage.withTintColor(themeColor).drawAspectFit(in: symbolRect)
+                    }
+                }
+            }
+            
+            // 绘制聚合足迹，按纬度从北到南排序，使得靠南的图标盖住靠北的图标
+            let sortedFootprints = aggregatedFootprints.sorted { $0.coordinate.latitude > $1.coordinate.latitude }
+            for aggregated in sortedFootprints {
+                let point = snapshot.point(for: aggregated.coordinate)
+                let radius: CGFloat = 9.0
+                let center = CGPoint(x: point.x, y: point.y - radius * 1.4)
+
+                let activity = aggregated.activityTypeValue.flatMap { activitiesByID[$0] ?? activitiesByName[$0] }
+                let activityColor = UIColor(hex: activity?.colorHex ?? "#8E8E93") ?? .gray
+                let iconColor: UIColor = .white
+
+                let pinPath = CGMutablePath()
+                pinPath.addArc(center: center, radius: radius, startAngle: 140 * .pi / 180, endAngle: 40 * .pi / 180, clockwise: false)
+                let bottomY = point.y - 1.5
+                pinPath.addLine(to: CGPoint(x: center.x + 1.5, y: bottomY))
+                pinPath.addArc(center: CGPoint(x: center.x, y: bottomY), radius: 1.5, startAngle: 0, endAngle: .pi, clockwise: false)
+                pinPath.closeSubpath()
+
+                ctx.cgContext.saveGState()
+                ctx.cgContext.setShadow(offset: CGSize(width: 0, height: 1.5), blur: 1.5, color: UIColor.black.withAlphaComponent(0.15).cgColor)
+                ctx.cgContext.setFillColor(markerOutlineColor.cgColor)
+                ctx.cgContext.addPath(pinPath)
+                ctx.cgContext.fillPath()
+                ctx.cgContext.restoreGState()
+
+                let innerRadius = radius - 1.5
+                let innerCenter = center
+                let innerCirclePath = UIBezierPath(arcCenter: innerCenter, radius: innerRadius, startAngle: 0, endAngle: 2 * .pi, clockwise: true)
+
+                ctx.cgContext.saveGState()
+                innerCirclePath.addClip()
+                let colors = theme == .dark
+                    ? [activityColor.cgColor, activityColor.withAlphaComponent(0.7).cgColor] as CFArray
+                    : [activityColor.withAlphaComponent(0.7).cgColor, activityColor.cgColor] as CFArray
+                if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0.0, 1.0]) {
+                    ctx.cgContext.drawLinearGradient(gradient, start: CGPoint(x: innerCenter.x, y: innerCenter.y - innerRadius), end: CGPoint(x: innerCenter.x, y: innerCenter.y + innerRadius), options: [])
+                } else {
+                    activityColor.setFill()
+                    innerCirclePath.fill()
+                }
+                ctx.cgContext.restoreGState()
+
+                if let latestPhotoAssetID = aggregated.latestPhotoAssetID,
+                   let photoImage = footprintPhotoImages[latestPhotoAssetID] {
+                    let photoRadius = innerRadius + 0.5
+                    let photoRect = CGRect(x: innerCenter.x - photoRadius, y: innerCenter.y - photoRadius, width: photoRadius * 2, height: photoRadius * 2)
+                    let clipPath = UIBezierPath(ovalIn: photoRect)
+                    ctx.cgContext.saveGState()
+                    clipPath.addClip()
+                    photoImage.drawAspectFill(in: photoRect)
+                    ctx.cgContext.restoreGState()
+                    activityColor.setStroke()
+                    clipPath.lineWidth = 1.0
+                    clipPath.stroke()
+                } else {
+                    let iconName = activity?.icon ?? FootprintIconDefaults.map
+                    if let iconImage = UIImage(systemName: iconName) {
+                        let iconSize: CGFloat = 11.0
+                        let iconRect = CGRect(x: innerCenter.x - iconSize/2, y: innerCenter.y - iconSize/2, width: iconSize, height: iconSize)
+                        iconImage.withTintColor(iconColor, renderingMode: .alwaysTemplate).drawAspectFit(in: iconRect)
+                    }
+                }
+            }
         }
     }
 
     /// A cheap, stable fingerprint of a day's data. Used to skip re-rendering
     /// widget map snapshots for offsets whose footprints/transports/activities
     /// haven't changed since the last sync.
-    private func daySignature(
-        footprints: [Footprint],
-        transports: [TransportRecord],
-        activities: [ActivityType]
+    nonisolated private static func daySignature(
+        footprints: [WidgetFootprintValue],
+        transports: [WidgetTransportValue],
+        activities: [WidgetActivityValue]
     ) -> String {
         let footprintPart = footprints
             .sorted { $0.footprintID.uuidString < $1.footprintID.uuidString }
@@ -1782,16 +2068,20 @@ final class WidgetDataSyncManager {
             .map { "\($0.recordID.uuidString)|\($0.startTime.timeIntervalSince1970)|\($0.endTime.timeIntervalSince1970)|\($0.statusRaw)|\($0.manualTypeRaw ?? $0.typeRaw)|\($0.pointsData.count)" }
             .joined(separator: ";")
         let activityPart = activities
-            .sorted { $0.id.uuidString < $1.id.uuidString }
-            .map { "\($0.id.uuidString)|\($0.colorHex)|\($0.icon)|\($0.name)" }
+            .sorted { $0.idString < $1.idString }
+            .map { "\($0.idString)|\($0.colorHex)|\($0.icon)|\($0.name)" }
             .joined(separator: ";")
         return "\(footprintPart)##\(transportPart)##\(activityPart)"
     }
 
     private func getFileURL(forOffset offset: Int, sizeName: String, themeName: String) -> URL? {
+        Self.snapshotFileURL(groupID: groupID, offset: offset, sizeName: sizeName, themeName: themeName)
+    }
+
+    nonisolated private static func snapshotFileURL(groupID: String, offset: Int, sizeName: String, themeName: String) -> URL? {
         let manager = FileManager.default
         guard let containerURL = manager.containerURL(forSecurityApplicationGroupIdentifier: groupID) else { return nil }
-        let fileName = "widget_snapshot_\(sizeName)_\(themeName)_\(offset)_\(Self.snapshotFileVersion).jpg"
+        let fileName = "widget_snapshot_\(sizeName)_\(themeName)_\(offset)_\(snapshotFileVersion).jpg"
         return containerURL.appendingPathComponent(fileName)
     }
 

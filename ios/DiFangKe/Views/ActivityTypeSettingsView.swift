@@ -110,15 +110,16 @@ struct ActivityTypeEditorView: View {
     @State private var icon: String = "tag.fill"
     @State private var selectedColor: Color = .blue
     @State private var iconSearchText: String = ""
+    @State private var availableIconCategories: [IconCategory] = []
     
-    struct IconCategory: Identifiable {
+    struct IconCategory: Identifiable, Sendable {
         let name: String
         let icons: [String]
 
         var id: String { name }
     }
 
-    private static let allIconCategories: [IconCategory] = [
+    nonisolated private static let allIconCategories: [IconCategory] = [
         IconCategory(name: "基础与生活", icons: [
             "tag.fill", "house.fill", "building.2.fill", "building.columns.fill", "storefront.fill",
             "briefcase.fill", "graduationcap.fill", "calendar", "calendar.badge.clock", "clock.fill",
@@ -266,16 +267,21 @@ struct ActivityTypeEditorView: View {
         ])
     ]
 
+    // SF Symbol availability is resolved once off main and cached for the process lifetime.
+    nonisolated private static let validatedIconCategories: [IconCategory] = allIconCategories.compactMap { category in
+        let availableIcons = category.icons.filter { UIImage(systemName: $0) != nil }
+        guard !availableIcons.isEmpty else { return nil }
+        return IconCategory(name: category.name, icons: availableIcons)
+    }
+
     private var iconCategories: [IconCategory] {
         let query = iconSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return availableIconCategories }
 
-        return Self.allIconCategories.compactMap { category in
-            let availableIcons = category.icons.filter { iconName in
-                UIImage(systemName: iconName) != nil
-                    && (query.isEmpty || iconName.localizedCaseInsensitiveContains(query))
-            }
-            guard !availableIcons.isEmpty else { return nil }
-            return IconCategory(name: category.name, icons: availableIcons)
+        return availableIconCategories.compactMap { category in
+            let matchingIcons = category.icons.filter { $0.localizedCaseInsensitiveContains(query) }
+            guard !matchingIcons.isEmpty else { return nil }
+            return IconCategory(name: category.name, icons: matchingIcons)
         }
     }
     
@@ -402,6 +408,13 @@ struct ActivityTypeEditorView: View {
                     }
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
+            }
+            .task {
+                guard availableIconCategories.isEmpty else { return }
+                let categories = await Task.detached(priority: .userInitiated) {
+                    Self.validatedIconCategories
+                }.value
+                availableIconCategories = categories
             }
             .onAppear {
                 if let activity = activity {

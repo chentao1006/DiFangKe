@@ -19,8 +19,11 @@ struct MiniCalendarView: View {
     
     private let daysInWeek = ["日", "一", "二", "三", "四", "五", "六"]
     
-    // Strictly only show months that have footprints, plus the current month
-    private var monthRange: [Date] {
+    // Strictly only show months that have footprints, plus the current month.
+    // Built off main whenever availableDates changes; body only reads it.
+    @State private var monthRange: [Date]
+
+    nonisolated private static func buildMonthRange(availableDates: Set<Date>, calendar: Calendar) -> [Date] {
         let today = Date()
         let currentMonthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: today))!
         
@@ -33,6 +36,16 @@ struct MiniCalendarView: View {
         let allMonths = monthsWithData.union([currentMonthStart])
         return allMonths.sorted()
     }
+
+    private func refreshMonthRange() async {
+        let availableDates = availableDates
+        let calendar = calendar
+        let range = await Task.detached(priority: .userInitiated) {
+            Self.buildMonthRange(availableDates: availableDates, calendar: calendar)
+        }.value
+        guard !Task.isCancelled else { return }
+        monthRange = range
+    }
     
     init(selectedDate: Binding<Date>, availableDates: Set<Date>, onDateSelected: @escaping (Date) -> Void) {
         self._selectedDate = selectedDate
@@ -42,6 +55,9 @@ struct MiniCalendarView: View {
         let initialMonth = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: selectedDate.wrappedValue)) ?? 
                           Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: Date()))!
         self._currentMonth = State(initialValue: initialMonth)
+        // Until the full range is built, offer the selected and current months.
+        let currentMonthStart = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: Date()))!
+        self._monthRange = State(initialValue: Array(Set([initialMonth, currentMonthStart])).sorted())
     }
     
     var body: some View {
@@ -103,6 +119,9 @@ struct MiniCalendarView: View {
         .fixedSize()
         .onDisappear {
             stopRepeat()
+        }
+        .task(id: availableDates) {
+            await refreshMonthRange()
         }
     }
     
