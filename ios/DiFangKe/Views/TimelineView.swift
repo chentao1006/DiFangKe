@@ -2773,6 +2773,26 @@ private struct TimelineView: View {
                               isActive else { return }
                         scheduleInitialScrollToTodayIfNeeded(using: proxy)
                     }
+                    .onChange(of: isActive) { _, active in
+                        guard active else {
+                            // A kept-alive tab may not receive onDisappear.
+                            // Do not let an off-screen scroll attempt mark the
+                            // initial destination as completed when no visible
+                            // scroll view accepted it.
+                            if !hasCompletedInitialTimelinePositioning {
+                                initialTodayScrollTask?.cancel()
+                                initialTodayScrollTask = nil
+                                didScheduleInitialScrollToToday = false
+                            }
+                            return
+                        }
+                        // The records surface stays mounted while another tab
+                        // is visible. If its first load finished off-screen,
+                        // there is no new onAppear/load-completion callback to
+                        // perform the initial positioning when we come back.
+                        scheduleInitialScrollToTodayIfNeeded(using: proxy)
+                        scheduleInitialLoadingFallback()
+                    }
                     .onChange(of: timelineDetent) { oldValue, newValue in
                         // A sheet resize changes every published frame even
                         // though the user did not scroll the timeline. Ignore
@@ -2905,7 +2925,13 @@ private struct TimelineView: View {
                             scrollNavigationGeneration = UUID()
                             calendarScrollLockTarget = nil
                             isCalendarScrollLocked = false
-                        } else if !isActive, let anchor = currentDateAnchor() {
+                        } else if !isActive,
+                                  hasCompletedInitialTimelinePositioning,
+                                  let anchor = currentDateAnchor() {
+                            // Before initial positioning, the default viewport
+                            // is the list's top, not a user-selected position.
+                            // Never persist it over the intended current-time
+                            // destination when the user changes tabs mid-load.
                             layoutViewportState.anchor = anchor
                         }
                         returnToTodayTask?.cancel()

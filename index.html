@@ -220,9 +220,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     
     <!-- Search engine metadata -->
-    <title>地方客 DiFangKe｜记录生活足迹与每日时间线</title>
-    <meta name="description" content="地方客 DiFangKe 是一款日常足迹记录应用：自动或手动记录去过的地方，标记工作、通勤、吃饭与娱乐等活动，在时间线上回看自己的生活节奏。">
-    <meta name="keywords" content="地方客, DiFangKe, 足迹记录, 生活轨迹, 每日时间线, 地图足迹, 活动记录, 日常日志">
+    <title>地方客 DiFangKe｜记录足迹、整理行程、回顾生活</title>
+    <meta name="description" content="地方客 DiFangKe iOS 版自动记录每日足迹与交通，把走过的路线整理成行程；你也可以规划未来路线，在生活地图、照片与统计中回顾时间的去向。">
+    <meta name="keywords" content="地方客, DiFangKe, 足迹记录, 生活轨迹, 每日时间线, 行程记录, 行程规划, 生活地图, 照片回忆">
     <meta name="author" content="地方客团队">
     <meta name="robots" content="index, follow">
     <meta name="theme-color" content="#4FB3A5">
@@ -235,7 +235,7 @@
     <meta property="og:site_name" content="地方客 DiFangKe">
     <meta property="og:url" content="https://difangke.cn/">
     <meta property="og:title" content="地方客｜走过的地方，就是你的生活">
-    <meta property="og:description" content="自动记录足迹，标记每段活动，在每日时间线上回看生活的节奏。">
+    <meta property="og:description" content="记录每天的足迹，整理走过的行程，也规划下一次出发。">
     <meta property="og:image" content="https://difangke.cn/assets/1024x1024bb.png?v=20260724">
     <meta property="og:image:secure_url" content="https://difangke.cn/assets/1024x1024bb.png?v=20260724">
     <meta property="og:image:width" content="1024">
@@ -246,7 +246,7 @@
     <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="地方客｜走过的地方，就是你的生活">
-    <meta name="twitter:description" content="自动记录足迹，标记活动，在每日时间线上回看生活。">
+    <meta name="twitter:description" content="记录每天的足迹，整理走过的行程，也规划下一次出发。">
     <meta name="twitter:image" content="https://difangke.cn/assets/1024x1024bb.png?v=20260724">
     <meta name="twitter:image:alt" content="地方客 DiFangKe 应用图标">
 
@@ -254,7 +254,7 @@
     <link rel="icon" type="image/x-icon" href="./assets/favicon.ico">
     <link rel="apple-touch-icon" href="/assets/1024x1024bb.png">
     <meta itemprop="name" content="地方客 DiFangKe">
-    <meta itemprop="description" content="记录生活足迹与每日时间线的应用">
+    <meta itemprop="description" content="记录足迹、整理行程与回顾生活的应用">
     <meta itemprop="image" content="https://difangke.cn/assets/1024x1024bb.png?v=20260724">
     <script type="application/ld+json">
     {
@@ -264,7 +264,7 @@
       "applicationCategory": "LifestyleApplication",
       "operatingSystem": "iOS, Android",
       "url": "https://difangke.cn/",
-      "description": "自动或手动记录去过的地方，标记日常活动，并在时间线上回看生活节奏的足迹记录应用。",
+      "description": "iOS 版自动记录每日足迹与交通，整理和规划行程，并通过生活地图、照片与统计回顾生活。",
       "image": "https://difangke.cn/assets/1024x1024bb.png",
       "downloadUrl": "https://difangke.cn/download/difangke.apk?v=44",
       "sameAs": [
@@ -475,26 +475,29 @@
         }
         .phone-mockup:hover { transform: scale(1.02); }
         
-        /* 纯净截图容器，移除外边框 */
+        /* 手机机身与截图容器 */
         .phone-container {
             position: relative;
-            width: 300px;
-            height: 610px;
-            border-radius: 35px;
-            background: transparent;
-            padding: 0; /* 移除内边距 */
-            box-shadow: 0 40px 80px rgba(0,0,0,0.15);
-            border: none; /* 移除外边框 */
-            overflow: hidden;
+            width: 282px;
+            padding: 7px;
+            border-radius: 42px;
+            background: linear-gradient(145deg, #3a3a3c 0%, #09090a 35%, #1c1c1e 100%);
+            box-shadow:
+                0 40px 80px rgba(0,0,0,0.2),
+                inset 0 0 0 1px rgba(255,255,255,0.28),
+                inset 0 0 0 3px rgba(0,0,0,0.72);
+            border: 1px solid rgba(0,0,0,0.8);
+            box-sizing: border-box;
         }
 
         .phone-screen {
             position: relative;
             width: 100%;
-            height: 100%;
+            aspect-ratio: 1206 / 2622;
             border-radius: 35px;
             overflow: hidden;
             background: #FFF;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.16);
         }
 
         .phone-screen img {
@@ -503,7 +506,7 @@
             left: 0;
             width: 100%;
             height: 100%;
-            object-fit: cover;
+            object-fit: contain;
             opacity: 0;
             transition: opacity 0.8s ease;
         }
@@ -568,6 +571,21 @@
             gap: 30px;
         }
 
+        #features .grid {
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 24px;
+        }
+
+        #features .card {
+            padding: 32px;
+        }
+
+        @media (max-width: 1024px) {
+            #features .grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
         .card {
             padding: 40px;
             border-radius: 24px;
@@ -628,11 +646,13 @@
             .hero-title { font-size: 2.2rem; }
             .hero-subtitle { font-size: 1.1rem; margin-bottom: 20px; }
             .phone-mockup { margin-top: 20px; transform: none; height: auto; display: inline-flex; width: 100%; justify-content: center; }
-            .phone-container { width: 240px; height: 500px; border: none; padding: 0; box-shadow: 0 20px 40px rgba(0,0,0,0.1); }
+            .phone-container { width: 246px; padding: 7px; border-radius: 38px; box-shadow: 0 20px 40px rgba(0,0,0,0.16), inset 0 0 0 1px rgba(255,255,255,0.24), inset 0 0 0 3px rgba(0,0,0,0.72); }
+            .phone-screen { border-radius: 31px; }
             
             .slider-arrow { width: 40px; height: 40px; opacity: 0.9; }
             .arrow-left { left: 10px; } /* 移动端放里面点 */
             .arrow-right { right: 10px; }
+            #features .grid { grid-template-columns: 1fr; }
         }
 
         /* Toast Styles */
@@ -716,7 +736,7 @@
         <div class="hero-content">
             <h1 class="hero-title">走过的地方，<br>就是你的生活。</h1>
             <p class="hero-subtitle">
-                地方客是一款轻量的日常记录工具，帮你把生活留下来。它不强调复杂的统计，而是关注“人”与“活动”。
+                自动记录每天的足迹与交通，把走过的路线整理成行程，也规划下一次出发。照片、地点和时间，会在回顾里重新连成你的生活。
             </p>
             <div style="margin-top: 30px;">
                 <div style="display: flex; align-items: center; gap: 24px; flex-wrap: wrap;">
@@ -747,15 +767,15 @@
             <div class="slider-arrow arrow-left" onclick="changeSlide(-1)">&#10094;</div>
             <div class="phone-container">
                 <div class="phone-screen" id="screenshot-slider">
-                    <img src="./screenshots/1.jpg" alt="地方客应用界面展示 - 足迹地图视图" class="active">
-                    <img src="./screenshots/2.jpg" alt="地方客应用界面展示 - 每日活动时间轴">
-                    <img src="./screenshots/3.jpg" alt="地方客应用界面展示 - 地点详情与备注">
-                    <img src="./screenshots/4.jpg" alt="地方客应用界面展示 - 活动类型分类统计">
-                    <img src="./screenshots/5.jpg" alt="地方客应用界面展示 - 个人成就与勋章">
-                    <img src="./screenshots/6.jpg" alt="地方客应用界面展示 - 历史足迹回放">
-                    <img src="./screenshots/7.jpg" alt="地方客应用界面展示 - 隐私设置与安全">
-                    <img src="./screenshots/8.jpg" alt="地方客应用界面展示 - 深色模式适配">
-                    <img src="./screenshots/9.jpg" alt="地方客应用界面展示 - 跨设备同步功能">
+                    <img src="./assets/iPhone-宣传截图/01-每一步，都有迹可循.png" alt="地方客时间线与足迹地图" class="active">
+                    <img src="./assets/iPhone-宣传截图/02-让旅程，自己成册.png" alt="地方客自动整理的行程列表">
+                    <img src="./assets/iPhone-宣传截图/03-规划路线，一目了然.png" alt="地方客逐日行程路线规划">
+                    <img src="./assets/iPhone-宣传截图/04-旅行回忆，不止于地图.png" alt="地方客行程详情与旅行照片">
+                    <img src="./assets/iPhone-宣传截图/05-回看走过的世界.png" alt="地方客生活地图与回顾照片">
+                    <img src="./assets/iPhone-宣传截图/06-看见时间的去处.png" alt="地方客时间分布与出行节奏回顾">
+                    <img src="./assets/iPhone-宣传截图/07-每个地方，都有故事.png" alt="地方客地点详情与历史照片">
+                    <img src="./assets/iPhone-宣传截图/08-珍藏特别的瞬间.png" alt="地方客足迹详情、备注与照片">
+                    <img src="./assets/iPhone-宣传截图/09-重访快乐的现场.png" alt="地方客地图足迹与同日回忆">
                 </div>
             </div>
             <div class="slider-arrow arrow-right" onclick="changeSlide(1)">&#10095;</div>
@@ -763,19 +783,23 @@
     </section>
 
     <section class="section" id="features">
-        <h2 class="section-title">你可以用它做什么</h2>
+        <h2 class="section-title">功能</h2>
         <div class="grid">
             <div class="card">
-                <h3>记录行动轨迹</h3>
-                <p>自动或手动记录你去过的地方，形成完整的时间线。不是冷冰冰的路径，而是带有“意义”的生活片段。</p>
+                <h3>记录每天的足迹</h3>
+                <p>自动记录停留地点、交通方式与路线，也能随时手动补充。地图和时间线同屏呈现，每一步都有迹可循。</p>
             </div>
             <div class="card">
-                <h3>标记活动含义</h3>
-                <p>为每段足迹选择一个“活动类型”：工作、吃饭、通勤、娱乐……也可以自定义属于你自己的类型。</p>
+                <h3>让旅程自己成册</h3>
+                <p>把连续的足迹整理成一段段旅程，串起沿途地点、交通、照片与备注；过去的经历不再散落在时间线里。</p>
             </div>
             <div class="card">
-                <h3>发现生活模式</h3>
-                <p>哪些时间在工作，哪些时间在放松？通过逐日的积累，你会慢慢看见自己生活的节奏。</p>
+                <h3>规划下一次出发</h3>
+                <p>按日期逐日安排城市、地点与交通，在地图上看清完整路线。出发后继续记录，让计划自然变成新的回忆。</p>
+            </div>
+            <div class="card">
+                <h3>回顾生活与出行节奏</h3>
+                <p>从生活地图、时间分布、常去地点和照片回忆里，看见时间去了哪里，也重新发现那些值得记住的瞬间。</p>
             </div>
         </div>
     </section>

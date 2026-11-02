@@ -2161,7 +2161,6 @@ struct HistoryStatisticsView: View {
     @State private var rangeFootprints: [Footprint] = []
     @State private var rangeFootprintsByID: [UUID: Footprint] = [:]
 
-    @State private var selectedRange: StatisticsRange = .last30Days
     @State private var appliedRange: StatisticsRange = .last30Days
     /// Days spent on trips in the range, with each trip's activity type.
     @State private var reviewTripActivityDays: [Date: String] = [:]
@@ -2220,7 +2219,6 @@ struct HistoryStatisticsView: View {
         self.allowsRangeSelection = seed.allowsRangeSelection
         _reviewSource = State(initialValue: seed.source)
         _reviewSourceFingerprint = State(initialValue: seed.sourceFingerprint)
-        _selectedRange = State(initialValue: seed.range)
         _appliedRange = State(initialValue: seed.range)
         _activeYearForSegment = State(initialValue: seed.activeYear)
         _reviewDerived = State(initialValue: seed.derived)
@@ -2257,20 +2255,6 @@ struct HistoryStatisticsView: View {
             } else {
                 reviewPage
             }
-        }
-        .onChange(of: selectedRange) { _, range in
-            // Invalidate the previous range synchronously. Waiting for the
-            // deferred refresh would leave a short window in which its result
-            // could still update the map after the picker has already moved.
-            if case .customYear(let year) = range {
-                activeYearForSegment = year
-            }
-            reviewDerivedDataRequestID = UUID()
-            reviewDerivedDataTask?.cancel()
-            reviewRoutesReady = false
-            reviewMapRegion = nil
-            mapPosition = .automatic
-            scheduleReviewRefresh(applying: range)
         }
         // Every level (page and each open sheet) drops its own working set;
         // a sheet's copy must not wait for its dismissal to be processed.
@@ -3060,7 +3044,37 @@ struct HistoryStatisticsView: View {
 
     private var rangeControl: ReviewRangeControl? {
         guard allowsRangeSelection else { return nil }
-        return ReviewRangeControl(selection: $selectedRange, years: availableYears, activeYear: activeYearForSegment)
+        return ReviewRangeControl(selection: rangeSelection, years: availableYears, activeYear: activeYearForSegment)
+    }
+
+    /// Lets the native segmented picker commit its binding before replacing
+    /// the range content. Clearing the content from an outer `onChange` in the
+    /// same update transaction can make the first tap restore the old segment.
+    private var rangeSelection: Binding<StatisticsRange> {
+        Binding(
+            get: { appliedRange },
+            set: { range in
+                guard range != appliedRange else { return }
+                appliedRange = range
+                Task { @MainActor in
+                    await Task.yield()
+                    guard appliedRange == range else { return }
+                    beginReviewRangeRefresh(range)
+                }
+            }
+        )
+    }
+
+    private func beginReviewRangeRefresh(_ range: StatisticsRange) {
+        if case .customYear(let year) = range {
+            activeYearForSegment = year
+        }
+        reviewDerivedDataRequestID = UUID()
+        reviewDerivedDataTask?.cancel()
+        reviewRoutesReady = false
+        reviewMapRegion = nil
+        mapPosition = .automatic
+        scheduleReviewRefresh(applying: range)
     }
 
     @ViewBuilder
@@ -4645,7 +4659,7 @@ struct HistoryStatisticsView: View {
     }
 
     private var rangePicker: some View {
-        ReviewRangePicker(selection: $selectedRange, years: availableYears, activeYear: activeYearForSegment)
+        ReviewRangePicker(selection: rangeSelection, years: availableYears, activeYear: activeYearForSegment)
     }
 
     // MARK: - Frequent Places Section

@@ -657,6 +657,10 @@ struct DFKFootprintShareTemplateView<QRCode: View>: View {
                         if let location = payload.locationText {
                             Text(location).font(mono(9, .medium)).foregroundStyle(muted).lineLimit(2)
                         }
+                        HStack(alignment: .firstTextBaseline, spacing: u(5)) {
+                            Text("备注").font(mono(9, .medium)).foregroundStyle(muted)
+                            Text(payload.title).font(mono(9, .medium)).lineLimit(2)
+                        }
                     }
                     Spacer(minLength: 0)
                     if let photo {
