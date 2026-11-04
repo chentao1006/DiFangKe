@@ -20,6 +20,7 @@
 		71F2E5B397A918D6AD287D07 /* OpenAIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */; };
 		7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FECD1239FE04DF703FFB1E6 /* DataManagerView.swift */; };
 		8D0E1F2A3B4C5D6E7F8091A2 /* DataDeduplicationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */; };
+		C10D5A110000000000000002 /* CloudSyncStoreRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10D5A110000000000000001 /* CloudSyncStoreRecovery.swift */; };
 		8D0E1F2A3B4C5D6E7F8091A4 /* DiFangKeSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */; };
 		8D0E1F2A3B4C5D6E7F8091A7 /* FutureTrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */; };
 		8D0E1F2A3B4C5D6E7F8091A8 /* DiFangKeSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */; };
@@ -97,6 +98,7 @@
 		F00DBA5E0000000000000003 /* ManualFootprintBoundaryRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000002 /* ManualFootprintBoundaryRegressionTests.swift */; };
 		F00DBA5E0000000000000010 /* CurrentActivityMapCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000011 /* CurrentActivityMapCacheTests.swift */; };
 		F00DBA5E0000000000000020 /* CurrentStayActivityMatchingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000021 /* CurrentStayActivityMatchingTests.swift */; };
+		F00DBA5E0000000000000030 /* CloudSyncStoreRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000031 /* CloudSyncStoreRecoveryTests.swift */; };
 		FE83FA99A0DCD7ACEF34A49F /* DiFangKeWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8425F1A47BDB68DEFCA6C2F /* DiFangKeWatchApp.swift */; };
 /* End PBXBuildFile section */
 
@@ -188,6 +190,7 @@
 		7D750760587987B7CCDAB5FF /* MapPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapPickerView.swift; sourceTree = "<group>"; };
 		8406ACF5012D1DB8F428AB9C /* Config.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Config.plist; sourceTree = "<group>"; };
 		8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataDeduplicationService.swift; sourceTree = "<group>"; };
+		C10D5A110000000000000001 /* CloudSyncStoreRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSyncStoreRecovery.swift; sourceTree = "<group>"; };
 		8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiFangKeSchema.swift; sourceTree = "<group>"; };
 		8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTrip.swift; sourceTree = "<group>"; };
 		8F4D2CA36A1B43D0A6C7E2B1 /* ShareCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareCards.swift; sourceTree = "<group>"; };
@@ -248,6 +251,7 @@
 		F00DBA5E0000000000000004 /* DiFangKeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DiFangKeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F00DBA5E0000000000000011 /* CurrentActivityMapCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentActivityMapCacheTests.swift; sourceTree = "<group>"; };
 		F00DBA5E0000000000000021 /* CurrentStayActivityMatchingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentStayActivityMatchingTests.swift; sourceTree = "<group>"; };
+		F00DBA5E0000000000000031 /* CloudSyncStoreRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSyncStoreRecoveryTests.swift; sourceTree = "<group>"; };
 		F44E7F2A482D33533D342882 /* PlacePickerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlacePickerViewModel.swift; sourceTree = "<group>"; };
 		FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -414,6 +418,7 @@
 		6C24D087F1ECA32C5EED5AC4 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				C10D5A110000000000000001 /* CloudSyncStoreRecovery.swift */,
 				B941AA140000000000000002 /* TripScanManager.swift */,
 				8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */,
 				C67848572FA3A082002DF823 /* WidgetDataSyncManager.swift */,
@@ -502,6 +507,7 @@
 		F00DBA5E0000000000000005 /* DiFangKeTests */ = {
 			isa = PBXGroup;
 			children = (
+				F00DBA5E0000000000000031 /* CloudSyncStoreRecoveryTests.swift */,
 				F00DBA5E0000000000000002 /* ManualFootprintBoundaryRegressionTests.swift */,
 				F00DBA5E0000000000000011 /* CurrentActivityMapCacheTests.swift */,
 				F00DBA5E0000000000000021 /* CurrentStayActivityMatchingTests.swift */,
@@ -711,6 +717,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C10D5A110000000000000002 /* CloudSyncStoreRecovery.swift in Sources */,
 				B941AA140000000000000001 /* TripScanManager.swift in Sources */,
 				B941AA130000000000000001 /* TripView.swift in Sources */,
 				C64D3DA22F81251E00BB3C3F /* AiSettingsView.swift in Sources */,
@@ -800,6 +807,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F00DBA5E0000000000000030 /* CloudSyncStoreRecoveryTests.swift in Sources */,
 				F00DBA5E0000000000000003 /* ManualFootprintBoundaryRegressionTests.swift in Sources */,
 				F00DBA5E0000000000000010 /* CurrentActivityMapCacheTests.swift in Sources */,
 				F00DBA5E0000000000000020 /* CurrentStayActivityMatchingTests.swift in Sources */,

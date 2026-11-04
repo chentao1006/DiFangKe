@@ -294,7 +294,6 @@ private struct ReviewRangePicker: View {
                 }
             }
         }
-        .padding(.horizontal, 20)
     }
 }
 
@@ -304,6 +303,7 @@ private extension View {
     func reviewRangeBar(_ control: ReviewRangeControl?) -> some View {
         if let control {
             let picker = ReviewRangePicker(selection: control.selection, years: control.years, activeYear: control.activeYear)
+                .padding(.horizontal, 20)
                 .padding(.bottom, 8)
             if #available(iOS 26.0, *) {
                 // Joins the navigation bar's own edge effect, like system pages
@@ -2256,13 +2256,18 @@ struct HistoryStatisticsView: View {
                 reviewPage
             }
         }
-        // Every level (page and each open sheet) drops its own working set;
-        // a sheet's copy must not wait for its dismissal to be processed.
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
-                releaseReviewWorkingSet()
-                if sheet != nil { dismiss() }
-            } else if phase == .active, sheet == nil, reviewSourceFingerprint == nil {
+                stopAiSummaryWork()
+                stopGeographyBackfill()
+                // Keep the displayed range and sheets intact. The full source
+                // is only needed for the next rebuild; keep it if one is still
+                // in progress, and retain its fingerprint to reuse the result.
+                if reviewRoutesReady {
+                    reviewSource = nil
+                }
+                DFKMapSnapshotCache.shared.removeAllMemoryImages()
+            } else if phase == .active, sheet == nil {
                 scheduleReviewRefresh(fetchesData: true)
             }
         }
@@ -2313,10 +2318,6 @@ struct HistoryStatisticsView: View {
                 } header: {
                     rangePicker
                         .padding(.top, 8)
-                        .padding(.bottom, 16)
-                        .background {
-                            ReviewNavigationBarBlur()
-                        }
                 }
             }
         }
@@ -3128,7 +3129,7 @@ struct HistoryStatisticsView: View {
             .presentationDetents([.large])
         case .places(let query, _):
             Group {
-                if !reviewRoutesReady || sheetPlacesRange != appliedRange {
+                if !reviewRoutesReady || reviewDerived.range != appliedRange || sheetPlacesRange != appliedRange {
                     reviewSheetLoading(title: "\(statisticsRangeText) · \(query.title)")
                 } else if query.presentsList {
                     ReviewPlaceListSheet(
@@ -3150,7 +3151,7 @@ struct HistoryStatisticsView: View {
                 }
             }
             .presentationDetents(query.presentsList ? Set<PresentationDetent>([.medium, .large]) : [.large])
-            .task(id: "\(appliedRange.rawValue)|\(reviewRoutesReady)") {
+            .task(id: reviewRoutesReady && reviewDerived.range == appliedRange ? appliedRange : nil) {
                 await resolveSheetPlaces(query)
             }
         }
@@ -3185,7 +3186,10 @@ struct HistoryStatisticsView: View {
     /// range's data is ready.
     private func resolveSheetPlaces(_ query: ReviewPlaceQuery) async {
         let range = appliedRange
-        guard reviewRoutesReady, sheetPlacesRange != range else { return }
+        // The picker commits before its deferred refresh starts, so ready
+        // data can still belong to the previous range. Never relabel it.
+        guard reviewRoutesReady, reviewDerived.range == range, sheetPlacesRange != range else { return }
+        let requestID = reviewDerivedDataRequestID
         let derived = reviewDerived
         let rangeText = statisticsRangeText
         let footprintIDs: [UUID]
@@ -3216,7 +3220,11 @@ struct HistoryStatisticsView: View {
             from: footprintIDs.compactMap { derived.rangeSnapshotsByID[$0] },
             titleKeyPath: titleKeyPath
         )
-        guard !Task.isCancelled, range == appliedRange, reviewRoutesReady else { return }
+        guard !Task.isCancelled,
+              requestID == reviewDerivedDataRequestID,
+              range == appliedRange,
+              reviewRoutesReady,
+              reviewDerived.range == range else { return }
         sheetPlaces = groups.compactMap {
             ReviewPlaceSelection(group: $0, rangeText: rangeText, footprintsByID: rangeFootprintsByID)
         }
@@ -4435,11 +4443,8 @@ struct HistoryStatisticsView: View {
         reviewDerivedDataTask?.cancel()
         reviewDerivedDataTask = nil
 
-        // HistoryStatisticsView is deliberately kept alive after its first tab
-        // selection. Consequently, neither switching tabs nor backgrounding the
-        // app destroys this state. Release the database-wide source arrays and
-        // the second, decoded copy of every transport route while the UI cannot
-        // be used; the existing refresh path restores them when needed.
+        // A memory warning warrants releasing the full working set, including
+        // decoded routes. Ordinary backgrounding preserves the displayed data.
         reviewSource = nil
         reviewDerived = ReviewDerivedData()
         rangeFootprints.removeAll(keepingCapacity: false)
@@ -4477,19 +4482,19 @@ struct HistoryStatisticsView: View {
                     ReviewDataBuilder.fetchSource(in: container)
                 }
                 guard !Task.isCancelled else { return }
-                if let source, source.fingerprint != reviewSourceFingerprint {
+                if let source {
+                    sourceChanged = source.fingerprint != reviewSourceFingerprint
                     reviewSourceFingerprint = source.fingerprint
                     reviewSource = source
-                    sourceChanged = true
                 }
             }
             if let range {
                 appliedRange = range
             }
-            // Re-entering the page must preserve the current result when the
-            // source fingerprint is unchanged; only an explicit range change
-            // or newly fetched source data may rebuild the review content.
-            guard range != nil || sourceChanged else { return }
+            // Reuse the displayed result when the source and range match.
+            // A range selection interrupted before its rebuild starts still
+            // needs to finish, even when the source fingerprint is unchanged.
+            guard range != nil || sourceChanged || reviewDerived.range != appliedRange else { return }
 
             // Let the freshly selected UI render before rebuilding maps,
             // memories and rankings for the applied range.
@@ -4660,6 +4665,9 @@ struct HistoryStatisticsView: View {
 
     private var rangePicker: some View {
         ReviewRangePicker(selection: rangeSelection, years: availableYears, activeYear: activeYearForSegment)
+            .padding(8)
+            .dfkDetailMaterial(in: Capsule())
+            .padding(.horizontal, 20)
     }
 
     // MARK: - Frequent Places Section

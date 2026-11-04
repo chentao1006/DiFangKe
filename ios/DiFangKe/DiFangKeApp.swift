@@ -372,6 +372,9 @@ struct DiFangKeApp: App {
                 }
             }
             .animation(.easeInOut(duration: 0.8), value: showSplash)
+            .onReceive(NotificationCenter.default.publisher(for: NSPersistentCloudKitContainer.eventChangedNotification).receive(on: RunLoop.main)) { notification in
+                logCloudSyncEvent(notification)
+            }
             .onChange(of: colorScheme) { _, _ in
                 locationManager.checkLiveActivity(forceContentUpdate: true)
             }
@@ -458,12 +461,59 @@ struct DiFangKeApp: App {
         }
     }
     
+    private func logCloudSyncEvent(_ notification: Notification) {
+        guard let event = notification.userInfo?[NSPersistentCloudKitContainer.eventNotificationUserInfoKey]
+            as? NSPersistentCloudKitContainer.Event else { return }
+        let operation: String
+        switch event.type {
+        case .setup: operation = "setup"
+        case .import: operation = "import"
+        case .export: operation = "export"
+        @unknown default: operation = "unknown"
+        }
+        print("[CloudSync] operation=\(operation) store=\(event.storeIdentifier) started=\(event.startDate) ended=\(String(describing: event.endDate)) succeeded=\(event.succeeded)")
+        if let error = event.error as NSError? {
+            print("[CloudSync] error domain=\(error.domain) code=\(error.code) details=\(error.userInfo)")
+        }
+        guard event.type == .import, event.endDate != nil, event.succeeded,
+              let container = modelContainer else { return }
+        // Read the persisted result in a fresh background context, independent
+        // of the timeline's cached models. Never modify records for diagnosis.
+        Task.detached(priority: .utility) {
+            let context = ModelContext(container)
+            var descriptor = FetchDescriptor<Footprint>(
+                sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
+            )
+            descriptor.fetchLimit = 1
+            do {
+                if let latest = try context.fetch(descriptor).first {
+                    print("[CloudSync] localLatestFootprint start=\(latest.startTime) end=\(latest.endTime) status=\(latest.statusValue)")
+                } else {
+                    print("[CloudSync] localLatestFootprint=none")
+                }
+            } catch {
+                print("[CloudSync] localLatestFootprint readError=\(error)")
+            }
+        }
+    }
+
     private func initializeModelContainer() async {
         guard modelContainer == nil, modelInitializationError == nil else { return }
         let isFirstLaunch = !UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
         let shouldEnableCloudKit = shouldUseCloudServices
+        print("[CloudSync] requestedCloudKit=\(shouldEnableCloudKit)")
 
         do {
+            let recoveryReport = try await Task.detached(priority: .userInitiated) {
+                try CloudSyncStoreRecovery.repairIfNeeded(appGroupID: AppConfig.shared.appGroupID)
+            }.value
+            if recoveryReport.didRepair {
+                print(
+                    "[CloudSyncRecovery] normalizedTransports=\(recoveryReport.normalizedTransportRows) " +
+                    "quarantinedManualSelections=\(recoveryReport.quarantinedManualSelectionRows) " +
+                    "backup=\(recoveryReport.backupURL?.path ?? "none")"
+                )
+            }
             let container: ModelContainer
             let usesCloudKit: Bool
             do {
@@ -496,6 +546,7 @@ struct DiFangKeApp: App {
                 // observer and session before any UI is shown in that case.
                 WatchSyncManager.shared.start(context: container.mainContext)
                 UserDefaults.standard.set(usesCloudKit, forKey: "activeModelContainerUsesCloudKit")
+                print("[CloudSync] coreStoreUsesCloudKit=\(usesCloudKit)")
                 if isFirstLaunch {
                     UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
                 }
