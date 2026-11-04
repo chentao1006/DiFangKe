@@ -56,6 +56,40 @@ class NotificationManager {
             }
         }
     }
+
+    func dailySummaryFireDate(on date: Date) -> Date? {
+        let defaults = UserDefaults.standard
+        let hour = defaults.object(forKey: "dailyNotificationHour") as? Int ?? 21
+        let minute = defaults.integer(forKey: "dailyNotificationMinute")
+        return Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: date)
+    }
+
+    /// Ordinary timeline refreshes never request AI outside the notification's preparation window.
+    var isDailySummaryPreparationDue: Bool {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true,
+              defaults.bool(forKey: "isAiAssistantEnabled") else { return false }
+        let now = Date()
+        guard let fireDate = dailySummaryFireDate(on: now),
+              now < fireDate,
+              now >= fireDate.addingTimeInterval(-AppConfig.shared.dailySummaryPreparationLeadTime) else {
+            return false
+        }
+        if let attemptedDate = defaults.object(forKey: "dailySummaryPreparationAttemptDate") as? Date,
+           Calendar.current.isDate(attemptedDate, inSameDayAs: now) {
+            return false
+        }
+        return true
+    }
+
+    /// Claim on main after facts and notification authorization are ready. Persist across relaunches;
+    /// a failed attempt must not retry on every subsequent location update.
+    @MainActor
+    func claimDailySummaryPreparation(for date: Date) -> Bool {
+        guard Calendar.current.isDateInToday(date), isDailySummaryPreparationDue else { return false }
+        UserDefaults.standard.set(date, forKey: "dailySummaryPreparationAttemptDate")
+        return true
+    }
     
     // Dynamic scheduling based on Settings
     func updateDailySummary(isEnabled: Bool, hour: Int, minute: Int, title: String? = nil, body: String? = nil) {
@@ -94,6 +128,8 @@ class NotificationManager {
     func refreshDailySummary(placeCount: Int, mileage: Double, transportCount: Int = 0, overviewSummary: String? = nil) {
         let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }
+        // Once today's reminder is due, don't replace tomorrow's reminder with today's facts.
+        guard let fireDate = dailySummaryFireDate(on: Date()), Date() < fireDate else { return }
         
         // The daily summary is a view of persisted timeline facts. Raw location
         // samples must not make an otherwise empty day eligible for a summary.
@@ -108,7 +144,7 @@ class NotificationManager {
         let staticPreamble = "忙碌的一天结束了，快来看看你今天留下的足迹吧。"
         
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
-        // 调用方已按足迹和交通的数据指纹校验汇总；不再使用仅按日期缓存的旧文案。
+        // AI 文案仅在通知前准备一次；后续刷新只更新统计，复用本日已保存的文案。
         let effectiveOverview = overviewSummary?.trimmingCharacters(in: .whitespacesAndNewlines)
         
         let saysStayedHome = effectiveOverview?.contains("宅在家") == true || effectiveOverview?.contains("没出门") == true || effectiveOverview?.contains("在家休息") == true

@@ -1772,6 +1772,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationWatchdogTimer = Timer.publish(every: 60, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
+                if NotificationManager.shared.isDailySummaryPreparationDue {
+                    self?.triggerNotificationSummaryRefresh()
+                }
                 self?.runLocationWatchdog()
             }
 
@@ -4428,8 +4431,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     
-    func triggerNotificationSummaryRefresh() {
-        guard let container = modelContext?.container else { return }
+    @discardableResult
+    func triggerNotificationSummaryRefresh() -> Task<Void, Never>? {
+        guard let container = modelContext?.container else { return nil }
         
         let targetDate = Calendar.current.startOfDay(for: Date())
         let tomorrowStart = targetDate.addingTimeInterval(86400)
@@ -4437,7 +4441,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         // Build the notification exclusively from persisted timeline facts.
         // Raw samples and inferred straight lines between stays are not trips.
         // Fetches and counting run on a background context.
-        Task.detached(priority: .background) {
+        return Task.detached(priority: .background) {
             let context = ModelContext(container)
             let fetchDescriptor = FetchDescriptor<Footprint>(
                 predicate: #Predicate { $0.startTime < tomorrowStart && $0.endTime >= targetDate },
@@ -4477,23 +4481,28 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             let transportCount = todayTransports.count
             let mileage = todayTransports.reduce(0.0) { $0 + max(0, $1.distance) }
 
-            let overviewStatus = await withCheckedContinuation { continuation in
-                Task { @MainActor in
-                    OpenAIService.shared.dailyOverviewStatus(
-                        for: targetDate,
-                        footprintIDs: footprintIDs,
-                        transportIDs: transportIDs
-                    ) { needsNetworkRequest, savedSummary in
-                        continuation.resume(returning: (needsNetworkRequest, savedSummary))
-                    }
-                }
-            }
+            let insightDescriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate {
+                $0.date == targetDate
+            })
+            let savedInsight = (try? context.fetch(insightDescriptor))?.first
+            let savedOverview = savedInsight?.aiGenerated == true ? savedInsight?.content : nil
 
             let resolvedOverview: String?
-            if overviewStatus.0,
-               UserDefaults.standard.bool(forKey: "isAiAssistantEnabled") {
+            if (placeCount > 0 || transportCount > 0),
+               NotificationManager.shared.isDailySummaryPreparationDue {
                 resolvedOverview = await withCheckedContinuation { continuation in
                     Task { @MainActor in
+                        let status = await withCheckedContinuation { authorization in
+                            NotificationManager.shared.getAuthorizationStatus {
+                                authorization.resume(returning: $0)
+                            }
+                        }
+                        guard status == .authorized || status == .provisional || status == .ephemeral,
+                              OpenAIService.shared.modelContainer != nil,
+                              NotificationManager.shared.claimDailySummaryPreparation(for: targetDate) else {
+                            continuation.resume(returning: savedOverview)
+                            return
+                        }
                         OpenAIService.shared.currentDailyOverviewSummary(
                             for: targetDate,
                             footprintIDs: footprintIDs,
@@ -4504,18 +4513,19 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     }
                 }
             } else {
-                // The persisted result is already based on the same facts.
-                // Reuse it for notification scheduling without contacting AI.
-                resolvedOverview = overviewStatus.1
+                // Location updates and edits refresh factual stats without regenerating AI copy.
+                resolvedOverview = savedOverview
             }
 
             await MainActor.run {
-                NotificationManager.shared.refreshDailySummary(
-                    placeCount: placeCount,
-                    mileage: mileage,
-                    transportCount: transportCount,
-                    overviewSummary: resolvedOverview
-                )
+                if Calendar.current.isDateInToday(targetDate) {
+                    NotificationManager.shared.refreshDailySummary(
+                        placeCount: placeCount,
+                        mileage: mileage,
+                        transportCount: transportCount,
+                        overviewSummary: resolvedOverview
+                    )
+                }
 
                 Task { await WidgetDataSyncManager.shared.syncTodayOnly() }
                 self.updateSharedWidgetRegion()

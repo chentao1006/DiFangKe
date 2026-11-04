@@ -114,6 +114,10 @@ class AppConfig {
     var tencentMapSecret: String {
         string(forKey: "TENCENT_MAP_SECRET")
     }
+
+    var dailySummaryPreparationLeadTime: TimeInterval {
+        double(forKey: "DAILY_SUMMARY_PREPARATION_LEAD_TIME")
+    }
     
     var habitTimeWindow: Int {
         int(forKey: "HABIT_TIME_WINDOW_MINUTES")

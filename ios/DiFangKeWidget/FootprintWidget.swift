@@ -1145,9 +1145,9 @@ private struct CurrentTrackingIslandBottomContent: View {
     private var state: CurrentTrackingActivityAttributes.ContentState { context.state }
     private var accent: Color { currentTrackingAccent(state) }
     // The system adds the sensor-safe top region and the leading/trailing row.
-    // Keep the bottom region at 112pt so the complete expanded island reaches
+    // Keep the bottom region at 104pt so the complete expanded island reaches
     // its intended height without turning that reserved area into a huge band.
-    private let expandedBottomHeight: CGFloat = 112
+    private let expandedBottomHeight: CGFloat = 104
 
     var body: some View {
         VStack(spacing: 6) {

@@ -179,6 +179,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 }
                 LocationManager.shared.sampleStationaryLocationIfNeeded()
                 LocationManager.shared.checkLiveActivity(forceContentUpdate: true)
+                if NotificationManager.shared.isDailySummaryPreparationDue {
+                    await LocationManager.shared.triggerNotificationSummaryRefresh()?.value
+                }
                 
                 // 已在追踪中的标准定位会话不需要每次 BG refresh 再次启动。
                 // 重复 startUpdatingLocation 会把静止状态拉回活跃定位，造成
@@ -191,7 +194,12 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 task.setTaskCompleted(success: true)
             }
         } else {
-            task.setTaskCompleted(success: true)
+            Task { @MainActor in
+                if NotificationManager.shared.isDailySummaryPreparationDue {
+                    await LocationManager.shared.triggerNotificationSummaryRefresh()?.value
+                }
+                task.setTaskCompleted(success: true)
+            }
         }
     }
     
@@ -337,6 +345,8 @@ struct DiFangKeApp: App {
                         // automatic timeline recovery never starts in that path.
                         print("[TimelineAuto] binding model context from app root")
                         locationManager.modelContext = container.mainContext
+                        OpenAIService.shared.modelContainer = container
+                        locationManager.triggerNotificationSummaryRefresh()
                         // A location wake can arrive before SwiftData finishes
                         // opening. Once the context exists, publish the state that
                         // the background departure callback already established.

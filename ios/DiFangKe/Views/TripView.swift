@@ -4688,10 +4688,9 @@ private struct PlannedTripDetailView: View {
                             }
                             .contentMargins(
                                 .bottom,
-                                showsPlannedLifecycleActions ? 88 : 0,
+                                showsPlannedLifecycleActions ? 88 : 16,
                                 for: .scrollContent
                             )
-                            .ignoresSafeArea(.container, edges: .bottom)
                             .tripTimelineHiddenScrollEdges()
                             .simultaneousGesture(
                                 DragGesture(minimumDistance: 8)

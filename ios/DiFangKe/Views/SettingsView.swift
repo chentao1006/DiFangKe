@@ -440,8 +440,7 @@ private struct NotificationSettingsView: View {
             minute: notificationMinute
         )
 
-        if isDailyNotificationEnabled,
-           Calendar.current.component(.hour, from: Date()) >= 18 {
+        if isDailyNotificationEnabled {
             locationManager.triggerNotificationSummaryRefresh()
         }
     }

@@ -18,6 +18,10 @@
 	<key>AI_LIMIT_PER_DAY</key>
 	<integer>100</integer>
 
+	<!-- 每日通知前准备 AI 总结的提前量（秒），仅在此窗口内请求一次 -->
+	<key>DAILY_SUMMARY_PREPARATION_LEAD_TIME</key>
+	<real>300</real>
+
 	<!-- App Group ID for data sharing between App and Widget -->
 	<key>APP_GROUP_ID</key>
 	<string>group.com.ct106.difangke</string>
