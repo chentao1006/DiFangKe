@@ -115,9 +115,23 @@ class AppConfig {
         string(forKey: "TENCENT_MAP_SECRET")
     }
 
+    var transportInferredRouteTimeGap: Double { double(forKey: "TRANSPORT_INFERRED_ROUTE_TIME_GAP") }
+    var transportRouteCompletionEndpointTolerance: Double { double(forKey: "TRANSPORT_ROUTE_COMPLETION_ENDPOINT_TOLERANCE") }
+    var transportRouteCompletionMaxDetourRatio: Double { double(forKey: "TRANSPORT_ROUTE_COMPLETION_MAX_DETOUR_RATIO") }
+    var transportRouteCompletionDurationRatio: Double { double(forKey: "TRANSPORT_ROUTE_COMPLETION_DURATION_RATIO") }
+    var transportRouteCompletionRetryInterval: Double { double(forKey: "TRANSPORT_ROUTE_COMPLETION_RETRY_INTERVAL") }
+    var transportRouteCompletionRequestInterval: Double { double(forKey: "TRANSPORT_ROUTE_COMPLETION_REQUEST_INTERVAL") }
+    var transportRouteCompletionFailureLimit: Int { int(forKey: "TRANSPORT_ROUTE_COMPLETION_FAILURE_LIMIT") }
+    var transportRouteCompletionMemoryLimit: Int { int(forKey: "TRANSPORT_ROUTE_COMPLETION_MEMORY_LIMIT") }
+
     var dailySummaryPreparationLeadTime: TimeInterval {
         double(forKey: "DAILY_SUMMARY_PREPARATION_LEAD_TIME")
     }
+
+    var dailySummaryMaxPreparationAttempts: Int { int(forKey: "DAILY_SUMMARY_MAX_PREPARATION_ATTEMPTS") }
+    var dailySummaryRetryInterval: TimeInterval { double(forKey: "DAILY_SUMMARY_RETRY_INTERVAL") }
+    var dailySummaryRequestTimeout: TimeInterval { double(forKey: "DAILY_SUMMARY_REQUEST_TIMEOUT") }
+    var dailySummaryBackgroundPreparationLeadTime: TimeInterval { double(forKey: "DAILY_SUMMARY_BACKGROUND_PREPARATION_LEAD_TIME") }
     
     var habitTimeWindow: Int {
         int(forKey: "HABIT_TIME_WINDOW_MINUTES")
@@ -656,16 +670,24 @@ class AppConfig {
         int(forKey: "REVIEW_PHOTO_IMPORT_SUGGESTION_MAX_FOOTPRINTS")
     }
 
+    var reviewCacheRefreshDays: Int {
+        int(forKey: "REVIEW_CACHE_REFRESH_DAYS")
+    }
+
+    var reviewRangeCacheMemoryCount: Int {
+        int(forKey: "REVIEW_RANGE_CACHE_MEMORY_COUNT")
+    }
+
+    var reviewRangeCacheMemoryLimitBytes: Int {
+        int(forKey: "REVIEW_RANGE_CACHE_MEMORY_LIMIT_MB") * 1024 * 1024
+    }
+
     var reviewMapTrajectoryBaseCellDegrees: Double {
         double(forKey: "REVIEW_MAP_TRAJECTORY_BASE_CELL_DEGREES")
     }
 
-    var reviewMapTransportIconMinSpacing: Double {
-        double(forKey: "REVIEW_MAP_TRANSPORT_ICON_MIN_SPACING")
-    }
-
-    var reviewMapTransportIconSameTypeSpacing: Double {
-        double(forKey: "REVIEW_MAP_TRANSPORT_ICON_SAME_TYPE_SPACING")
+    var mapTransportIconMergeDiameterRatio: Double {
+        double(forKey: "MAP_TRANSPORT_ICON_MERGE_DIAMETER_RATIO")
     }
 
     var reviewPlacePhotoPreviewCount: Int {
@@ -809,6 +831,8 @@ class AppConfig {
     var reconstructionBoundaryTolerance: Double {
         double(forKey: "RECONSTRUCTION_BOUNDARY_TOLERANCE")
     }
+
+    var timelineRebuildMinRawPoints: Int { int(forKey: "TIMELINE_REBUILD_MIN_RAW_POINTS") }
 
     var overlapMinDuration: Double {
         double(forKey: "OVERLAP_MIN_DURATION")

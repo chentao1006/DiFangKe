@@ -20,7 +20,6 @@
 		71F2E5B397A918D6AD287D07 /* OpenAIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC770D1218DA3E75BF2D5859 /* OpenAIService.swift */; };
 		7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FECD1239FE04DF703FFB1E6 /* DataManagerView.swift */; };
 		8D0E1F2A3B4C5D6E7F8091A2 /* DataDeduplicationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */; };
-		C10D5A110000000000000002 /* CloudSyncStoreRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10D5A110000000000000001 /* CloudSyncStoreRecovery.swift */; };
 		8D0E1F2A3B4C5D6E7F8091A4 /* DiFangKeSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */; };
 		8D0E1F2A3B4C5D6E7F8091A7 /* FutureTrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */; };
 		8D0E1F2A3B4C5D6E7F8091A8 /* DiFangKeSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */; };
@@ -46,6 +45,8 @@
 		B941AA130000000000000001 /* TripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA130000000000000002 /* TripView.swift */; };
 		B941AA140000000000000001 /* TripScanManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA140000000000000002 /* TripScanManager.swift */; };
 		BB95F1637D3ABD303156926C /* EditPlaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D7A089B6F99853042F8B6A1 /* EditPlaceSheet.swift */; };
+		C10D5A110000000000000002 /* CloudSyncStoreRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10D5A110000000000000001 /* CloudSyncStoreRecovery.swift */; };
+		C11D55000000000000000002 /* TransportRouteCompletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = C11D55000000000000000001 /* TransportRouteCompletion.swift */; };
 		C199604340369E777F064D7B /* Config.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8406ACF5012D1DB8F428AB9C /* Config.plist */; };
 		C1A2B3C4D5E6F70123456789 /* trip_major_cities.json in Resources */ = {isa = PBXBuildFile; fileRef = C1A2B3C4D5E6F70123456788 /* trip_major_cities.json */; };
 		C641B0512FE2720C009DC763 /* SafeMKMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C641B0502FE2720C009DC763 /* SafeMKMapView.swift */; };
@@ -190,7 +191,6 @@
 		7D750760587987B7CCDAB5FF /* MapPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapPickerView.swift; sourceTree = "<group>"; };
 		8406ACF5012D1DB8F428AB9C /* Config.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Config.plist; sourceTree = "<group>"; };
 		8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataDeduplicationService.swift; sourceTree = "<group>"; };
-		C10D5A110000000000000001 /* CloudSyncStoreRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSyncStoreRecovery.swift; sourceTree = "<group>"; };
 		8D0E1F2A3B4C5D6E7F8091A3 /* DiFangKeSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiFangKeSchema.swift; sourceTree = "<group>"; };
 		8F4D2C9D6A1B43D0A6C7E2B1 /* FutureTrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FutureTrip.swift; sourceTree = "<group>"; };
 		8F4D2CA36A1B43D0A6C7E2B1 /* ShareCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareCards.swift; sourceTree = "<group>"; };
@@ -212,6 +212,8 @@
 		B941AA140000000000000002 /* TripScanManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripScanManager.swift; sourceTree = "<group>"; };
 		BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoService.swift; sourceTree = "<group>"; };
 		C0E6E94F0AB674372B9577B9 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/WatchOS.platform/Developer/SDKs/WatchOS11.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		C10D5A110000000000000001 /* CloudSyncStoreRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudSyncStoreRecovery.swift; sourceTree = "<group>"; };
+		C11D55000000000000000001 /* TransportRouteCompletion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransportRouteCompletion.swift; sourceTree = "<group>"; };
 		C1A2B3C4D5E6F70123456788 /* trip_major_cities.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = trip_major_cities.json; path = ../../config/trip_major_cities.json; sourceTree = "<group>"; };
 		C641B0502FE2720C009DC763 /* SafeMKMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeMKMapView.swift; sourceTree = "<group>"; };
 		C64D3D9D2F80058600BB3C3F /* IgnoredPlacesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IgnoredPlacesView.swift; sourceTree = "<group>"; };
@@ -419,6 +421,7 @@
 			isa = PBXGroup;
 			children = (
 				C10D5A110000000000000001 /* CloudSyncStoreRecovery.swift */,
+				C11D55000000000000000001 /* TransportRouteCompletion.swift */,
 				B941AA140000000000000002 /* TripScanManager.swift */,
 				8D0E1F2A3B4C5D6E7F8091A1 /* DataDeduplicationService.swift */,
 				C67848572FA3A082002DF823 /* WidgetDataSyncManager.swift */,
@@ -761,6 +764,7 @@
 				C64D3DA42F81434600BB3C3F /* DFKMapView.swift in Sources */,
 				C64D3DA02F8111A800BB3C3F /* RawLogsManagerView.swift in Sources */,
 				C65E583B2F8241350030A766 /* TimelineBuilder.swift in Sources */,
+				C11D55000000000000000002 /* TransportRouteCompletion.swift in Sources */,
 				C68544442F85457800C605E9 /* ActivityType.swift in Sources */,
 				19D19D677339112CC0F14ED5 /* Place.swift in Sources */,
 				CDA3376C04480D9A7C70C2BC /* PlacePickerViewModel.swift in Sources */,
@@ -901,7 +905,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -922,7 +926,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.7.1;
+				MARKETING_VERSION = 1.7.2;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1038,7 +1042,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = U2NEAJ73J2;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -1053,7 +1057,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.7.1;
+				MARKETING_VERSION = 1.7.2;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

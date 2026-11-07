@@ -11,6 +11,27 @@
 	<string></string>
 	<key>TENCENT_MAP_SECRET</key>
 	<string></string>
+	<!-- 显示推测路线：缺失采样时间（秒）；距离门槛复用 WIDGET_INFERRED_ROUTE_DISTANCE_THRESHOLD -->
+	<key>TRANSPORT_INFERRED_ROUTE_TIME_GAP</key>
+	<real>180</real>
+	<!-- 规划路线两端与缺口定位点的最大偏差（米） -->
+	<key>TRANSPORT_ROUTE_COMPLETION_ENDPOINT_TOLERANCE</key>
+	<real>300</real>
+	<!-- 路线长度 / 缺口直线距离上限；规划用时 / 缺口时长上限 -->
+	<key>TRANSPORT_ROUTE_COMPLETION_MAX_DETOUR_RATIO</key>
+	<real>4</real>
+	<key>TRANSPORT_ROUTE_COMPLETION_DURATION_RATIO</key>
+	<real>2</real>
+	<!-- 未匹配结果后台重试间隔（秒）；后台队列每条处理间隔（秒，详情主动查询不等待）；内存缓存条数 -->
+	<key>TRANSPORT_ROUTE_COMPLETION_RETRY_INTERVAL</key>
+	<real>86400</real>
+	<key>TRANSPORT_ROUTE_COMPLETION_REQUEST_INTERVAL</key>
+	<real>2</real>
+	<!-- 同一路线缺口连续失败达到此次数后永久停止自动及详情请求 -->
+	<key>TRANSPORT_ROUTE_COMPLETION_FAILURE_LIMIT</key>
+	<integer>3</integer>
+	<key>TRANSPORT_ROUTE_COMPLETION_MEMORY_LIMIT</key>
+	<integer>128</integer>
 	<key>AI_LIMIT_PER_MINUTE</key>
 	<integer>1</integer>
 	<key>AI_LIMIT_PER_HOUR</key>
@@ -18,9 +39,20 @@
 	<key>AI_LIMIT_PER_DAY</key>
 	<integer>100</integer>
 
-	<!-- 每日通知前准备 AI 总结的提前量（秒），仅在此窗口内请求一次 -->
+	<!-- 每日通知前准备 AI 总结的提前量（秒） -->
 	<key>DAILY_SUMMARY_PREPARATION_LEAD_TIME</key>
 	<real>300</real>
+	<!-- 临近通知进入后台时提前准备，避免依赖最后几分钟仍有运行机会（秒） -->
+	<key>DAILY_SUMMARY_BACKGROUND_PREPARATION_LEAD_TIME</key>
+	<real>10800</real>
+	<!-- 每个实质变化版本限制尝试次数和重试间隔（秒） -->
+	<key>DAILY_SUMMARY_MAX_PREPARATION_ATTEMPTS</key>
+	<integer>2</integer>
+	<key>DAILY_SUMMARY_RETRY_INTERVAL</key>
+	<real>60</real>
+	<!-- 单次总结请求超时（秒），避免占满后台执行时间仍未拿到结果 -->
+	<key>DAILY_SUMMARY_REQUEST_TIMEOUT</key>
+	<real>20</real>
 
 	<!-- App Group ID for data sharing between App and Widget -->
 	<key>APP_GROUP_ID</key>
@@ -352,14 +384,14 @@
     <real>60</real>
     <key>LOW_POWER_CLUSTER_FRACTION</key>
     <real>0.8</real>
-    <!-- 自动停留期间仍保持的离开监测：比手动省电模式更及时，低于移动中的最高精度 -->
+    <!-- 自动停留期间仍保持的离开监测：目标精度 20 米，小幅提前捕捉起步，低于移动中的最高精度 -->
     <key>AUTOMATIC_STATIONARY_WATCH_ACCURACY</key>
-    <real>25</real>
+    <real>20</real>
     <key>AUTOMATIC_STATIONARY_WATCH_DISTANCE_FILTER</key>
     <real>5</real>
-    <!-- 单个准确且有速度的离开点即可唤醒高精度，但须超出定位误差范围 -->
+    <!-- 单个准确且速度达到 2.2 m/s 的离开点即可唤醒高精度；保留位移下限和精度倍数以抑制漂移 -->
     <key>LOW_POWER_DEPARTURE_SPEED</key>
-    <real>2.5</real>
+    <real>2.2</real>
     <key>LOW_POWER_DEPARTURE_ACCURACY</key>
     <real>60</real>
     <key>LOW_POWER_DEPARTURE_DISTANCE_FLOOR</key>
@@ -512,15 +544,24 @@
     <key>REVIEW_MEMORY_MAXIMUM_COUNT</key>
     <integer>6</integer>
     <key>REVIEW_MEMORY_CAROUSEL_INTERVAL</key>
-    <real>4</real>
+    <real>6</real>
     <key>REVIEW_MEMORY_CAROUSEL_ANIMATION_DURATION</key>
-    <real>0.8</real>
+    <real>1.2</real>
     <key>REVIEW_MEMORY_TRAVEL_DISTANCE_MIN</key>
     <real>10000</real>
     <key>REVIEW_MEMORY_WALK_DISTANCE_MIN</key>
     <real>3000</real>
     <key>REVIEW_MEMORY_DIVERSE_TRANSPORT_MIN_COUNT</key>
     <integer>2</integer>
+
+    <!-- 回顾近期范围和今年的数据每天更新，统计不含今天；历史年份仅在内容或配置变化时更新 -->
+    <key>REVIEW_CACHE_REFRESH_DAYS</key>
+    <integer>1</integer>
+    <!-- 同时保留的已解码回顾范围数量和内存缓存预算（MB），内存警告时清空 -->
+    <key>REVIEW_RANGE_CACHE_MEMORY_COUNT</key>
+    <integer>3</integer>
+    <key>REVIEW_RANGE_CACHE_MEMORY_LIMIT_MB</key>
+    <integer>64</integer>
 
     <!-- 回顾页首次进入时，足迹数不超过此值则介绍从照片补充过去足迹 -->
     <key>REVIEW_PHOTO_IMPORT_SUGGESTION_MAX_FOOTPRINTS</key>
@@ -529,11 +570,9 @@
     <!-- 回顾地图交通线：最大放大时的抽稀网格（经纬度），缩小时按屏幕跨度逐级放大 -->
     <key>REVIEW_MAP_TRAJECTORY_BASE_CELL_DEGREES</key>
     <real>0.0003</real>
-    <!-- 回顾地图交通图标：任意两个图标的最小间距、同类型图标的合并间距（占屏幕长边的比例） -->
-    <key>REVIEW_MAP_TRANSPORT_ICON_MIN_SPACING</key>
-    <real>0.05</real>
-    <key>REVIEW_MAP_TRANSPORT_ICON_SAME_TYPE_SPACING</key>
-    <real>0.18</real>
+    <!-- 同类交通图标合并距离为图标直径的倍数；1 为刚好相碰，1.4 允许少量间隙 -->
+    <key>MAP_TRANSPORT_ICON_MERGE_DIAMETER_RATIO</key>
+    <real>1.4</real>
     <!-- 回顾地点页：照片默认展示张数，其余点"查看更多"展开 -->
     <key>REVIEW_PLACE_PHOTO_PREVIEW_COUNT</key>
     <integer>9</integer>
@@ -604,6 +643,10 @@
     <key>RECONSTRUCTION_BOUNDARY_TOLERANCE</key>
     <real>600</real>
 
+    <!-- 删除旧时间线前的最低有效原始轨迹点数；只有点数极少时阻止重建 -->
+    <key>TIMELINE_REBUILD_MIN_RAW_POINTS</key>
+    <integer>20</integer>
+
     <!-- 重叠判定：最短重叠时长（秒）、最小重叠比例 -->
     <key>OVERLAP_MIN_DURATION</key>
     <real>300</real>
@@ -668,7 +711,7 @@
     <key>CLOUD_PERIODIC_SYNC_INTERVAL</key>
     <real>600</real>
 
-    <!-- 小组件地图：判定为"推测路线"（虚线）的距离缺口门槛（米） -->
+    <!-- iOS / 小组件共用：推测路线（虚线）的距离缺口门槛，也是补全查询的最小位移（米） -->
     <key>WIDGET_INFERRED_ROUTE_DISTANCE_THRESHOLD</key>
     <real>500</real>
 

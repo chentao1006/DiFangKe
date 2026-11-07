@@ -42,6 +42,8 @@ struct FootprintCardView: View {
     
     @Environment(\.modelContext) private var modelContext
     @Environment(LocationManager.self) private var locationManager
+    @ObservedObject private var photoService = PhotoService.shared
+    @State private var displayedPhotoAssetIDs: [String] = []
     @State private var highlightVisible: Bool = false
     @State private var showingDeleteConfirm = false
     @State private var showingIgnoreConfirm = false
@@ -72,6 +74,16 @@ struct FootprintCardView: View {
             revision: footprintDataRevision,
             isEnabled: !disableContextMenu && footprint.status != .ignored
         )
+    }
+
+    private var photoResolutionTaskKey: Int {
+        var hasher = Hasher()
+        hasher.combine(footprint.photoAssetIDsData)
+        hasher.combine(footprint.startTime)
+        hasher.combine(footprint.endTime)
+        hasher.combine(photoService.authorizationStatus.rawValue)
+        hasher.combine(photoService.identifierResolutionRevision)
+        return hasher.finalize()
     }
 
     private static let timeFormatter: DateFormatter = {
@@ -152,10 +164,10 @@ struct FootprintCardView: View {
                     }
                     .padding(.vertical, 14)
                     .padding(.leading, 0)
-                    .padding(.trailing, footprint.photoAssetIDs.isEmpty ? 16 : 84) // Increased for larger photo
+                    .padding(.trailing, displayedPhotoAssetIDs.isEmpty ? 16 : 84) // Increased for larger photo
                     .frame(maxWidth: .infinity, minHeight: 70, alignment: .topLeading)
                     
-                    if let firstID = footprint.photoAssetIDs.first {
+                    if let firstID = displayedPhotoAssetIDs.first {
                         ZStack(alignment: .topTrailing) {
                             Color.clear // Expand to fill parent
                             
@@ -165,8 +177,8 @@ struct FootprintCardView: View {
                                     .frame(width: 60, height: 60)
                                     .clipShape(RoundedRectangle(cornerRadius: 8))
                                 
-                                if footprint.photoAssetIDs.count > 1 {
-                                    Text("\(footprint.photoAssetIDs.count)")
+                                if displayedPhotoAssetIDs.count > 1 {
+                                    Text("\(displayedPhotoAssetIDs.count)")
                                         .font(.system(size: 8, weight: .bold))
                                         .foregroundColor(.white)
                                         .padding(.horizontal, 4)
@@ -180,7 +192,7 @@ struct FootprintCardView: View {
                             .padding(.trailing, 12)
                         }
                         .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: footprint.photoAssetIDs)
+                        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: displayedPhotoAssetIDs)
                     }
                 }
             }
@@ -235,6 +247,17 @@ struct FootprintCardView: View {
             }
             .sheet(isPresented: $showingSplitFootprint) {
                 FootprintSplitView(footprint: footprint)
+            }
+            .task(id: photoResolutionTaskKey) {
+                displayedPhotoAssetIDs = []
+                let data = footprint.photoAssetIDsData
+                let interval = DateInterval(start: footprint.startTime, end: max(footprint.startTime, footprint.endTime))
+                let resolved = await Task.detached(priority: .userInitiated) {
+                    let assetIDs = (try? JSONDecoder().decode([String].self, from: data)) ?? []
+                    return PhotoService.shared.displayableAssetIDs(assetIDs, during: interval)
+                }.value
+                guard !Task.isCancelled else { return }
+                displayedPhotoAssetIDs = resolved
             }
             .onAppear {
                 if footprint.isHighlight == true {

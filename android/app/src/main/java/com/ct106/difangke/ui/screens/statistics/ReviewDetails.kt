@@ -574,7 +574,7 @@ private fun ReviewRhythmDetail(snapshot: ReviewSnapshot) {
 
         Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("足迹活跃分析", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            Text("以下按足迹次数与活跃天数统计，不代表里程。", fontSize = 12.sp, color = reviewSecondaryText())
+            Text("以下按足迹次数与活跃天数统计。", fontSize = 12.sp, color = reviewSecondaryText())
         }
 
         ReviewMetricGrid(listOf(

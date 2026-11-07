@@ -1212,7 +1212,13 @@ struct TimelineScene<Content: View>: View {
                     aiScore: footprint.aiScore,
                     isHighlight: footprint.isHighlight,
                     placeID: footprint.placeID,
-                    photoAssetIDs: footprint.photoAssetIDs,
+                    photoAssetIDs: PhotoService.shared.displayableAssetIDs(
+                        footprint.photoAssetIDs,
+                        during: DateInterval(
+                            start: max(footprint.startTime, startOfDay),
+                            end: min(max(footprint.endTime, footprint.startTime), endOfDay)
+                        )
+                    ),
                     address: footprint.address,
                     countryCode: footprint.countryCode,
                     countryName: footprint.countryName,
@@ -2049,7 +2055,7 @@ struct TimelineScene<Content: View>: View {
 
         for source in sources {
             guard case .transport(let transport) = source else { continue }
-            let transportCoordinates = transport.lineSegments
+            let transportCoordinates = TransportRouteCompletion.cachedSegments(for: transport)
                 .flatMap { $0.coordinates }
                 .filter(\.isRenderableMapCoordinate)
             if let midpoint = transportCoordinates.distanceMidpoint {
@@ -2470,6 +2476,31 @@ private struct TimelineView: View {
                         } message: {
                             Text("这将删除已手动修正或确认的足迹记录，并基于原始轨迹点重新分析生成时间线。")
                         }
+                        .alert(locationManager.resetDataConfirmationDate == nil ? "无法重新生成本日数据" : "原始轨迹点较少", isPresented: Binding(
+                            get: { locationManager.resetDataError != nil },
+                            set: {
+                                if !$0 {
+                                    locationManager.resetDataError = nil
+                                    locationManager.resetDataConfirmationDate = nil
+                                }
+                            }
+                        )) {
+                            if let confirmationDate = locationManager.resetDataConfirmationDate {
+                                Button("仍然生成", role: .destructive) {
+                                    locationManager.resetDataError = nil
+                                    locationManager.resetDataConfirmationDate = nil
+                                    locationManager.resetData(for: confirmationDate, allowingSparseRawPoints: true)
+                                }
+                                Button("取消", role: .cancel) {
+                                    locationManager.resetDataError = nil
+                                    locationManager.resetDataConfirmationDate = nil
+                                }
+                            } else {
+                                Button("知道了", role: .cancel) { locationManager.resetDataError = nil }
+                            }
+                        } message: {
+                            Text(locationManager.resetDataError ?? "")
+                        }
                         .alert("确认删除足迹？", isPresented: isShowingFootprintDeletionAlert) {
                             Button("删除", role: .destructive) {
                                 if let footprintPendingDeletion {
@@ -2528,7 +2559,7 @@ private struct TimelineView: View {
                             Text(transportMergeConfirmationMessage)
                         }
                         .onChange(of: locationManager.isResettingData) { oldValue, newValue in
-                            if oldValue && !newValue {
+                            if oldValue && !newValue && locationManager.resetDataError == nil {
                                 let targetDate = Calendar.current.startOfDay(for: activeTimelineDate)
                                 Task { @MainActor in
                                     try? await Task.sleep(nanoseconds: 100_000_000)
@@ -3377,7 +3408,7 @@ private struct TimelineView: View {
                 if !coordinates.isEmpty { return coordinates }
                 return [CLLocationCoordinate2D(latitude: latitude, longitude: longitude)]
             case .transport(let transport):
-                let coordinates = transport.lineSegments.flatMap(\.coordinates)
+                let coordinates = TransportRouteCompletion.cachedSegments(for: transport).flatMap(\.coordinates)
                 if !coordinates.isEmpty { return coordinates }
                 return transport.points
             }
@@ -3826,8 +3857,9 @@ private struct TimelineView: View {
                         onPhotoTap: { assetID in
                             guard case .footprint(let footprint) = item else { return }
                             let storedAssetIDs = footprint.photoAssetIDs
+                            let interval = DateInterval(start: footprint.startTime, end: max(footprint.startTime, footprint.endTime))
                             Task { @MainActor in
-                                selectedMapPhotoAssetIDs = await PhotoService.shared.displayableAssetIDsAsync(storedAssetIDs)
+                                selectedMapPhotoAssetIDs = await PhotoService.shared.displayableAssetIDsAsync(storedAssetIDs, during: interval)
                                 selectedMapPhotoAssetID = assetID
                             }
                         },
@@ -5859,7 +5891,10 @@ private struct ContinuousTimelineRow: View {
         }
         .task(id: photoResolutionTaskKey) {
             didResolvePhotoAssetIDs = false
-            let resolved = await photoService.displayableAssetIDsAsync(photoAssetIDs)
+            let resolved = await photoService.displayableAssetIDsAsync(
+                photoAssetIDs,
+                during: DateInterval(start: item.startTime, end: max(item.startTime, item.endTime))
+            )
             guard !Task.isCancelled else { return }
             displayablePhotoAssetIDs = resolved
             didResolvePhotoAssetIDs = true
@@ -6092,12 +6127,13 @@ private struct ContinuousTimelineRow: View {
         hasher.combine(photoService.authorizationStatus.rawValue)
         hasher.combine(photoService.identifierResolutionRevision)
         hasher.combine(photoAssetIDs)
+        hasher.combine(item.startTime)
+        hasher.combine(item.endTime)
         return hasher.finalize()
     }
 
-    /// LazyVStack may recreate an off-screen row. Keep its photo layout present
-    /// while the displayable-ID check runs so recycling the row cannot collapse
-    /// and then expand its height.
+    /// The snapshot already checks photo times off main. Keep that layout
+    /// while resolving again so recycling a row cannot change its height.
     private var timelinePhotoAssetIDs: [String] {
         didResolvePhotoAssetIDs ? displayablePhotoAssetIDs : photoAssetIDs
     }

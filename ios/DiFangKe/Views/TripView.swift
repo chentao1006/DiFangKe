@@ -1474,6 +1474,7 @@ private struct TripListCardHero: View {
     @State private var photos: [UIImage] = []
     @State private var renderSize: CGSize = .zero
     @State private var isVisible = false
+    @State private var inferredRoutesRevision = TransportRouteCompletion.revision
 
     var body: some View {
         GeometryReader { proxy in
@@ -1520,7 +1521,10 @@ private struct TripListCardHero: View {
             }
             .onChange(of: proxy.size) { _, size in updateRenderSize(size) }
         }
-        .task(id: "\(model?.signature ?? "")|\(colorScheme)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))|photos:\(photoService.identifierResolutionRevision)") {
+        .onReceive(NotificationCenter.default.publisher(for: TransportRouteCompletion.didChange)) { _ in
+            inferredRoutesRevision = TransportRouteCompletion.revision
+        }
+        .task(id: "\(model?.signature ?? "")|\(colorScheme)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))|photos:\(photoService.identifierResolutionRevision)|routes:\(inferredRoutesRevision)") {
             guard let model, renderSize.width > 1, renderSize.height > 1 else { return }
             let actualDayRequests = model.actualDayRequests
             let actualSnapshots: [TripActualItemSnapshot]
@@ -1857,12 +1861,6 @@ private func buildTripCardMapContent(
             isHome: tripCityMatchesHome(cityName: stop.cityName, countryCode: stop.countryCode, homeCity: homeCity)
         )
     }
-    // Each route is segmented and smoothed once; both the drawn segments and
-    // the transport markers read from the same result, in dictionary order.
-    let segmentsBySource = routeDictionary.map { sourceID, points in
-        (sourceID: sourceID, segments: TripMapRouteSegment.make(sourceID: sourceID, points: points))
-    }
-    let routeSegments = segmentsBySource.flatMap(\.segments)
     var transportTypeByID: [UUID: String] = [:]
     if let actualSnapshots {
         for item in actualSnapshots {
@@ -1873,6 +1871,12 @@ private func buildTripCardMapContent(
             if let sourceID = item.sourceTransportRecordID { transportTypeByID[sourceID] = item.transportTypeRaw ?? "" }
         }
     }
+    // Each route is segmented and smoothed once; both the drawn segments and
+    // the transport markers read from the same result, in dictionary order.
+    let segmentsBySource = routeDictionary.map { sourceID, points in
+        (sourceID: sourceID, segments: TripMapRouteSegment.make(sourceID: sourceID, points: points, typeRaw: transportTypeByID[sourceID]))
+    }
+    let routeSegments = segmentsBySource.flatMap(\.segments)
     let transportMarkers = segmentsBySource.compactMap { entry -> TripCardMapTransportMarker? in
         let coordinates = entry.segments
             .flatMap(\.coordinates)
@@ -2041,7 +2045,7 @@ enum TripListCardMapRenderer {
         focusesContentLeft: Bool = true,
         stopMarkerScale: CGFloat = 1
     ) async -> UIImage? {
-        let key = "trip-record-map-style-v5|\(focusesContentLeft)|\(stopMarkerScale)|\(signature)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))|\(colorScheme)"
+        let key = "trip-record-map-style-v6|\(focusesContentLeft)|\(stopMarkerScale)|\(signature)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))|\(colorScheme)|routes:\(TransportRouteCompletion.revision)"
         if let cached = DFKMapSnapshotCache.shared.image(for: key) { return cached }
         // Camera framing over every coordinate runs off the main thread.
         guard let mapRect = await Task.detached(priority: .utility, operation: {
@@ -2666,7 +2670,7 @@ private func buildTripShareSummary(
     // Transport legs: distance comes from the recorded route geometry.
     let transportItems = sortedItems.filter(isTransport)
     let routeDictionary = await TripScanManager.shared.transportRoutes(
-        for: Set(transportItems.compactMap(\.sourceTransportRecordID))
+        for: Set(transportItems.compactMap(\.sourceTransportRecordID)), completesMissingRoutes: false
     )
     var legByItemID: [UUID: DFKTripShareSummary.Leg] = [:]
     for item in transportItems {
@@ -4480,13 +4484,13 @@ private struct PlannedTripDetailView: View {
                             MapPolyline(route.polyline)
                                 .stroke(
                                     destination.id == nextDestinationID ? Color.blue : Color.dfkAccent.opacity(0.78),
-                                    lineWidth: destination.id == nextDestinationID ? 5 : 4
+                                    lineWidth: destination.id == nextDestinationID ? 7 : 6
                                 )
                         } else if let pair = plannedRoutePair(endingAt: destination) {
                             MapPolyline(coordinates: [pair.0, pair.1])
                                 .stroke(
                                     destination.id == nextDestinationID ? Color.blue.opacity(0.8) : Color.dfkAccent.opacity(0.5),
-                                    style: StrokeStyle(lineWidth: 1.3, lineCap: .round, lineJoin: .round, dash: [5, 5])
+                                    style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: [5, 5])
                                 )
                         }
                     }
@@ -6012,7 +6016,9 @@ enum TencentTripDirections {
     static func routes(
         from origin: CLLocationCoordinate2D,
         to destination: CLLocationCoordinate2D,
-        transportTypeRaw: String?
+        transportTypeRaw: String?,
+        prefersStoredRoutes: Bool = false,
+        refreshesCachedRoutes: Bool = false
     ) async -> [TripPlannedRoute] {
         let transportType = TransportType(rawValue: transportTypeRaw ?? "")
         let mode: String
@@ -6032,47 +6038,53 @@ enum TencentTripDirections {
         }
 
         let cacheKey = [
-            "v5",
+            "v6",
             mode,
             transportType?.rawValue ?? "none",
             String(format: "%.6f,%.6f", origin.latitude, origin.longitude),
             String(format: "%.6f,%.6f", destination.latitude, destination.longitude)
         ].joined(separator: "|")
-        if let cached = routeCache[cacheKey] { return cached }
+        if !refreshesCachedRoutes, let cached = routeCache[cacheKey] { return cached }
         // Disk cache reads and JSON decoding run off the main thread.
         let storedRoutes = await Task.detached(priority: .utility) {
             Self.storedRoutes(for: cacheKey)
         }.value
+        if !refreshesCachedRoutes, prefersStoredRoutes, !storedRoutes.isEmpty { return storedRoutes }
 
         let key = AppConfig.shared.tencentMapKey
         let secret = AppConfig.shared.tencentMapSecret
         guard !key.isEmpty, !secret.isEmpty else { return storedRoutes }
 
-        let path = "/direction/v1/\(mode)/"
-        var parameters = [
-            "from": String(format: "%.6f,%.6f", origin.latitude, origin.longitude),
-            "key": key,
-            "output": "json",
-            "to": String(format: "%.6f,%.6f", destination.latitude, destination.longitude)
-        ]
-        if mode == "transit" {
-            parameters["policy"] = transportType == .bus
-                ? "LEAST_TIME,NO_SUBWAY"
-                : "LEAST_TIME"
-        } else if mode == "driving" {
-            parameters["get_mp"] = "1"
-        }
-        let sortedParameters = parameters.sorted { $0.key < $1.key }
-        let signatureQuery = sortedParameters.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
-        let signatureSource = "/ws\(path)?\(signatureQuery)\(secret)"
-        let signature = Insecure.MD5.hash(data: Data(signatureSource.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
+        // Signing and request assembly share the background preparation path
+        // with decoding; the main actor only owns the in-memory route cache.
+        let requestURL = await Task.detached(priority: .utility) {
+            let path = "/direction/v1/\(mode)/"
+            var parameters = [
+                "from": String(format: "%.6f,%.6f", origin.latitude, origin.longitude),
+                "key": key,
+                "output": "json",
+                "to": String(format: "%.6f,%.6f", destination.latitude, destination.longitude)
+            ]
+            if mode == "transit" {
+                parameters["policy"] = transportType == .bus
+                    ? "LEAST_TIME,NO_SUBWAY"
+                    : "LEAST_TIME"
+            } else if mode == "driving" {
+                parameters["get_mp"] = "1"
+            }
+            let sortedParameters = parameters.sorted { $0.key < $1.key }
+            let signatureQuery = sortedParameters.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
+            let signatureSource = "/ws\(path)?\(signatureQuery)\(secret)"
+            let signature = Insecure.MD5.hash(data: Data(signatureSource.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
 
-        var components = URLComponents(string: "\(baseURL)\(path)")
-        components?.queryItems = sortedParameters.map { URLQueryItem(name: $0.key, value: $0.value) }
-            + [URLQueryItem(name: "sig", value: signature)]
-        guard let url = components?.url else { return storedRoutes }
+            var components = URLComponents(string: "\(baseURL)\(path)")
+            components?.queryItems = sortedParameters.map { URLQueryItem(name: $0.key, value: $0.value) }
+                + [URLQueryItem(name: "sig", value: signature)]
+            return components?.url
+        }.value
+        guard let url = requestURL else { return storedRoutes }
 
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
@@ -6209,12 +6221,24 @@ enum TencentTripDirections {
 
     private static func routeInstructions(from route: [String: Any]) -> [TripRouteInstruction] {
         guard let steps = route["steps"] as? [[String: Any]] else { return [] }
+        let routeGeometry = (route["polyline"] as? [NSNumber]).map(decodePolyline) ?? []
+        func geometry(for object: [String: Any]) -> [CLLocationCoordinate2D] {
+            let own = coordinates(in: object)
+            if !own.isEmpty { return own }
+            // Tencent indexes the flattened latitude/longitude array, not points.
+            guard let indices = object["polyline_idx"] as? [NSNumber], indices.count == 2 else { return [] }
+            let start = indices[0].intValue / 2
+            let end = indices[1].intValue / 2
+            guard indices[0].intValue >= 0, end >= start, end < routeGeometry.count else { return [] }
+            return Array(routeGeometry[start...end])
+        }
         return steps.flatMap { step -> [TripRouteInstruction] in
             let mode = (step["mode"] as? String)?.uppercased()
             if mode == "TRANSIT",
                let line = (step["lines"] as? [[String: Any]])?.first {
-                    let lineCoordinates = coordinates(in: line)
-                    let coordinate = lineCoordinates.first ?? coordinates(in: step).first
+                    let ownCoordinates = geometry(for: line)
+                    let lineCoordinates = ownCoordinates.isEmpty ? geometry(for: step) : ownCoordinates
+                    let coordinate = lineCoordinates.first
                     let vehicle = (line["vehicle"] as? String)?.uppercased()
                     let icon: String
                     switch vehicle {
@@ -7018,7 +7042,7 @@ private struct TripPlanRouteSheet: View {
                             .stroke(
                                 Color.dfkAccent.opacity(0.7),
                                 style: StrokeStyle(
-                                    lineWidth: 2,
+                                    lineWidth: 4,
                                     lineCap: .round,
                                     lineJoin: .round,
                                     dash: [8, 8]
@@ -7038,7 +7062,7 @@ private struct TripPlanRouteSheet: View {
                                                     : 0.62
                                             ),
                                             style: StrokeStyle(
-                                                lineWidth: selectedInstructionIndex == index ? 7 : 3,
+                                                lineWidth: selectedInstructionIndex == index ? 9 : 5,
                                                 lineCap: .round,
                                                 lineJoin: .round
                                             )
@@ -7080,7 +7104,7 @@ private struct TripPlanRouteSheet: View {
                             MapPolyline(route.polyline)
                                 .stroke(
                                     Color.dfkAccent.opacity(0.72),
-                                    style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
+                                    style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round)
                                 )
                         }
                     }
@@ -7740,7 +7764,8 @@ private struct TripDetailMapModel: Sendable {
         var segmentsBySource: [UUID: [TripMapRouteSegment]] = [:]
         func segments(for sourceID: UUID) -> [TripMapRouteSegment] {
             if let cached = segmentsBySource[sourceID] { return cached }
-            let made = TripMapRouteSegment.make(sourceID: sourceID, points: transportRoutes[sourceID] ?? [])
+            let typeRaw = items.first { $0.sourceTransportRecordID == sourceID }?.transportTypeRaw
+            let made = TripMapRouteSegment.make(sourceID: sourceID, points: transportRoutes[sourceID] ?? [], typeRaw: typeRaw)
             segmentsBySource[sourceID] = made
             return made
         }
@@ -7854,9 +7879,7 @@ private struct TripDetailMapModel: Sendable {
                   !tripCityMatchesHome(cityName: item.cityName, countryCode: item.countryCode, homeCity: homeCity) else { return nil }
             return coordinate
         }
-        let routeCoordinates = transportRoutes.values.flatMap { route in
-            route.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-        }
+        let routeCoordinates = model.routeSegments.flatMap(\.coordinates)
         let awayCoordinates = awayCityCoordinates + awayItemCoordinates
         let inCityFallbackCoordinates = !allItemCoordinates.isEmpty ? allItemCoordinates : allCityCoordinates
         model.mapCoordinates = !awayCoordinates.isEmpty
@@ -7866,11 +7889,9 @@ private struct TripDetailMapModel: Sendable {
         for item in items where model.coordinatesByItemID[item.id] == nil {
             if item.kindRaw == TripItemKind.transport.rawValue,
                let sourceID = item.sourceTransportRecordID,
-               let route = transportRoutes[sourceID] {
-                model.coordinatesByItemID[item.id] = route.compactMap { point in
-                    let coordinate = CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon)
-                    return point.lat.isFinite && point.lon.isFinite && CLLocationCoordinate2DIsValid(coordinate) ? coordinate : nil
-                }
+               transportRoutes[sourceID] != nil {
+                model.coordinatesByItemID[item.id] = segments(for: sourceID)
+                    .flatMap(\.coordinates).filter(\.isRenderableMapCoordinate)
             } else if let latitude = item.latitude, let longitude = item.longitude {
                 let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
                 model.coordinatesByItemID[item.id] = CLLocationCoordinate2DIsValid(coordinate) ? [coordinate] : []
@@ -8109,8 +8130,7 @@ struct TripDetailView: View {
                     Annotation("", coordinate: visibleTransportMidpoints[marker.id] ?? marker.coordinate) {
                         TripTransportMapMarker(
                             icon: marker.icon,
-                            travelsWest: marker.travelsWest,
-                            isSelected: selectedTimelineItemID == marker.itemID
+                            travelsWest: marker.travelsWest
                         )
                         .mapAnnotationLayer(MapAnnotationLayer.transport)
                     }
@@ -8238,6 +8258,9 @@ struct TripDetailView: View {
         }
         .task(id: rowIndexKey) { await rebuildRowIndex() }
         .onReceive(tripStoreDidSave) { _ in rowSaveRevision &+= 1 }
+        .onReceive(NotificationCenter.default.publisher(for: TransportRouteCompletion.didChange)) { _ in
+            Task { await rebuildMapModel() }
+        }
         .task(id: "\(rowIndex.daySignature)#\(recordRefreshVersion)#\(isRowIndexLoaded)#photos:\(photoService.authorizationStatus.rawValue):\(photoService.identifierResolutionRevision)") {
             guard isRowIndexLoaded else { return }
             if trip.state != .planned {
@@ -8542,7 +8565,13 @@ struct TripMapRouteSegment: Identifiable {
     let coordinates: [CLLocationCoordinate2D]
     let isDashed: Bool
 
-    static func make(sourceID: UUID, points: [CodableCoordinate]) -> [TripMapRouteSegment] {
+    static func make(sourceID: UUID, points: [CodableCoordinate], typeRaw: String? = nil) -> [TripMapRouteSegment] {
+        if let typeRaw {
+            let transport = TransportRouteCompletion.transport(id: sourceID, typeRaw: typeRaw, points: points)
+            return TransportRouteCompletion.cachedSegments(for: transport).map {
+                .init(id: $0.id, coordinates: $0.coordinates, isDashed: $0.isDashed)
+            }
+        }
         let valid = points.filter {
             $0.lat.isFinite && $0.lon.isFinite && CLLocationCoordinate2DIsValid(.init(latitude: $0.lat, longitude: $0.lon))
         }
@@ -8557,7 +8586,7 @@ struct TripMapRouteSegment: Identifiable {
             let secondCoordinate = CLLocationCoordinate2D(latitude: second.lat, longitude: second.lon)
             let distance = CLLocation(latitude: first.lat, longitude: first.lon).distance(from: CLLocation(latitude: second.lat, longitude: second.lon))
             let timeGap = first.timestamp.flatMap { start in second.timestamp.map { abs($0.timeIntervalSince(start)) } }
-            let dashed = first.isSyntheticPadding == true || second.isSyntheticPadding == true || timeGap == nil || timeGap! > 180 || distance > 500
+            let dashed = first.isSyntheticPadding == true || second.isSyntheticPadding == true || timeGap == nil || timeGap! > AppConfig.shared.transportInferredRouteTimeGap || distance > AppConfig.shared.widgetInferredRouteDistanceThreshold
             if currentDashed == nil { currentDashed = dashed }
             if currentDashed == dashed {
                 chunk.append(secondCoordinate)
@@ -8588,7 +8617,6 @@ private struct TripTransportMapMarker: View {
     static let diameter: CGFloat = 18
     let icon: String
     let travelsWest: Bool
-    let isSelected: Bool
     var body: some View {
         ZStack {
             Circle().fill(Color(uiColor: .systemBackground)).overlay(Circle().stroke(Color.dfkAccent, lineWidth: 1.2))
@@ -8598,7 +8626,6 @@ private struct TripTransportMapMarker: View {
                 .scaleEffect(x: travelsWest ? -1 : 1, y: 1)
         }
         .frame(width: Self.diameter, height: Self.diameter)
-        .scaleEffect(isSelected ? 1.5 : 1, anchor: .center)
     }
 }
 
@@ -8804,7 +8831,9 @@ private struct TripDetailSheet: View {
                 .modelContainer(container)
             }
         }
-        .sheet(item: $selectedTransport) { transport in
+        .sheet(item: $selectedTransport, onDismiss: {
+            selectedTimelineItemID = nil
+        }) { transport in
             if let container = TripScanManager.shared.recordModelContainer {
                 TransportModalView(transport: transport) { newType in
                     updateTransport(transport, type: newType, in: container)
@@ -8951,7 +8980,9 @@ private struct TripDetailSheet: View {
             predicate: #Predicate { $0.recordID == recordID }
         )
         guard let record = try? container.mainContext.fetch(descriptor).first else { return }
-        let route = transportRoutes[recordID] ?? []
+        // Open the same persisted record as Footprints, even before the trip
+        // map's asynchronous geometry load has completed.
+        let pointsData = record.pointsData
         let type = TransportType(rawValue: record.typeRaw) ?? .slow
         let manualType = record.manualTypeRaw.flatMap(TransportType.init(rawValue:))
         let startTime = record.startTime
@@ -8962,26 +8993,33 @@ private struct TripDetailSheet: View {
         let averageSpeed = record.averageSpeed
         let stepCount = record.stepCount
         Task { @MainActor in
-            // Route point conversion runs off the main thread.
-            let coordinates = await Task.detached(priority: .userInitiated) {
-                route.compactMap { point -> CLLocationCoordinate2D? in
-                    let coordinate = CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon)
-                    return point.lat.isFinite && point.lon.isFinite && CLLocationCoordinate2DIsValid(coordinate) ? coordinate : nil
+            let detailTransport = await Task.detached(priority: .userInitiated) { () -> Transport? in
+                guard let route = try? JSONDecoder().decode([CodableCoordinate].self, from: pointsData) else {
+                    return nil
                 }
+                // Reuse the route conversion used by the trip map/cache. Keep
+                // timestamps and synthetic flags: coordinates alone turn every
+                // recorded edge into an inferred gap and change its cache key.
+                let recorded = TransportRouteCompletion.transport(
+                    id: recordID, typeRaw: (manualType ?? type).rawValue, points: route
+                )
+                return Transport(
+                    id: recordID,
+                    startTime: startTime,
+                    endTime: endTime,
+                    startLocation: startLocation,
+                    endLocation: endLocation,
+                    type: type,
+                    distance: distance,
+                    averageSpeed: averageSpeed,
+                    points: recorded.points,
+                    pathPoints: recorded.pathPoints,
+                    manualType: manualType,
+                    stepCount: stepCount
+                )
             }.value
-            selectedTransport = Transport(
-                id: recordID,
-                startTime: startTime,
-                endTime: endTime,
-                startLocation: startLocation,
-                endLocation: endLocation,
-                type: type,
-                distance: distance,
-                averageSpeed: averageSpeed,
-                points: coordinates,
-                manualType: manualType,
-                stepCount: stepCount
-            )
+            guard selectedTimelineItemID == item.id, let detailTransport else { return }
+            selectedTransport = detailTransport
         }
     }
 

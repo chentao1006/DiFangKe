@@ -1189,6 +1189,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     var syncStatusMessage: String = ""
     var syncProgress: Double = 0.0
     var isResettingData: Bool = false
+    var resetDataError: String?
+    var resetDataConfirmationDate: Date?
     var rebuildProgress: Double = 0
     var isRebuildingAll: Bool = false
     private var rebuildTask: Task<Void, Never>? = nil
@@ -1390,10 +1392,18 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
 
-    /// 将“移动证据”转成 UI 稳定状态：有移动证据立刻切到 moving；无证据需要保持一段时间才切回 stationary。
-    private func updateUIMovementState(isMovingEvidence: Bool, source: String) {
+    /// Motion wakes location tracking but must neither start movement nor
+    /// extend its hold timer. Only the confirmed-departure path starts it;
+    /// subsequent location evidence can sustain it.
+    private func updateUIMovementState(
+        isMovingEvidence: Bool,
+        source: String,
+        hasLocationEvidence: Bool = false,
+        allowsStartingMovement: Bool = false
+    ) {
+        guard !isMovingEvidence || hasLocationEvidence else { return }
         let now = Date()
-        if isMovingEvidence {
+        if isMovingEvidence && (uiIsMoving || allowsStartingMovement) {
             uiMovementSettleTask?.cancel()
             uiMovementSettleTask = nil
             lastMovingEvidenceTime = now
@@ -1401,9 +1411,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 uiIsMoving = true
                 uiMovingStartedAt = now
                 print("[LocationManager] UI moving=true (\(source))")
-                // The Live Activity reflects the immediate motion state. Do
-                // not wait for the persisted stay boundary to be closed after
-                // enough GPS displacement has accumulated.
+                // Entered only with location evidence; sensor callbacks alone
+                // must not publish a new moving state during launch/resume.
                 checkLiveActivity(forceContentUpdate: true)
             }
             return
@@ -1426,8 +1435,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             uiMovementSettleTask?.cancel()
             uiMovementSettleTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64((remaining + 0.1) * 1_000_000_000))
-                guard !Task.isCancelled, let self,
-                      !HealthManager.shared.isMoving else { return }
+                // A sensor pulse must not veto GPS-based settling. New
+                // location evidence cancels this task through the path above.
+                guard !Task.isCancelled, let self else { return }
                 self.updateUIMovementState(isMovingEvidence: false, source: "motion:settled")
             }
             return
@@ -1773,7 +1783,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             .autoconnect()
             .sink { [weak self] _ in
                 if NotificationManager.shared.isDailySummaryPreparationDue {
-                    self?.triggerNotificationSummaryRefresh()
+                    self?.triggerNotificationSummaryRefresh(prepareAI: true)
                 }
                 self?.runLocationWatchdog()
             }
@@ -2827,7 +2837,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             && location.speed >= 0
             && location.speed > AppConfig.shared.stationaryDwellSpeed
             && (motion != .stationary || hasStrongGPSDepartureEvidence || hasLowPowerGPSDepartureEvidence)
-        updateUIMovementState(isMovingEvidence: (isMovingBySensor || isMovingByGPS), source: "didUpdateLocations")
+        updateUIMovementState(
+            isMovingEvidence: isMovingByGPS,
+            source: "didUpdateLocations",
+            hasLocationEvidence: true
+        )
         
         // 0. 智能节能：根据速度和停留状态动态调整定位参数
         let place = matchedPlace
@@ -3248,7 +3262,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         savePotentialStop()
         ongoingTitle = nil
         saveOngoingTitle()
-        updateUIMovementState(isMovingEvidence: true, source: "departure:\(source)")
+        updateUIMovementState(isMovingEvidence: true, source: "departure:\(source)", hasLocationEvidence: true, allowsStartingMovement: true)
         if let departureFix = lastLocation {
             uiMovingStartedAt = min(uiMovingStartedAt ?? departureFix.timestamp, departureFix.timestamp)
         }
@@ -3395,59 +3409,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     @MainActor
     public func resetToday() {
-        guard let container = modelContext?.container else { return }
-        let date = Date()
-        self.isResettingData = true
-        
-        Task.detached(priority: .userInitiated) {
-            let context = ModelContext(container)
-            let targetDate = Calendar.current.startOfDay(for: date)
-            let nextDay = Calendar.current.date(byAdding: .day, value: 1, to: targetDate)!
-            
-            // 1. 清理
-            let fetchDescriptor = FetchDescriptor<Footprint>(
-                predicate: #Predicate { 
-                    ($0.date >= targetDate && $0.date < nextDay) ||
-                    ($0.startTime < nextDay && $0.endTime >= targetDate)
-                }
-            )
-            if let existing = try? context.fetch(fetchDescriptor) {
-                for fp in existing {
-                    context.delete(fp)
-                }
-            }
-            
-            let transportDescriptor = FetchDescriptor<TransportManualSelection>(
-                predicate: #Predicate { $0.startTime >= targetDate && $0.startTime < nextDay }
-            )
-            if let existingManuals = try? context.fetch(transportDescriptor) {
-                for m in existingManuals { context.delete(m) }
-            }
-            try? context.save()
-            
-            // 2. 重新处理原始点
-            let rawPoints = RawLocationStore.shared.loadAllDevicesLocations(for: date)
-            if !rawPoints.isEmpty {
-                var tempQueue: [CLLocation] = []
-                for loc in rawPoints {
-                    if let candidate = FootprintProcessor.shared.processNewLocation(loc, queue: &tempQueue, isHistorical: true) {
-                        // 在主线程处理插入逻辑，确保全局状态(potentialStopStartLocation等)同步
-                        let end = candidate.endTime
-                        await MainActor.run {
-                            self.handleNewCandidateFootprint(candidate, isHistorical: true)
-                        }
-                        tempQueue.removeAll { $0.timestamp <= end }
-                    }
-                }
-            }
-            
-            await MainActor.run {
-                self.isResettingData = false
-                self.lastProcessedTimestamp = Calendar.current.startOfDay(for: date)
-                Task { await self.loadPointsFromStore() }
-                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
-            }
-        }
+        resetData(for: Date())
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
@@ -4163,11 +4125,13 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 CloudSettingsManager.shared.triggerDataSyncPulse()
                 
                 // 先在主线程获取当前状态
-                let (currentIDs, currentMetadata): ([String], [PhotoMetadata]) = await MainActor.run {
+                let currentPhotos: ([String], [PhotoMetadata])? = await MainActor.run {
                     let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
-                    guard let fp = try? context.fetch(descriptor).first else { return ([], []) }
+                    guard let fp = try? context.fetch(descriptor).first,
+                          fp.startTime == startTime, fp.endTime == endTime else { return nil }
                     return (fp.photoAssetIDs, fp.photoMetadata)
                 }
+                guard let (currentIDs, currentMetadata) = currentPhotos else { return }
                 
                 if currentIDs.isEmpty && autoIDs.isEmpty { return }
                 
@@ -4297,7 +4261,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 if hasChanged {
                     await MainActor.run {
                         let descriptor = FetchDescriptor<Footprint>(predicate: #Predicate { $0.footprintID == id })
-                        if let fp = try? context.fetch(descriptor).first {
+                        // A split/time edit may finish while Photos/iCloud is
+                        // resolving. Never attach results for the old interval.
+                        if let fp = try? context.fetch(descriptor).first,
+                           fp.startTime == startTime, fp.endTime == endTime {
                             fp.photoAssetIDs = workingIDs
                             fp.photoMetadata = workingMetadata
                             try? context.save()
@@ -4432,7 +4399,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     
     @discardableResult
-    func triggerNotificationSummaryRefresh() -> Task<Void, Never>? {
+    func triggerNotificationSummaryRefresh(prepareAI: Bool = false, allowEarlyAI: Bool = false) -> Task<Void, Never>? {
         guard let container = modelContext?.container else { return nil }
         
         let targetDate = Calendar.current.startOfDay(for: Date())
@@ -4487,9 +4454,23 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             let savedInsight = (try? context.fetch(insightDescriptor))?.first
             let savedOverview = savedInsight?.aiGenerated == true ? savedInsight?.content : nil
 
+            // Publish factual counts before any AI status check or network request.
+            // The notification must retain its basic data even if AI is unavailable,
+            // times out, or the background execution window closes early.
+            await MainActor.run {
+                if Calendar.current.isDateInToday(targetDate) {
+                    NotificationManager.shared.refreshDailySummary(
+                        placeCount: placeCount,
+                        mileage: mileage,
+                        transportCount: transportCount,
+                        overviewSummary: savedOverview
+                    )
+                }
+            }
+
             let resolvedOverview: String?
-            if (placeCount > 0 || transportCount > 0),
-               NotificationManager.shared.isDailySummaryPreparationDue {
+            let hasCompletedSummary = NotificationManager.shared.hasCompletedDailySummary(for: targetDate)
+            if (prepareAI || hasCompletedSummary), (placeCount > 0 || transportCount > 0) {
                 resolvedOverview = await withCheckedContinuation { continuation in
                     Task { @MainActor in
                         let status = await withCheckedContinuation { authorization in
@@ -4498,22 +4479,50 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                             }
                         }
                         guard status == .authorized || status == .provisional || status == .ephemeral,
-                              OpenAIService.shared.modelContainer != nil,
-                              NotificationManager.shared.claimDailySummaryPreparation(for: targetDate) else {
+                              OpenAIService.shared.modelContainer != nil else {
                             continuation.resume(returning: savedOverview)
                             return
                         }
-                        OpenAIService.shared.currentDailyOverviewSummary(
+                        OpenAIService.shared.dailyOverviewStatus(
                             for: targetDate,
                             footprintIDs: footprintIDs,
                             transportIDs: transportIDs
-                        ) { summary in
-                            continuation.resume(returning: summary)
+                        ) { needsNetworkRequest, currentSummary, fingerprint in
+                            guard needsNetworkRequest else {
+                                if prepareAI, let currentSummary, !currentSummary.isEmpty {
+                                    NotificationManager.shared.finishDailySummaryPreparation(
+                                        for: targetDate,
+                                        summary: currentSummary
+                                    )
+                                }
+                                continuation.resume(returning: currentSummary ?? savedOverview)
+                                return
+                            }
+                            let isRegeneration = hasCompletedSummary
+                            guard NotificationManager.shared.claimDailySummaryPreparation(
+                                for: targetDate,
+                                allowEarly: allowEarlyAI || isRegeneration,
+                                allowingCompletedSummary: isRegeneration,
+                                fingerprint: fingerprint
+                            ) else {
+                                continuation.resume(returning: savedOverview)
+                                return
+                            }
+                            OpenAIService.shared.currentDailyOverviewSummary(
+                                for: targetDate,
+                                footprintIDs: footprintIDs,
+                                transportIDs: transportIDs
+                            ) { summary in
+                                NotificationManager.shared.finishDailySummaryPreparation(
+                                    for: targetDate, summary: summary
+                                )
+                                continuation.resume(returning: summary)
+                            }
                         }
                     }
                 }
             } else {
-                // Location updates and edits refresh factual stats without regenerating AI copy.
+                // Before the first preparation, ordinary refreshes only update factual stats.
                 resolvedOverview = savedOverview
             }
 
@@ -5234,31 +5243,29 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     /// 重置并重新生成指定日期的足迹数据
     @MainActor
-    func resetData(for date: Date) {
-        guard let context = modelContext else { return }
+    func resetData(for date: Date, allowingSparseRawPoints: Bool = false) {
+        guard !isResettingData, let context = modelContext else { return }
 
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
 
-        // 清理当天缓存并提前通知页面释放旧模型引用，避免删除后访问失效对象。
-        TimelineBuilder.timelineCache.removeValue(forKey: startOfDay)
-        NotificationCenter.default.post(
-            name: NSNotification.Name("FootprintDataWillReset"),
-            object: nil,
-            userInfo: ["date": startOfDay]
-        )
-        
+        resetDataError = nil
+        resetDataConfirmationDate = nil
         isResettingData = true
-        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-        
-        if context.hasChanges { try? context.save() }
+        do {
+            if context.hasChanges { try context.save() }
+        } catch {
+            isResettingData = false
+            resetDataError = "无法保存当前修改，已停止重新生成。请稍后重试。"
+            return
+        }
         let container = context.container
         Task {
-            // 1. 物理清空当天所有相关记录。按时间交集删除，防止跨天旧记录漏删。
-            // Fetch/delete on a background context; the main context merges the save.
-            await Task.detached(priority: .userInitiated) {
+            // Validate on the same background context before deleting or clearing UI references.
+            let resetIssue = await Task.detached(priority: .userInitiated) { () async -> (message: String, canProceed: Bool)? in
                 let context = ModelContext(container)
+                context.autosaveEnabled = false
                 let fpDesc = FetchDescriptor<Footprint>(predicate: #Predicate {
                     $0.startTime < endOfDay && $0.endTime > startOfDay
                 })
@@ -5267,14 +5274,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 })
                 let insightDesc = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDay })
 
-                if let fps = try? context.fetch(fpDesc) {
-                    for fp in fps {
-                        context.delete(fp)
-                    }
-                }
-                if let tps = try? context.fetch(tpDesc) { for tp in tps { context.delete(tp) } }
-                if let insights = try? context.fetch(insightDesc) { for i in insights { context.delete(i) } }
-
                 // 同步清理当天的手动删除标记（与 resetToday() 保持一致）：否则用户此前手动
                 // 删除过的交通段会一直残留在 TransportManualSelection 里，syncDay 重建时
                 // 会把重叠的缺口当作"已排除"整段跳过，导致哪怕原始 GPS 点还在，重建出来
@@ -5282,10 +5281,40 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                 let manualDesc = FetchDescriptor<TransportManualSelection>(predicate: #Predicate {
                     $0.startTime >= startOfDay && $0.startTime < endOfDay
                 })
-                if let manuals = try? context.fetch(manualDesc) { for m in manuals { context.delete(m) } }
-
-                try? context.save()
+                do {
+                    let fps = try context.fetch(fpDesc)
+                    let tps = try context.fetch(tpDesc)
+                    let insights = try context.fetch(insightDesc)
+                    let manuals = try context.fetch(manualDesc)
+                    if !allowingSparseRawPoints,
+                       let warning = PersistentTimelineBuilder.rebuildWarning(for: date) {
+                        return (warning, true)
+                    }
+                    await MainActor.run {
+                        TimelineBuilder.timelineCache.removeValue(forKey: startOfDay)
+                        NotificationCenter.default.post(
+                            name: NSNotification.Name("FootprintDataWillReset"), object: nil,
+                            userInfo: ["date": startOfDay]
+                        )
+                        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                    }
+                    for fp in fps { context.delete(fp) }
+                    for tp in tps { context.delete(tp) }
+                    for insight in insights { context.delete(insight) }
+                    for manual in manuals { context.delete(manual) }
+                    try context.save()
+                    return nil
+                } catch {
+                    context.rollback()
+                    return ("无法读取或保存本日数据，已停止重新生成。已有数据未改动，请稍后重试。", false)
+                }
             }.value
+            if let resetIssue {
+                self.resetDataError = resetIssue.message
+                self.resetDataConfirmationDate = resetIssue.canProceed ? startOfDay : nil
+                self.isResettingData = false
+                return
+            }
 
             // 2. 调用新引擎重新构建
             // syncDay 内部有防重入锁：如果这一天恰好被别的触发源（例如实时定位

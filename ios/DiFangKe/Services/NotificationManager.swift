@@ -5,8 +5,70 @@ import BackgroundTasks
 class NotificationManager {
     static let shared = NotificationManager()
     private let newFootprintActivityCategoryID = "dfk.newFootprintActivity"
+    private let preparedDailySummaryDateKey = "preparedDailySummaryDate"
+    private let preparedDailySummaryBodyKey = "preparedDailySummaryBody"
+    private let preparedDailySummaryOverviewKey = "preparedDailySummaryOverview"
+    private let preparedDailySummaryStatsKey = "preparedDailySummaryStats"
+    private let dailySummaryAttemptFingerprintKey = "dailySummaryAttemptFingerprint"
+    static let dailySummaryBackgroundTaskID = "com.ct106.difangke.summary"
+    @MainActor private var dailySummaryPreparationTask: Task<Void, Never>?
+    @MainActor private var scheduledDailySummaryDate: Date?
+    @MainActor private var preparingDailySummaryDate: Date?
+    @MainActor private var preparedDailySummaryBody: (date: Date, body: String, overview: String?, stats: String?)?
 
     private init() {}
+
+    @MainActor
+    private func preparedDailySummary(for date: Date) -> (date: Date, body: String, overview: String?, stats: String?)? {
+        let calendar = Calendar.current
+        guard let fireDate = dailySummaryFireDate(on: date), date < fireDate else { return nil }
+        if let preparedDailySummaryBody,
+           calendar.isDate(preparedDailySummaryBody.date, inSameDayAs: date) {
+            return preparedDailySummaryBody
+        }
+
+        let defaults = UserDefaults.standard
+        guard let storedDate = defaults.object(forKey: preparedDailySummaryDateKey) as? Date,
+              calendar.isDate(storedDate, inSameDayAs: date),
+              let body = defaults.string(forKey: preparedDailySummaryBodyKey),
+              !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let restored = (
+            date: storedDate,
+            body: body,
+            overview: defaults.string(forKey: preparedDailySummaryOverviewKey),
+            stats: defaults.string(forKey: preparedDailySummaryStatsKey)
+        )
+        preparedDailySummaryBody = restored
+        return restored
+    }
+
+    @MainActor
+    private func savePreparedDailySummary(body: String, overview: String?, stats: String) {
+        let date = Date()
+        preparedDailySummaryBody = (date, body, overview, stats)
+        let defaults = UserDefaults.standard
+        defaults.set(date, forKey: preparedDailySummaryDateKey)
+        defaults.set(body, forKey: preparedDailySummaryBodyKey)
+        defaults.set(stats, forKey: preparedDailySummaryStatsKey)
+        if let overview, !overview.isEmpty {
+            defaults.set(overview, forKey: preparedDailySummaryOverviewKey)
+        } else {
+            defaults.removeObject(forKey: preparedDailySummaryOverviewKey)
+        }
+    }
+
+    private func factualDailySummaryBody(
+        from prepared: (date: Date, body: String, overview: String?, stats: String?)
+    ) -> String? {
+        let stats = prepared.stats ?? prepared.body
+            .split(separator: "\n")
+            .map(String.init)
+            .last(where: { $0.hasPrefix("今日在 ") })
+        guard let stats, !stats.isEmpty else { return nil }
+        return "忙碌的一天结束了，快来看看你今天留下的足迹吧。\n\(stats)"
+    }
 
     func registerNotificationCategories() {
         let chooseAction = UNNotificationAction(identifier: "dfk.chooseActivity", title: "选择活动类型", options: [.foreground])
@@ -64,31 +126,133 @@ class NotificationManager {
         return Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: date)
     }
 
-    /// Ordinary timeline refreshes never request AI outside the notification's preparation window.
+    /// Timing for initial scheduled preparation. Later structural changes are fingerprint-gated.
     var isDailySummaryPreparationDue: Bool {
+        canPrepareDailySummary(allowEarly: false)
+    }
+
+    private func canPrepareDailySummary(
+        allowEarly: Bool,
+        allowingCompletedSummary: Bool = false,
+        fingerprint: String? = nil
+    ) -> Bool {
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true,
               defaults.bool(forKey: "isAiAssistantEnabled") else { return false }
         let now = Date()
+        let leadTime = allowEarly ? AppConfig.shared.dailySummaryBackgroundPreparationLeadTime
+            : AppConfig.shared.dailySummaryPreparationLeadTime
         guard let fireDate = dailySummaryFireDate(on: now),
               now < fireDate,
-              now >= fireDate.addingTimeInterval(-AppConfig.shared.dailySummaryPreparationLeadTime) else {
+              now >= fireDate.addingTimeInterval(-leadTime) else {
             return false
         }
-        if let attemptedDate = defaults.object(forKey: "dailySummaryPreparationAttemptDate") as? Date,
-           Calendar.current.isDate(attemptedDate, inSameDayAs: now) {
-            return false
+        if !allowingCompletedSummary,
+           let completed = defaults.object(forKey: "dailySummaryCompletedDate") as? Date,
+           Calendar.current.isDate(completed, inSameDayAs: now) { return false }
+        if let attempted = defaults.object(forKey: "dailySummaryAttemptDate") as? Date,
+           Calendar.current.isDate(attempted, inSameDayAs: now),
+           defaults.string(forKey: dailySummaryAttemptFingerprintKey) == fingerprint {
+            guard defaults.integer(forKey: "dailySummaryAttemptCount") < AppConfig.shared.dailySummaryMaxPreparationAttempts,
+                  now.timeIntervalSince(attempted) >= AppConfig.shared.dailySummaryRetryInterval else { return false }
         }
         return true
     }
 
-    /// Claim on main after facts and notification authorization are ready. Persist across relaunches;
-    /// a failed attempt must not retry on every subsequent location update.
+    /// Only notification preparation claims an attempt. Success, rather than merely entering
+    /// the request path, completes the day. Failures have bounded retries per structural version.
     @MainActor
-    func claimDailySummaryPreparation(for date: Date) -> Bool {
-        guard Calendar.current.isDateInToday(date), isDailySummaryPreparationDue else { return false }
-        UserDefaults.standard.set(date, forKey: "dailySummaryPreparationAttemptDate")
+    func claimDailySummaryPreparation(
+        for date: Date,
+        allowEarly: Bool = false,
+        allowingCompletedSummary: Bool = false,
+        fingerprint: String? = nil
+    ) -> Bool {
+        guard Calendar.current.isDateInToday(date), preparingDailySummaryDate == nil,
+              canPrepareDailySummary(
+                allowEarly: allowEarly,
+                allowingCompletedSummary: allowingCompletedSummary,
+                fingerprint: fingerprint
+              ) else { return false }
+        let defaults = UserDefaults.standard
+        let prior = defaults.object(forKey: "dailySummaryAttemptDate") as? Date
+        let isSameAttempt = prior.map { Calendar.current.isDateInToday($0) } == true
+            && defaults.string(forKey: dailySummaryAttemptFingerprintKey) == fingerprint
+        let count = isSameAttempt
+            ? defaults.integer(forKey: "dailySummaryAttemptCount") : 0
+        defaults.set(count + 1, forKey: "dailySummaryAttemptCount")
+        defaults.set(Date(), forKey: "dailySummaryAttemptDate")
+        if let fingerprint {
+            defaults.set(fingerprint, forKey: dailySummaryAttemptFingerprintKey)
+        } else {
+            defaults.removeObject(forKey: dailySummaryAttemptFingerprintKey)
+        }
+        preparingDailySummaryDate = date
         return true
+    }
+
+    func hasCompletedDailySummary(for date: Date) -> Bool {
+        guard let completed = UserDefaults.standard.object(forKey: "dailySummaryCompletedDate") as? Date else {
+            return false
+        }
+        return Calendar.current.isDate(completed, inSameDayAs: date)
+    }
+
+    @MainActor
+    func finishDailySummaryPreparation(for date: Date, summary: String?) {
+        preparingDailySummaryDate = nil
+        if let summary, !summary.isEmpty {
+            UserDefaults.standard.set(date, forKey: "dailySummaryCompletedDate")
+        }
+        scheduleDailySummaryPreparation(reschedule: true)
+    }
+
+    /// Actively reserve a foreground timer and the already-permitted background refresh task.
+    /// A local notification's delivery itself does not execute application code.
+    @MainActor
+    func scheduleDailySummaryPreparation(reschedule: Bool = false) {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true,
+              defaults.bool(forKey: "isAiAssistantEnabled") else {
+            dailySummaryPreparationTask?.cancel()
+            dailySummaryPreparationTask = nil
+            scheduledDailySummaryDate = nil
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.dailySummaryBackgroundTaskID)
+            return
+        }
+        guard preparingDailySummaryDate == nil else { return }
+        let now = Date()
+        guard var fireDate = dailySummaryFireDate(on: now) else { return }
+        let completed = (defaults.object(forKey: "dailySummaryCompletedDate") as? Date)
+            .map { Calendar.current.isDateInToday($0) } == true
+        let exhausted = (defaults.object(forKey: "dailySummaryAttemptDate") as? Date)
+            .map { Calendar.current.isDateInToday($0) } == true
+            && defaults.integer(forKey: "dailySummaryAttemptCount") >= AppConfig.shared.dailySummaryMaxPreparationAttempts
+        if fireDate <= now || completed || exhausted {
+            guard let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: now),
+                  let nextFire = dailySummaryFireDate(on: tomorrow) else { return }
+            fireDate = nextFire
+        }
+        guard reschedule || scheduledDailySummaryDate != fireDate else { return }
+        dailySummaryPreparationTask?.cancel()
+        scheduledDailySummaryDate = fireDate
+        var preparationDate = fireDate.addingTimeInterval(-AppConfig.shared.dailySummaryPreparationLeadTime)
+        if let attempted = defaults.object(forKey: "dailySummaryAttemptDate") as? Date,
+           Calendar.current.isDate(attempted, inSameDayAs: fireDate) {
+            preparationDate = max(preparationDate, attempted.addingTimeInterval(AppConfig.shared.dailySummaryRetryInterval))
+        }
+        let request = BGAppRefreshTaskRequest(identifier: Self.dailySummaryBackgroundTaskID)
+        request.earliestBeginDate = max(now, preparationDate)
+        do { try BGTaskScheduler.shared.submit(request) }
+        catch { print("[DailySummary] Failed to schedule preparation: \(error)") }
+        let delay = max(0, preparationDate.timeIntervalSinceNow)
+        dailySummaryPreparationTask = Task { @MainActor in
+            do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            self.dailySummaryPreparationTask = nil
+            await LocationManager.shared.triggerNotificationSummaryRefresh(prepareAI: true)?.value
+        }
     }
     
     // Dynamic scheduling based on Settings
@@ -97,9 +261,9 @@ class NotificationManager {
         // (past memories, etc.).  More importantly, cancelling
         // every request while the configured time is being reached can make
         // today's summary disappear before the system presents it.
-        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["dailySummary"])
-        
         guard isEnabled else { 
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["dailySummary"])
+            Task { @MainActor in self.scheduleDailySummaryPreparation() }
             print("Notifications disabled by user.")
             return 
         }
@@ -110,21 +274,34 @@ class NotificationManager {
         
         let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: true)
         
+        // Keep an already prepared body through settings refreshes; add() replaces the
+        // matching identifier without a remove/add gap around the notification deadline.
         let content = UNMutableNotificationContent()
         content.title = title ?? "每日足迹汇总"
         content.body = body ?? "忙碌的一天结束了，快来看看你今天留下的足迹吧。"
         content.sound = .default
         
-        let request = UNNotificationRequest(identifier: "dailySummary", content: content, trigger: trigger)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
-                print("Failed to schedule notification: \(error)")
-            } else {
+        Task { @MainActor in
+            guard UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true else { return }
+            if let prepared = self.preparedDailySummary(for: Date()) {
+                if prepared.overview == nil || UserDefaults.standard.bool(forKey: "isAiAssistantEnabled") {
+                    content.body = prepared.body
+                } else if let factualBody = self.factualDailySummaryBody(from: prepared) {
+                    content.body = factualBody
+                }
+            }
+            self.scheduleDailySummaryPreparation()
+            let request = UNNotificationRequest(identifier: "dailySummary", content: content, trigger: trigger)
+            do {
+                try await UNUserNotificationCenter.current().add(request)
                 print("Successfully scheduled daily summary at \(hour):\(String(format: "%02d", minute)) with custom body: \(body != nil)")
+            } catch {
+                print("Failed to schedule notification: \(error)")
             }
         }
     }
     
+    @MainActor
     func refreshDailySummary(placeCount: Int, mileage: Double, transportCount: Int = 0, overviewSummary: String? = nil) {
         let isEnabled = UserDefaults.standard.object(forKey: "isDailyNotificationEnabled") as? Bool ?? true
         guard isEnabled else { return }
@@ -144,17 +321,21 @@ class NotificationManager {
         let staticPreamble = "忙碌的一天结束了，快来看看你今天留下的足迹吧。"
         
         let isAiEnabled = UserDefaults.standard.bool(forKey: "isAiAssistantEnabled")
-        // AI 文案仅在通知前准备一次；后续刷新只更新统计，复用本日已保存的文案。
-        let effectiveOverview = overviewSummary?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 统计始终独立更新；AI 概述复用到足迹或交通结构发生实质变化为止。
+        let preparedOverview = preparedDailySummary(for: Date())?.overview
+        let effectiveOverview = (overviewSummary ?? preparedOverview)?.trimmingCharacters(in: .whitespacesAndNewlines)
         
         let saysStayedHome = effectiveOverview?.contains("宅在家") == true || effectiveOverview?.contains("没出门") == true || effectiveOverview?.contains("在家休息") == true
         // Never let a stale/model-generated "stayed home" sentence contradict
         // recorded trip. The factual stats remain visible either way.
         if isAiEnabled, let effectiveOverview, !effectiveOverview.isEmpty, !(transportCount > 0 && saysStayedHome) {
             let finalBody = "\(effectiveOverview)\n\(statsInfo)"
+            savePreparedDailySummary(body: finalBody, overview: effectiveOverview, stats: statsInfo)
             self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: "每日足迹汇总", body: finalBody)
         } else {
-            self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: "每日足迹汇总", body: "\(staticPreamble)\n\(statsInfo)")
+            let finalBody = "\(staticPreamble)\n\(statsInfo)"
+            savePreparedDailySummary(body: finalBody, overview: nil, stats: statsInfo)
+            self.updateDailySummary(isEnabled: true, hour: finalHour, minute: minute, title: "每日足迹汇总", body: finalBody)
         }
     }
 

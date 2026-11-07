@@ -1733,7 +1733,8 @@ struct PhotoImportFlowModifier: ViewModifier {
                             self.successCount = selectedFootprints.count
                             self.isImporting = false
                             self.showingImportSuccessAlert = true
-                            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                            NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil,
+                                                            userInfo: ["isImport": true])
                         }
                     }
                 }

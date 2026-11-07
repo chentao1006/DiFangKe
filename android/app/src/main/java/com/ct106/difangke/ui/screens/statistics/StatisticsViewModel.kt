@@ -766,7 +766,7 @@ class ReviewSnapshot(
                 id = "favorite-${footprint.footprintID}",
                 date = footprint.startTime,
                 footprint = null,
-                title = "${favoriteFootprints.size}个重要片段",
+                title = "${favoriteFootprints.size}个珍藏回忆",
                 evidence = "点开查看全部收藏",
                 reason = "收藏足迹",
                 icon = "star.fill",

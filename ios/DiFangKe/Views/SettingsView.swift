@@ -199,6 +199,10 @@ struct SettingsView: View {
             
             Section(header: Text("系统配置"), footer: Text("智能分析服务将根据您的地点历史自动建议标题。")) {
                 Toggle("AI 智能辅助", isOn: $isAiAssistantEnabled)
+                    .onChange(of: isAiAssistantEnabled) { _, _ in
+                        NotificationManager.shared.refreshSettings()
+                        locationManager.triggerNotificationSummaryRefresh()
+                    }
                 if isAiAssistantEnabled {
                     NavigationLink(destination: AiSettingsView()) {
                         HStack {

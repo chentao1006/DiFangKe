@@ -7,11 +7,10 @@ import WidgetKit
 
 @MainActor
 final class WidgetDataSyncManager {
-    nonisolated private static var inferredRouteDistanceThreshold: CLLocationDistance { AppConfig.shared.widgetInferredRouteDistanceThreshold }
     static let shared = WidgetDataSyncManager()
     // Keep this in sync with the widget reader. Bump it whenever the widget
     // renderer changes so WidgetKit cannot reuse an image drawn with old rules.
-    nonisolated static let snapshotFileVersion = "v14"
+    nonisolated static let snapshotFileVersion = "v17"
 
     /// Marker outlines are composited after MapKit renders the map, so they
     /// must use the snapshot's requested appearance instead of the app's
@@ -330,14 +329,16 @@ final class WidgetDataSyncManager {
         let transportOverlays = transports.compactMap { transport -> CurrentActivityTransportOverlay? in
             guard let decoded = try? JSONDecoder().decode([CodableCoordinate].self, from: transport.pointsData),
                   !decoded.isEmpty else { return nil }
-            let coordinates = decoded
+            let typeRaw = transport.manualTypeRaw ?? transport.typeRaw
+            let segments = widgetTransportLineSegments(from: decoded, id: transport.recordID, typeRaw: typeRaw)
+            let coordinates = segments.isEmpty ? decoded
                 .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
                 .filter { $0.latitude.isFinite && $0.longitude.isFinite && CLLocationCoordinate2DIsValid($0) }
+                : segments.flatMap(\.coordinates)
             guard !coordinates.isEmpty else { return nil }
-            let typeRaw = transport.manualTypeRaw ?? transport.typeRaw
             return CurrentActivityTransportOverlay(
                 coordinates: coordinates,
-                segments: widgetTransportLineSegments(from: decoded),
+                segments: segments,
                 typeRaw: typeRaw
             )
         }
@@ -924,20 +925,15 @@ final class WidgetDataSyncManager {
             let aggregatedFootprints = Self.aggregatedFootprints(from: footprints)
             let decodedTransports = Self.decodedTransports(transports, requiresCoordinates: true)
 
-            // 分享卡片的相机只由足迹决定。交通仍完整绘制为覆盖层，但不能因为
-            // 一段很长的行程把足迹标记缩得看不清；纯交通卡片才退回以交通定范围。
-            let footprintCameraCoordinates = footprints.flatMap { $0.geometry.coordinates }.filter {
+            // 所有模板共用完整范围：足迹、原始轨迹点和实际绘制的曲线都参与取景。
+            // 平滑或补全后的路线可能与原始点不同，二者都需包含，避免边缘被裁掉。
+            let footprintCoordinates = footprints.flatMap { $0.geometry.coordinates }
+            let transportCoordinates = decodedTransports.flatMap { $0.recordedCoordinates + $0.coordinates }
+            let cameraCoordinates = (footprintCoordinates + transportCoordinates).filter {
                 $0.latitude.isFinite &&
                 $0.longitude.isFinite &&
                 CLLocationCoordinate2DIsValid($0)
             }
-            let cameraCoordinates = footprintCameraCoordinates.isEmpty
-                ? decodedTransports.flatMap(\.coordinates).filter {
-                    $0.latitude.isFinite &&
-                    $0.longitude.isFinite &&
-                    CLLocationCoordinate2DIsValid($0)
-                }
-                : footprintCameraCoordinates
             guard !cameraCoordinates.isEmpty else { return nil }
 
             let activitiesByID = Dictionary(activities.map { ($0.idString, $0) }, uniquingKeysWith: { first, _ in first })
@@ -1100,8 +1096,7 @@ final class WidgetDataSyncManager {
 
             if usesReviewPlaceCounts {
                 let transportClusters = reviewTransportIconClusters(
-                    from: decodedTransports,
-                    region: region
+                    from: decodedTransports
                 )
                 drawReviewTransportIconClusters(
                     transportClusters,
@@ -1324,51 +1319,15 @@ final class WidgetDataSyncManager {
     }
 
     nonisolated private static func reviewTransportIconClusters(
-        from transports: [WidgetDecodedTransport],
-        region: MKCoordinateRegion
+        from transports: [WidgetDecodedTransport]
     ) -> [ReviewTransportIconCluster] {
-        struct Bucket {
-            var latitude = 0.0
-            var longitude = 0.0
-            var count = 0
-            let type: TransportType
-            var westwardCount = 0
-        }
-
-        let latitudeCell = max(region.span.latitudeDelta / 7, 0.000_01)
-        let longitudeCell = max(region.span.longitudeDelta / 7, 0.000_01)
-        var buckets: [String: Bucket] = [:]
-        for transport in transports {
-            guard let midpoint = transport.coordinates.widgetMidpoint else { continue }
+        transports.compactMap { transport in
+            guard let midpoint = transport.coordinates.widgetMidpoint else { return nil }
             let type = TransportType(rawValue: transport.typeRaw) ?? .slow
-            let x = Int((midpoint.longitude / longitudeCell).rounded())
-            let y = Int((midpoint.latitude / latitudeCell).rounded())
-            let key = "\(type.rawValue):\(x):\(y)"
-            if var bucket = buckets[key] {
-                bucket.latitude += midpoint.latitude
-                bucket.longitude += midpoint.longitude
-                bucket.count += 1
-                if transport.coordinates.travelsWest { bucket.westwardCount += 1 }
-                buckets[key] = bucket
-            } else {
-                buckets[key] = Bucket(
-                    latitude: midpoint.latitude,
-                    longitude: midpoint.longitude,
-                    count: 1,
-                    type: type,
-                    westwardCount: transport.coordinates.travelsWest ? 1 : 0
-                )
-            }
-        }
-
-        return buckets.values.map { bucket in
-            ReviewTransportIconCluster(
-                coordinate: CLLocationCoordinate2D(
-                    latitude: bucket.latitude / Double(bucket.count),
-                    longitude: bucket.longitude / Double(bucket.count)
-                ),
-                type: bucket.type,
-                travelsWest: bucket.westwardCount * 2 > bucket.count
+            return ReviewTransportIconCluster(
+                coordinate: midpoint,
+                type: type,
+                travelsWest: transport.coordinates.travelsWest
             )
         }
     }
@@ -1381,7 +1340,12 @@ final class WidgetDataSyncManager {
     ) {
         let accent = UIColor(named: "AccentColor") ?? .systemTeal
         let outline = Self.mapMarkerOutlineColor(for: style)
-        for cluster in clusters {
+        let kept = MapTransportIconMerge.keptIndices(
+            points: clusters.map { snapshot.point(for: $0.coordinate) },
+            types: clusters.map(\.type.rawValue),
+            diameter: 18
+        )
+        for cluster in kept.map({ clusters[$0] }) {
             let point = snapshot.point(for: cluster.coordinate)
             let circleRect = CGRect(x: point.x - 9, y: point.y - 9, width: 18, height: 18)
             context.setFillColor(outline.cgColor)
@@ -1571,6 +1535,7 @@ final class WidgetDataSyncManager {
     private struct WidgetDecodedTransport {
         /// `manualTypeRaw ?? typeRaw` of the source record.
         let typeRaw: String
+        let recordedCoordinates: [CLLocationCoordinate2D]
         let coordinates: [CLLocationCoordinate2D]
         let segments: [WidgetTransportLineSegment]
     }
@@ -1586,149 +1551,34 @@ final class WidgetDataSyncManager {
                   !decoded.isEmpty else {
                 return nil
             }
-            let coordinates = decoded
+            let segments = widgetTransportLineSegments(from: decoded, id: transport.recordID, typeRaw: transport.manualTypeRaw ?? transport.typeRaw)
+            let recordedCoordinates = decoded
                 .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
                 .filter {
                     $0.latitude.isFinite &&
                     $0.longitude.isFinite &&
                     CLLocationCoordinate2DIsValid($0)
                 }
+            let coordinates = segments.isEmpty ? recordedCoordinates : segments.flatMap(\.coordinates)
             if requiresCoordinates && coordinates.isEmpty { return nil }
             return WidgetDecodedTransport(
                 typeRaw: transport.manualTypeRaw ?? transport.typeRaw,
+                recordedCoordinates: recordedCoordinates,
                 coordinates: coordinates,
-                segments: widgetTransportLineSegments(from: decoded)
+                segments: segments
             )
         }
     }
 
-    nonisolated private static func widgetTransportLineSegments(from decoded: [CodableCoordinate]) -> [WidgetTransportLineSegment] {
-        let validPoints = decoded.filter {
-            $0.lat.isFinite &&
-            $0.lon.isFinite &&
-            CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon))
+    nonisolated private static func widgetTransportLineSegments(
+        from decoded: [CodableCoordinate], id: UUID, typeRaw: String
+    ) -> [WidgetTransportLineSegment] {
+        let transport = TransportRouteCompletion.transport(id: id, typeRaw: typeRaw, points: decoded)
+        return TransportRouteCompletion.cachedSegments(for: transport).map {
+            WidgetTransportLineSegment(coordinates: $0.coordinates, isDashed: $0.isDashed)
         }
-        guard validPoints.count >= 2 else { return [] }
-
-        var segments: [WidgetTransportLineSegment] = []
-        var currentChunk = [CLLocationCoordinate2D(latitude: validPoints[0].lat, longitude: validPoints[0].lon)]
-        var currentDashed: Bool?
-
-        for index in 0..<(validPoints.count - 1) {
-            let current = validPoints[index]
-            let next = validPoints[index + 1]
-            let isDashed: Bool
-            if current.isSyntheticPadding == true || next.isSyntheticPadding == true {
-                isDashed = true
-            } else if let currentTime = current.timestamp, let nextTime = next.timestamp {
-                let timeGap = abs(nextTime.timeIntervalSince(currentTime))
-                let distanceGap = CLLocation(latitude: current.lat, longitude: current.lon)
-                    .distance(from: CLLocation(latitude: next.lat, longitude: next.lon))
-                isDashed = timeGap > 3 * 60 || distanceGap > Self.inferredRouteDistanceThreshold
-            } else {
-                // Keep widget snapshots consistent with the app: coordinates
-                // without sample times are inferred connections.
-                isDashed = true
-            }
-
-            if currentDashed == nil {
-                currentDashed = isDashed
-            }
-
-            let nextCoordinate = CLLocationCoordinate2D(latitude: next.lat, longitude: next.lon)
-            if currentDashed == isDashed {
-                currentChunk.append(nextCoordinate)
-            } else {
-                segments.append(WidgetTransportLineSegment(
-                    coordinates: currentChunk.smoothed(),
-                    isDashed: currentDashed == true
-                ))
-                currentChunk = [
-                    CLLocationCoordinate2D(latitude: current.lat, longitude: current.lon),
-                    nextCoordinate
-                ]
-                currentDashed = isDashed
-            }
-        }
-
-        if currentChunk.count >= 2 {
-            segments.append(WidgetTransportLineSegment(
-                coordinates: currentChunk.smoothed(),
-                isDashed: currentDashed == true
-            ))
-        }
-
-        for i in 0..<segments.count {
-            if segments[i].isDashed && segments[i].coordinates.count == 2 {
-                let p0 = segments[i].coordinates[0]
-                let p3 = segments[i].coordinates[1]
-                
-                var p0TangentPrev: CLLocationCoordinate2D? = nil
-                if i > 0 && !segments[i-1].isDashed {
-                    let prevSolid = segments[i-1].coordinates
-                    if prevSolid.count >= 10 {
-                        p0TangentPrev = prevSolid[prevSolid.count - 1 - Swift.min(prevSolid.count - 1, 10)]
-                    } else if prevSolid.count >= 2 {
-                        p0TangentPrev = prevSolid.first!
-                    }
-                }
-                
-                var p3TangentNext: CLLocationCoordinate2D? = nil
-                if i < segments.count - 1 && !segments[i+1].isDashed {
-                    let nextSolid = segments[i+1].coordinates
-                    if nextSolid.count >= 10 {
-                        p3TangentNext = nextSolid[Swift.min(nextSolid.count - 1, 10)]
-                    } else if nextSolid.count >= 2 {
-                        p3TangentNext = nextSolid.last!
-                    }
-                }
-                
-                let dLat0 = p0TangentPrev != nil ? p0.latitude - p0TangentPrev!.latitude : 0
-                let dLon0 = p0TangentPrev != nil ? p0.longitude - p0TangentPrev!.longitude : 0
-                let dLat3 = p3TangentNext != nil ? p3TangentNext!.latitude - p3.latitude : 0
-                let dLon3 = p3TangentNext != nil ? p3TangentNext!.longitude - p3.longitude : 0
-                
-                let distLat = p3.latitude - p0.latitude
-                let distLon = p3.longitude - p0.longitude
-                let dist = sqrt(distLat*distLat + distLon*distLon)
-                
-                let len0 = sqrt(dLat0*dLat0 + dLon0*dLon0)
-                let len3 = sqrt(dLat3*dLat3 + dLon3*dLon3)
-                
-                let scale0 = len0 > 0 ? (dist * 0.35) / len0 : 0
-                let scale3 = len3 > 0 ? (dist * 0.35) / len3 : 0
-                
-                let c1 = CLLocationCoordinate2D(
-                    latitude: p0.latitude + (len0 > 0 ? dLat0 * scale0 : distLat * 0.3),
-                    longitude: p0.longitude + (len0 > 0 ? dLon0 * scale0 : distLon * 0.3)
-                )
-                let c2 = CLLocationCoordinate2D(
-                    latitude: p3.latitude - (len3 > 0 ? dLat3 * scale3 : distLat * 0.3),
-                    longitude: p3.longitude - (len3 > 0 ? dLon3 * scale3 : distLon * 0.3)
-                )
-                
-                var bezierPoints: [CLLocationCoordinate2D] = []
-                let steps = 20
-                for j in 0...steps {
-                    let t = Double(j) / Double(steps)
-                    let u = 1.0 - t
-                    let u2 = u * u
-                    let u3 = u2 * u
-                    let t2 = t * t
-                    let t3 = t2 * t
-                    
-                    let lat = u3 * p0.latitude + 3.0 * u2 * t * c1.latitude + 3.0 * u * t2 * c2.latitude + t3 * p3.latitude
-                    let lon = u3 * p0.longitude + 3.0 * u2 * t * c1.longitude + 3.0 * u * t2 * c2.longitude + t3 * p3.longitude
-                    bezierPoints.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
-                }
-                
-                segments[i] = WidgetTransportLineSegment(coordinates: bezierPoints, isDashed: true)
-            }
-        }
-
-        return segments
     }
-    
+
     private func syncData(forOffset offset: Int) async {
         await withExclusiveMapSnapshotWork {
             await self.syncDataUnlocked(forOffset: offset)
@@ -2071,7 +1921,7 @@ final class WidgetDataSyncManager {
             .sorted { $0.idString < $1.idString }
             .map { "\($0.idString)|\($0.colorHex)|\($0.icon)|\($0.name)" }
             .joined(separator: ";")
-        return "\(footprintPart)##\(transportPart)##\(activityPart)"
+        return "\(footprintPart)##\(transportPart)##\(activityPart)##routes:\(TransportRouteCompletion.revision)"
     }
 
     private func getFileURL(forOffset offset: Int, sizeName: String, themeName: String) -> URL? {

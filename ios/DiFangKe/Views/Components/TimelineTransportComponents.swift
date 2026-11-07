@@ -26,6 +26,14 @@ struct TransportModalView: View {
     @State private var localStartTime: Date? = nil
     @State private var localEndTime: Date? = nil
     @State private var refreshedTransport: Transport? = nil
+    @State private var displayedRouteSegments: [TransportLineSegment] = []
+    @State private var inferredRoutesRevision = TransportRouteCompletion.revision
+
+    private struct RouteDisplayKey: Hashable {
+        let geometry: ObjectIdentifier
+        let type: TransportType
+        let revision: Double
+    }
 
     private var displayedTransport: Transport { refreshedTransport ?? transport }
     
@@ -105,7 +113,7 @@ struct TransportModalView: View {
                                     .tint(.blue)
                             }
                             
-                            ForEach(displayedTransport.lineSegments) { segment in
+                            ForEach(displayedRouteSegments) { segment in
                                 MapPolyline(coordinates: segment.coordinates)
                                     .stroke(
                                         Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.7),
@@ -249,6 +257,22 @@ struct TransportModalView: View {
                     reloadDisplayedTransport(for: start)
                     onLocationUpdate?()
                 }
+            }
+            .task(id: RouteDisplayKey(geometry: displayedTransport.routeGeometryIdentity, type: displayType, revision: inferredRoutesRevision)) {
+                let route = displayedTransport.updatingType(displayType)
+                let segments = await Task.detached(priority: .userInitiated) {
+                    TransportRouteCompletion.cachedSegments(for: route)
+                }.value
+                guard !Task.isCancelled else { return }
+                displayedRouteSegments = segments
+            }
+            // Cache revisions redraw the map without starting another explicit retry.
+            .task(id: RouteDisplayKey(geometry: displayedTransport.routeGeometryIdentity, type: displayType, revision: 0)) {
+                let route = displayedTransport.updatingType(displayType)
+                await TransportRouteCompletion.prepare([route], activelyRequested: true)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: TransportRouteCompletion.didChange)) { _ in
+                inferredRoutesRevision = TransportRouteCompletion.revision
             }
             .onAppear {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {

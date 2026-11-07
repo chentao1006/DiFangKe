@@ -397,6 +397,9 @@ struct Transport: Identifiable {
     var currentType: TransportType {
         manualType ?? type
     }
+
+    /// Stable across copies, replaced when the underlying route value changes.
+    var routeGeometryIdentity: ObjectIdentifier { ObjectIdentifier(lineSegmentsCache) }
     
     func updatingStart(_ location: String) -> Transport {
         Transport(id: id, startTime: startTime, endTime: endTime, startLocation: location, endLocation: endLocation, type: type, distance: distance, averageSpeed: averageSpeed, points: points, pathPoints: pathPoints, manualType: manualType, stepCount: stepCount)
@@ -467,7 +470,14 @@ final class TransportLineSegmentsCache: @unchecked Sendable {
 extension Transport {
     /// A direct jump this long has no route shape between its two samples.
     /// Display it as inferred rather than implying a recorded GPS trace.
-    private static let inferredRouteDistanceThreshold: CLLocationDistance = 500
+    static func isInferredGap(_ current: TransportPathPoint, _ next: TransportPathPoint) -> Bool {
+        if current.isSyntheticPadding || next.isSyntheticPadding { return true }
+        guard let start = current.timestamp, let end = next.timestamp else { return true }
+        let distance = CLLocation(latitude: current.coordinate.latitude, longitude: current.coordinate.longitude)
+            .distance(from: CLLocation(latitude: next.coordinate.latitude, longitude: next.coordinate.longitude))
+        return abs(end.timeIntervalSince(start)) > AppConfig.shared.transportInferredRouteTimeGap ||
+            distance > AppConfig.shared.widgetInferredRouteDistanceThreshold
+    }
 
     /// Smoothed display geometry. Computed once per value (it depends only on
     /// the immutable `id` and `pathPoints`) and shared by its copies, so view
@@ -476,7 +486,13 @@ extension Transport {
         lineSegmentsCache.value { computeLineSegments() }
     }
 
-    private func computeLineSegments() -> [TransportLineSegment] {
+    /// Display-only replacements; neither the observed samples nor mileage change.
+    /// Call while preparing map data in the background, never from a view body.
+    func lineSegments(replacingInferredGaps gaps: [Int: [CLLocationCoordinate2D]]) -> [TransportLineSegment] {
+        gaps.isEmpty ? lineSegments : computeLineSegments(inferredGaps: gaps)
+    }
+
+    private func computeLineSegments(inferredGaps: [Int: [CLLocationCoordinate2D]] = [:]) -> [TransportLineSegment] {
         let validPoints = pathPoints.filter {
             $0.coordinate.latitude.isFinite &&
             $0.coordinate.longitude.isFinite &&
@@ -487,49 +503,44 @@ extension Transport {
         var segments: [TransportLineSegment] = []
         var currentChunk: [CLLocationCoordinate2D] = [validPoints[0].coordinate]
         var isCurrentlyDashed: Bool? = nil
+        var containsPlannedGeometry = false
+
+        func appendChunk(dashed: Bool) {
+            segments.append(TransportLineSegment(
+                id: "\(id.uuidString)-\(segments.count)",
+                // Spline smoothing must not bend a supplied road/rail polyline.
+                coordinates: containsPlannedGeometry ? currentChunk : currentChunk.smoothed(),
+                isDashed: dashed
+            ))
+        }
 
         for i in 0..<(validPoints.count - 1) {
             let current = validPoints[i]
             let next = validPoints[i + 1]
-            let isDashed: Bool
-            
-            if current.isSyntheticPadding || next.isSyntheticPadding {
-                isDashed = true
-            } else if let currentTime = current.timestamp, let nextTime = next.timestamp {
-                let timeGap = abs(nextTime.timeIntervalSince(currentTime))
-                let distanceGap = CLLocation(latitude: current.coordinate.latitude, longitude: current.coordinate.longitude)
-                    .distance(from: CLLocation(latitude: next.coordinate.latitude, longitude: next.coordinate.longitude))
-                isDashed = timeGap > 3 * 60 || distanceGap > Self.inferredRouteDistanceThreshold
-            } else {
-                // A legacy/synthesized route can contain coordinates but no
-                // sample times.  Its straight connection is inferred, not an
-                // observed GPS trace, so do not render it as a solid route.
-                isDashed = true
-            }
+            let isDashed = Self.isInferredGap(current, next)
+            let replacement = isDashed ? inferredGaps[i] : nil
 
             if isCurrentlyDashed == nil {
                 isCurrentlyDashed = isDashed
             }
 
             if isCurrentlyDashed == isDashed {
-                currentChunk.append(next.coordinate)
+                if let replacement {
+                    currentChunk.append(contentsOf: replacement.dropFirst())
+                    containsPlannedGeometry = true
+                } else {
+                    currentChunk.append(next.coordinate)
+                }
             } else {
-                segments.append(TransportLineSegment(
-                    id: "\(id.uuidString)-\(segments.count)",
-                    coordinates: currentChunk.smoothed(),
-                    isDashed: isCurrentlyDashed!
-                ))
-                currentChunk = [current.coordinate, next.coordinate]
+                appendChunk(dashed: isCurrentlyDashed!)
+                currentChunk = replacement ?? [current.coordinate, next.coordinate]
+                containsPlannedGeometry = replacement != nil
                 isCurrentlyDashed = isDashed
             }
         }
 
         if let dashed = isCurrentlyDashed, currentChunk.count >= 2 {
-            segments.append(TransportLineSegment(
-                id: "\(id.uuidString)-\(segments.count)",
-                coordinates: currentChunk.smoothed(),
-                isDashed: dashed
-            ))
+            appendChunk(dashed: dashed)
         }
 
         // 优化虚线绘制：使用三次贝塞尔曲线使虚线顺着前后实线的切线方向自然延伸

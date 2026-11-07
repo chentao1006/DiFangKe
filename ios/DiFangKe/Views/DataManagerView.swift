@@ -609,7 +609,8 @@ final class BackupService {
     
     func restoreBackup(data: Data, context: ModelContext) throws -> RestoreReport {
         let report = try Self.restoreBackupRecords(data: data, context: context)
-        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil,
+                                        userInfo: ["isImport": true])
         CloudSettingsManager.shared.triggerDataSyncPulse()
         return report
     }
@@ -623,7 +624,8 @@ final class BackupService {
             let data = try Data(contentsOf: url)
             return try BackupService.restoreBackupRecords(data: data, context: ModelContext(container))
         }.value
-        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil,
+                                        userInfo: ["isImport": true])
         CloudSettingsManager.shared.triggerDataSyncPulse()
         return report
     }

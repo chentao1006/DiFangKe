@@ -144,7 +144,9 @@ enum PhotoImportDraftRecovery {
 
 class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     static let shared = PhotoService()
+    private static let reviewLibraryRevisionKey = "review.photoLibraryRevision"
     private let displayableAssetIDsCache = NSCache<NSString, NSArray>()
+    private let reviewMemoryMetadataCache = NSCache<NSString, NSString>()
     private let identifierResolutionCache = PhotoIdentifierResolutionCache()
     private var crossDevicePhotoRecoveryTask: Task<Void, Never>?
     
@@ -168,12 +170,16 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     override init() {
         super.init()
         displayableAssetIDsCache.countLimit = 64
+        reviewMemoryMetadataCache.countLimit = 1
         checkStatus()
     }
 
     func clearTransientCaches() {
         displayableAssetIDsCache.removeAllObjects()
+        clearReviewMemoryCacheIdentity()
     }
+
+    func clearReviewMemoryCacheIdentity() { reviewMemoryMetadataCache.removeAllObjects() }
     
     deinit {
         crossDevicePhotoRecoveryTask?.cancel()
@@ -221,6 +227,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     
     func photoLibraryDidChange(_ changeInstance: PHChange) {
         displayableAssetIDsCache.removeAllObjects()
+        clearReviewMemoryCacheIdentity()
+        UserDefaults.standard.set(UUID().uuidString, forKey: Self.reviewLibraryRevisionKey)
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard (status == .authorized || status == .limited),
               let container = modelContext?.container else { return }
@@ -250,9 +258,30 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     func cacheResolvedAssetIdentifiers(_ mappings: [String: String]) {
         guard identifierResolutionCache.merge(mappings) else { return }
         displayableAssetIDsCache.removeAllObjects()
+        clearReviewMemoryCacheIdentity()
+        UserDefaults.standard.set(UUID().uuidString, forKey: Self.reviewLibraryRevisionKey)
         Task { @MainActor in
             identifierResolutionRevision &+= 1
         }
+    }
+
+    /// Background-only metadata check for persisted review candidates; no
+    /// images are requested. The observer stamp also covers changes to older
+    /// assets and cross-device identifier resolutions while the app is open.
+    func reviewMemoryCacheIdentity() -> String {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        let revision = UserDefaults.standard.string(forKey: Self.reviewLibraryRevisionKey) ?? ""
+        guard status == .authorized || status == .limited else { return "\(status.rawValue)|\(revision)" }
+        let key = "\(status.rawValue)|\(revision)" as NSString
+        if let identity = reviewMemoryMetadataCache.object(forKey: key) { return identity as String }
+        let count = PHAsset.fetchAssets(with: .image, options: nil).count
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "modificationDate", ascending: false)]
+        options.fetchLimit = 1
+        let latest = PHAsset.fetchAssets(with: .image, options: options).firstObject
+        let identity = "\(status.rawValue)|\(revision)|\(count)|\(latest?.localIdentifier ?? "")|\(latest?.modificationDate?.timeIntervalSince1970 ?? 0)"
+        reviewMemoryMetadataCache.setObject(identity as NSString, forKey: key)
+        return identity
     }
     
     func syncDeletedPhotos(in container: ModelContainer) async {
@@ -387,9 +416,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         guard status == .authorized || status == .limited else { return 0 }
         
         let options = PHFetchOptions()
-        let bufferStart = startTime.addingTimeInterval(-300) // 增加到 5 分钟缓冲
-        let bufferEnd = endTime.addingTimeInterval(300)
-        let predicate = NSPredicate(format: "creationDate > %@ AND creationDate < %@", bufferStart as NSDate, bufferEnd as NSDate)
+        let predicate = NSPredicate(format: "creationDate >= %@ AND creationDate <= %@", startTime as NSDate, endTime as NSDate)
         options.predicate = predicate
         return PHAsset.fetchAssets(with: .image, options: options).count
     }
@@ -414,9 +441,7 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     /// Synchronous core of `fetchAssets`; call only off the main thread.
     private static func matchingAssets(startTime: Date, endTime: Date, near location: CLLocationCoordinate2D?, maxDistance: CLLocationDistance) -> [PHAsset] {
         let options = PHFetchOptions()
-        let bufferStart = startTime.addingTimeInterval(-linkingTimeBuffer)
-        let bufferEnd = endTime.addingTimeInterval(linkingTimeBuffer)
-        options.predicate = NSPredicate(format: "creationDate > %@ AND creationDate < %@", bufferStart as NSDate, bufferEnd as NSDate)
+        options.predicate = NSPredicate(format: "creationDate >= %@ AND creationDate <= %@", startTime as NSDate, endTime as NSDate)
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         
         let result = PHAsset.fetchAssets(with: .image, options: options)
@@ -475,12 +500,13 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
 
     /// IDs that Photos can resolve on this device, de-duplicated and ordered
     /// oldest first. Stored cross-device IDs remain untouched in the model.
-    func displayableAssetIDs(_ assetIDs: [String]) -> [String] {
+    func displayableAssetIDs(_ assetIDs: [String], during interval: DateInterval? = nil) -> [String] {
         guard !assetIDs.isEmpty else { return [] }
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard status == .authorized || status == .limited else { return [] }
         let resolvedAssetIDs = assetIDs.map(resolvedAssetIdentifier(for:))
-        let cacheKey = resolvedAssetIDs.joined(separator: "\u{1F}") as NSString
+        let timeKey = interval.map { "\($0.start.timeIntervalSince1970)|\($0.end.timeIntervalSince1970)" } ?? "all"
+        let cacheKey = (timeKey + "\u{1E}" + resolvedAssetIDs.joined(separator: "\u{1F}")) as NSString
         if let cached = displayableAssetIDsCache.object(forKey: cacheKey) as? [String] {
             return cached
         }
@@ -489,6 +515,11 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         var creationDates: [String: Date] = [:]
         var availableAssetIDs = Set<String>()
         assets.enumerateObjects { asset, _, _ in
+            // A transport split or time edit can leave the original photo
+            // references on a shorter stay. Filter the presentation without
+            // deleting references, including manually selected photos.
+            // Keep undated photos: there is no evidence they are out of range.
+            if let interval, let date = asset.creationDate, !interval.contains(date) { return }
             availableAssetIDs.insert(asset.localIdentifier)
             creationDates[asset.localIdentifier] = asset.creationDate
         }
@@ -543,19 +574,23 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     ) async -> [String] {
         await Task.detached(priority: .userInitiated) { [self] in
             let resolvedAssetIDs = displayableAssetIDs(storedAssetIDs)
-            guard resolvedAssetIDs.count < Set(storedAssetIDs).count else { return resolvedAssetIDs }
+            let interval = DateInterval(start: startTime, end: max(startTime, endTime))
+            let inRangeAssetIDs = displayableAssetIDs(resolvedAssetIDs, during: interval)
+            // Out-of-range IDs are resolved, not missing. They must not cause
+            // cross-device recovery to pull in a replacement set of photos.
+            guard resolvedAssetIDs.count < Set(storedAssetIDs).count else { return inRangeAssetIDs }
 
             // Same query and rule as fetchAssets(startTime:endTime:near:), run inline.
             let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-            guard status == .authorized || status == .limited else { return resolvedAssetIDs }
+            guard status == .authorized || status == .limited else { return inRangeAssetIDs }
             let matchedAssetIDs = Self.matchingAssets(
                 startTime: startTime, endTime: endTime, near: coordinate,
                 maxDistance: Self.defaultAssetMatchDistance
             ).map(\.localIdentifier)
             var seenIdentifiers = Set<String>()
-            let combinedAssetIDs = (resolvedAssetIDs + matchedAssetIDs)
+            let combinedAssetIDs = (inRangeAssetIDs + matchedAssetIDs)
                 .filter { seenIdentifiers.insert($0).inserted }
-            return assetIDsOldestFirst(combinedAssetIDs)
+            return displayableAssetIDs(combinedAssetIDs, during: interval)
         }.value
     }
 
@@ -603,15 +638,12 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }.value
     }
 
-    func displayableAssetIDsAsync(_ assetIDs: [String]) async -> [String] {
+    func displayableAssetIDsAsync(_ assetIDs: [String], during interval: DateInterval? = nil) async -> [String] {
         guard !assetIDs.isEmpty else { return [] }
         return await Task.detached(priority: .userInitiated) { [self] in
-            displayableAssetIDs(assetIDs)
+            displayableAssetIDs(assetIDs, during: interval)
         }.value
     }
-
-    /// Photos taken this long before/after a stay still belong to it.
-    private static let linkingTimeBuffer: TimeInterval = 60
 
     /// The single rule for whether a photo belongs to a stay: used to link
     /// photos to footprints and to keep such photos out of photo import.
@@ -621,8 +653,8 @@ class PhotoService: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         guard !asset.mediaSubtypes.contains(.photoScreenshot),
               let assetLocation = asset.location,
               let creationDate = asset.creationDate,
-              creationDate > startTime.addingTimeInterval(-linkingTimeBuffer),
-              creationDate < endTime.addingTimeInterval(linkingTimeBuffer) else { return false }
+              creationDate >= startTime,
+              creationDate <= endTime else { return false }
         guard let location else { return true }
         let distance = CLLocation(latitude: location.latitude, longitude: location.longitude)
             .distance(from: assetLocation)

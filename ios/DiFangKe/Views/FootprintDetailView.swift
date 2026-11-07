@@ -118,14 +118,17 @@ struct FootprintModalView: View {
         hasher.combine(photoService.authorizationStatus.rawValue)
         hasher.combine(photoService.identifierResolutionRevision)
         hasher.combine(footprint.photoAssetIDs)
+        hasher.combine(footprint.startTime)
+        hasher.combine(footprint.endTime)
         return hasher.finalize()
     }
 
     private var displayedPhotoAssetIDs: [String] {
-        orderedPhotoAssetIDs ?? footprint.photoAssetIDs
+        orderedPhotoAssetIDs ?? []
     }
 
     private func refreshPhotoAssetOrder() async {
+        orderedPhotoAssetIDs = nil
         let assetIDs = footprint.photoAssetIDs
         guard !assetIDs.isEmpty else {
             orderedPhotoAssetIDs = []
@@ -137,7 +140,10 @@ struct FootprintModalView: View {
         // rendering them creates a second set of permanently empty tiles.
         // Keep the stored references for Cloud Identifier recovery, but only
         // present assets that Photos can actually resolve on this device.
-        let displayable = await photoService.displayableAssetIDsAsync(assetIDs)
+        let displayable = await photoService.displayableAssetIDsAsync(
+            assetIDs,
+            during: DateInterval(start: footprint.startTime, end: max(footprint.startTime, footprint.endTime))
+        )
         guard !Task.isCancelled else { return }
         orderedPhotoAssetIDs = displayable
     }

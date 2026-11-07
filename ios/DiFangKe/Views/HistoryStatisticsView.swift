@@ -2,12 +2,13 @@ import SwiftUI
 import SwiftData
 import MapKit
 import UIKit
+import CryptoKit
 
 extension Notification.Name {
     static let dfkShareHistoryStatistics = Notification.Name("dfkShareHistoryStatistics")
 }
 
-enum StatisticsRange: Hashable {
+enum StatisticsRange: Hashable, Codable {
     case last7Days
     case last30Days
     case last90Days
@@ -46,7 +47,7 @@ enum StatisticsRange: Hashable {
     }
 }
 
-private enum FrequentPlaceRankScope: String, CaseIterable, Identifiable {
+private enum FrequentPlaceRankScope: String, CaseIterable, Identifiable, Codable {
     case country = "国家"
     case city = "城市"
     case place = "地点"
@@ -88,7 +89,7 @@ private struct StatisticsGeographyResult: Sendable {
     let cityName: String
 }
 
-private struct ReviewMemoryCandidate: Identifiable {
+private struct ReviewMemoryCandidate: Identifiable, Codable {
     let id: String
     let date: Date
     let footprintID: UUID?
@@ -106,20 +107,19 @@ private struct ReviewMemoryPhotoCarousel: View {
     let sourceAssetIDs: [String]
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedIndex = 0
-    /// Oldest first, resolved through Photos off main.
-    @State private var orderedAssetIDs: [String]?
+    /// Resolved through Photos and shuffled off main, once per source change.
+    @State private var shuffledAssetIDs: [String]?
 
     init(assetIDs: [String]) {
         self.sourceAssetIDs = assetIDs
     }
 
-    private var assetIDs: [String] { orderedAssetIDs ?? [] }
+    private var assetIDs: [String] { shuffledAssetIDs ?? [] }
 
     var body: some View {
         Group {
-            if orderedAssetIDs == nil {
-                // Until the order is known, show the same earliest photo the
-                // carousel starts with.
+            if shuffledAssetIDs == nil {
+                // Keep a thumbnail visible while preparing the random order.
                 ContinuousTimelinePhotoThumbnail(
                     assetIDs: sourceAssetIDs,
                     targetSide: 420,
@@ -129,12 +129,17 @@ private struct ReviewMemoryPhotoCarousel: View {
                 )
             } else {
                 carousel
+                    .id(shuffledAssetIDs)
             }
         }
         .task(id: sourceAssetIDs) {
             let ordered = await PhotoService.shared.assetIDsOldestFirstAsync(sourceAssetIDs)
+            let shuffled = await reviewDetached(priority: .userInitiated) {
+                ordered.shuffled()
+            }
             guard !Task.isCancelled else { return }
-            orderedAssetIDs = ordered
+            selectedIndex = 0
+            shuffledAssetIDs = shuffled
         }
     }
 
@@ -157,7 +162,7 @@ private struct ReviewMemoryPhotoCarousel: View {
             let interval = max(1, AppConfig.shared.reviewMemoryCarouselInterval)
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                guard !Task.isCancelled, scenePhase == .active else { return }
+                guard !Task.isCancelled, scenePhase == .active, assetIDs.count > 1 else { return }
                 withAnimation(.easeInOut(duration: AppConfig.shared.reviewMemoryCarouselAnimationDuration)) {
                     selectedIndex = (selectedIndex + 1) % assetIDs.count
                 }
@@ -232,7 +237,6 @@ private struct ReviewSheetSeed {
     let source: ReviewSourceSnapshot?
     let sourceFingerprint: Int?
     let range: StatisticsRange
-    let activeYear: Int
     let derived: ReviewDerivedData
     let rangeFootprints: [Footprint]
     let rangeFootprintsByID: [UUID: Footprint]
@@ -251,30 +255,192 @@ private struct ReviewSheetSeed {
 private struct ReviewRangeControl {
     let selection: Binding<StatisticsRange>
     let years: [Int]
-    let activeYear: Int
+}
+
+private enum ReviewRangeTrace {
+    static func log(_ message: String) {
+        NSLog("%@", "[ReviewRange] \(message)")
+    }
+}
+
+/// Observes the existing native control without recognizing or consuming taps.
+private struct ReviewRangeTouchTrace: UIViewRepresentable {
+    let range: StatisticsRange
+    let selection: Binding<Int>
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.isUserInteractionEnabled = false
+        view.accessibilityElementsHidden = true
+        return view
+    }
+
+    func updateUIView(_ view: ProbeView, context: Context) {
+        view.rangeText = range.rawValue
+        view.selection = selection
+        view.attach()
+    }
+
+    static func dismantleUIView(_ view: ProbeView, coordinator: ()) {
+        view.detach()
+    }
+
+    final class ProbeView: UIView, UIGestureRecognizerDelegate {
+        var rangeText = ""
+        var selection: Binding<Int> = .constant(1)
+        private weak var control: UISegmentedControl?
+        private var pendingTouch: (target: Int, startingIndex: Int)?
+        private lazy var touchProbe: UITapGestureRecognizer = {
+            let recognizer = UITapGestureRecognizer()
+            recognizer.cancelsTouchesInView = false
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = false
+            recognizer.delegate = self
+            return recognizer
+        }()
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if window == nil {
+                detach()
+            } else {
+                DispatchQueue.main.async { [weak self] in self?.attach() }
+            }
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            attach()
+        }
+
+        func attach() {
+            guard window != nil else { return }
+            var ancestor = superview
+            while let view = ancestor {
+                if let found = findControl(in: view) {
+                    guard control !== found else { return }
+                    detach()
+                    control = found
+                    found.addGestureRecognizer(touchProbe)
+                    found.addTarget(self, action: #selector(nativeValueChanged(_:)), for: .valueChanged)
+                    ReviewRangeTrace.log("probe.attach current=\(rangeText) native=\(found.selectedSegmentIndex) bounds=\(found.bounds)")
+                    return
+                }
+                ancestor = view.superview
+            }
+        }
+
+        func detach() {
+            control?.removeGestureRecognizer(touchProbe)
+            control?.removeTarget(self, action: #selector(nativeValueChanged(_:)), for: .valueChanged)
+            control = nil
+            pendingTouch = nil
+        }
+
+        private func findControl(in view: UIView) -> UISegmentedControl? {
+            if let segmented = view as? UISegmentedControl,
+               segmented.numberOfSegments == 5, segmented.titleForSegment(at: 0) == "7天" {
+                return segmented
+            }
+            for child in view.subviews {
+                if let found = findControl(in: child) { return found }
+            }
+            return nil
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            if let control {
+                let point = touch.location(in: control)
+                let width = control.bounds.width
+                let count = control.numberOfSegments
+                if width > 0, count > 0, point.x >= 0, point.x < width,
+                   point.y >= 0, point.y < control.bounds.height {
+                    let target = Int(point.x / width * CGFloat(count))
+                    pendingTouch = (target, control.selectedSegmentIndex)
+                } else {
+                    pendingTouch = nil
+                }
+                ReviewRangeTrace.log("touch.begin point=\(point) bounds=\(control.bounds) native=\(control.selectedSegmentIndex) target=\(pendingTouch?.target ?? -1) current=\(rangeText)")
+            }
+            // Reject the touch so the probe cannot recognize, cancel or delay it.
+            return false
+        }
+
+        @objc private func nativeValueChanged(_ control: UISegmentedControl) {
+            let nativeIndex = control.selectedSegmentIndex
+            ReviewRangeTrace.log("native.valueChanged index=\(nativeIndex) target=\(pendingTouch?.target ?? -1) current=\(rangeText)")
+            defer { pendingTouch = nil }
+            // On the first tap UIKit can report the previously selected segment
+            // even when the touch lands in another one. Correct only that case;
+            // preserve native changes and the year menu's own selection path.
+            guard let touch = pendingTouch,
+                  (0...3).contains(touch.target),
+                  nativeIndex == touch.startingIndex,
+                  nativeIndex != touch.target else { return }
+            ReviewRangeTrace.log("native.correct index=\(nativeIndex) target=\(touch.target)")
+            control.selectedSegmentIndex = touch.target
+            selection.wrappedValue = touch.target
+        }
+    }
 }
 
 /// The review page's segmented range picker; the last segment opens a year menu.
 private struct ReviewRangePicker: View {
     @Binding var selection: StatisticsRange
     let years: [Int]
-    let activeYear: Int
 
     private var isCustomYear: Bool {
         if case .customYear = selection { return true }
         return false
     }
 
+    /// Fixed native segment identifiers; no second stored selection value.
+    private var selectedSegment: Binding<Int> {
+        Binding(
+            get: {
+                switch selection {
+                case .last7Days: return 0
+                case .last30Days: return 1
+                case .last90Days: return 2
+                case .lastYear: return 3
+                case .customYear: return 4
+                }
+            },
+            set: { index in
+                let range: StatisticsRange
+                switch index {
+                case 0: range = .last7Days
+                case 1: range = .last30Days
+                case 2: range = .last90Days
+                case 3: range = .lastYear
+                case 4:
+                    guard !isCustomYear else { return }
+                    range = .customYear(Calendar.current.component(.year, from: Date()))
+                default: return
+                }
+                ReviewRangeTrace.log("binding.set segment=\(index) current=\(selection.rawValue) target=\(range.rawValue)")
+                selection = range
+            }
+        )
+    }
+
     var body: some View {
-        Picker("时间范围", selection: $selection) {
-            Text("7天").tag(StatisticsRange.last7Days)
-            Text("30天").tag(StatisticsRange.last30Days)
-            Text("90天").tag(StatisticsRange.last90Days)
-            Text("1年").tag(StatisticsRange.lastYear)
-            Text(isCustomYear ? "\(String(activeYear)) ▾" : "年份 ▾")
-                .tag(StatisticsRange.customYear(activeYear))
+        Picker("时间范围", selection: selectedSegment) {
+            Text("7天").tag(0)
+            Text("30天").tag(1)
+            Text("90天").tag(2)
+            Text("1年").tag(3)
+            Text(isCustomYear ? "\(selection.rawValue) ▾" : "年份 ▾")
+                .tag(4)
         }
         .pickerStyle(.segmented)
+        .background(ReviewRangeTouchTrace(range: selection, selection: selectedSegment))
+        .onAppear {
+            ReviewRangeTrace.log("picker.appear current=\(selection.rawValue)")
+        }
+        .onDisappear {
+            ReviewRangeTrace.log("picker.disappear current=\(selection.rawValue)")
+        }
         .overlay {
             GeometryReader { geometry in
                 HStack(spacing: 0) {
@@ -302,7 +468,7 @@ private extension View {
     @ViewBuilder
     func reviewRangeBar(_ control: ReviewRangeControl?) -> some View {
         if let control {
-            let picker = ReviewRangePicker(selection: control.selection, years: control.years, activeYear: control.activeYear)
+            let picker = ReviewRangePicker(selection: control.selection, years: control.years)
                 .padding(.horizontal, 20)
                 .padding(.bottom, 8)
             if #available(iOS 26.0, *) {
@@ -329,11 +495,11 @@ private struct ReviewPlaceListSelection: Identifiable {
     let places: [ReviewPlaceSelection]
 }
 
-private struct ReviewActivitySlice: Identifiable {
+private struct ReviewActivitySlice: Identifiable, Codable {
     let id: String
     let name: String
     let duration: TimeInterval
-    let color: Color
+    @ReviewCacheColor var color: Color
     let icon: String
 }
 
@@ -389,9 +555,11 @@ private struct ReviewActivityHeatmapRow: Identifiable {
 }
 
 private struct ReviewDailyFootprintHeatmap: View {
-    let values: [Int]
+    @Environment(\.colorScheme) private var colorScheme
+    /// Normalized daily intensities, prepared by the background builder.
+    let values: [Double]
     var preferredColumnCount: Int? = nil
-    var accessibilityText = "每日足迹"
+    var accessibilityText = "每日出行热度，有里程时按里程，无里程时按足迹数量"
 
     var body: some View {
         Canvas { context, size in
@@ -411,8 +579,6 @@ private struct ReviewDailyFootprintHeatmap: View {
             )
             let gridWidth = cellSide * CGFloat(columnCount) + spacing * CGFloat(columnCount - 1)
             let horizontalOffset = max(0, (size.width - gridWidth) / 2)
-            let maximum = max(1, values.max() ?? 1)
-
             for index in values.indices {
                 let row = index / columnCount
                 let column = index % columnCount
@@ -423,8 +589,8 @@ private struct ReviewDailyFootprintHeatmap: View {
                     height: cellSide
                 )
                 let color = values[index] == 0
-                    ? Color(uiColor: .systemGray5)
-                    : Color.dfkAccent.opacity(0.22 + 0.78 * Double(values[index]) / Double(maximum))
+                    ? Color(uiColor: colorScheme == .dark ? .systemGray3 : .systemGray5)
+                    : Color.dfkAccent.opacity(0.22 + 0.78 * values[index])
                 context.fill(
                     Path(roundedRect: rect, cornerSize: CGSize(width: min(3, cellSide * 0.22), height: min(3, cellSide * 0.22))),
                     with: .color(color)
@@ -481,12 +647,12 @@ private struct ReviewNavigationBarBlur: UIViewRepresentable {
     }
 }
 
-private struct ReviewTransportSlice: Identifiable {
+private struct ReviewTransportSlice: Identifiable, Codable {
     let id: String
     let name: String
     let count: Int
     let distance: Double
-    let color: Color
+    @ReviewCacheColor var color: Color
     let icon: String
 }
 
@@ -503,11 +669,27 @@ private struct ReviewTransportHeatmapRow: Identifiable {
     var id: String { slice.id }
 }
 
-private struct ReviewMileageMetrics {
-    let dailyValues: [(date: Date, distance: Double)]
+private struct ReviewDailyMileage: Codable {
+    let date: Date
+    let distance: Double
+}
+
+private struct ReviewDailyCount: Codable {
+    let date: Date
+    let count: Int
+}
+
+private struct ReviewRegionTotal: Codable {
+    let name: String
+    let duration: TimeInterval
+}
+
+private struct ReviewMileageMetrics: Codable {
+    let dailyValues: [ReviewDailyMileage]
+    let dailyHeatmapIntensities: [Double]
     let total: Double
     let dailyAverage: Double
-    let peakDay: (date: Date, distance: Double)?
+    let peakDay: ReviewDailyMileage?
     let activeDayCount: Int
     let weekdayAverages: [Double]
 }
@@ -531,7 +713,7 @@ private struct ReviewDecodedTransport: @unchecked Sendable {
     let points: [CodableCoordinate]
 }
 
-private struct ReviewMapBounds: Sendable {
+private struct ReviewMapBounds: Sendable, Codable {
     let minimumLatitude: Double
     let maximumLatitude: Double
     let minimumLongitude: Double
@@ -540,6 +722,7 @@ private struct ReviewMapBounds: Sendable {
 
 private struct ReviewMemoryCachePayload: Codable {
     let revision: Int
+    let signature: String
     let entries: [ReviewMemoryCacheEntry]
 }
 
@@ -547,6 +730,7 @@ private struct ReviewMemoryCacheEntry: Codable {
     let id: String
     let date: Date
     let footprintID: UUID?
+    let placeKey: String?
     let title: String
     let evidence: String
     let reason: String
@@ -614,7 +798,7 @@ private actor StatisticsGeographyResolver {
 /// Value copy of the footprint fields the review page reads. Taken in a
 /// background context so grouping, ranking and scoring never walk models on
 /// the main actor.
-private struct ReviewFootprintSnapshot: @unchecked Sendable {
+private struct ReviewFootprintSnapshot: Codable, @unchecked Sendable {
     let footprintID: UUID
     let startTime: Date
     let endTime: Date
@@ -648,7 +832,7 @@ private struct ReviewFootprintSnapshot: @unchecked Sendable {
     var duration: TimeInterval { max(0, endTime.timeIntervalSince(startTime)) }
 }
 
-private struct ReviewTransportSnapshot: Sendable {
+private struct ReviewTransportSnapshot: Sendable, Codable {
     let id: UUID
     let startTime: Date
     let endTime: Date
@@ -664,25 +848,41 @@ private struct ReviewTransportSnapshot: Sendable {
     }
 }
 
-private struct ReviewActivitySnapshot: @unchecked Sendable {
+private struct ReviewActivitySnapshot: Codable, @unchecked Sendable {
     let id: UUID
     let name: String
     let icon: String
-    let color: Color
+    @ReviewCacheColor var color: Color
 }
 
 /// Database-wide review source, fetched and fingerprinted off main.
-private struct ReviewSourceSnapshot: @unchecked Sendable {
+private struct ReviewRouteCacheStamp: Codable, Sendable {
+    let id: UUID
+    let startLocation: String
+    let endLocation: String
+    let averageSpeed: Double
+    let stepCount: Int?
+    let pointsDigest: Data
+}
+
+private struct ReviewSourceSnapshot: Codable, @unchecked Sendable {
     let fingerprint: Int
     /// Non-ignored footprints, newest first (the former `allFootprints` order).
     let footprints: [ReviewFootprintSnapshot]
     let transports: [ReviewTransportSnapshot]
+    /// Stored-byte digests are calculated once per source refresh, never on
+    /// each year selection. No route payloads are retained in this snapshot.
+    let routeCacheStamps: [UUID: ReviewRouteCacheStamp]
     let activities: [ReviewActivitySnapshot]
     let priorityPlaceIDs: Set<UUID>
+    let availableYears: [Int]
+    let pastMemoryCandidate: ReviewMemoryCandidate?
+    let tripActivityDays: [Date: String]
+    let capturedAt: Date
 }
 
 /// AppConfig values the background builders read, captured on main.
-private struct ReviewConfigSnapshot: Sendable {
+private struct ReviewConfigSnapshot: Sendable, Codable {
     let longStayMinDuration: Double
     let photoMinCount: Int
     let firstVisitPhotoMinCount: Int
@@ -718,48 +918,51 @@ private struct ReviewConfigSnapshot: Sendable {
 private struct ReviewRangeWindow: Sendable {
     let range: StatisticsRange
     let now: Date
+    let isClosedYear: Bool
     /// Inclusive lower bound of `startTime`.
     let lowerBound: Date
-    /// Exclusive upper bound of `startTime` (custom years only).
-    let upperBound: Date?
+    /// Exclusive upper bound; today's records never enter the review.
+    let upperBound: Date
     /// The former `reviewRangeStart` / `reviewRangeEnd`.
     let rangeStart: Date
     let rangeEnd: Date
 
     init(range: StatisticsRange, now: Date = Date()) {
         let calendar = Calendar.current
+        let today = calendar.startOfDay(for: now)
         self.range = range
         self.now = now
+        if case .customYear(let year) = range {
+            isClosedYear = year < calendar.component(.year, from: now)
+        } else {
+            isClosedYear = false
+        }
         switch range {
         case .last7Days, .last30Days, .last90Days, .lastYear:
             let days = range.days ?? 0
-            let cutoff = calendar.date(byAdding: .day, value: -days, to: now) ?? now
+            let cutoff = calendar.date(byAdding: .day, value: -days, to: today) ?? today
             lowerBound = cutoff
-            upperBound = nil
+            upperBound = today
             rangeStart = cutoff
-            rangeEnd = now
+            rangeEnd = calendar.date(byAdding: .day, value: -1, to: today) ?? today
         case .customYear(let year):
             let yearStart = calendar.date(from: DateComponents(year: year, month: 1, day: 1)) ?? now
             lowerBound = yearStart
-            upperBound = calendar.date(from: DateComponents(year: year + 1, month: 1, day: 1))
+            let yearEnd = calendar.date(from: DateComponents(year: year + 1, month: 1, day: 1)) ?? today
+            upperBound = min(yearEnd, today)
             rangeStart = yearStart
-            rangeEnd = calendar.date(from: DateComponents(year: year, month: 12, day: 31)) ?? now
+            rangeEnd = calendar.date(byAdding: .day, value: -1, to: upperBound) ?? upperBound
         }
     }
 
-    /// Same membership rule as the former `filteredFootprints` /
-    /// `filteredTransportRecords`.
     func contains(_ date: Date) -> Bool {
-        if case .customYear(let year) = range {
-            return Calendar.current.component(.year, from: date) == year
-        }
-        return date >= lowerBound
+        date >= lowerBound && date < upperBound
     }
 }
 
 /// Declared outside the view so the background builder can create it
 /// without touching the view's main-actor isolation.
-private struct ReviewFrequentPlaceItem: Identifiable {
+private struct ReviewFrequentPlaceItem: Identifiable, Codable {
     let id: String
     let name: String
     let address: String
@@ -768,14 +971,14 @@ private struct ReviewFrequentPlaceItem: Identifiable {
     let footprintIDs: [UUID]
 }
 
-private struct ReviewGeographyMetric {
+private struct ReviewGeographyMetric: Codable {
     let icon: String
     let value: String
     let label: String
 }
 
-private struct ReviewRhythmMetrics {
-    let dailyCounts: [(date: Date, count: Int)]
+private struct ReviewRhythmMetrics: Codable {
+    let dailyCounts: [ReviewDailyCount]
     let activeDayCount: Int
     let activeDayRate: Int
     let weeklyAverageText: String
@@ -784,6 +987,16 @@ private struct ReviewRhythmMetrics {
     let longestStreak: Int
     let weekdayAverages: [CGFloat]
     let hourlyCounts: [Int]
+}
+
+private struct ReviewPlaceVisitDay: Identifiable {
+    let date: Date
+    let visitCount: Int
+    let totalDuration: TimeInterval
+    let activities: [ReviewActivitySnapshot]
+    let photoCount: Int
+    let reasons: [String]
+    var id: Date { date }
 }
 
 private struct ReviewPlaceStats {
@@ -799,7 +1012,7 @@ private struct ReviewPlaceStats {
     /// Total stay per activity type, longest first.
     let activitySlices: [ReviewActivitySlice]
     let activityVisitCounts: [String: Int]
-    let visitActivities: [UUID: ReviewActivitySnapshot]
+    let visitDays: [ReviewPlaceVisitDay]
 }
 
 /// A place's visits grouped and summarised in the background; the main actor
@@ -815,11 +1028,14 @@ private struct ReviewPlaceGroup: @unchecked Sendable {
 
 /// Everything the review page derives from the source for one applied range.
 /// Built in the background; `body` and its sections only read it.
-private struct ReviewDerivedData: @unchecked Sendable {
+private struct ReviewDerivedData: Codable, @unchecked Sendable {
     var range: StatisticsRange?
     /// Range footprints in source order (newest first).
     var rangeFootprints: [ReviewFootprintSnapshot] = []
     var rangeTransports: [ReviewTransportSnapshot] = []
+    /// Prepared off main for model queries; new records wait for the next day.
+    var footprintIDs: [UUID] = []
+    var transportIDs: [UUID] = []
     var rangeSnapshotsByID: [UUID: ReviewFootprintSnapshot] = [:]
     var footprintIDsByPlaceKey: [String: [UUID]] = [:]
     var favoriteFootprintIDs: Set<UUID> = []
@@ -837,7 +1053,7 @@ private struct ReviewDerivedData: @unchecked Sendable {
     var transportActiveDays: [String: Int] = [:]
     var transportWeekdayCounts: [String: [Int]] = [:]
     var transportHourlyCounts: [String: [Int]] = [:]
-    var topRegions: [(name: String, duration: TimeInterval)] = []
+    var topRegions: [ReviewRegionTotal] = []
     var pastMemoryCandidate: ReviewMemoryCandidate?
     var activityBuckets: [Int] = Array(repeating: 0, count: 24)
     var rhythm = ReviewRhythmMetrics(
@@ -853,6 +1069,7 @@ private struct ReviewDerivedData: @unchecked Sendable {
     )
     var mileage = ReviewMileageMetrics(
         dailyValues: [],
+        dailyHeatmapIntensities: [],
         total: 0,
         dailyAverage: 0,
         peakDay: nil,
@@ -861,7 +1078,7 @@ private struct ReviewDerivedData: @unchecked Sendable {
     )
     var frequentPlaces: [FrequentPlaceRankScope: [ReviewFrequentPlaceItem]] = [:]
     var defaultFrequentPlaceRankScope: FrequentPlaceRankScope = .city
-    var shareCoordinates: [CLLocationCoordinate2D] = []
+    @ReviewCacheCoordinates var shareCoordinates: [CLLocationCoordinate2D] = []
     var photoCaptions: [String: String] = [:]
 
     func placeKey(for footprintID: UUID) -> String? {
@@ -869,7 +1086,7 @@ private struct ReviewDerivedData: @unchecked Sendable {
     }
 }
 
-private enum ReviewTimelineSlot: Sendable {
+private enum ReviewTimelineSlot: Sendable, Codable {
     case footprint(UUID)
     case transport(Int)
 }
@@ -881,6 +1098,330 @@ private struct ReviewDerivedResult: @unchecked Sendable {
     /// `(footprints + transports)` sorted by start time.
     let timelineSlots: [ReviewTimelineSlot]
     let bounds: ReviewMapBounds?
+}
+
+// Derived cache files are disposable presentation data, independent of both
+// SwiftData stores. Bump the format version when calculation semantics change.
+@propertyWrapper
+private struct ReviewCacheColor: Codable {
+    var wrappedValue: Color
+
+    private struct Stored: Codable {
+        let light: String
+        let dark: String
+    }
+
+    init(wrappedValue: Color) { self.wrappedValue = wrappedValue }
+
+    init(from decoder: Decoder) throws {
+        let stored = try Stored(from: decoder)
+        guard let light = Color(hex: stored.light), let dark = Color(hex: stored.dark) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid cached color"))
+        }
+        let lightColor = UIColor(light), darkColor = UIColor(dark)
+        wrappedValue = Color(uiColor: UIColor { traits in
+            traits.userInterfaceStyle == .dark ? darkColor : lightColor
+        })
+    }
+
+    func encode(to encoder: Encoder) throws {
+        let color = UIColor(wrappedValue)
+        try Stored(
+            light: Color(uiColor: color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))).toHex(),
+            dark: Color(uiColor: color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .dark))).toHex()
+        ).encode(to: encoder)
+    }
+}
+
+@propertyWrapper
+private struct ReviewCacheCoordinates: Codable {
+    var wrappedValue: [CLLocationCoordinate2D]
+
+    init(wrappedValue: [CLLocationCoordinate2D]) { self.wrappedValue = wrappedValue }
+
+    init(from decoder: Decoder) throws {
+        wrappedValue = try [CodableCoordinate](from: decoder).map {
+            CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try wrappedValue.map { CodableCoordinate(lat: $0.latitude, lon: $0.longitude) }.encode(to: encoder)
+    }
+}
+
+private struct ReviewCachedTransport: Codable {
+    let id: UUID
+    let startTime: Date
+    let endTime: Date
+    let startLocation: String
+    let endLocation: String
+    let type: TransportType
+    let distance: Double
+    let averageSpeed: Double
+    @ReviewCacheCoordinates var points: [CLLocationCoordinate2D]
+    let pathPoints: [CodableCoordinate]
+    let manualType: TransportType?
+    let stepCount: Int?
+
+    init(_ transport: Transport) {
+        id = transport.id
+        startTime = transport.startTime
+        endTime = transport.endTime
+        startLocation = transport.startLocation
+        endLocation = transport.endLocation
+        type = transport.type
+        distance = transport.distance
+        averageSpeed = transport.averageSpeed
+        points = transport.points
+        pathPoints = transport.pathPoints.map {
+            CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude,
+                              timestamp: $0.timestamp, isSyntheticPadding: $0.isSyntheticPadding)
+        }
+        manualType = transport.manualType
+        stepCount = transport.stepCount
+    }
+
+    func transport() -> Transport {
+        Transport(id: id, startTime: startTime, endTime: endTime,
+                  startLocation: startLocation, endLocation: endLocation, type: type,
+                  distance: distance, averageSpeed: averageSpeed, points: points,
+                  pathPoints: pathPoints.map {
+                      TransportPathPoint(coordinate: CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon),
+                                         timestamp: $0.timestamp, isSyntheticPadding: $0.isSyntheticPadding ?? false)
+                  }, manualType: manualType, stepCount: stepCount)
+    }
+}
+
+private struct ReviewRangeCachePayload: Codable {
+    let version: Int
+    let signature: String
+    let createdAt: Date
+    let derived: ReviewDerivedData
+    let transports: [ReviewCachedTransport]
+    let timelineSlots: [ReviewTimelineSlot]
+    let bounds: ReviewMapBounds?
+}
+
+private struct ReviewSourceCachePayload: Codable, @unchecked Sendable {
+    let version: Int
+    let calendar: String
+    let timeZone: String
+    let source: ReviewSourceSnapshot
+}
+
+/// Bounded decoded results in memory; one atomic file per range on disk.
+/// Disk coding runs outside this actor so a write cannot hold up cache hits.
+private actor ReviewRangeResultCache {
+    static let shared = ReviewRangeResultCache()
+    static let formatVersion = 2
+
+    private final class Entry: @unchecked Sendable {
+        let range: StatisticsRange
+        let signature: String
+        let createdAt: Date
+        let result: ReviewDerivedResult
+        let cost: Int
+        var memories: (token: String, values: [ReviewMemoryCandidate])?
+
+        init(range: StatisticsRange, signature: String, createdAt: Date, result: ReviewDerivedResult) {
+            self.range = range
+            self.signature = signature
+            self.createdAt = createdAt
+            self.result = result
+            cost = result.transports.reduce(0) {
+                $0 + $1.points.count * MemoryLayout<CLLocationCoordinate2D>.stride
+                    + $1.pathPoints.count * MemoryLayout<TransportPathPoint>.stride
+            } + result.derived.rangeFootprints.count * MemoryLayout<ReviewFootprintSnapshot>.stride
+        }
+    }
+    private let memoryCache = NSCache<NSString, Entry>()
+    private var sourceSnapshot: ReviewSourceCachePayload?
+    private var sourceLoadTask: (id: UUID, task: Task<ReviewSourceCachePayload?, Never>)?
+    private let writeQueue = DispatchQueue(label: "com.difangke.reviewRangeCache.write", qos: .utility)
+    private var writeIDs: [StatisticsRange: UUID] = [:]
+
+    func clearMemory() {
+        memoryCache.removeAllObjects()
+        sourceSnapshot = nil
+    }
+
+    /// One source for every range and sheet for the local calendar day.
+    /// Persist it with the existing disposable cache so relaunching does not
+    /// pick up live edits midway through the day's review.
+    func source(in container: ModelContainer, refreshDays: Int) async -> ReviewSourceSnapshot? {
+        let now = Date()
+        let calendar = Calendar.current
+        let calendarID = String(describing: calendar.identifier)
+        let timeZone = calendar.timeZone.identifier
+        if let cached = sourceSnapshot,
+           cached.calendar == calendarID, cached.timeZone == timeZone,
+           Self.isFresh(cached.source.capturedAt, now: now, refreshDays: refreshDays) {
+            return cached.source
+        }
+        if let sourceLoadTask {
+            return await finishSourceLoad(sourceLoadTask, in: container, refreshDays: refreshDays)
+        }
+        let url = cacheURL(filename: "source.plist")
+        let task = Task.detached(priority: .userInitiated) { () -> ReviewSourceCachePayload? in
+            if let url, let data = try? Data(contentsOf: url),
+               let cached = try? PropertyListDecoder().decode(ReviewSourceCachePayload.self, from: data),
+               cached.version == Self.formatVersion,
+               cached.calendar == calendarID, cached.timeZone == timeZone,
+               Self.isFresh(cached.source.capturedAt, now: now, refreshDays: refreshDays) {
+                return cached
+            }
+            guard let source = await ReviewDataBuilder.fetchSource(in: container, now: now) else { return nil }
+            let payload = ReviewSourceCachePayload(version: Self.formatVersion, calendar: calendarID,
+                                                   timeZone: timeZone, source: source)
+            if let url {
+                let encoder = PropertyListEncoder()
+                encoder.outputFormat = .binary
+                if let data = try? encoder.encode(payload) {
+                    do {
+                        var directory = url.deletingLastPathComponent()
+                        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                        var values = URLResourceValues()
+                        values.isExcludedFromBackup = true
+                        try directory.setResourceValues(values)
+                        try data.write(to: url, options: .atomic)
+                    } catch {
+                        // A disposable cache must never block the real source.
+                    }
+                }
+            }
+            return payload
+        }
+        let load = (id: UUID(), task: task)
+        sourceLoadTask = load
+        return await finishSourceLoad(load, in: container, refreshDays: refreshDays)
+    }
+
+    private func finishSourceLoad(
+        _ load: (id: UUID, task: Task<ReviewSourceCachePayload?, Never>),
+        in container: ModelContainer,
+        refreshDays: Int
+    ) async -> ReviewSourceSnapshot? {
+        let payload = await load.task.value
+        if sourceLoadTask?.id == load.id {
+            sourceLoadTask = nil
+            sourceSnapshot = payload
+        }
+        guard let payload else { return nil }
+        let calendar = Calendar.current
+        guard payload.calendar == String(describing: calendar.identifier),
+              payload.timeZone == calendar.timeZone.identifier,
+              Self.isFresh(payload.source.capturedAt, now: Date(), refreshDays: refreshDays) else {
+            // Loading can straddle midnight; never publish yesterday's source
+            // to a request that is already waiting for the new day's review.
+            return await source(in: container, refreshDays: refreshDays)
+        }
+        return payload.source
+    }
+
+    func memories(for range: StatisticsRange, token: String) -> [ReviewMemoryCandidate]? {
+        guard let memories = memoryCache.object(forKey: range.rawValue as NSString)?.memories,
+              memories.token == token else { return nil }
+        return memories.values
+    }
+
+    func rememberMemories(_ values: [ReviewMemoryCandidate], for range: StatisticsRange, token: String) {
+        guard let entry = memoryCache.object(forKey: range.rawValue as NSString) else { return }
+        entry.memories = (token, values)
+        let photoCost = values.reduce(0) { cost, candidate in
+            cost + candidate.photoAssetIDs.reduce(0) { $0 + $1.utf8.count }
+        }
+        memoryCache.setObject(entry, forKey: range.rawValue as NSString, cost: entry.cost + photoCost)
+    }
+
+    func configure(memoryCount: Int, memoryLimitBytes: Int) {
+        if memoryCache.countLimit != max(1, memoryCount) { memoryCache.countLimit = max(1, memoryCount) }
+        if memoryCache.totalCostLimit != max(1, memoryLimitBytes) { memoryCache.totalCostLimit = max(1, memoryLimitBytes) }
+    }
+
+    private static func isFresh(_ date: Date, now: Date, refreshDays: Int) -> Bool {
+        let calendar = Calendar.current
+        let age = calendar.dateComponents([.day], from: calendar.startOfDay(for: date),
+                                          to: calendar.startOfDay(for: now)).day ?? -1
+        return age >= 0 && age < max(1, refreshDays)
+    }
+
+    private static func isFresh(_ date: Date, window: ReviewRangeWindow, refreshDays: Int) -> Bool {
+        // Closed years do not expire with time, but must match their content
+        // signature below so imports and edits can invalidate them.
+        if window.isClosedYear { return true }
+        return isFresh(date, now: window.now, refreshDays: refreshDays)
+    }
+
+    func result(for window: ReviewRangeWindow, signature: String, refreshDays: Int) async -> ReviewDerivedResult? {
+        let key = window.range.rawValue as NSString
+        if let entry = memoryCache.object(forKey: key),
+           entry.signature == signature, Self.isFresh(entry.createdAt, window: window, refreshDays: refreshDays) {
+            return entry.result
+        }
+        guard let url = cacheURL(for: window.range) else { return nil }
+        let loaded: Entry? = await reviewDetached(priority: .userInitiated) {
+            guard let data = try? Data(contentsOf: url), !Task.isCancelled,
+                  let payload = try? PropertyListDecoder().decode(ReviewRangeCachePayload.self, from: data),
+                  payload.version == Self.formatVersion, payload.derived.range == window.range,
+                  payload.signature == signature else { return nil }
+            let result = ReviewDerivedResult(derived: payload.derived,
+                                             transports: payload.transports.map { $0.transport() },
+                                             timelineSlots: payload.timelineSlots, bounds: payload.bounds)
+            return Entry(range: window.range, signature: payload.signature, createdAt: payload.createdAt, result: result)
+        }
+        guard let loaded, !Task.isCancelled, Self.isFresh(loaded.createdAt, window: window, refreshDays: refreshDays) else { return nil }
+        memoryCache.setObject(loaded, forKey: key, cost: loaded.cost)
+        return loaded.result
+    }
+
+    func rememberResult(_ result: ReviewDerivedResult, range: StatisticsRange, signature: String, createdAt: Date) {
+        guard !Task.isCancelled else { return }
+        let entry = Entry(range: range, signature: signature, createdAt: createdAt, result: result)
+        memoryCache.setObject(entry, forKey: range.rawValue as NSString, cost: entry.cost)
+    }
+
+    func store(_ result: ReviewDerivedResult, range: StatisticsRange, signature: String, createdAt: Date) async {
+        guard !Task.isCancelled else { return }
+        guard let url = cacheURL(for: range) else { return }
+        let writeID = UUID()
+        writeIDs[range] = writeID
+        let data: Data? = await reviewDetached {
+            let payload = ReviewRangeCachePayload(version: Self.formatVersion, signature: signature, createdAt: createdAt,
+                                                  derived: result.derived, transports: result.transports.map(ReviewCachedTransport.init),
+                                                  timelineSlots: result.timelineSlots, bounds: result.bounds)
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
+            return try? encoder.encode(payload)
+        }
+        guard let data, !Task.isCancelled, writeIDs[range] == writeID else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            writeQueue.async {
+                do {
+                    var directory = url.deletingLastPathComponent()
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    var values = URLResourceValues()
+                    values.isExcludedFromBackup = true
+                    try directory.setResourceValues(values)
+                    try data.write(to: url, options: .atomic)
+                } catch {
+                    // Cache failures must never prevent displaying real data.
+                }
+                continuation.resume()
+            }
+        }
+        if writeIDs[range] == writeID { writeIDs[range] = nil }
+    }
+
+    private func cacheURL(for range: StatisticsRange) -> URL? {
+        cacheURL(filename: "\(range.rawValue).plist")
+    }
+
+    private func cacheURL(filename: String) -> URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("ReviewRangeCache", isDirectory: true)
+            .appendingPathComponent(filename)
+    }
 }
 
 /// Runs `operation` detached and forwards cancellation of the awaiting task.
@@ -969,14 +1510,20 @@ private enum ReviewDataBuilder {
 
     /// Fetches the review source in its own context and fingerprints it.
     /// Returns nil when a fetch fails so the caller keeps its current source.
-    static func fetchSource(in container: ModelContainer) -> ReviewSourceSnapshot? {
+    static func fetchSource(in container: ModelContainer, now capturedAt: Date) async -> ReviewSourceSnapshot? {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: capturedAt)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today) ?? today
+        let tripDays = await TripScanManager.shared.tripActivityDays(from: .distantPast, through: yesterday)
         let context = ModelContext(container)
         let footprintDescriptor = FetchDescriptor<Footprint>(
-            predicate: #Predicate<Footprint> { $0.statusValue != "ignored" },
+            predicate: #Predicate<Footprint> { $0.statusValue != "ignored" && $0.startTime < today },
             sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
         )
         let transportRecordDescriptor = FetchDescriptor<TransportRecord>(
-            predicate: #Predicate<TransportRecord> { $0.statusRaw == "active" }
+            predicate: #Predicate<TransportRecord> {
+                $0.statusRaw == "active" && $0.startTime < today && $0.endTime <= today
+            }
         )
         let activityDescriptor = FetchDescriptor<ActivityType>(
             sortBy: [SortDescriptor(\ActivityType.sortOrder)]
@@ -989,30 +1536,50 @@ private enum ReviewDataBuilder {
         }
 
         var hasher = Hasher()
+        var routeCacheStamps: [UUID: ReviewRouteCacheStamp] = [:]
+        hasher.combine(Calendar.current.startOfDay(for: capturedAt))
+        hasher.combine(PhotoService.shared.reviewMemoryCacheIdentity())
+        for day in tripDays.keys.sorted() {
+            hasher.combine(day)
+            hasher.combine(tripDays[day])
+        }
         for footprint in fetchedFootprints {
             hasher.combine(footprint.footprintID)
             hasher.combine(footprint.startTime)
             hasher.combine(footprint.endTime)
-            hasher.combine(footprint.latitudeData.count)
-            hasher.combine(footprint.longitudeData.count)
+            hasher.combine(footprint.latitudeData)
+            hasher.combine(footprint.longitudeData)
             hasher.combine(footprint.photoAssetIDsData)
             hasher.combine(footprint.placeID)
             hasher.combine(footprint.activityTypeValue)
             hasher.combine(footprint.countryCode)
+            hasher.combine(footprint.countryName)
             hasher.combine(footprint.cityName)
+            hasher.combine(footprint.address)
+            hasher.combine(footprint.reason)
+            hasher.combine(footprint.isHighlight)
+            hasher.combine(footprint.isAddressEditedByHand)
             hasher.combine(footprint.statusValue)
         }
         for transport in fetchedTransports {
+            let digest = Data(SHA256.hash(data: transport.pointsData))
+            routeCacheStamps[transport.recordID] = ReviewRouteCacheStamp(
+                id: transport.recordID, startLocation: transport.startLocation, endLocation: transport.endLocation,
+                averageSpeed: transport.averageSpeed, stepCount: transport.stepCount, pointsDigest: digest
+            )
             hasher.combine(transport.recordID)
             hasher.combine(transport.startTime)
             hasher.combine(transport.endTime)
             hasher.combine(transport.typeRaw)
             hasher.combine(transport.manualTypeRaw)
             hasher.combine(transport.distance)
-            // Route payloads can be very large. Their identity, time range and
-            // byte count are sufficient to detect normal edits without hashing
-            // the entire JSON blob for every app-wide signal.
-            hasher.combine(transport.pointsData.count)
+            // Same-sized route edits must invalidate persisted results too.
+            // Hash the stored bytes off main without decoding route JSON.
+            hasher.combine(digest)
+            hasher.combine(transport.startLocation)
+            hasher.combine(transport.endLocation)
+            hasher.combine(transport.averageSpeed)
+            hasher.combine(transport.stepCount)
         }
         for activity in fetchedActivities {
             hasher.combine(activity.id)
@@ -1028,6 +1595,7 @@ private enum ReviewDataBuilder {
             hasher.combine(place.longitude)
             hasher.combine(place.address)
             hasher.combine(place.category)
+            hasher.combine(place.isPriority)
         }
 
         // `allPlaces.first(where:)` semantics: the first place per ID wins.
@@ -1058,7 +1626,7 @@ private enum ReviewDataBuilder {
             return ReviewFootprintSnapshot(
                 footprintID: footprint.footprintID,
                 startTime: footprint.startTime,
-                endTime: footprint.endTime,
+                endTime: min(footprint.endTime, today),
                 latitude: footprint.latitude,
                 longitude: footprint.longitude,
                 photoAssetIDs: footprint.photoAssetIDs,
@@ -1090,16 +1658,105 @@ private enum ReviewDataBuilder {
                 distance: $0.distance
             )
         }
+        let priorityPlaceIDs = Set(fetchedPlaces.filter(\.isPriority).map(\.placeID))
         return ReviewSourceSnapshot(
             fingerprint: hasher.finalize(),
             footprints: footprints,
             transports: transports,
+            routeCacheStamps: routeCacheStamps,
             activities: activities,
-            priorityPlaceIDs: Set(fetchedPlaces.filter(\.isPriority).map(\.placeID))
+            priorityPlaceIDs: priorityPlaceIDs,
+            availableYears: Set(footprints.map { Calendar.current.component(.year, from: $0.startTime) }).sorted(by: >),
+            pastMemoryCandidate: pastMemoryCandidate(history: footprints, priorityPlaceIDs: priorityPlaceIDs, now: capturedAt),
+            tripActivityDays: tripDays,
+            capturedAt: capturedAt
         )
     }
 
     // MARK: Derived data
+
+    /// Closed years reuse their result until their content changes. Other
+    /// ranges validate the daily snapshot before aggregation or route decoding.
+    static func rangeResult(
+        source: ReviewSourceSnapshot,
+        window: ReviewRangeWindow,
+        tripActivityDays: [Date: String],
+        config: ReviewConfigSnapshot,
+        refreshDays: Int,
+        memoryCount: Int,
+        memoryLimitBytes: Int,
+        container: ModelContainer
+    ) async -> ReviewDerivedResult {
+        await ReviewRangeResultCache.shared.configure(memoryCount: memoryCount, memoryLimitBytes: memoryLimitBytes)
+        struct TripDay: Encodable {
+            let date: Date
+            let activity: String
+        }
+        struct Stamp: Encodable {
+            let version: Int
+            let range: StatisticsRange
+            let asOfDay: Date?
+            let calendar: String
+            let timeZone: String
+            let locale: String
+            let footprints: [ReviewFootprintSnapshot]
+            let transports: [ReviewTransportSnapshot]
+            let routes: [ReviewRouteCacheStamp]
+            let activities: [ReviewActivitySnapshot]
+            let tripDays: [TripDay]
+            let config: ReviewConfigSnapshot
+        }
+        let calendar = Calendar.current
+        let isClosedYear = window.isClosedYear
+        let tripDays = tripActivityDays.map { TripDay(date: $0.key, activity: $0.value) }.sorted { $0.date < $1.date }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        func currentResult(_ cached: ReviewDerivedResult) -> ReviewDerivedResult {
+            var derived = cached.derived
+            derived.availableYears = source.availableYears
+            derived.pastMemoryCandidate = calendar.isDate(source.capturedAt, inSameDayAs: window.now)
+                ? source.pastMemoryCandidate
+                : pastMemoryCandidate(history: source.footprints, priorityPlaceIDs: source.priorityPlaceIDs, now: window.now)
+            return ReviewDerivedResult(derived: derived, transports: cached.transports,
+                                       timelineSlots: cached.timelineSlots, bounds: cached.bounds)
+        }
+        let stamp = Stamp(
+            version: ReviewRangeResultCache.formatVersion, range: window.range,
+            asOfDay: isClosedYear ? nil : calendar.startOfDay(for: window.now),
+            calendar: String(describing: calendar.identifier), timeZone: calendar.timeZone.identifier,
+            locale: Locale.current.identifier,
+            footprints: source.footprints.filter { window.contains($0.startTime) }.sorted { $0.footprintID.uuidString < $1.footprintID.uuidString },
+            transports: source.transports.filter { window.contains($0.startTime) }.sorted { $0.id.uuidString < $1.id.uuidString },
+            routes: source.transports.filter { window.contains($0.startTime) }
+                .compactMap { source.routeCacheStamps[$0.id] }.sorted { $0.id.uuidString < $1.id.uuidString },
+            activities: source.activities.sorted { $0.id.uuidString < $1.id.uuidString },
+            tripDays: tripDays,
+            config: config
+        )
+        let signature = (try? encoder.encode(stamp)).map { Data(SHA256.hash(data: $0)).base64EncodedString() }
+        if let signature, !Task.isCancelled,
+           let cached = await ReviewRangeResultCache.shared.result(for: window, signature: signature, refreshDays: refreshDays) {
+            return currentResult(cached)
+        }
+        // Only a genuine cache miss needs a database query and raw routes.
+        guard let transportSources = fetchTransportBuildSnapshots(in: window, container: container) else {
+            return derive(source: source, window: window, tripActivityDays: tripActivityDays,
+                          config: config, transportSources: [])
+        }
+        let result = derive(source: source, window: window, tripActivityDays: tripActivityDays,
+                            config: config, transportSources: transportSources)
+        if let signature, !Task.isCancelled {
+            let createdAt = source.capturedAt
+            // Publish the native entry before returning. A utility-priority
+            // disk write must not decide when a revisit becomes a cache hit.
+            await ReviewRangeResultCache.shared.rememberResult(result, range: window.range, signature: signature,
+                                                               createdAt: createdAt)
+            Task(priority: .utility) {
+                await ReviewRangeResultCache.shared.store(result, range: window.range, signature: signature, createdAt: createdAt)
+            }
+        }
+        return result
+    }
 
     /// Same rule as `Footprint.getActivityType(from:)`.
     static func activityType(value: String?, in activities: [ReviewActivitySnapshot]) -> ReviewActivitySnapshot? {
@@ -1113,7 +1770,7 @@ private enum ReviewDataBuilder {
         window: ReviewRangeWindow,
         tripActivityDays: [Date: String],
         config: ReviewConfigSnapshot,
-        container: ModelContainer
+        transportSources: [ReviewTransportBuildSnapshot]
     ) -> ReviewDerivedResult {
         let calendar = Calendar.current
         let activities = source.activities
@@ -1124,8 +1781,9 @@ private enum ReviewDataBuilder {
         derived.range = window.range
         derived.rangeFootprints = rangeFootprints
         derived.rangeTransports = rangeTransports
-        derived.availableYears = Set(source.footprints.map { calendar.component(.year, from: $0.startTime) })
-            .sorted(by: >)
+        derived.footprintIDs = rangeFootprints.map(\.footprintID)
+        derived.transportIDs = rangeTransports.map(\.id)
+        derived.availableYears = source.availableYears
 
         var snapshotsByID: [UUID: ReviewFootprintSnapshot] = [:]
         var idsByPlaceKey: [String: [UUID]] = [:]
@@ -1257,7 +1915,7 @@ private enum ReviewDataBuilder {
             let name = city.isEmpty ? footprint.placeName : city
             regionTotals[name, default: 0] += footprint.duration
         }
-        derived.topRegions = regionTotals.map { (name: $0.key, duration: $0.value) }.sorted { $0.duration > $1.duration }
+        derived.topRegions = regionTotals.map { ReviewRegionTotal(name: $0.key, duration: $0.value) }.sorted { $0.duration > $1.duration }
 
         derived.pastMemoryCandidate = pastMemoryCandidate(
             history: source.footprints,
@@ -1266,7 +1924,7 @@ private enum ReviewDataBuilder {
         )
 
         // Rhythm.
-        let rangeDuration = max(1, window.rangeEnd.timeIntervalSince(window.rangeStart))
+        let rangeDuration = max(1, window.upperBound.timeIntervalSince(window.rangeStart))
         var buckets = Array(repeating: 0, count: 24)
         var hourlyCounts = Array(repeating: 0, count: 24)
         for footprint in rangeFootprints {
@@ -1277,21 +1935,14 @@ private enum ReviewDataBuilder {
         }
         derived.activityBuckets = buckets
 
-        let endDate = calendar.startOfDay(for: min(window.rangeEnd, window.now))
-        let dayCount: Int
-        if let fixedDays = window.range.days {
-            dayCount = fixedDays
-        } else {
-            let rangeStart = calendar.startOfDay(for: window.rangeStart)
-            dayCount = max(1, (calendar.dateComponents([.day], from: rangeStart, to: endDate).day ?? 0) + 1)
-        }
-        let firstDate = calendar.date(byAdding: .day, value: -(dayCount - 1), to: endDate) ?? endDate
+        let firstDate = calendar.startOfDay(for: window.rangeStart)
+        let dayCount = max(0, calendar.dateComponents([.day], from: firstDate, to: window.upperBound).day ?? 0)
         let countsByDate = Dictionary(grouping: rangeFootprints) {
             calendar.startOfDay(for: $0.startTime)
         }.mapValues(\.count)
-        let dailyCounts: [(date: Date, count: Int)] = (0..<dayCount).map { offset in
+        let dailyCounts = (0..<dayCount).map { offset in
             let date = calendar.date(byAdding: .day, value: offset, to: firstDate) ?? firstDate
-            return (date, countsByDate[date, default: 0])
+            return ReviewDailyCount(date: date, count: countsByDate[date, default: 0])
         }
         let activeDayCount = dailyCounts.filter { $0.count > 0 }.count
         let totalCount = dailyCounts.reduce(0) { $0 + $1.count }
@@ -1332,9 +1983,20 @@ private enum ReviewDataBuilder {
             records.reduce(0) { $0 + $1.distance }
         }
         let dailyValues = dailyCounts.map { item in
-            (date: item.date, distance: distanceByDate[item.date, default: 0])
+            ReviewDailyMileage(date: item.date, distance: distanceByDate[item.date, default: 0])
         }
         let mileageTotal = dailyValues.reduce(0) { $0 + $1.distance }
+        let maximumDailyDistance = dailyValues.map(\.distance).max() ?? 0
+        let maximumDailyFootprintCount = max(1, dailyCounts.map(\.count).max() ?? 0)
+        // Keep mileage and footprint counts on their own scales; a missing
+        // mileage record must not make a day with visits appear inactive.
+        let dailyHeatmapIntensities = dailyCounts.map { day -> Double in
+            let distance = distanceByDate[day.date, default: 0]
+            if distance > 0 {
+                return distance / maximumDailyDistance
+            }
+            return Double(day.count) / Double(maximumDailyFootprintCount)
+        }
         var mileageTotals = Array(repeating: 0.0, count: 7)
         var mileageOccurrences = Array(repeating: 0, count: 7)
         for item in dailyValues {
@@ -1344,6 +2006,7 @@ private enum ReviewDataBuilder {
         }
         derived.mileage = ReviewMileageMetrics(
             dailyValues: dailyValues,
+            dailyHeatmapIntensities: dailyHeatmapIntensities,
             total: mileageTotal,
             dailyAverage: dailyValues.isEmpty ? 0 : mileageTotal / Double(dailyValues.count),
             peakDay: dailyValues.max { $0.distance < $1.distance },
@@ -1389,10 +2052,8 @@ private enum ReviewDataBuilder {
         // Routes: decode only this range's payloads from a private context.
         let routes = decodeRoutes(
             for: rangeTransports,
-            window: window,
             footprints: rangeFootprints,
-            config: config,
-            container: container
+            sources: transportSources
         )
 
         var combined: [(startTime: Date, slot: ReviewTimelineSlot)] = rangeFootprints.map {
@@ -1521,36 +2182,36 @@ private enum ReviewDataBuilder {
         )
     }
 
-    private static func decodeRoutes(
-        for records: [ReviewTransportSnapshot],
-        window: ReviewRangeWindow,
-        footprints: [ReviewFootprintSnapshot],
-        config: ReviewConfigSnapshot,
+    private static func fetchTransportBuildSnapshots(
+        in window: ReviewRangeWindow,
         container: ModelContainer
-    ) -> (transports: [Transport], bounds: ReviewMapBounds?) {
+    ) -> [ReviewTransportBuildSnapshot]? {
         // One range query; payloads are matched back by ID so the source
         // order and membership stay authoritative.
         let context = ModelContext(container)
         let lowerBound = window.lowerBound
-        let descriptor: FetchDescriptor<TransportRecord>
-        if let upperBound = window.upperBound {
-            descriptor = FetchDescriptor<TransportRecord>(
-                predicate: #Predicate<TransportRecord> {
-                    $0.statusRaw == "active" && $0.startTime >= lowerBound && $0.startTime < upperBound
-                }
-            )
-        } else {
-            descriptor = FetchDescriptor<TransportRecord>(
-                predicate: #Predicate<TransportRecord> {
-                    $0.statusRaw == "active" && $0.startTime >= lowerBound
-                }
-            )
+        let upperBound = window.upperBound
+        let today = Calendar.current.startOfDay(for: window.now)
+        let descriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate<TransportRecord> {
+                $0.statusRaw == "active" && $0.startTime >= lowerBound && $0.startTime < upperBound && $0.endTime <= today
+            }
+        )
+        guard let records = try? context.fetch(descriptor) else { return nil }
+        return records.map {
+            ReviewTransportBuildSnapshot(id: $0.recordID, startTime: $0.startTime, endTime: $0.endTime,
+                                         startLocation: $0.startLocation, endLocation: $0.endLocation,
+                                         typeRaw: $0.typeRaw, distance: $0.distance, averageSpeed: $0.averageSpeed,
+                                         pointsData: $0.pointsData, manualTypeRaw: $0.manualTypeRaw, stepCount: $0.stepCount)
         }
-        var recordsByID: [UUID: TransportRecord] = [:]
-        for record in (try? context.fetch(descriptor)) ?? [] where recordsByID[record.recordID] == nil {
-            recordsByID[record.recordID] = record
-        }
+    }
 
+    private static func decodeRoutes(
+        for records: [ReviewTransportSnapshot],
+        footprints: [ReviewFootprintSnapshot],
+        sources: [ReviewTransportBuildSnapshot]
+    ) -> (transports: [Transport], bounds: ReviewMapBounds?) {
+        let recordsByID = Dictionary(sources.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var transports: [Transport] = []
         transports.reserveCapacity(records.count)
         var decodedPoints: [[CodableCoordinate]] = []
@@ -1702,13 +2363,11 @@ private enum ReviewDataBuilder {
         var activityTotals: [String: TimeInterval] = [:]
         var activityVisitCounts: [String: Int] = [:]
         var activitiesByName: [String: ReviewActivitySnapshot] = [:]
-        var visitActivities: [UUID: ReviewActivitySnapshot] = [:]
         for visit in visits {
             guard let activity = visit.activity else { continue }
             activityTotals[activity.name, default: 0] += max(0, visit.duration)
             activityVisitCounts[activity.name, default: 0] += 1
             activitiesByName[activity.name] = activity
-            visitActivities[visit.footprintID] = activity
         }
         let activitySlices = activityTotals.compactMap { name, duration -> ReviewActivitySlice? in
             guard let activity = activitiesByName[name] else { return nil }
@@ -1716,6 +2375,24 @@ private enum ReviewDataBuilder {
         }.sorted { $0.duration > $1.duration }
         let chronological = visits.sorted { $0.startTime < $1.startTime }
         let trend = chronological.map { max(0, $0.duration) }
+        let visitDays = Dictionary(grouping: chronological) {
+            calendar.startOfDay(for: $0.startTime)
+        }.map { date, dailyVisits in
+            var activityNames: Set<String> = []
+            let activities = dailyVisits.compactMap(\.activity).filter { activityNames.insert($0.name).inserted }
+            let photoIDs = Set(dailyVisits.flatMap(\.photoAssetIDs))
+            var seenReasons: Set<String> = []
+            let reasons = dailyVisits.compactMap { $0.reason?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && seenReasons.insert($0).inserted }
+            return ReviewPlaceVisitDay(
+                date: date,
+                visitCount: dailyVisits.count,
+                totalDuration: dailyVisits.reduce(0) { $0 + $1.duration },
+                activities: activities,
+                photoCount: photoIDs.count,
+                reasons: reasons
+            )
+        }.sorted { $0.date < $1.date }
         return ReviewPlaceStats(
             totalDuration: visits.reduce(0) { $0 + $1.duration },
             geographyText: geographyText,
@@ -1727,19 +2404,20 @@ private enum ReviewDataBuilder {
             lastVisitDate: chronological.last?.startTime,
             activitySlices: activitySlices,
             activityVisitCounts: activityVisitCounts,
-            visitActivities: visitActivities
+            visitDays: visitDays
         )
     }
 
     // MARK: Memories
 
     static func memoryCacheKey(for range: StatisticsRange) -> String {
-        "review.memory.v9.\(range.rawValue)"
+        "review.memory.v11.\(range.rawValue)"
     }
 
-    static func loadCachedMemories(for range: StatisticsRange) -> [ReviewMemoryCandidate] {
+    static func loadCachedMemories(for range: StatisticsRange, signature: String) -> [ReviewMemoryCandidate]? {
         guard let data = UserDefaults.standard.data(forKey: memoryCacheKey(for: range)),
-              let payload = try? JSONDecoder().decode(ReviewMemoryCachePayload.self, from: data) else { return [] }
+              let payload = try? JSONDecoder().decode(ReviewMemoryCachePayload.self, from: data),
+              payload.signature == signature else { return nil }
         return payload.entries.filter {
             !$0.photoAssetIDs.isEmpty || $0.id.hasPrefix("favorite-")
         }.map { entry in
@@ -1747,7 +2425,7 @@ private enum ReviewDataBuilder {
                 id: entry.id,
                 date: entry.date,
                 footprintID: entry.footprintID,
-                placeKey: nil,
+                placeKey: entry.placeKey,
                 title: entry.title,
                 evidence: entry.evidence,
                 reason: entry.reason,
@@ -1758,7 +2436,7 @@ private enum ReviewDataBuilder {
         }
     }
 
-    static func saveCachedMemories(_ candidates: [ReviewMemoryCandidate], revision: Int, range: StatisticsRange) {
+    static func saveCachedMemories(_ candidates: [ReviewMemoryCandidate], revision: Int, range: StatisticsRange, signature: String) {
         let entries = candidates.filter {
             !$0.photoAssetIDs.isEmpty || $0.id.hasPrefix("favorite-")
         }.map {
@@ -1766,6 +2444,7 @@ private enum ReviewDataBuilder {
                 id: $0.id,
                 date: $0.date,
                 footprintID: $0.footprintID,
+                placeKey: $0.placeKey,
                 title: $0.title,
                 evidence: $0.evidence,
                 reason: $0.reason,
@@ -1774,7 +2453,7 @@ private enum ReviewDataBuilder {
                 score: $0.score
             )
         }
-        let payload = ReviewMemoryCachePayload(revision: revision, entries: entries)
+        let payload = ReviewMemoryCachePayload(revision: revision, signature: signature, entries: entries)
         if let data = try? JSONEncoder().encode(payload) {
             UserDefaults.standard.set(data, forKey: memoryCacheKey(for: range))
         }
@@ -1787,6 +2466,70 @@ private enum ReviewDataBuilder {
             endTime: footprint.endTime,
             coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
         )
+    }
+
+    static func cachedOrBuildMemoryCandidates(
+        history: [ReviewFootprintSnapshot],
+        sourceFingerprint: Int,
+        derived: ReviewDerivedData,
+        config: ReviewConfigSnapshot,
+        range: StatisticsRange
+    ) async -> [ReviewMemoryCandidate] {
+        struct Validation: Encodable {
+            let source: Int
+            let rangeRevision: Int
+            let range: StatisticsRange
+            let config: ReviewConfigSnapshot
+            let calendar: String
+            let timeZone: String
+            let locale: String
+            let library: String
+        }
+        let library = PhotoService.shared.reviewMemoryCacheIdentity()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let validation = Validation(source: sourceFingerprint, rangeRevision: derived.mapRevision, range: range,
+                                    config: config, calendar: String(describing: Calendar.current.identifier),
+                                    timeZone: Calendar.current.timeZone.identifier, locale: Locale.current.identifier,
+                                    library: library)
+        let token = (try? encoder.encode(validation)).map { Data(SHA256.hash(data: $0)).base64EncodedString() }
+        if let token, let cached = await ReviewRangeResultCache.shared.memories(for: range, token: token) {
+            return cached
+        }
+        struct Stamp: Encodable {
+            let history: [ReviewFootprintSnapshot]
+            let footprints: [ReviewFootprintSnapshot]
+            let transports: [ReviewTransportSnapshot]
+            let config: ReviewConfigSnapshot
+            let calendar: String
+            let timeZone: String
+            let locale: String
+            let library: String
+        }
+        let stamp = Stamp(
+            history: history.sorted { $0.footprintID.uuidString < $1.footprintID.uuidString },
+            footprints: derived.rangeFootprints.sorted { $0.footprintID.uuidString < $1.footprintID.uuidString },
+            transports: derived.rangeTransports.sorted { $0.id.uuidString < $1.id.uuidString },
+            config: config, calendar: String(describing: Calendar.current.identifier),
+            timeZone: Calendar.current.timeZone.identifier, locale: Locale.current.identifier,
+            library: library
+        )
+        let signature = (try? encoder.encode(stamp)).map { Data(SHA256.hash(data: $0)).base64EncodedString() }
+        if let signature, let cached = loadCachedMemories(for: range, signature: signature) {
+            if let token, !Task.isCancelled {
+                await ReviewRangeResultCache.shared.rememberMemories(cached, for: range, token: token)
+            }
+            return cached
+        }
+        guard !Task.isCancelled else { return [] }
+        let candidates = await buildMemoryCandidates(history: history, derived: derived, config: config)
+        if let signature, !Task.isCancelled {
+            saveCachedMemories(candidates, revision: derived.mapRevision, range: range, signature: signature)
+        }
+        if let token, !Task.isCancelled {
+            await ReviewRangeResultCache.shared.rememberMemories(candidates, for: range, token: token)
+        }
+        return candidates
     }
 
     static func buildMemoryCandidates(
@@ -2086,7 +2829,7 @@ private enum ReviewDataBuilder {
                 date: footprint.startTime,
                 footprintID: nil,
                 placeKey: nil,
-                title: "\(favoriteFootprints.count)个重要片段",
+                title: "\(favoriteFootprints.count)个珍藏回忆",
                 evidence: "点开查看全部收藏",
                 reason: "收藏足迹",
                 systemImage: "star.fill",
@@ -2101,7 +2844,7 @@ private enum ReviewDataBuilder {
                 date: footprint.startTime,
                 footprintID: nil,
                 placeKey: nil,
-                title: "\(favoriteFootprints.count)个重要片段",
+                title: "\(favoriteFootprints.count)个珍藏回忆",
                 evidence: "点开查看全部收藏",
                 reason: "收藏足迹",
                 systemImage: "star.fill",
@@ -2155,6 +2898,7 @@ struct HistoryStatisticsView: View {
 
     /// Database-wide value snapshot, fetched and fingerprinted off main.
     @State private var reviewSource: ReviewSourceSnapshot?
+    @State private var reviewAvailableYears: (capturedAt: Date, values: [Int])?
     /// Everything the sections show for the applied range, built off main.
     @State private var reviewDerived = ReviewDerivedData()
     /// Main-context models for the applied range (map items and selections).
@@ -2168,6 +2912,8 @@ struct HistoryStatisticsView: View {
     @State private var reviewMapRegion: MKCoordinateRegion?
     @State private var reviewTimelineItemsCache: [TimelineItem] = []
     @State private var reviewMemoryCandidatesCache: [ReviewMemoryCandidate] = []
+    /// An empty candidate list is conclusive only after this range completes.
+    @State private var reviewMemoryCandidatesRange: StatisticsRange?
     /// The sheet this view presents; each hosts its own range.
     @State private var presentedSheet: ReviewSheetContent?
     @State private var pendingFavoriteFootprint: Footprint?
@@ -2193,7 +2939,6 @@ struct HistoryStatisticsView: View {
     // Cache structure: [RangeRawValue: (text: String, timestamp: Double)]
     @State private var summaryCache: [String: [String: Any]] = (UserDefaults.standard.dictionary(forKey: "statistics_ai_cache") as? [String: [String: Any]]) ?? [:]
 
-    @State private var activeYearForSegment: Int = Calendar.current.component(.year, from: Date())
     @State private var sharePayload: DFKShareCardPayload?
     @State private var frequentPlaceRankScope: FrequentPlaceRankScope = .city
     @State private var hasManuallySelectedFrequentPlaceRankScope = false
@@ -2220,8 +2965,8 @@ struct HistoryStatisticsView: View {
         _reviewSource = State(initialValue: seed.source)
         _reviewSourceFingerprint = State(initialValue: seed.sourceFingerprint)
         _appliedRange = State(initialValue: seed.range)
-        _activeYearForSegment = State(initialValue: seed.activeYear)
         _reviewDerived = State(initialValue: seed.derived)
+        _reviewAvailableYears = State(initialValue: (seed.source?.capturedAt ?? .distantPast, seed.derived.availableYears))
         _rangeFootprints = State(initialValue: seed.rangeFootprints)
         _rangeFootprintsByID = State(initialValue: seed.rangeFootprintsByID)
         _reviewTripActivityDays = State(initialValue: seed.tripActivityDays)
@@ -2242,7 +2987,7 @@ struct HistoryStatisticsView: View {
     }
 
     private var availableYears: [Int] {
-        reviewDerived.availableYears
+        reviewAvailableYears?.values ?? reviewDerived.availableYears
     }
     private var usesIPadLayout: Bool {
         UIDevice.current.userInterfaceIdiom == .pad
@@ -2256,10 +3001,17 @@ struct HistoryStatisticsView: View {
                 reviewPage
             }
         }
+        .task(id: appliedRange) {
+            ReviewRangeTrace.log("range.task applied=\(appliedRange.rawValue)")
+            guard !reviewRoutesReady || reviewDerived.range != appliedRange else { return }
+            beginReviewRangeRefresh(appliedRange)
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
                 stopAiSummaryWork()
                 stopGeographyBackfill()
+                Task { await ReviewRangeResultCache.shared.clearMemory() }
+                PhotoService.shared.clearReviewMemoryCacheIdentity()
                 // Keep the displayed range and sheets intact. The full source
                 // is only needed for the next rebuild; keep it if one is still
                 // in progress, and retain its fingerprint to reuse the result.
@@ -2267,9 +3019,17 @@ struct HistoryStatisticsView: View {
                     reviewSource = nil
                 }
                 DFKMapSnapshotCache.shared.removeAllMemoryImages()
-            } else if phase == .active, sheet == nil {
-                scheduleReviewRefresh(fetchesData: true)
+            } else if phase == .active {
+                scheduleReviewRefresh()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
+            guard scenePhase == .active else { return }
+            scheduleReviewRefresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { notification in
+            guard notification.userInfo?["isImport"] as? Bool == true else { return }
+            scheduleReviewRefresh(refreshesHistoricalYears: true)
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             releaseReviewWorkingSet()
@@ -2298,8 +3058,11 @@ struct HistoryStatisticsView: View {
                                 reviewHeroSection
                                     .frame(maxWidth: .infinity)
                                 memorableSection
-                                    .frame(maxWidth: .infinity)
+                                    .frame(maxWidth: .infinity,
+                                           maxHeight: reviewMemoryCandidatesRange != appliedRange ? .infinity : nil,
+                                           alignment: .top)
                             }
+                            .fixedSize(horizontal: false, vertical: reviewMemoryCandidatesRange != appliedRange)
                         } else {
                             reviewHeroSection
                         }
@@ -2326,7 +3089,7 @@ struct HistoryStatisticsView: View {
             prepareStatsShare()
         }
         .onAppear {
-            scheduleReviewRefresh(fetchesData: true)
+            scheduleReviewRefresh()
         }
         .sheet(item: $sharePayload) { _ in
             DFKShareCardSheet(payload: $sharePayload)
@@ -2582,7 +3345,16 @@ struct HistoryStatisticsView: View {
                 $0.id != featuredCandidate?.id && !$0.id.hasPrefix("favorite-")
             }
         return VStack(alignment: .leading, spacing: 12) {
-            if featuredCandidate == nil && compactCandidates.isEmpty {
+            if reviewMemoryCandidatesRange != appliedRange {
+                ProgressView()
+                    .controlSize(.large)
+                    .accessibilityLabel("正在加载回忆")
+                    .frame(maxWidth: .infinity,
+                           minHeight: usesIPadLayout ? 0 : 248,
+                           maxHeight: usesIPadLayout ? .infinity : nil)
+                    .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    .padding(.horizontal, 16)
+            } else if featuredCandidate == nil && compactCandidates.isEmpty {
                 ContentUnavailableView("还没有特别突出的片段", systemImage: "sparkles", description: Text("停留、照片和新的经历积累后，会在这里自然出现"))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 18)
@@ -2896,14 +3668,9 @@ struct HistoryStatisticsView: View {
         reviewBentoCard(title: "出行节奏", icon: "chart.bar.xaxis") {
             let mileage = reviewMileageMetrics
             VStack(alignment: .leading, spacing: 10) {
-                let values = mileage.dailyValues.map { Int($0.distance.rounded()) }
-                ReviewDailyFootprintHeatmap(values: values, accessibilityText: "每日里程热度")
+                let values = mileage.dailyHeatmapIntensities
+                ReviewDailyFootprintHeatmap(values: values)
                     .frame(height: reviewRhythmCardHeatmapHeight(itemCount: values.count))
-                Text("日均 \(formatRankMileage(mileage.dailyAverage))")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
             }
         }
     }
@@ -3029,7 +3796,6 @@ struct HistoryStatisticsView: View {
             source: reviewSource,
             sourceFingerprint: reviewSourceFingerprint,
             range: appliedRange,
-            activeYear: activeYearForSegment,
             derived: reviewDerived,
             rangeFootprints: rangeFootprints,
             rangeFootprintsByID: rangeFootprintsByID,
@@ -3045,37 +3811,17 @@ struct HistoryStatisticsView: View {
 
     private var rangeControl: ReviewRangeControl? {
         guard allowsRangeSelection else { return nil }
-        return ReviewRangeControl(selection: rangeSelection, years: availableYears, activeYear: activeYearForSegment)
-    }
-
-    /// Lets the native segmented picker commit its binding before replacing
-    /// the range content. Clearing the content from an outer `onChange` in the
-    /// same update transaction can make the first tap restore the old segment.
-    private var rangeSelection: Binding<StatisticsRange> {
-        Binding(
-            get: { appliedRange },
-            set: { range in
-                guard range != appliedRange else { return }
-                appliedRange = range
-                Task { @MainActor in
-                    await Task.yield()
-                    guard appliedRange == range else { return }
-                    beginReviewRangeRefresh(range)
-                }
-            }
-        )
+        return ReviewRangeControl(selection: $appliedRange, years: availableYears)
     }
 
     private func beginReviewRangeRefresh(_ range: StatisticsRange) {
-        if case .customYear(let year) = range {
-            activeYearForSegment = year
-        }
+        guard appliedRange == range else { return }
         reviewDerivedDataRequestID = UUID()
         reviewDerivedDataTask?.cancel()
         reviewRoutesReady = false
         reviewMapRegion = nil
         mapPosition = .automatic
-        scheduleReviewRefresh(applying: range)
+        scheduleReviewRefresh()
     }
 
     @ViewBuilder
@@ -3086,6 +3832,7 @@ struct HistoryStatisticsView: View {
                 FullReviewMapView(
                     title: "\(statisticsRangeText) · \(reviewGeographyMetric.value)\(reviewGeographyMetric.label)",
                     rangeText: statisticsRangeText,
+                    revision: reviewDerivedDataRequestID,
                     timelineItems: reviewTimelineItemsCache,
                     footprintSnapshots: reviewDerived.rangeSnapshotsByID,
                     initialRegion: reviewMapRegion,
@@ -3653,19 +4400,26 @@ struct HistoryStatisticsView: View {
     private var reviewRhythmDetail: some View {
         let mileage = reviewMileageMetrics
         return VStack(alignment: .leading, spacing: 16) {
-            Text("从每日里程、星期、时刻、趋势和连续性观察这段时间的出行节奏。")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            if mileage.activeDayCount > 0 {
+                Text("从每日里程、星期、时刻、趋势和连续性观察这段时间的出行节奏。")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
 
-            reviewMileageDailyHeatmap(mileage)
-            reviewMileageSummaryGrid(mileage)
-            reviewMileageDailyChart(mileage)
-            reviewMileageWeekdayChart(mileage)
+            if mileage.activeDayCount > 0 || reviewRhythmActiveDayCount > 0 {
+                reviewMileageDailyHeatmap(mileage)
+            }
+
+            if mileage.activeDayCount > 0 {
+                reviewMileageSummaryGrid(mileage)
+                reviewMileageDailyChart(mileage)
+                reviewMileageWeekdayChart(mileage)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("足迹活跃分析")
                     .font(.title3.bold())
-                Text("以下按足迹次数与活跃天数统计，不代表里程。")
+                Text("以下按足迹次数与活跃天数统计。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -3907,14 +4661,13 @@ struct HistoryStatisticsView: View {
 
     private func reviewMileageDailyHeatmap(_ mileage: ReviewMileageMetrics) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("每日里程热度", systemImage: "square.grid.3x3.fill")
+            Label("每日出行热度", systemImage: "square.grid.3x3.fill")
                 .font(.headline)
-            let values = mileage.dailyValues.map { Int($0.distance.rounded()) }
+            let values = mileage.dailyHeatmapIntensities
             let columnCount = reviewRhythmDetailHeatmapColumnCount(for: values.count)
             ReviewDailyFootprintHeatmap(
                 values: values,
-                preferredColumnCount: columnCount,
-                accessibilityText: "每日里程热度"
+                preferredColumnCount: columnCount
             )
                 .frame(height: reviewRhythmDetailHeatmapHeight(itemCount: values.count, columnCount: columnCount))
         }
@@ -4112,7 +4865,7 @@ struct HistoryStatisticsView: View {
         reviewDerived.transportHourlyCounts[typeID] ?? Array(repeating: 0, count: 24)
     }
 
-    private var reviewTopRegions: [(name: String, duration: TimeInterval)] {
+    private var reviewTopRegions: [ReviewRegionTotal] {
         reviewDerived.topRegions
     }
 
@@ -4121,7 +4874,7 @@ struct HistoryStatisticsView: View {
     }
 
     private var reviewRangeWindow: ReviewRangeWindow {
-        ReviewRangeWindow(range: appliedRange)
+        ReviewRangeWindow(range: appliedRange, now: reviewSource?.capturedAt ?? Date())
     }
 
     private var reviewRangeStart: Date {
@@ -4435,6 +5188,7 @@ struct HistoryStatisticsView: View {
     }
 
     private func releaseReviewWorkingSet() {
+        Task { await ReviewRangeResultCache.shared.clearMemory() }
         stopAiSummaryWork()
         stopGeographyBackfill()
         scheduledReviewRefreshTask?.cancel()
@@ -4451,6 +5205,7 @@ struct HistoryStatisticsView: View {
         rangeFootprintsByID.removeAll(keepingCapacity: false)
         reviewTimelineItemsCache.removeAll(keepingCapacity: false)
         reviewMemoryCandidatesCache.removeAll(keepingCapacity: false)
+        reviewMemoryCandidatesRange = nil
         reviewSourceFingerprint = nil
         reviewRoutesReady = false
         reviewMapRegion = nil
@@ -4462,44 +5217,53 @@ struct HistoryStatisticsView: View {
     }
 
     private func scheduleReviewRefresh(
-        applying range: StatisticsRange? = nil,
-        fetchesData: Bool = false
+        refreshesHistoricalYears: Bool = false
     ) {
         scheduledReviewRefreshTask?.cancel()
         scheduledReviewRefreshTask = Task { @MainActor in
-            // Commit the tab or picker selection first. The data work starts on
-            // a later main-actor turn so the interaction never waits for it.
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 16_000_000)
+            // The Picker binding has already assigned the range; load its data separately.
             guard !Task.isCancelled else { return }
 
-            var sourceChanged = false
-            if fetchesData || reviewSource == nil {
-                // Fetch and fingerprint the whole source in a private context;
-                // the main actor only compares the resulting fingerprint.
-                let container = modelContext.container
-                let source = await reviewDetached(priority: .userInitiated) {
-                    ReviewDataBuilder.fetchSource(in: container)
+            let rangeAtStart = appliedRange
+            let isClosedYear = ReviewRangeWindow(range: rangeAtStart).isClosedYear
+            let container = modelContext.container
+            let refreshDays = AppConfig.shared.reviewCacheRefreshDays
+            // Validate historical content on entry and after an import. Recent
+            // ranges keep their daily source even when imported years change.
+            let liveSource: ReviewSourceSnapshot?
+            if isClosedYear || refreshesHistoricalYears {
+                liveSource = await reviewDetached(priority: .userInitiated) {
+                    await ReviewDataBuilder.fetchSource(in: container, now: Date())
                 }
-                guard !Task.isCancelled else { return }
-                if let source {
-                    sourceChanged = source.fingerprint != reviewSourceFingerprint
-                    reviewSourceFingerprint = source.fingerprint
-                    reviewSource = source
+            } else {
+                liveSource = nil
+            }
+            let source: ReviewSourceSnapshot?
+            if isClosedYear {
+                source = liveSource
+            } else {
+                source = await reviewDetached(priority: .userInitiated) {
+                    await ReviewRangeResultCache.shared.source(in: container, refreshDays: refreshDays)
                 }
             }
-            if let range {
-                appliedRange = range
+            guard !Task.isCancelled, appliedRange == rangeAtStart else { return }
+            if let yearsSource = liveSource ?? source,
+               yearsSource.capturedAt >= (reviewAvailableYears?.capturedAt ?? .distantPast) {
+                reviewAvailableYears = (yearsSource.capturedAt, yearsSource.availableYears)
+                reviewDerived.availableYears = yearsSource.availableYears
+            }
+            var sourceChanged = false
+            if let source {
+                sourceChanged = source.fingerprint != reviewSourceFingerprint
+                reviewSourceFingerprint = source.fingerprint
+                reviewSource = source
             }
             // Reuse the displayed result when the source and range match.
             // A range selection interrupted before its rebuild starts still
             // needs to finish, even when the source fingerprint is unchanged.
-            guard range != nil || sourceChanged || reviewDerived.range != appliedRange else { return }
+            guard sourceChanged || reviewDerived.range != rangeAtStart || !reviewRoutesReady else { return }
 
-            // Let the freshly selected UI render before rebuilding maps,
-            // memories and rankings for the applied range.
-            await Task.yield()
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, appliedRange == rangeAtStart else { return }
 
             stopGeographyBackfill()
             hasManuallySelectedFrequentPlaceRankScope = false
@@ -4514,39 +5278,41 @@ struct HistoryStatisticsView: View {
         let rangeAtStart = appliedRange
         guard let source = reviewSource else { return }
 
-        let window = ReviewRangeWindow(range: rangeAtStart)
+        let window = ReviewRangeWindow(range: rangeAtStart, now: source.capturedAt)
         let config = ReviewConfigSnapshot.current()
+        let cacheRefreshDays = AppConfig.shared.reviewCacheRefreshDays
+        let cacheMemoryCount = AppConfig.shared.reviewRangeCacheMemoryCount
+        let cacheMemoryLimitBytes = AppConfig.shared.reviewRangeCacheMemoryLimitBytes
         let container = modelContext.container
-        let tripRangeStart = window.rangeStart
-        let tripRangeEnd = min(window.rangeEnd, window.now)
 
         // Never leave a previous range visible while its replacement is being
         // built. Rankings, rhythm, routes and memories are all derived off
         // main and published together once the request is proven current.
         reviewTimelineItemsCache = []
         reviewRoutesReady = false
+        if sheet == nil {
+            reviewMemoryCandidatesCache = []
+            reviewMemoryCandidatesRange = nil
+        }
 
         reviewDerivedDataTask = Task { @MainActor in
-            let cachedMemories = await reviewDetached(priority: .userInitiated) {
-                ReviewDataBuilder.loadCachedMemories(for: rangeAtStart)
+            let tripDays = await reviewDetached(priority: .userInitiated) {
+                source.tripActivityDays.filter { window.contains($0.key) }
             }
-            guard !Task.isCancelled,
-                  requestID == reviewDerivedDataRequestID,
-                  rangeAtStart == appliedRange else { return }
-            reviewMemoryCandidatesCache = cachedMemories
-
-            let tripDays = await TripScanManager.shared.tripActivityDays(from: tripRangeStart, through: tripRangeEnd)
             guard !Task.isCancelled,
                   requestID == reviewDerivedDataRequestID,
                   rangeAtStart == appliedRange else { return }
             reviewTripActivityDays = tripDays
 
             let result = await reviewDetached(priority: .userInitiated) {
-                ReviewDataBuilder.derive(
+                await ReviewDataBuilder.rangeResult(
                     source: source,
                     window: window,
                     tripActivityDays: tripDays,
                     config: config,
+                    refreshDays: cacheRefreshDays,
+                    memoryCount: cacheMemoryCount,
+                    memoryLimitBytes: cacheMemoryLimitBytes,
                     container: container
                 )
             }
@@ -4556,9 +5322,12 @@ struct HistoryStatisticsView: View {
 
             // Map items, selections and sharing need this context's models:
             // one range query, matched to the derived data by ID.
-            let models = fetchRangeFootprintModels(in: window)
+            let models = fetchRangeFootprintModels(ids: result.derived.footprintIDs)
             let modelsByID = Dictionary(models.map { ($0.footprintID, $0) }, uniquingKeysWith: { first, _ in first })
             reviewDerived = result.derived
+            if let reviewAvailableYears {
+                reviewDerived.availableYears = reviewAvailableYears.values
+            }
             rangeFootprints = models
             rangeFootprintsByID = modelsByID
             updateDefaultFrequentPlaceRankScope()
@@ -4568,74 +5337,55 @@ struct HistoryStatisticsView: View {
                 mapPosition = .region(region)
             }
 
-            // Memories only appear on the page; sheets skip building them.
-            if sheet == nil {
-                let history = source.footprints
-                let derived = result.derived
-                let candidates = await reviewDetached(priority: .utility) {
-                    await ReviewDataBuilder.buildMemoryCandidates(history: history, derived: derived, config: config)
-                }
-                guard !Task.isCancelled,
-                      requestID == reviewDerivedDataRequestID,
-                      rangeAtStart == appliedRange else { return }
-                reviewMemoryCandidatesCache = candidates
-                let revision = derived.mapRevision
-                Task.detached(priority: .utility) {
-                    ReviewDataBuilder.saveCachedMemories(candidates, revision: revision, range: rangeAtStart)
-                }
-            }
             reviewTimelineItemsCache = result.timelineSlots.compactMap { slot -> TimelineItem? in
                 switch slot {
                 case .footprint(let id):
                     return modelsByID[id].map(TimelineItem.footprint)
                 case .transport(let index):
+                    guard result.transports.indices.contains(index) else { return nil }
                     return .transport(result.transports[index])
                 }
             }
+            // Photos can require many Photos-library lookups. Publish the
+            // cached/statistical range before waiting for memory candidates.
             reviewRoutesReady = true
+
+            // Memories only appear on the page; sheets skip building them.
+            if sheet == nil {
+                let history = source.footprints
+                let derived = result.derived
+                let candidates = await reviewDetached(priority: .utility) {
+                    await ReviewDataBuilder.cachedOrBuildMemoryCandidates(history: history, sourceFingerprint: source.fingerprint, derived: derived,
+                                                                          config: config, range: rangeAtStart)
+                }
+                guard !Task.isCancelled,
+                      requestID == reviewDerivedDataRequestID,
+                      rangeAtStart == appliedRange else { return }
+                reviewMemoryCandidatesCache = candidates
+                reviewMemoryCandidatesRange = rangeAtStart
+            }
         }
     }
 
-    private func fetchRangeFootprintModels(in window: ReviewRangeWindow) -> [Footprint] {
-        let lowerBound = window.lowerBound
-        let descriptor: FetchDescriptor<Footprint>
-        if let upperBound = window.upperBound {
-            descriptor = FetchDescriptor<Footprint>(
-                predicate: #Predicate<Footprint> {
-                    $0.statusValue != "ignored" && $0.startTime >= lowerBound && $0.startTime < upperBound
-                },
-                sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
-            )
-        } else {
-            descriptor = FetchDescriptor<Footprint>(
-                predicate: #Predicate<Footprint> {
-                    $0.statusValue != "ignored" && $0.startTime >= lowerBound
-                },
-                sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
-            )
-        }
+    private func fetchRangeFootprintModels(ids: [UUID]) -> [Footprint] {
+        let descriptor = FetchDescriptor<Footprint>(
+            predicate: #Predicate<Footprint> {
+                ids.contains($0.footprintID)
+            },
+            sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
+        )
         return (try? modelContext.fetch(descriptor)) ?? []
     }
 
     /// Range transport models, fetched only for sharing (the map snapshot
     /// loader takes models).
     private func fetchRangeTransportRecords() -> [TransportRecord] {
-        let window = reviewRangeWindow
-        let lowerBound = window.lowerBound
-        let descriptor: FetchDescriptor<TransportRecord>
-        if let upperBound = window.upperBound {
-            descriptor = FetchDescriptor<TransportRecord>(
-                predicate: #Predicate<TransportRecord> {
-                    $0.statusRaw == "active" && $0.startTime >= lowerBound && $0.startTime < upperBound
-                }
-            )
-        } else {
-            descriptor = FetchDescriptor<TransportRecord>(
-                predicate: #Predicate<TransportRecord> {
-                    $0.statusRaw == "active" && $0.startTime >= lowerBound
-                }
-            )
-        }
+        let ids = reviewDerived.transportIDs
+        let descriptor = FetchDescriptor<TransportRecord>(
+            predicate: #Predicate<TransportRecord> {
+                ids.contains($0.recordID)
+            }
+        )
         return (try? modelContext.fetch(descriptor)) ?? []
     }
 
@@ -4664,9 +5414,9 @@ struct HistoryStatisticsView: View {
     }
 
     private var rangePicker: some View {
-        ReviewRangePicker(selection: rangeSelection, years: availableYears, activeYear: activeYearForSegment)
+        ReviewRangePicker(selection: $appliedRange, years: availableYears)
+            .frame(maxWidth: .infinity)
             .padding(8)
-            .dfkDetailMaterial(in: Capsule())
             .padding(.horizontal, 20)
     }
 
@@ -5240,8 +5990,8 @@ private struct ReviewPlaceView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("到访记录")
                         .font(.title2.bold())
-                    ForEach(selection.visits, id: \.footprintID) { footprint in
-                        visitRow(footprint)
+                    ForEach(selection.stats.visitDays) { day in
+                        visitRow(day)
                     }
                 }
                 .padding(.horizontal, 18)
@@ -5428,39 +6178,42 @@ private struct ReviewPlaceView: View {
         selection.stats.hourlyCounts
     }
 
-    private func visitRow(_ footprint: Footprint) -> some View {
+    private func visitRow(_ day: ReviewPlaceVisitDay) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(footprint.startTime.formatted(.dateTime.month().day()))
+                Text(day.date.formatted(.dateTime.month().day()))
                     .font(.headline.bold())
                     .lineLimit(1)
                 Spacer(minLength: 12)
-                Text("\(footprint.startTime.formatted(.dateTime.hour().minute()))–\(footprint.endTime.formatted(.dateTime.hour().minute()))")
-                    .font(.headline)
+                Text("\(day.visitCount)次 · 累计\(placeDurationText(day.totalDuration))")
+                    .font(.subheadline.weight(.semibold))
                     .monospacedDigit()
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
 
-            HStack(spacing: 12) {
-                if let activity = selection.stats.visitActivities[footprint.footprintID] {
-                    Label(activity.name, systemImage: activity.icon)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(activity.color)
-                        .lineLimit(1)
-                }
-                Text("停留 \(placeDurationText(footprint.duration))")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 12)
-                if !footprint.photoAssetIDs.isEmpty {
-                    Label("\(footprint.photoAssetIDs.count)张照片", systemImage: "photo")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+            if !day.activities.isEmpty || day.photoCount > 0 {
+                HStack(alignment: .top, spacing: 12) {
+                    FlowLayout(spacing: 8) {
+                        ForEach(day.activities, id: \.name) { activity in
+                            Label(activity.name, systemImage: activity.icon)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(activity.color)
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if day.photoCount > 0 {
+                        Label("\(day.photoCount)张照片", systemImage: "photo")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
                 }
             }
 
-            if let reason = footprint.reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
+            ForEach(day.reasons, id: \.self) { reason in
                 Text(reason)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -5496,6 +6249,7 @@ struct FullReviewMapView: View {
     @Environment(\.dismiss) private var dismiss
     let title: String
     let rangeText: String
+    let revision: UUID
     let timelineItems: [TimelineItem]
     /// Background snapshots of the range footprints, keyed by ID, so place
     /// grouping on taps runs off main.
@@ -5511,6 +6265,7 @@ struct FullReviewMapView: View {
     fileprivate init(
         title: String,
         rangeText: String,
+        revision: UUID,
         timelineItems: [TimelineItem],
         footprintSnapshots: [UUID: ReviewFootprintSnapshot],
         initialRegion: MKCoordinateRegion?,
@@ -5520,6 +6275,7 @@ struct FullReviewMapView: View {
     ) {
         self.title = title
         self.rangeText = rangeText
+        self.revision = revision
         self.timelineItems = timelineItems
         self.footprintSnapshots = footprintSnapshots
         self.initialRegion = initialRegion
@@ -5541,6 +6297,7 @@ struct FullReviewMapView: View {
                 clustersPlacesByMapScale: true,
                 placeClusterRegion: initialRegion,
                 showsUserDefinedPlaceRadii: false,
+                timelineUpdateIdentifier: revision.hashValue,
                 onTimelineItemTap: { item in
                     guard case .footprint(let footprint) = item else { return }
                     presentPlace(footprint: footprint)

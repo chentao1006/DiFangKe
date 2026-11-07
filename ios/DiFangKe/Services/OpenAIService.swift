@@ -417,7 +417,6 @@ class OpenAIService {
         let startOfDate = Calendar.current.startOfDay(for: date)
 
         Task {
-            let context = ModelContext(container)
             let profile = await Self.buildDailySummaryProfileOffMain(
                 container: container,
                 fpIds: fpIds,
@@ -425,17 +424,21 @@ class OpenAIService {
                 includeTodayData: true
             )
 
-            let descriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate {
-                $0.date == startOfDate
-            })
-            let existing = (try? context.fetch(descriptor))?.first
-            let existingContent = existing?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let saved = await Task.detached(priority: .utility) { () -> (String?, String?, Bool) in
+                let context = ModelContext(container)
+                let descriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDate })
+                let existing = (try? context.fetch(descriptor))?.first
+                return (existing?.content?.trimmingCharacters(in: .whitespacesAndNewlines),
+                        existing?.dataFingerprint, existing?.aiGenerated == true)
+            }.value
+            let existingContent = saved.0
 
             if let profile,
-               existing?.aiGenerated == true,
-               existing?.dataFingerprint == profile.fingerprint,
+               saved.2,
+               saved.1 == profile.fingerprint,
                let existingContent,
-               !existingContent.isEmpty {
+               !existingContent.isEmpty,
+               existingContent != profile.fallbackSummary {
                 await MainActor.run { completion(existingContent) }
                 return
             }
@@ -451,46 +454,60 @@ class OpenAIService {
             }
             currentDailyOverviewCompletions[profile.fingerprint] = [completion]
 
-            let resolved = await self.resolveDailySummary(
-                date: startOfDate,
-                fpIds: fpIds,
-                tpIds: tpIds,
-                context: context,
-                includeTodayData: true
-            )
-
-            if let resolved {
-                if let existing {
-                    existing.content = resolved.content
-                    existing.aiGenerated = true
-                    existing.dataFingerprint = resolved.fingerprint
-                } else {
-                    let newSummary = DailyInsight(date: startOfDate, content: resolved.content, aiGenerated: true)
-                    newSummary.dataFingerprint = resolved.fingerprint
-                    context.insert(newSummary)
+            let response = await withCheckedContinuation { continuation in
+                self.generateDailySummary(date: startOfDate, footprintDescriptions: profile.lines) {
+                    continuation.resume(returning: $0)
                 }
-                try? context.save()
+            }
+            var summary = dailySummaryCleanedSummary(response)
+            if let content = summary {
+                let savedSuccessfully = await Task.detached(priority: .utility) { () -> Bool in
+                    let context = ModelContext(container)
+                    context.autosaveEnabled = false
+                    do {
+                        let descriptor = FetchDescriptor<DailyInsight>(predicate: #Predicate { $0.date == startOfDate })
+                        if let existing = try context.fetch(descriptor).first {
+                            existing.content = content
+                            existing.aiGenerated = true
+                            existing.dataFingerprint = profile.fingerprint
+                        } else {
+                            let insight = DailyInsight(date: startOfDate, content: content, aiGenerated: true)
+                            insight.dataFingerprint = profile.fingerprint
+                            context.insert(insight)
+                        }
+                        try context.save()
+                        return true
+                    } catch {
+                        context.rollback()
+                        return false
+                    }
+                }.value
+                if !savedSuccessfully {
+                    lastError = "每日总结保存失败"
+                    summary = nil
+                }
             }
 
             let completions = currentDailyOverviewCompletions.removeValue(
                 forKey: profile.fingerprint
             ) ?? [completion]
-            completions.forEach { $0(resolved?.content) }
+            // A failed response is not an AI result and must not complete the notification's day.
+            completions.forEach { $0(summary) }
         }
     }
 
     /// Checks whether the current facts differ from the persisted AI result
     /// without making a network request.  Callers use this before claiming a
     /// rate-limit window, so unchanged timeline refreshes do not consume it.
-    func dailyOverviewStatus(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], completion: @escaping (_ needsNetworkRequest: Bool, _ savedSummary: String?) -> Void) {
+    func dailyOverviewStatus(for date: Date, footprints: [Footprint], transports: [TransportRecord] = [], completion: @escaping (_ needsNetworkRequest: Bool, _ savedSummary: String?, _ fingerprint: String?) -> Void) {
         dailyOverviewStatus(for: date, footprintIDs: footprints.map(\.footprintID),
                             transportIDs: transports.map(\.recordID), completion: completion)
     }
 
     /// ID-based variant for callers holding models from a background context.
-    func dailyOverviewStatus(for date: Date, footprintIDs fpIds: [UUID], transportIDs tpIds: [UUID], completion: @escaping (_ needsNetworkRequest: Bool, _ savedSummary: String?) -> Void) {
+    func dailyOverviewStatus(for date: Date, footprintIDs fpIds: [UUID], transportIDs tpIds: [UUID], completion: @escaping (_ needsNetworkRequest: Bool, _ savedSummary: String?, _ fingerprint: String?) -> Void) {
         guard let container = modelContainer else {
-            completion(false, nil)
+            completion(false, nil, nil)
             return
         }
 
@@ -504,7 +521,7 @@ class OpenAIService {
                 tpIds: tpIds,
                 includeTodayData: true
             ) else {
-                await MainActor.run { completion(false, nil) }
+                await MainActor.run { completion(false, nil, nil) }
                 return
             }
 
@@ -518,7 +535,7 @@ class OpenAIService {
                 && !(existingContent?.isEmpty ?? true)
 
             await MainActor.run {
-                completion(!isCurrent, isCurrent ? existingContent : nil)
+                completion(!isCurrent, isCurrent ? existingContent : nil, profile.fingerprint)
             }
         }
     }
@@ -642,13 +659,7 @@ class OpenAIService {
                 }
                 fingerprintParts.append([
                     "footprint",
-                    fp.footprintID.uuidString,
-                    fp.placeID?.uuidString ?? "",
-                    fp.address ?? "",
-                    fp.activityTypeValue ?? "",
-                    fp.reason ?? "",
-                    fp.isHighlight == true ? "highlight" : "",
-                    fp.statusValue
+                    fp.footprintID.uuidString
                 ].joined(separator: "|"))
 
             }
@@ -700,10 +711,10 @@ class OpenAIService {
         return DailySummaryProfile(
             lines: lines,
             // Ongoing footprint end times and transport distance change with
-            // routine location updates. They belong in the AI facts above, but
-            // not in the identity used to decide whether another request is
-            // needed. Structural timeline changes and user-owned edits still
-            // produce a new fingerprint.
+            // routine location updates. Address resolution, notes, highlights
+            // and activity edits are also not large enough to regenerate a
+            // notification summary. Adding/removing an eligible footprint or
+            // transport, or changing a transport type, changes identity.
             fingerprint: fingerprintParts.sorted().joined(separator: "\n"),
             fallbackSummary: fallbackSummary
         )
@@ -868,33 +879,37 @@ class OpenAIService {
             "temperature": 0.2
         ]
         
-        guard let request = prepareRequest(endpoint: "/chat/completions", body: body) else {
+        guard var request = prepareRequest(endpoint: "/chat/completions", body: body) else {
             // lastError is already set in prepareRequest
             completion(nil); return
         }
+        request.timeoutInterval = config.dailySummaryRequestTimeout
         
         URLSession.shared.dataTask(with: request) { data, response, error in
-            Task { @MainActor in
-                if let error = error {
-                    self.lastError = "总结失败: \(error.localizedDescription)"
-                    completion(nil); return
-                }
-                
-                if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
-                    self.lastError = "总结失败: HTTP \(httpResponse.statusCode)"
-                    completion(nil); return
-                }
-
-                guard let data = data,
+            // Decode on URLSession's callback queue; only publish the result on main.
+            let failure: String?
+            let summary: String?
+            if let error {
+                failure = "总结失败: \(error.localizedDescription)"
+                summary = nil
+            } else if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+                failure = "总结失败: HTTP \(httpResponse.statusCode)"
+                summary = nil
+            } else if let data,
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let choices = json["choices"] as? [[String: Any]],
-                      let content = (choices.first?["message"] as? [String: Any])?["content"] as? String else {
-                    self.lastError = "解析总结内容失败"
-                    completion(nil); return
-                }
+                      let content = (choices.first?["message"] as? [String: Any])?["content"] as? String {
                 let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-                self.lastAiResponse = trimmed
-                completion(trimmed.isEmpty ? nil : trimmed)
+                summary = trimmed.isEmpty ? nil : trimmed
+                failure = summary == nil ? "总结内容为空" : nil
+            } else {
+                failure = "解析总结内容失败"
+                summary = nil
+            }
+            Task { @MainActor in
+                self.lastError = failure
+                if let summary { self.lastAiResponse = summary }
+                completion(summary)
             }
         }.resume()
     }

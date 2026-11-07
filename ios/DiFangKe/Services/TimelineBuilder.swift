@@ -1641,10 +1641,9 @@ class PersistentTimelineBuilder {
         return changed
     }
 
-    /// A previously saved route can still contain points now recognized as
-    /// drift, including a route whose time boundary was manually adjusted.
-    /// Keep the user's interval and type while rebuilding only contaminated
-    /// geometry from valid samples inside that interval.
+    /// A previously saved route can still contain points now recognized as drift.
+    /// Replace its geometry only when the remaining observations still form a valid
+    /// transport; otherwise keep the established record instead of silently deleting it.
     private static func repairRoutesContainingDrift(
         _ transports: [TransportRecord],
         validPoints: [CLLocation],
@@ -1665,10 +1664,18 @@ class PersistentTimelineBuilder {
             }.map {
                 CodableCoordinate(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, timestamp: $0.timestamp)
             }
-            guard let data = try? JSONEncoder().encode(route) else { continue }
-            transport.pointsData = data
-            transport.distance = TimelineBuilder.calculatePathDistance(route)
+            let distance = TimelineBuilder.calculatePathDistance(route)
+            let observedSpan = TimelineBuilder.calculateMaxDiameter(route.map {
+                CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
+            })
             let duration = transport.endTime.timeIntervalSince(transport.startTime)
+            guard route.count >= AppConfig.shared.transportFinalizeMinPoints,
+                  distance >= AppConfig.shared.transportMinDistanceThreshold,
+                  observedSpan >= AppConfig.shared.transportMinDistanceThreshold,
+                  duration >= AppConfig.shared.transportMinDurationThreshold,
+                  let data = try? JSONEncoder().encode(route) else { continue }
+            transport.pointsData = data
+            transport.distance = distance
             transport.averageSpeed = duration > 0 ? transport.distance / duration : 0
             changed = true
         }
@@ -1712,6 +1719,23 @@ class PersistentTimelineBuilder {
             // 一小段旧的手动删除拖累，导致整个缺口被丢弃、一段都不重建。
             return overlapDuration > 300 && overlapDuration >= candidateDuration * 0.3
         }
+    }
+
+    /// Warn before a full rebuild when the day has too few usable raw points to produce a timeline.
+    /// Existing timeline coverage cannot be used as a prerequisite here: rebuilding is also the
+    /// recovery path when an existing footprint or transport has gone missing.
+    static func rebuildWarning(for date: Date) -> String? {
+        let config = AppConfig.shared
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: date)
+        guard let end = calendar.date(byAdding: .day, value: 1, to: start) else { return nil }
+        let raw = RawLocationStore.shared.loadAllDevicesLocations(for: date, filtered: false)
+        let points = RawLocationStore.markDriftPoints(raw).filter { !$0.isDriftPoint }.map(\.location)
+            .filter { $0.timestamp >= start && $0.timestamp < end }
+        guard points.count >= config.timelineRebuildMinRawPoints else {
+            return "本日仅有 \(points.count) 个有效轨迹点，重新生成的时间线可能不完整。你仍可继续，或取消并保留现有足迹和交通。"
+        }
+        return nil
     }
 
     // The public entry owns the day's lock for the complete synchronization,
@@ -1824,15 +1848,10 @@ class PersistentTimelineBuilder {
             $0.startTime < endOfDay && $0.endTime > startOfDay && $0.statusRaw != "ignored"
         }, sortBy: [SortDescriptor(\.startTime)])
         var allTps = (try? context.fetch(tpDesc)) ?? []
-        // Repair older automatic candidates that accumulated jitter into a trip.
-        // Keep raw locations, manual edits, and records without usable geometry.
-        let confined = allTps.filter {
-            $0.manualTypeRaw == nil && !hasMinimumAutomaticTransportSpan($0)
-        }
-        if !confined.isEmpty {
-            for record in confined { context.delete(record) }
-            allTps = (try? context.fetch(tpDesc)) ?? []
-        }
+        // Creation already applies hasMinimumAutomaticTransportSpan. Do not re-run that
+        // admission rule as destructive cleanup on a record the user has already seen:
+        // later drift classification can change the available evidence, and a routine sync
+        // must not make an established transport disappear without a verified replacement.
 
         if Footprint.absorbAdjacentAutomaticContinuations(allFps, transports: allTps, context: context) {
             allFps = (try? context.fetch(fpDesc)) ?? []
@@ -1900,13 +1919,9 @@ class PersistentTimelineBuilder {
             allTps = (try? context.fetch(tpDesc)) ?? []
         }
         
-        // Repair before calculating covered intervals: a trip made entirely
-        // from drift must stop covering this interval in the same sync pass.
+        // Repair before calculating covered intervals, but only when the replacement route
+        // remains a valid transport. Otherwise retain the established record unchanged.
         if repairRoutesContainingDrift(allTps, validPoints: allRawPoints, driftTimestamps: driftTimestamps, date: date) {
-            let invalid = allTps.filter {
-                $0.manualTypeRaw == nil && !hasMinimumAutomaticTransportSpan($0)
-            }
-            for record in invalid { context.delete(record) }
             allTps = (try? context.fetch(tpDesc)) ?? []
         }
 

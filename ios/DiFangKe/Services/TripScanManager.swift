@@ -617,13 +617,14 @@ final class TripScanManager {
         }.value
     }
 
-    func transportRoutes(for recordIDs: Set<UUID>) async -> [UUID: [CodableCoordinate]] {
+    func transportRoutes(for recordIDs: Set<UUID>, completesMissingRoutes: Bool = true) async -> [UUID: [CodableCoordinate]] {
         guard !recordIDs.isEmpty, let legacyContainer else { return [:] }
-        return await Task.detached(priority: .utility) {
+        let loaded = await Task.detached(priority: .utility) {
             let context = ModelContext(legacyContainer)
             var routes: [UUID: [CodableCoordinate]] = [:]
+            var transports: [Transport] = []
             for recordID in recordIDs {
-                guard !Task.isCancelled else { return [:] }
+                guard !Task.isCancelled else { break }
                 var descriptor = FetchDescriptor<TransportRecord>(
                     predicate: #Predicate { $0.recordID == recordID }
                 )
@@ -632,9 +633,18 @@ final class TripScanManager {
                       let points = try? JSONDecoder().decode([CodableCoordinate].self, from: record.pointsData),
                       !points.isEmpty else { continue }
                 routes[record.recordID] = points
+                transports.append(TransportRouteCompletion.transport(
+                    id: record.recordID, typeRaw: record.manualTypeRaw ?? record.typeRaw, points: points
+                ))
             }
-            return routes
+            return (routes: routes, transports: transports)
         }.value
+        if completesMissingRoutes {
+            // Publish the recorded geometry immediately. Active maps rebuild
+            // from the completion notification when the background request ends.
+            Task { await TransportRouteCompletion.prepare(loaded.transports) }
+        }
+        return loaded.routes
     }
 
     func tripCardPhotoAssetIDs(for footprintIDs: [UUID], perFootprintLimit: Int = 2, totalLimit: Int = 5) async -> [String] {

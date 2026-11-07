@@ -104,6 +104,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // The trip-planning feature has been removed. Clear any reminders that
         // an older version scheduled before the user can receive one.
         NotificationManager.shared.removeLegacyTripNotifications()
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: NotificationManager.dailySummaryBackgroundTaskID, using: nil) { task in
+            let work = Task { @MainActor in
+                await LocationManager.shared.triggerNotificationSummaryRefresh(prepareAI: true)?.value
+                NotificationManager.shared.scheduleDailySummaryPreparation(reschedule: true)
+                task.setTaskCompleted(success: !Task.isCancelled)
+            }
+            task.expirationHandler = { work.cancel() }
+        }
         // The initial install path does not necessarily visit Settings or
         // receive a cloud-settings update.  Ensure the user's persisted daily
         // reminder is always present after launch.
@@ -180,7 +188,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 LocationManager.shared.sampleStationaryLocationIfNeeded()
                 LocationManager.shared.checkLiveActivity(forceContentUpdate: true)
                 if NotificationManager.shared.isDailySummaryPreparationDue {
-                    await LocationManager.shared.triggerNotificationSummaryRefresh()?.value
+                    await LocationManager.shared.triggerNotificationSummaryRefresh(prepareAI: true)?.value
                 }
                 
                 // 已在追踪中的标准定位会话不需要每次 BG refresh 再次启动。
@@ -196,7 +204,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         } else {
             Task { @MainActor in
                 if NotificationManager.shared.isDailySummaryPreparationDue {
-                    await LocationManager.shared.triggerNotificationSummaryRefresh()?.value
+                    await LocationManager.shared.triggerNotificationSummaryRefresh(prepareAI: true)?.value
                 }
                 task.setTaskCompleted(success: true)
             }
@@ -346,6 +354,7 @@ struct DiFangKeApp: App {
                         print("[TimelineAuto] binding model context from app root")
                         locationManager.modelContext = container.mainContext
                         OpenAIService.shared.modelContainer = container
+                        NotificationManager.shared.scheduleDailySummaryPreparation(reschedule: true)
                         locationManager.triggerNotificationSummaryRefresh()
                         // A location wake can arrive before SwiftData finishes
                         // opening. Once the context exists, publish the state that
@@ -430,6 +439,9 @@ struct DiFangKeApp: App {
                             // Submit the current ActivityKit state immediately
                             // while this background execution window is open.
                             locationManager.checkLiveActivity(forceContentUpdate: true)
+                            // Prepare while background runtime is available, rather than depending
+                            // on the process being awake in the final five minutes before delivery.
+                            await locationManager.triggerNotificationSummaryRefresh(prepareAI: true, allowEarlyAI: true)?.value
                             
                             await WidgetDataSyncManager.shared.syncTodayOnly()
                             // BGAppRefreshTask already forces a full history resync periodically; don't duplicate it here.
