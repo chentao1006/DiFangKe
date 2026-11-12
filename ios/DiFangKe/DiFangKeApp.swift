@@ -228,6 +228,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        if notification.request.identifier == NotificationManager.liveActivityRecoveryNotificationID {
+            NotificationManager.shared.removeLiveActivityRecoveryNotification()
+            completionHandler([])
+            return
+        }
         completionHandler([.banner, .list, .sound])
     }
 
@@ -393,6 +398,7 @@ struct DiFangKeApp: App {
             }
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
+                    NotificationManager.shared.removeLiveActivityRecoveryNotification()
                     locationManager.refreshAuthorizationStatus()
                     TripScanManager.shared.refreshActiveTripProgress()
                     backgroundWidgetSyncTask?.cancel()

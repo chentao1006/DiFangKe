@@ -1,11 +1,12 @@
 import Foundation
 import UserNotifications
 import BackgroundTasks
+import UIKit
 
 class NotificationManager {
     static let shared = NotificationManager()
     private let newFootprintActivityCategoryID = "dfk.newFootprintActivity"
-    private let liveActivityRecoveryNotificationID = "currentLiveActivityRecovery"
+    static let liveActivityRecoveryNotificationID = "currentLiveActivityRecovery"
     private let preparedDailySummaryDateKey = "preparedDailySummaryDate"
     private let preparedDailySummaryBodyKey = "preparedDailySummaryBody"
     private let preparedDailySummaryOverviewKey = "preparedDailySummaryOverview"
@@ -403,13 +404,21 @@ class NotificationManager {
         content.userInfo = ["type": "resume_current_live_activity"]
 
         let request = UNNotificationRequest(
-            identifier: liveActivityRecoveryNotificationID,
+            identifier: Self.liveActivityRecoveryNotificationID,
             content: content,
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
                 print("Failed to send Live Activity recovery notification: \(error)")
+                return
+            }
+            // The app may have become active while UserNotifications was
+            // asynchronously adding this immediate request. Clear it after the
+            // add completes as well, otherwise it can race the active callback.
+            Task { @MainActor in
+                guard UIApplication.shared.applicationState == .active else { return }
+                self.removeLiveActivityRecoveryNotification()
             }
         }
     }
@@ -417,9 +426,10 @@ class NotificationManager {
     /// Once the app is open, its Live Activity can recover directly. Remove only
     /// this recovery prompt and leave daily summaries and footprint alerts intact.
     func removeLiveActivityRecoveryNotification() {
-        UNUserNotificationCenter.current().removeDeliveredNotifications(
-            withIdentifiers: [liveActivityRecoveryNotificationID]
-        )
+        let center = UNUserNotificationCenter.current()
+        let identifiers = [Self.liveActivityRecoveryNotificationID]
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
     }
 
     /// The trip-plan feature has been removed. Older builds scheduled its
