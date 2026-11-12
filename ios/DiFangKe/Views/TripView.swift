@@ -2199,13 +2199,6 @@ private enum TripCreationPurpose: String, Identifiable {
     var id: String { rawValue }
 }
 
-private struct TripPlanCityStay: Identifiable {
-    let id = UUID()
-    let city: TripCitySelection
-    var arrivalDay: Date
-    var departureDay: Date
-}
-
 private struct PlanTripCreateView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var context
@@ -2213,8 +2206,9 @@ private struct PlanTripCreateView: View {
     @State private var startDay = Calendar.current.startOfDay(for: Date())
     @State private var dayCount = 1
     @State private var hasPlannedDates = false
-    @State private var cityStays: [TripPlanCityStay] = []
-    @State private var showingCitySearch = false
+    /// Each day's cities by day index, so the plan works with or without dates.
+    @State private var citiesByDay: [Int: [TripCitySelection]] = [:]
+    @State private var citySearchDayIndex: Int?
     @State private var isSaving = false
     @State private var saveError: String?
 
@@ -2223,31 +2217,14 @@ private struct PlanTripCreateView: View {
             Form {
                 Section("什么时候") {
                     Toggle("设置日期", isOn: $hasPlannedDates)
-                        .onChange(of: hasPlannedDates) { _, enabled in
-                            guard !enabled else { return }
-                            for index in cityStays.indices {
-                                cityStays[index].arrivalDay = startDay
-                                cityStays[index].departureDay = endDay
-                            }
-                        }
                     if hasPlannedDates {
                         DatePicker("开始日期", selection: $startDay, displayedComponents: .date)
-                            .onChange(of: startDay) { oldValue, newValue in
-                                shiftPlan(from: oldValue, to: newValue)
-                            }
                     }
                     Stepper(value: $dayCount, in: 1...AppConfig.shared.tripMaximumDurationDays) {
                         LabeledContent("行程天数", value: "\(dayCount)天")
                     }
-                    .onChange(of: dayCount) { _, _ in
-                        if hasPlannedDates {
-                            clampCityStays()
-                        } else {
-                            for index in cityStays.indices {
-                                cityStays[index].arrivalDay = startDay
-                                cityStays[index].departureDay = endDay
-                            }
-                        }
+                    .onChange(of: dayCount) { _, count in
+                        citiesByDay = citiesByDay.filter { $0.key < count }
                     }
                     if hasPlannedDates {
                         LabeledContent("结束日期", value: endDay.formatted(.dateTime.year().month().day()))
@@ -2255,56 +2232,22 @@ private struct PlanTripCreateView: View {
                     }
                 }
 
-                Section {
-                    ForEach($cityStays) { $stay in
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                Label(stay.city.cityName, systemImage: "building.2")
-                                    .font(.headline)
-                                Spacer()
-                                Button(role: .destructive) {
-                                    cityStays.removeAll { $0.id == stay.id }
-                                } label: {
-                                    Image(systemName: "trash")
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            if hasPlannedDates {
-                                DatePicker("到达", selection: $stay.arrivalDay, in: startDay...endDay, displayedComponents: .date)
-                                DatePicker("离开", selection: $stay.departureDay, in: stay.arrivalDay...endDay, displayedComponents: .date)
-                            }
+                ForEach(Array(planDays.enumerated()), id: \.offset) { index, day in
+                    TripDayCitySection(
+                        day: day,
+                        title: dayTitle(index: index, day: day),
+                        footer: index == planDays.count - 1
+                            ? "第一步，先定下每天在哪个城市或地区，同一天可以有多座城市。创建后，再在行程里安排每天具体去哪些地方、几点到、怎么过去，也可以让 AI 帮你优化。"
+                            : nil,
+                        cities: citiesByDay[index] ?? [],
+                        detectedCities: [],
+                        onCopyPrevious: copyPreviousAction(for: index),
+                        onAdd: { citySearchDayIndex = index },
+                        onRemove: { city in
+                            citiesByDay[index]?.removeAll { $0.key == city.key }
+                            if citiesByDay[index]?.isEmpty == true { citiesByDay[index] = nil }
                         }
-                        .padding(.vertical, 4)
-                    }
-                    Button { showingCitySearch = true } label: {
-                        Label(cityStays.isEmpty ? "添加目的地" : "继续添加城市", systemImage: "plus.circle")
-                    }
-                } header: {
-                    Text("去哪里")
-                } footer: {
-                    if hasPlannedDates {
-                        Text("选择每座城市的停留日期，同一天可以安排多座城市。")
-                    }
-                }
-
-                if !cityStays.isEmpty {
-                    Section("行程预览") {
-                        Text(generatedTitle)
-                            .font(.headline)
-                        ForEach(Array(planDays.enumerated()), id: \.offset) { index, day in
-                            HStack(alignment: .firstTextBaseline) {
-                                TripDayTitleBadge(
-                                    dayNumber: index + 1,
-                                    dateText: hasPlannedDates
-                                        ? day.formatted(.dateTime.month().day().weekday(.abbreviated))
-                                        : nil
-                                )
-                                Spacer()
-                                Text(cities(on: day).map(\.cityName).joined(separator: " · ").nilIfEmpty ?? "待安排")
-                                    .foregroundStyle(cities(on: day).isEmpty ? .tertiary : .secondary)
-                            }
-                        }
-                    }
+                    )
                 }
             }
             .navigationTitle("规划一次出行")
@@ -2313,14 +2256,21 @@ private struct PlanTripCreateView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("创建", action: save)
-                        .disabled(cityStays.isEmpty || isSaving)
+                        .disabled(citiesByDay.values.allSatisfy(\.isEmpty) || isSaving)
                 }
             }
         }
-        .sheet(isPresented: $showingCitySearch) {
-            TripCitySearchView { city in
-                cityStays.append(TripPlanCityStay(city: city, arrivalDay: startDay, departureDay: endDay))
-                showingCitySearch = false
+        .sheet(isPresented: Binding(
+            get: { citySearchDayIndex != nil },
+            set: { if !$0 { citySearchDayIndex = nil } }
+        )) {
+            if let dayIndex = citySearchDayIndex {
+                TripCitySearchView { city in
+                    var cities = citiesByDay[dayIndex] ?? []
+                    if !cities.contains(where: { $0.key == city.key }) { cities.append(city) }
+                    citiesByDay[dayIndex] = cities
+                    citySearchDayIndex = nil
+                }
             }
         }
         .alert("没有创建成功", isPresented: Binding(
@@ -2339,50 +2289,26 @@ private struct PlanTripCreateView: View {
         Calendar.autoupdatingCurrent.date(byAdding: .day, value: dayCount - 1, to: startDay) ?? startDay
     }
 
+    /// Most days of a trip stay where the day before ended.
+    private func copyPreviousAction(for index: Int) -> (() -> Void)? {
+        guard index > 0, let previous = citiesByDay[index - 1], !previous.isEmpty else { return nil }
+        return { citiesByDay[index] = previous }
+    }
+
+    private func dayTitle(index: Int, day: Date) -> String {
+        guard hasPlannedDates else { return "第\(index + 1)天" }
+        return "第\(index + 1)天 · \(day.formatted(.dateTime.month().day().weekday(.abbreviated)))"
+    }
+
     private var generatedTitle: String {
-        let orderedCities = cityStays.enumerated().sorted {
-            if $0.element.arrivalDay == $1.element.arrivalDay { return $0.offset < $1.offset }
-            return $0.element.arrivalDay < $1.element.arrivalDay
-        }.map { $0.element.city.cityName }
-        return tripAutomaticTitle(
-            cityNames: orderedCities,
+        tripAutomaticTitle(
+            cityNames: (0..<dayCount).flatMap { citiesByDay[$0] ?? [] }.map(\.cityName),
             dayCount: planDays.count
         )
     }
 
-    private func cities(on day: Date) -> [TripCitySelection] {
-        let calendar = Calendar.autoupdatingCurrent
-        let value = calendar.startOfDay(for: day)
-        var seen = Set<String>()
-        return cityStays.filter {
-            value >= calendar.startOfDay(for: $0.arrivalDay)
-                && value <= calendar.startOfDay(for: $0.departureDay)
-        }.compactMap { stay in
-            seen.insert(stay.city.key).inserted ? stay.city : nil
-        }
-    }
-
-    private func shiftPlan(from oldValue: Date, to newValue: Date) {
-        let calendar = Calendar.autoupdatingCurrent
-        let oldStart = calendar.startOfDay(for: oldValue)
-        let newStart = calendar.startOfDay(for: newValue)
-        let offset = calendar.dateComponents([.day], from: oldStart, to: newStart).day ?? 0
-        guard offset != 0 else { return }
-        for index in cityStays.indices {
-            cityStays[index].arrivalDay = calendar.date(byAdding: .day, value: offset, to: cityStays[index].arrivalDay) ?? newStart
-            cityStays[index].departureDay = calendar.date(byAdding: .day, value: offset, to: cityStays[index].departureDay) ?? endDay
-        }
-    }
-
-    private func clampCityStays() {
-        for index in cityStays.indices {
-            cityStays[index].arrivalDay = min(max(cityStays[index].arrivalDay, startDay), endDay)
-            cityStays[index].departureDay = min(max(cityStays[index].departureDay, cityStays[index].arrivalDay), endDay)
-        }
-    }
-
     private func save() {
-        guard !cityStays.isEmpty else { return }
+        guard !citiesByDay.values.allSatisfy(\.isEmpty) else { return }
         isSaving = true
         let trip = Trip(
             title: generatedTitle,
@@ -2398,7 +2324,7 @@ private struct PlanTripCreateView: View {
         var insertedDays: [TripDay] = []
         var insertedCities: [TripDayCity] = []
         for (dayIndex, dayDate) in planDays.enumerated() {
-            let dayCities = cities(on: dayDate)
+            let dayCities = citiesByDay[dayIndex] ?? []
             let timeZone = dayCities.first?.timeZoneIdentifier ?? TimeZone.autoupdatingCurrent.identifier
             let day = TripDay(tripID: trip.id, day: dayDate, timeZoneIdentifier: timeZone, orderIndex: dayIndex)
             context.insert(day)
@@ -3803,13 +3729,18 @@ private struct TripActivityTypePicker: View {
 
 private struct TripDayCitySection: View {
     let day: Date
+    /// Overrides the date heading, e.g. "第2天" for a plan without dates.
+    var title: String? = nil
+    var footer: String? = nil
     let cities: [TripCitySelection]
     let detectedCities: [TripImportedCity]
+    /// Offered on an empty day after a day with cities.
+    var onCopyPrevious: (() -> Void)? = nil
     let onAdd: () -> Void
     let onRemove: (TripCitySelection) -> Void
 
     var body: some View {
-        Section(day.formatted(date: .complete, time: .omitted)) {
+        Section {
             ForEach(Array(detectedCities.enumerated()), id: \.offset) { _, city in
                 HStack {
                     Label(city.countryName.isEmpty ? city.cityName : "\(city.cityName)，\(city.countryName)", systemImage: "location.fill")
@@ -3830,6 +3761,17 @@ private struct TripDayCitySection: View {
                 }
             }
             Button(action: onAdd) { Label("添加城市", systemImage: "plus.circle") }
+            if cities.isEmpty, detectedCities.isEmpty, let onCopyPrevious {
+                Button(action: onCopyPrevious) {
+                    Label("沿用前一天的城市", systemImage: "arrow.turn.right.down")
+                }
+            }
+        } header: {
+            Text(title ?? day.formatted(date: .complete, time: .omitted))
+        } footer: {
+            if let footer {
+                Text(footer)
+            }
         }
     }
 }
@@ -5597,17 +5539,20 @@ private struct PlannedTripDetailView: View {
         return Button {
             routeSelection = makeRouteSelection(for: destination)
         } label: {
-            HStack(spacing: 10) {
+            // The marker lines up with the leg's first line, like the stop
+            // markers with the place names.
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 TimelineTransportMarker(icon: hasTransport ? icon : "plus")
                     .frame(width: Self.planTransportMarkerWidth, height: 26)
-                    .padding(.vertical, 8)
-                    // The line spans the whole row; the stop rows around it
-                    // continue it through the row spacing.
+                    .padding(.top, 8)
+                    // The column fills the row so the line spans it whole; the
+                    // stop rows around it continue it through the row spacing.
+                    .frame(maxHeight: .infinity, alignment: .top)
                     .background {
                         VStack(spacing: 0) {
                             Rectangle()
                                 .fill(ContinuousTimelineLayout.lineColor)
-                                .frame(width: 2)
+                                .frame(width: 2, height: 8)
                                 .opacity(connectsAbove ? 1 : 0)
                             Color.clear.frame(width: 2, height: 26)
                             Rectangle()
@@ -5615,19 +5560,21 @@ private struct PlannedTripDetailView: View {
                                 .frame(width: 2)
                         }
                     }
+                    .alignmentGuide(.firstTextBaseline) { _ in
+                        8 + 13 + UIFont.preferredFont(forTextStyle: .subheadline).capHeight / 2
+                    }
                 tripTransportRowLabel(
                     summary: hasTransport ? plannedRouteSummary(to: destination, from: origin) : nil,
                     placeholder: "选择交通方式",
                     notes: destination.transportNotes
                 )
+                .padding(.vertical, 8)
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
             }
             .font(.subheadline)
             .foregroundStyle(.secondary)
             .frame(minHeight: 42)
+            .fixedSize(horizontal: false, vertical: true)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -10083,6 +10030,8 @@ private struct TripEditorView: View {
     @State private var dropTargetBeforeItemID: UUID?
     @State private var titleWasEdited = false
     @State private var confirmingShorterPlan = false
+    /// Asked when leaving with unsaved edits, by 取消 or by swiping down.
+    @State private var confirmingDiscard = false
     @State private var isSaving = false
     @State private var saveError: String?
     @AppStorage("isAiAssistantEnabled") private var isAiAssistantEnabled = false
@@ -10174,11 +10123,28 @@ private struct TripEditorView: View {
             .navigationTitle(editorTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        if hasUnsavedChanges {
+                            confirmingDiscard = true
+                        } else {
+                            dismiss()
+                        }
+                    }
+                    // Anchored to 取消, which a swipe-down attempt also opens.
+                    .confirmationDialog("保存这次的修改？", isPresented: $confirmingDiscard, titleVisibility: .visible) {
+                        Button("保存") { attemptSave() }
+                        Button("不保存", role: .destructive) { dismiss() }
+                        Button("继续编辑", role: .cancel) { }
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存", action: attemptSave)
                         .disabled(isSaving)
                 }
+            }
+            .dfkSheetDismissGuard(isBlocked: { hasUnsavedChanges && !isSaving }) {
+                confirmingDiscard = true
             }
         }
         .sheet(item: $addPlaceDay) { day in
@@ -10644,18 +10610,21 @@ private struct TripEditorView: View {
                 route: nil
             )
         } label: {
-            HStack(spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 TimelineTransportMarker(
                     icon: hasTransport ? (type?.icon ?? "arrow.triangle.swap") : "plus"
                 )
                     .frame(width: 24)
+                    // Lines up with the leg's first line.
+                    .alignmentGuide(.firstTextBaseline) { dimensions in
+                        dimensions[VerticalAlignment.center] + UIFont.preferredFont(forTextStyle: .subheadline).capHeight / 2
+                    }
                 tripTransportRowLabel(
                     summary: hasTransport ? tripPlanTransportSummary(destination: destination, origin: origin) : nil,
                     placeholder: "设置交通方式",
                     notes: destination.transportNotes
                 )
-                Spacer()
-                Image(systemName: "chevron.right").font(.caption2)
+                Spacer(minLength: 0)
             }
             .contentShape(Rectangle())
         }
@@ -10803,23 +10772,27 @@ private struct TripEditorView: View {
         let dayIDs = Set(days.map(\.id))
         var changed = false
         for city in allCities where dayIDs.contains(city.tripDayID) && city.cityIdentifier?.isEmpty != false {
-            guard let latitude = city.latitude, let longitude = city.longitude else { continue }
-            city.cityIdentifier = await TripCityIdentityResolver.shared.identifier(
-                coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
-                cityName: city.cityName,
-                countryCode: city.countryCode
-            )
-            changed = changed || city.cityIdentifier?.isEmpty == false
+            guard let latitude = city.latitude, let longitude = city.longitude,
+                  let identifier = await TripCityIdentityResolver.shared.identifier(
+                    coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                    cityName: city.cityName,
+                    countryCode: city.countryCode
+                  ), !identifier.isEmpty else { continue }
+            // Only real identifiers are written, so merely opening the editor
+            // leaves no unsaved change behind.
+            city.cityIdentifier = identifier
+            changed = true
         }
         for item in allItems where dayIDs.contains(item.tripDayID) && item.cityIdentifier?.isEmpty != false {
             guard let latitude = item.latitude, let longitude = item.longitude,
-                  let cityName = item.cityName, !cityName.isEmpty else { continue }
-            item.cityIdentifier = await TripCityIdentityResolver.shared.identifier(
-                coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
-                cityName: cityName,
-                countryCode: item.countryCode ?? ""
-            )
-            changed = changed || item.cityIdentifier?.isEmpty == false
+                  let cityName = item.cityName, !cityName.isEmpty,
+                  let identifier = await TripCityIdentityResolver.shared.identifier(
+                    coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                    cityName: cityName,
+                    countryCode: item.countryCode ?? ""
+                  ), !identifier.isEmpty else { continue }
+            item.cityIdentifier = identifier
+            changed = true
         }
         if changed { try? context.save() }
     }
@@ -11011,6 +10984,19 @@ private struct TripEditorView: View {
     }
 
     private func normalize(_ items: [TripItem]) { items.enumerated().forEach { $0.element.orderIndex = $0.offset } }
+
+    /// Anything not yet saved: rows changed in the draft store, or the
+    /// fields kept in view state until save.
+    private var hasUnsavedChanges: Bool {
+        if context.hasChanges { return true }
+        let calendar = Calendar.autoupdatingCurrent
+        return title != trip.title
+            || notes != trip.notes
+            || activityTypeValue != trip.activityTypeValue
+            || hasPlannedDates != trip.datesUserEdited
+            || startDay != calendar.startOfDay(for: trip.plannedStartDay)
+            || endDay != calendar.startOfDay(for: trip.plannedEndDay)
+    }
 
     private func markEdited() {
         trip.citiesUserEdited = true

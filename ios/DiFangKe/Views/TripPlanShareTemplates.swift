@@ -61,8 +61,6 @@ struct DFKTripPlanShare {
     /// The day the trip is on today, while it is underway.
     var currentDayIndex: Int?
 
-    var lodgingNightCount: Int { days.filter { $0.lodging != nil }.count }
-
     /// Marks the lodging stops and works out where each night is spent: a
     /// lodging checked into that day (one at the very start of a day is last
     /// night's, being left), else the one still stayed at while the day stays
@@ -208,11 +206,9 @@ enum DFKTripPlanShareTemplate: String, CaseIterable, Identifiable {
     case day
     /// The trip announced: countdown, route and map.
     case announce
-    /// Where each night is spent, for family.
-    case stays
     /// The whole route on one map, a line per day, for discussing the plan.
     case overview
-    /// One day's places with full addresses, for a driver or guide.
+    /// Every place with its full address, day by day, for a driver or guide.
     case addresses
     /// Every place as a box to tick.
     case checklist
@@ -224,7 +220,6 @@ enum DFKTripPlanShareTemplate: String, CaseIterable, Identifiable {
         case .itinerary: return "详细行程单"
         case .day: return "单日安排"
         case .announce: return "出发预告"
-        case .stays: return "住宿报备"
         case .overview: return "路线总览"
         case .addresses: return "地址清单"
         case .checklist: return "打卡清单"
@@ -232,7 +227,7 @@ enum DFKTripPlanShareTemplate: String, CaseIterable, Identifiable {
     }
 
     /// Shows one day, picked below the preview.
-    var isSingleDay: Bool { self == .day || self == .addresses }
+    var isSingleDay: Bool { self == .day }
 
     func pixelSize(for plan: DFKTripPlanShare?, dayIndex: Int) -> CGSize {
         let minimum: CGFloat = 640 // artboard points; 1920 px
@@ -241,7 +236,7 @@ enum DFKTripPlanShareTemplate: String, CaseIterable, Identifiable {
         let height: CGFloat
         switch self {
         case .announce:
-            height = minimum
+            height = layout.announceHeight
         case .itinerary:
             height = layout.headerHeight(titleLines: 2, hasHome: plan.homeCityName != nil)
                 + plan.days.reduce(CGFloat.zero) { $0 + layout.daySectionHeight($1, mapHeight: layout.itineraryMapHeight) }
@@ -251,19 +246,16 @@ enum DFKTripPlanShareTemplate: String, CaseIterable, Identifiable {
             height = layout.headerHeight(titleLines: 1, hasHome: false) + 40
                 + (day.map { layout.daySectionHeight($0, mapHeight: layout.dayMapHeight) } ?? 0)
                 + layout.footerHeight
-        case .stays:
-            height = layout.headerHeight(titleLines: 2, hasHome: true)
-                + plan.days.reduce(CGFloat.zero) { $0 + layout.stayRowHeight($1) }
-                + layout.footerHeight
         case .overview:
             height = layout.headerHeight(titleLines: 2, hasHome: false)
                 + layout.overviewMapHeight + 18
                 + CGFloat(plan.days.count) * layout.overviewRowHeight
                 + layout.footerHeight
         case .addresses:
-            let day = plan.day(at: dayIndex)
-            height = layout.headerHeight(titleLines: 1, hasHome: false) + 40
-                + (day?.stops ?? []).reduce(CGFloat.zero) { $0 + layout.addressRowHeight($1) }
+            height = layout.headerHeight(titleLines: 2, hasHome: false)
+                + plan.days.reduce(CGFloat.zero) { total, day in
+                    total + 32 + 4 + day.stops.reduce(CGFloat.zero) { $0 + layout.addressRowHeight($1) } + (day.stops.isEmpty ? 30 : 0) + 18
+                }
                 + layout.footerHeight
         case .checklist:
             height = layout.headerHeight(titleLines: 2, hasHome: false)
@@ -316,6 +308,16 @@ enum DFKTripPlanShareLayout {
         return max(1, min(limit, lines))
     }
 
+    /// The countdown card: kicker, countdown, two-line title and dates, the
+    /// route map, the city chain, the stats row and the footer.
+    static var announceHeight: CGFloat {
+        28 + 16 + 4 + 115 + 8 + 2 * 36 + 8 + 17 + 18
+            + announceMapHeight + 18
+            + 22
+            + 16 + 16 + 46
+            + footerHeight
+    }
+
     static func headerHeight(titleLines: Int, hasHome: Bool) -> CGFloat {
         28 + 16 + 8 + CGFloat(titleLines) * 36 + 8 + 2 * 17 + (hasHome ? 22 : 0) + 22
     }
@@ -349,13 +351,6 @@ enum DFKTripPlanShareLayout {
             height += 10 + 26 + 18 + (lodging.address?.isEmpty == false ? 32 : 0)
         }
         return height + 26
-    }
-
-    static func stayRowHeight(_ day: DFKTripPlanShare.Day) -> CGFloat {
-        let addressLines = day.lodging?.address.map {
-            CGFloat(lineCount($0, fontSize: 11, width: contentWidth - 86, limit: 2))
-        } ?? 0
-        return 22 + 20 + 22 + addressLines * 15 + 4
     }
 
     static func addressRowHeight(_ stop: DFKTripPlanShare.Stop) -> CGFloat {
@@ -416,7 +411,6 @@ struct DFKTripPlanShareTemplateView<QRCode: View>: View {
             case .itinerary: itinerary
             case .day: singleDay
             case .announce: announce
-            case .stays: stays
             case .overview: overview
             case .addresses: addresses
             case .checklist: checklist
@@ -533,12 +527,14 @@ struct DFKTripPlanShareTemplateView<QRCode: View>: View {
     private func legRow(_ leg: DFKTripPlanShare.Leg, connectsAbove: Bool) -> some View {
         HStack(alignment: .top, spacing: 0) {
             Color.clear.frame(width: u(Layout.timeColumnWidth))
+            // Drawn like the trip timeline's transport marker: accent icon
+            // in an accent ring, whatever the transport type.
             Image(systemName: leg.type?.icon ?? "arrow.down")
                 .font(sans(9, .bold))
-                .foregroundStyle(leg.type?.shareTint ?? muted)
+                .foregroundStyle(accent)
                 .frame(width: u(18), height: u(18))
                 .background(paper, in: Circle())
-                .overlay(Circle().stroke(rule, lineWidth: u(1)))
+                .overlay(Circle().stroke(accent, lineWidth: u(1.2)))
                 .frame(width: u(Layout.markerColumnWidth))
                 .padding(.top, u(6))
             VStack(alignment: .leading, spacing: u(5)) {
@@ -555,7 +551,7 @@ struct DFKTripPlanShareTemplateView<QRCode: View>: View {
                         .padding(.horizontal, u(8))
                         .padding(.vertical, u(5))
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background((leg.type?.shareTint ?? muted).opacity(0.1), in: RoundedRectangle(cornerRadius: u(6), style: .continuous))
+                        .background(accent.opacity(0.1), in: RoundedRectangle(cornerRadius: u(6), style: .continuous))
                 }
             }
             .padding(.leading, u(8))
@@ -800,62 +796,6 @@ struct DFKTripPlanShareTemplateView<QRCode: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: Stays
-
-    private var stays: some View {
-        page(background: paper, foreground: ink, secondary: muted) {
-            header(kicker: "出行报备", trailing: plan.lodgingNightCount > 0 ? "住\(plan.lodgingNightCount)晚" : nil, titleLines: 2, showsHome: true)
-            ForEach(plan.days) { day in
-                stayRow(day, isLast: day.index == plan.days.count - 1)
-            }
-        }
-    }
-
-    private func stayRow(_ day: DFKTripPlanShare.Day, isLast: Bool) -> some View {
-        HStack(alignment: .top, spacing: u(14)) {
-            VStack(alignment: .leading, spacing: u(2)) {
-                Text("D\(day.index + 1)").font(mono(15)).foregroundStyle(accent)
-                if let date = day.date {
-                    Text(Self.shortDate.string(from: date)).font(mono(10, .medium)).foregroundStyle(muted)
-                }
-            }
-            .frame(width: u(58), alignment: .leading)
-            VStack(alignment: .leading, spacing: u(4)) {
-                Text(day.cityNames.isEmpty ? "待安排" : day.cityNames.joined(separator: " → "))
-                    .font(sans(15, .bold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                if let lodging = day.lodging {
-                    Label {
-                        Text(lodging.name).font(sans(12.5, .semibold)).lineLimit(1)
-                    } icon: {
-                        Image(systemName: "bed.double.fill").foregroundStyle(lodgingTint)
-                    }
-                    .font(sans(11))
-                    if let address = lodging.address, !address.isEmpty {
-                        Text(address).font(sans(11)).foregroundStyle(muted).lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                } else {
-                    Text(isLast ? "行程最后一天" : "住宿未填写")
-                        .font(sans(12))
-                        .foregroundStyle(muted)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, u(11))
-        .overlay(alignment: .bottom) { Rectangle().fill(rule).frame(height: max(1, u(0.5))) }
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    fileprivate static var shortDate: DateFormatter {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
-        formatter.dateFormat = "M月d日 EEE"
-        return formatter
-    }
-
     // MARK: Overview
 
     private var overview: some View {
@@ -887,7 +827,7 @@ struct DFKTripPlanShareTemplateView<QRCode: View>: View {
             Spacer(minLength: u(6))
             HStack(spacing: u(4)) {
                 ForEach(Array(types.prefix(3).enumerated()), id: \.offset) { _, type in
-                    Image(systemName: type.icon).font(sans(11, .semibold)).foregroundStyle(type.shareTint)
+                    Image(systemName: type.icon).font(sans(11, .semibold)).foregroundStyle(accent)
                 }
             }
         }
@@ -898,23 +838,20 @@ struct DFKTripPlanShareTemplateView<QRCode: View>: View {
     // MARK: Addresses
 
     private var addresses: some View {
-        let day = plan.day(at: dayIndex)
-        return page(background: .white, foreground: ink, secondary: muted) {
-            if let day {
-                VStack(alignment: .leading, spacing: u(6)) {
-                    Text("地址清单").font(sans(11, .semibold)).tracking(u(2)).foregroundStyle(muted)
-                    HStack(alignment: .firstTextBaseline, spacing: u(10)) {
-                        Text("第\(day.index + 1)天").font(serif(34))
-                        Text(day.date == nil ? day.cityNames.joined(separator: " → ") : plan.dayTitle(day))
-                            .font(sans(14, .semibold))
-                            .lineLimit(1)
+        page(background: .white, foreground: ink, secondary: muted) {
+            header(kicker: "地址清单", trailing: "\(plan.stopCount)个地点", titleLines: 2, showsHome: false)
+            ForEach(plan.days) { day in
+                VStack(alignment: .leading, spacing: 0) {
+                    dayHeader(day)
+                        .padding(.bottom, u(4))
+                    if day.stops.isEmpty {
+                        Text("暂未安排地点").font(sans(12)).foregroundStyle(muted).frame(height: u(30))
                     }
-                    Text(title).font(sans(12)).foregroundStyle(muted).lineLimit(1)
+                    ForEach(day.stops) { stop in
+                        addressRow(stop)
+                    }
                 }
-                .padding(.bottom, u(22))
-                ForEach(day.stops) { stop in
-                    addressRow(stop)
-                }
+                .padding(.bottom, u(18))
             }
         }
     }

@@ -79,6 +79,7 @@
 		C68544342F84E84200C605E9 /* LocationSelectionComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = C685442F2F84E84200C605E9 /* LocationSelectionComponents.swift */; };
 		C68544352F84E84200C605E9 /* TimelineTransportComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = C68544312F84E84200C605E9 /* TimelineTransportComponents.swift */; };
 		C68544362F84E84200C605E9 /* FlowLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = C685442E2F84E84200C605E9 /* FlowLayout.swift */; };
+		B941AA180000000000000001 /* SheetDismissGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA180000000000000002 /* SheetDismissGuard.swift */; };
 		C68544402F85334A00C605E9 /* CloudSettingsManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C685443F2F85334A00C605E9 /* CloudSettingsManager.swift */; };
 		C68544422F85343F00C605E9 /* SavedPlacesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C68544412F85343F00C605E9 /* SavedPlacesView.swift */; };
 		C68544442F85457800C605E9 /* ActivityType.swift in Sources */ = {isa = PBXBuildFile; fileRef = C68544432F85457800C605E9 /* ActivityType.swift */; };
@@ -236,6 +237,7 @@
 		C678483B2FA258DE002DF823 /* MotionType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionType.swift; sourceTree = "<group>"; };
 		C67848572FA3A082002DF823 /* WidgetDataSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetDataSyncManager.swift; sourceTree = "<group>"; };
 		C685442E2F84E84200C605E9 /* FlowLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowLayout.swift; sourceTree = "<group>"; };
+		B941AA180000000000000002 /* SheetDismissGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetDismissGuard.swift; sourceTree = "<group>"; };
 		C685442F2F84E84200C605E9 /* LocationSelectionComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationSelectionComponents.swift; sourceTree = "<group>"; };
 		C68544302F84E84200C605E9 /* TimelineComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineComponents.swift; sourceTree = "<group>"; };
 		C68544312F84E84200C605E9 /* TimelineTransportComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineTransportComponents.swift; sourceTree = "<group>"; };
@@ -480,6 +482,7 @@
 				C641B0502FE2720C009DC763 /* SafeMKMapView.swift */,
 				C685444D2F877C2800C605E9 /* MiniCalendarView.swift */,
 				C685442E2F84E84200C605E9 /* FlowLayout.swift */,
+				B941AA180000000000000002 /* SheetDismissGuard.swift */,
 				C685442F2F84E84200C605E9 /* LocationSelectionComponents.swift */,
 				C68544302F84E84200C605E9 /* TimelineComponents.swift */,
 				C68544312F84E84200C605E9 /* TimelineTransportComponents.swift */,
@@ -753,6 +756,7 @@
 				C68544342F84E84200C605E9 /* LocationSelectionComponents.swift in Sources */,
 				C68544352F84E84200C605E9 /* TimelineTransportComponents.swift in Sources */,
 				C68544362F84E84200C605E9 /* FlowLayout.swift in Sources */,
+				B941AA180000000000000001 /* SheetDismissGuard.swift in Sources */,
 				C6ACF7672F95110B006D9536 /* RawPointsListView.swift in Sources */,
 				C64D3D9E2F80058600BB3C3F /* IgnoredPlacesView.swift in Sources */,
 				BB95F1637D3ABD303156926C /* EditPlaceSheet.swift in Sources */,

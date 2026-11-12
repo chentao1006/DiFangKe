@@ -126,11 +126,11 @@ struct TripAIPlannerView: View {
                         Button {
                             confirmingClear = true
                         } label: {
-                            Image(systemName: "trash")
+                            Image(systemName: "eraser")
                         }
                         .disabled(session.isStreaming || session.applyingMessageID != nil)
                         .accessibilityLabel("清空对话记录")
-                        // Anchored to the trash button so it opens where it was tapped.
+                        // Anchored to the eraser button so it opens where it was tapped.
                         .confirmationDialog("清空这个行程的对话记录？", isPresented: $confirmingClear, titleVisibility: .visible) {
                             Button("清空对话记录", role: .destructive) {
                                 session.clearConversation()
